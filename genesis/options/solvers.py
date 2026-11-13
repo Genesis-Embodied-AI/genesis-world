@@ -843,9 +843,6 @@ class NewtonOptions(Options):
     pcg_tol : float, optional
         Relative accuracy of the inner linear solve of an iteration. A looser value makes every iteration cheaper, the
         next iterations correcting its inexact result, at the cost of more iterations. Defaults to 1e-4.
-    failure_check_interval : int, optional
-        Substeps between two checks of whether a solve reached 'max_iterations', which logs a warning. A smaller
-        interval reports it sooner, at the cost of a slower simulation. Defaults to 32.
     graph_mode : str, optional
         How the iterations of a substep run on the device. 'multi' has the host check the solve after every iteration,
         which runs on every Quadrants build and compiles fastest, at the cost of the device waiting on the host at each
@@ -861,7 +858,6 @@ class NewtonOptions(Options):
     line_search_shrink: PositiveFloat = 0.5
     pcg_max_iterations: PositiveInt = 1024
     pcg_tol: PositiveFloat = 1e-4
-    failure_check_interval: PositiveInt = 32
     graph_mode: Literal["mono", "multi"] = "multi"
 
     def model_post_init(self, context: Any) -> None:
