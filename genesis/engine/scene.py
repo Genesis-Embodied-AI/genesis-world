@@ -19,6 +19,7 @@ import numpy as np
 import torch
 
 import trimesh
+from pydantic import BaseModel
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -386,8 +387,7 @@ class Scene(BuildableMixin, RBC):
             User-specified name for the entity. If not provided, an auto-generated name will be assigned
             based on the morph type and entity UID (e.g., "box_a1b2c3d4"). Must be unique within the scene.
         options : gs.entities.BaseEntity | None, optional
-            The options to construct the entity from, an instance of a subclass of ``gs.entities.BaseEntity``. They
-            replace every other argument.
+            The options to construct the entity from, an instance of a subclass of ``gs.entities.BaseEntity``.
 
         Returns
         -------
@@ -452,7 +452,7 @@ class Scene(BuildableMixin, RBC):
             ),
         ):
             vis_modes = ("particle", "recon")
-        elif isinstance(options, (gs.entities.PBD, gs.entities.MPM)):
+        elif isinstance(options, (gs.entities.PBD, gs.entities.MPM, gs.entities.SPH)):
             vis_modes = ("visual", "particle", "recon")
         elif isinstance(options, gs.entities.FEM):
             vis_modes = ("visual",)
@@ -530,7 +530,7 @@ class Scene(BuildableMixin, RBC):
             The visualization mode of the stage. This is a handy shortcut for setting `surface.vis_mode` without
             explicitly creating a surface object.
         options : gs.entities.Rigid | gs.entities.Kinematic | None, optional
-            The options to construct the entities of the stage from. They replace every other argument.
+            The options to construct the entities of the stage from.
 
         Returns
         -------
@@ -983,7 +983,8 @@ class Scene(BuildableMixin, RBC):
                     for options in (*(morph if isinstance(morph, tuple) else (morph,)), surface):
                         if options is not None:
                             options._make_read_only()
-                    entity._options = entity._options.model_copy(update={"morph": morph, "surface": surface})
+                    # A copy without validation, which keeps every field held, defaults included
+                    entity._options = BaseModel.model_copy(entity._options, update={"morph": morph, "surface": surface})
 
                 # reset state
                 self._reset()
