@@ -291,3 +291,330 @@ def test_halt_on_nan(show_viewer):
     scene.step()
     assert block.get_particles_pos().isfinite().all()
     assert not scene.get_error_envs_mask().any()
+
+
+@pytest.mark.required
+def test_implicit_particle_constraints(show_viewer):
+    GRAVITY = 9.81
+    LINK_SHIFT = 0.2
+    VELOCITY = 1.0
+    N_STEPS = 30
+    N_STEPS_FALL = 5
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            gravity=(0.0, 0.0, -GRAVITY),
+        ),
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-1.0, -1.0, 0.0),
+            upper_bound=(1.0, 1.0, 1.0),
+            use_implicit_solver=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.3, -1.5, 1.1),
+            camera_lookat=(0.15, -0.25, 0.55),
+            camera_fov=30,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    rigid_box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.55),
+            size=(0.12, 0.12, 0.05),
+            fixed=True,
+        ),
+        vis_mode="collision",
+    )
+    mpm_cube = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.35),
+            size=(0.15, 0.15, 0.15),
+        ),
+        material=gs.materials.MPM.Elastic(),
+        vis_mode="particle",
+    )
+    moving_box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, -0.5, 0.85),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.Rigid(
+            gravity_compensation=1.0,
+        ),
+        vis_mode="collision",
+    )
+    mpm_follower = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, -0.5, 0.7),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.MPM.Elastic(),
+        vis_mode="particle",
+    )
+    scene.build(n_envs=2)
+    checkpoint_unconstrained = scene.sim.__getstate__()
+
+    # The top of the cube hangs from a fixed link by stiff springs, the link then moved aside at once
+    mask = mpm_cube.get_particles_in_bbox((-0.08, -0.08, 0.41), (0.08, 0.08, 0.44))
+    mpm_cube.set_particle_constraints(mask, rigid_box.links[0].idx, stiffness=1e5)
+    attached_x_0 = mpm_cube.get_particles_pos()[:, mask[0], 0].mean(dim=-1)
+    link_shift = torch.tensor((LINK_SHIFT, 0.0, 0.0), device=gs.device)
+    rigid_box.set_pos(rigid_box.get_pos() + link_shift, zero_velocity=False)
+
+    # The follower hangs from a link moving at the velocity they share
+    mpm_follower.set_particle_constraints(True, moving_box.links[0].idx, stiffness=1e3)
+    moving_box.set_dofs_velocity((VELOCITY, 0.0, 0.0, 0.0, 0.0, 0.0))
+    mpm_follower.set_velocity((VELOCITY, 0.0, 0.0))
+    follower_pos_0 = mpm_follower.get_particles_pos()
+    moving_box_pos_0 = moving_box.get_pos()
+
+    for _ in range(N_STEPS):
+        scene.step()
+
+    # The attached particles follow the link however stiff their springs, the cube neither left behind nor blown up
+    assert mpm_cube.get_particles_vel().isfinite().all()
+    attached_x = mpm_cube.get_particles_pos()[:, mask[0], 0].mean(dim=-1)
+    assert_allclose(attached_x - attached_x_0, LINK_SHIFT, tol=1e-2 * LINK_SHIFT)
+
+    # The follower keeps its offset to its link, which keeps its velocity, where a spring target lagging a step behind
+    # the link would leave it a step behind
+    step_length = VELOCITY * scene.dt
+    moving_box_disp = moving_box.get_pos() - moving_box_pos_0
+    follower_offset = mpm_follower.get_particles_pos() - follower_pos_0 - moving_box_disp[:, None]
+    assert_allclose(moving_box_disp, (N_STEPS * step_length, 0.0, 0.0), tol=0.1 * step_length)
+    assert_allclose(follower_offset[..., :2], 0.0, tol=0.1 * step_length)
+
+    # Restoring the checkpoint brings back unconstrained particles, which fall freely where attached ones would hang
+    scene.sim.__setstate__(checkpoint_unconstrained)
+    for _ in range(N_STEPS_FALL):
+        scene.step()
+    fall_vel = GRAVITY * N_STEPS_FALL * scene.dt
+    assert_allclose(mpm_follower.get_particles_vel()[..., 2], -fall_vel, tol=0.1 * fall_vel)
+
+
+@pytest.mark.required
+def test_implicit_halt_on_nan(show_viewer):
+    IMPACT_VELOCITY = 5.0
+    N_STEPS = 50
+
+    scene = gs.Scene(
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-0.5, -0.5, 0.0),
+            upper_bound=(0.5, 0.5, 1.0),
+            use_implicit_solver=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, 0.5, 0.4),
+            camera_lookat=(0.0, 0.0, 0.2),
+            camera_fov=35,
+        ),
+        show_viewer=show_viewer,
+    )
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.3),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(
+            E=1e9,
+            sampler="regular",
+        ),
+        vis_mode="particle",
+    )
+    # A rigid box falling beside the block, whose dofs join the Newton solve
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.3, 0.0, 0.9),
+            size=(0.05, 0.05, 0.05),
+        ),
+        vis_mode="collision",
+    )
+    scene.build(n_envs=2)
+    pos_0 = block.get_particles_pos()
+    span_0 = pos_0.amax(dim=-2) - pos_0.amin(dim=-2)
+    particle_size = block.particle_size
+
+    # A block as stiff as hard plastic falls onto the floor of the domain, thrown at it in the second env. It comes to
+    # rest on the floor as undeformed as it started, without any env flagged.
+    block.set_velocity(((0.0, 0.0, 0.0), (0.0, 0.0, -IMPACT_VELOCITY)))
+    for _ in range(N_STEPS):
+        scene.step()
+    assert not scene.get_error_envs_mask().any()
+    pos = block.get_particles_pos()
+    assert_allclose(block.get_particles_vel(), 0.0, tol=1e-2)
+    assert_allclose(pos[..., 2].amin(dim=-1), scene.mpm_solver.boundary_lower[2], tol=0.5 * particle_size)
+    assert_allclose(pos.amax(dim=-2) - pos.amin(dim=-2), span_0, tol=0.1 * particle_size)
+
+    # A non-finite velocity fails the Newton solve of its env, which is flagged and frozen, its particles and the rigid
+    # box alike, while the other proceeds
+    block.set_velocity(((0.0, 0.0, 1.0), (0.0, 0.0, float("nan"))))
+    pos_free_0 = block.get_particles_pos(envs_idx=[0])
+    pos_failed_0 = block.get_particles_pos(envs_idx=[1])
+    box_pos_free_0 = box.get_pos(envs_idx=[0])
+    box_qpos_failed_0 = box.get_qpos(envs_idx=[1])
+    box_dofs_vel_failed_0 = box.get_dofs_velocity(envs_idx=[1])
+    scene.step()
+    assert_equal(scene.get_error_envs_mask(), (False, True))
+    assert (block.get_particles_pos(envs_idx=[0])[..., 2] > pos_free_0[..., 2]).all()
+    assert_equal(block.get_particles_pos(envs_idx=[1]), pos_failed_0)
+    assert (box.get_pos(envs_idx=[0])[..., 2] < box_pos_free_0[..., 2]).all()
+    assert_equal(box.get_qpos(envs_idx=[1]), box_qpos_failed_0)
+    assert_equal(box.get_dofs_velocity(envs_idx=[1]), box_dofs_vel_failed_0)
+
+    # The error raises at the beginning of the next step on CPU, and at worst of the one after it on GPU
+    with pytest.raises(gs.GenesisException, match="Newton solve of the implicit MPM solver"):
+        for _ in range(1 if gs.backend == gs.cpu else 2):
+            scene.step()
+
+    # Resetting the scene clears the error, so the simulation proceeds
+    scene.reset()
+    scene.step()
+    assert block.get_particles_pos().isfinite().all()
+    assert not scene.get_error_envs_mask().any()
+
+
+@pytest.mark.required
+def test_implicit_emitted_particles(show_viewer):
+    NOZZLE_HEIGHT = 0.5
+    DROPLET_SIZE = 0.1
+    N_DROPLETS = 5
+    N_STEPS = 50
+
+    scene = gs.Scene(
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-0.5, -0.5, -0.1),
+            upper_bound=(0.5, 0.5, 1.0),
+            use_implicit_solver=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.7, -0.7, 0.55),
+            camera_lookat=(0.0, 0.0, 0.2),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    emitter = scene.add_emitter(
+        material=gs.materials.MPM.Liquid(),
+        max_particles=5000,
+    )
+    scene.build(n_envs=2)
+
+    # Droplets shot down at the plane join the simulation as they are emitted
+    for _ in range(N_DROPLETS):
+        emitter.emit(droplet_shape="circle", droplet_size=DROPLET_SIZE, pos=(0.0, 0.0, NOZZLE_HEIGHT), speed=2.0)
+        scene.step()
+    is_emitted = emitter.entity.get_particles_active()
+    for _ in range(N_STEPS):
+        scene.step()
+
+    # They land on the plane and spread over it, which holds them above it
+    pos = emitter.entity.get_particles_pos()[is_emitted]
+    assert pos.isfinite().all()
+    assert (pos[:, 2] > -emitter.entity.particle_size).all()
+    assert (pos[:, 2] < 0.2 * NOZZLE_HEIGHT).all()
+    assert ((pos[:, :2].amax(dim=0) - pos[:, :2].amin(dim=0)) > 2.0 * DROPLET_SIZE).all()
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("partner", ["SPH", "PBD", "FEM"])
+def test_implicit_solver_coupling_refusal(partner):
+    scene = gs.Scene(
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-0.5, -0.5, 0.0),
+            upper_bound=(0.5, 0.5, 1.0),
+            use_implicit_solver=True,
+        ),
+        show_viewer=False,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.2, 0.0, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.2, 0.0, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material={
+            "SPH": gs.materials.SPH.Liquid,
+            "PBD": gs.materials.PBD.Liquid,
+            "FEM": gs.materials.FEM.Elastic,
+        }[partner](),
+    )
+    with pytest.raises(gs.GenesisException, match=f"Coupling MPM with {partner} requires the explicit MPM solver"):
+        scene.build()
+
+
+@pytest.mark.required
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "requires_grad",
+        # The SAP coupler refuses single precision first
+        pytest.param("coupler", marks=pytest.mark.precision("64")),
+        "cpic",
+        "elliptic_cone",
+        "cg_solver",
+        "hibernation",
+        "noslip",
+        "custom_material",
+    ],
+)
+def test_implicit_solver_refusal(unsupported):
+    if unsupported == "cpic":
+        with pytest.raises(gs.GenesisException, match="'enable_CPIC' requires the explicit solver"):
+            gs.options.MPMOptions(use_implicit_solver=True, enable_CPIC=True)
+        return
+
+    # A material of a stress of its own, which the explicit solver runs and the implicit one has no energy for
+    class CustomMaterial(gs.materials.MPM.Base):
+        pass
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            requires_grad=unsupported == "requires_grad",
+        ),
+        rigid_options=gs.options.RigidOptions(
+            friction_cone=gs.friction_cone.elliptic if unsupported == "elliptic_cone" else gs.friction_cone.pyramidal,
+            constraint_solver=gs.constraint_solver.CG if unsupported == "cg_solver" else gs.constraint_solver.Newton,
+            use_hibernation=unsupported == "hibernation",
+            noslip_iterations=5 if unsupported == "noslip" else 0,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-0.5, -0.5, 0.0),
+            upper_bound=(0.5, 0.5, 1.0),
+            use_implicit_solver=True,
+        ),
+        coupler_options=gs.options.SAPCouplerOptions() if unsupported == "coupler" else None,
+        show_viewer=False,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=CustomMaterial() if unsupported == "custom_material" else gs.materials.MPM.Elastic(),
+    )
+    # A free rigid body, whose dofs the Newton solve takes when it touches the particles
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.4),
+            size=(0.1, 0.1, 0.1),
+        ),
+    )
+    error_message = {
+        "requires_grad": "Differentiable simulation",
+        "coupler": "The implicit MPM solver requires LegacyCouplerOptions",
+        "elliptic_cone": "friction_cone=gs.friction_cone.pyramidal",
+        "cg_solver": "constraint_solver=gs.constraint_solver.Newton",
+        "hibernation": "use_hibernation=False",
+        "noslip": "noslip_iterations=0",
+        "custom_material": "supports the Elastic, ElastoPlastic, Liquid, Muscle, Sand and Snow materials alone",
+    }[unsupported]
+    with pytest.raises(gs.GenesisException, match=error_message):
+        scene.build()

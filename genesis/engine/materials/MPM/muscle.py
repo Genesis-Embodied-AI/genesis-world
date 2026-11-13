@@ -51,3 +51,23 @@ class Muscle(Elastic):
         stress += self.stiffness * actu * F_tmp @ AAt @ F_tmp.transpose()
 
         return stress
+
+
+@qd.func
+def func_muscle_fibre_terms(
+    stiffness: float, actu: float, muscle_direction: qd.types.vector(3), F: qd.types.matrix(3, 3)
+):
+    """
+    Return the energy density of the fibres of a muscle under the implicit solver, its first Piola-Kirchhoff stress and
+    its curvature along the fibres.
+
+    The fibres pull along `muscle_direction` with the active stiffness `stiffness` times the activation, the positive
+    part of the actuation: a muscle contracts alone, and a negative activation would make the energy concave.
+    """
+    stiffness_active = stiffness * qd.max(actu, 0.0)
+    F_fibre = F @ muscle_direction
+    return (
+        0.5 * stiffness_active * F_fibre.dot(F_fibre),
+        stiffness_active * F_fibre.outer_product(muscle_direction),
+        stiffness_active,
+    )
