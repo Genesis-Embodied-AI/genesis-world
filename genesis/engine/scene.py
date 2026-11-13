@@ -844,8 +844,7 @@ class Scene(RBC):
             The surface of the emitted particles. Defaults to ``gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))``.
             Its ``vis_mode`` defaults to 'particle'.
         options : gs.entities.MPM | gs.entities.SPH | gs.entities.PBD | None, optional
-            The entity options of the emitted particles, which replace the material and the surface. Their surface
-            defaults as ``surface`` does.
+            The entity options of the emitted particles, which replace the material and the surface.
 
         Returns
         -------
