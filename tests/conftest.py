@@ -150,6 +150,17 @@ def box_on_masked_stick():
 
 
 @pytest.fixture(scope="session")
+def box_link():
+    # A single link whose collision geometry is a 10cm box
+    robot = ET.Element("robot", name="box_link")
+    link = ET.SubElement(robot, "link", name="box")
+    for kind in ("visual", "collision"):
+        geometry = ET.SubElement(ET.SubElement(link, kind), "geometry")
+        ET.SubElement(geometry, "box", size="0.1 0.1 0.1")
+    return robot
+
+
+@pytest.fixture(scope="session")
 def long_chain():
     # A free box followed by 31 boxes on ball joints and a last one on a vertical hinge, 100 dofs in a row
     mjcf = ET.Element("mujoco", model="long_chain")
