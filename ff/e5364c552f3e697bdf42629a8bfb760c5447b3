@@ -1,0 +1,23 @@
+genesis/engine/solvers/kinematic_solver.py
+  s_4e532cc51f4368::t_6fc2678294439b 1493,1512
+genesis/engine/solvers/rigid/abd/inverse_kinematics.py
+  s_4e532cc51f4368::t_13e5aa73f61f08 37,39-42,122,132-135,209,242-244,246-256,258-279,398,403,409-426,428-443,452,471-472,480-481,486-492,507,509-510,530,542,550,556-581,584-595,597-623,625,628-634,648-653,655-662,664,670-681,683,695-697,709,728-729,737,756
+tests/rigid/test_kinematics.py
+  s_4e532cc51f4368::t_09fd110ab5c60d 375-395
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ffe5364c552f3e697bdf42629a8bfb760c5447b3",
+  "prompts": {},
+  "sessions": {
+    "s_4e532cc51f4368": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "70ed08a1-5a04-49fd-9697-c03270ba2dff",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
