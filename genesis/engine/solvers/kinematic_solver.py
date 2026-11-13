@@ -1437,6 +1437,7 @@ class KinematicSolver(Solver):
             q_start,
             link_start,
             joint_start,
+            seed,
             self.dyn_state,
             ik_state,
             ik_fk,
@@ -1449,14 +1450,13 @@ class KinematicSolver(Solver):
             n_links,
             len(dofs_idx),
             len(envs_idx),
-            custom_init_qpos,
             max_samples,
             max_solver_iters,
             damping,
             pos_tol,
             rot_tol,
             max_step_size,
-            seed,
+            custom_init_qpos,
             respect_joint_limit,
         )
 

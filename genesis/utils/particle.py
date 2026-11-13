@@ -10,29 +10,12 @@ from skimage.measure import marching_cubes
 
 import genesis as gs
 
-from . import geom as gu
 from .cache import get_ptc_cache
 
 try:
     malloc_trim = ctypes.CDLL(ctypes.util.find_library("c")).malloc_trim
 except (AttributeError, TypeError):
     malloc_trim = None
-
-
-def n_particles_vol(p_size=0.01, volume=1.0):
-    return max(1, round(volume / p_size**3))
-
-
-def n_particles_3D(p_size=0.01, size=(1.0, 1.0, 1.0)):
-    return max(1, round(size[0] / p_size)) * max(1, round(size[1] / p_size)) * max(1, round(size[2] / p_size))
-
-
-def n_particles_1D(p_size=0.01, length=1.0):
-    return max(1, round(length / p_size))
-
-
-def nowhere_particles(n):
-    return np.tile(gu.nowhere(), (n, 1))
 
 
 def trimesh_to_particles_simple(mesh, p_size, sampler):
@@ -55,19 +38,19 @@ def trimesh_to_particles_simple(mesh, p_size, sampler):
             np.random.set_state(random_state_end)
         return positions
 
-    with gs.logger.timer(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file:"):
-        # sample a cube first
-        box_size = mesh.bounds[1] - mesh.bounds[0]
-        box_center = (mesh.bounds[1] + mesh.bounds[0]) / 2
-        positions = _box_to_particles(p_size=p_size, pos=box_center, size=box_size, sampler=sampler)
-        # reject out-of-boundary particles
-        # See compute_sdf_data in genesis/utils/mesh.py for the sign computation
-        sd, *_ = igl.signed_distance(
-            positions, mesh.vertices, mesh.faces, sign_type=igl.SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER
-        )
-        positions = positions[sd < 0.0]
+    gs.logger.info(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file...")
+    # sample a cube first
+    box_size = mesh.bounds[1] - mesh.bounds[0]
+    box_center = (mesh.bounds[1] + mesh.bounds[0]) / 2
+    positions = _box_to_particles(p_size=p_size, pos=box_center, size=box_size, sampler=sampler)
+    # reject out-of-boundary particles
+    # See compute_sdf_data in genesis/utils/mesh.py for the sign computation
+    sd, *_ = igl.signed_distance(
+        positions, mesh.vertices, mesh.faces, sign_type=igl.SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER
+    )
+    positions = positions[sd < 0.0]
 
-        cache.save((positions, np.random.get_state() if sampler == "random" else None))
+    cache.save((positions, np.random.get_state() if sampler == "random" else None))
 
     return positions
 
@@ -87,42 +70,42 @@ def trimesh_to_particles_pbs(mesh, p_size, sampler, pos=(0, 0, 0)):
     if positions is not None:
         gs.logger.debug("Sampled particles file (`.ptc`) found in cache.")
     else:
-        with gs.logger.timer(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file:"):
-            sdf_res = int(sampler.split("-")[-1])
-            # This method samples denser particles than the 'random' and 'regular' samplers at the same radius
-            radius = 1.104 * p_size / 2
+        gs.logger.info(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file...")
+        sdf_res = int(sampler.split("-")[-1])
+        # This method samples denser particles than the 'random' and 'regular' samplers at the same radius
+        radius = 1.104 * p_size / 2
 
-            # Signed distance field, positive inside, over the bounding box of the mesh padded by the support radius
-            origin = mesh.bounds[0] - 4.0 * radius
-            cell_size = (mesh.bounds[1] + 4.0 * radius - origin) / sdf_res
-            nodes = origin + cell_size * np.stack(np.meshgrid(*[np.arange(sdf_res + 1)] * 3, indexing="ij"), axis=-1)
-            sdf, *_ = igl.signed_distance(nodes.reshape((-1, 3)), mesh.vertices, mesh.faces)
-            sdf = -sdf.reshape((sdf_res + 1,) * 3)
+        # Signed distance field, positive inside, over the bounding box of the mesh padded by the support radius
+        origin = mesh.bounds[0] - 4.0 * radius
+        cell_size = (mesh.bounds[1] + 4.0 * radius - origin) / sdf_res
+        nodes = origin + cell_size * np.stack(np.meshgrid(*[np.arange(sdf_res + 1)] * 3, indexing="ij"), axis=-1)
+        sdf, *_ = igl.signed_distance(nodes.reshape((-1, 3)), mesh.vertices, mesh.faces)
+        sdf = -sdf.reshape((sdf_res + 1,) * 3)
 
-            # The particles are seeded slightly closer than their final spacing, on layers of rows offset by a radius
-            # every other row, then relaxed towards a uniform density
-            seed_radius = 0.95 * radius
-            spacing = np.array([2.0 * seed_radius, np.sqrt(3.0) * seed_radius, 2.0 * seed_radius])
-            lattice_x, lattice_y, lattice_z = [
-                np.arange(mesh.bounds[0][k], mesh.bounds[1][k] + 0.5 * spacing[k], spacing[k]) for k in range(3)
-            ]
-            lattice_x, lattice_y, lattice_z = [
-                lattice_x[lattice_x <= mesh.bounds[1][0]],
-                lattice_y[lattice_y <= mesh.bounds[1][1]],
-                lattice_z[lattice_z <= mesh.bounds[1][2]],
-            ]
-            grid_z, grid_y, grid_x = np.meshgrid(lattice_z, np.arange(len(lattice_y)), lattice_x, indexing="ij")
-            is_row_odd = grid_y % 2 == 1
-            positions = np.stack(
-                (
-                    grid_x + is_row_odd * seed_radius,
-                    lattice_y[grid_y] + seed_radius,
-                    grid_z + ~is_row_odd * seed_radius,
-                ),
-                axis=-1,
-            ).reshape((-1, 3))
-            positions = _relax_volume_sampling(positions, sdf, origin, cell_size, radius, n_steps=100)
-            cache.save(positions)
+        # The particles are seeded slightly closer than their final spacing, on layers of rows offset by a radius
+        # every other row, then relaxed towards a uniform density
+        seed_radius = 0.95 * radius
+        spacing = np.array([2.0 * seed_radius, np.sqrt(3.0) * seed_radius, 2.0 * seed_radius])
+        lattice_x, lattice_y, lattice_z = [
+            np.arange(mesh.bounds[0][k], mesh.bounds[1][k] + 0.5 * spacing[k], spacing[k]) for k in range(3)
+        ]
+        lattice_x, lattice_y, lattice_z = [
+            lattice_x[lattice_x <= mesh.bounds[1][0]],
+            lattice_y[lattice_y <= mesh.bounds[1][1]],
+            lattice_z[lattice_z <= mesh.bounds[1][2]],
+        ]
+        grid_z, grid_y, grid_x = np.meshgrid(lattice_z, np.arange(len(lattice_y)), lattice_x, indexing="ij")
+        is_row_odd = grid_y % 2 == 1
+        positions = np.stack(
+            (
+                grid_x + is_row_odd * seed_radius,
+                lattice_y[grid_y] + seed_radius,
+                grid_z + ~is_row_odd * seed_radius,
+            ),
+            axis=-1,
+        ).reshape((-1, 3))
+        positions = _relax_volume_sampling(positions, sdf, origin, cell_size, radius, n_steps=100)
+        cache.save(positions)
 
     return positions + pos
 
@@ -280,21 +263,17 @@ def _box_to_particles(p_size, pos, size, sampler):
     lower = pos - size / 2
     upper = pos + size / 2
 
+    n_particles_axes = np.maximum(np.round(size / p_size).astype(gs.np_int), 1)
     if sampler == "random":
-        n_particles = n_particles_3D(p_size, size)
+        n_particles = np.prod(n_particles_axes)
         # The draws are scaled by separate numpy operations, each rounded exactly, so that every platform samples the
         # same positions. The compiled scaling of 'np.random.uniform' rounds differently from one platform to another.
         positions = lower + np.random.random((n_particles, 3)) * (upper - lower)
 
     elif sampler == "regular":
-        n_x = n_particles_1D(p_size, size[0])
-        n_y = n_particles_1D(p_size, size[1])
-        n_z = n_particles_1D(p_size, size[2])
         p_lower = lower + 0.5 * p_size
         p_upper = upper - 0.5 * p_size
-        x = np.linspace(p_lower[0], p_upper[0], n_x)
-        y = np.linspace(p_lower[1], p_upper[1], n_y)
-        z = np.linspace(p_lower[2], p_upper[2], n_z)
+        x, y, z = (np.linspace(p_lower[i], p_upper[i], n_particles_axes[i]) for i in range(3))
         positions = np.stack(np.meshgrid(x, y, z, indexing="ij"), -1).reshape((-1, 3))
 
     else:
@@ -303,99 +282,37 @@ def _box_to_particles(p_size, pos, size, sampler):
     return positions
 
 
-def box_to_particles(p_size=0.01, pos=(0, 0, 0), size=(1, 1, 1), sampler="random"):
-    if "pbs" in sampler:
-        mesh = trimesh.creation.box(extents=size)
+def primitive_to_particles(p_size, shape, size, sampler, inner_radius=0.0):
+    """
+    Sample particles inside a primitive centered at the origin.
 
+    The primitive is a box of extents size, a cylinder along z of diameter size[0] and height size[2], or a sphere of
+    diameter size[0], hollowed out within inner_radius of the origin. The 'pbs' samplers sample the mesh of the
+    primitive and fall back to the 'random' sampler when they fail. The 'random' and 'regular' samplers fill the box
+    of extents size and keep the points inside the primitive.
+    """
+    assert shape in ("box", "cylinder", "sphere")
+    if "pbs" in sampler:
+        if shape == "box":
+            mesh = trimesh.creation.box(extents=size)
+        elif shape == "cylinder":
+            mesh = trimesh.creation.cylinder(radius=0.5 * size[0], height=size[2])
+        else:
+            mesh = trimesh.creation.icosphere(radius=0.5 * size[0])
         try:
-            positions = trimesh_to_particles_pbs(mesh, p_size, sampler, pos=pos)
+            positions = trimesh_to_particles_pbs(mesh, p_size, sampler)
         except gs.GenesisException:
             sampler = "random"
 
-    if sampler in ("random", "regular"):
-        positions = _box_to_particles(
-            p_size=p_size,
-            pos=pos,
-            size=size,
-            sampler=sampler,
-        )
+    if "pbs" not in sampler:
+        positions = _box_to_particles(p_size=p_size, pos=np.zeros(3), size=size, sampler=sampler)
+        if shape == "cylinder":
+            positions = positions[np.linalg.norm(positions[:, :2], axis=-1) <= 0.5 * size[0]]
+        elif shape == "sphere":
+            positions = positions[np.linalg.norm(positions, axis=-1) <= 0.5 * size[0]]
 
-    return positions
-
-
-def cylinder_to_particles(p_size=0.01, pos=(0, 0, 0), radius=0.5, height=1.0, sampler="random"):
-    if "pbs" in sampler:
-        mesh = trimesh.creation.cylinder(radius=radius, height=height)
-        try:
-            positions = trimesh_to_particles_pbs(mesh, p_size, sampler, pos=pos)
-        except gs.GenesisException:
-            sampler = "random"
-
-    if sampler in ("random", "regular"):
-        # sample a cube first
-        size = np.array([2 * radius, 2 * radius, height])
-        positions = _box_to_particles(
-            p_size=p_size,
-            pos=pos,
-            size=size,
-            sampler=sampler,
-        )
-        # reject out-of-boundary particles
-        positions_r = np.linalg.norm(positions[:, [0, 1]] - np.array(pos)[[0, 1]], axis=1)
-        positions = positions[positions_r <= radius]
-
-    return positions
-
-
-def sphere_to_particles(p_size=0.01, pos=(0, 0, 0), radius=0.5, sampler="random"):
-    if "pbs" in sampler:
-        mesh = trimesh.creation.icosphere(radius=radius)
-        try:
-            positions = trimesh_to_particles_pbs(mesh, p_size, sampler, pos=pos)
-        except gs.GenesisException:
-            sampler = "random"
-
-    if sampler in ("random", "regular"):
-        # sample a cube first
-        size = np.array([2 * radius, 2 * radius, 2 * radius])
-        positions = _box_to_particles(
-            p_size=p_size,
-            pos=pos,
-            size=size,
-            sampler=sampler,
-        )
-        # reject out-of-boundary particles
-        positions_r = np.linalg.norm(positions - np.array(pos), axis=1)
-        positions = positions[positions_r <= radius]
-
-    return positions
-
-
-def shell_to_particles(p_size=0.01, pos=(0, 0, 0), inner_radius=0.5, outer_radius=0.7, sampler="random"):
-    if "pbs" in sampler:
-        mesh = trimesh.creation.icosphere(radius=outer_radius)
-        try:
-            positions = trimesh_to_particles_pbs(mesh, p_size, sampler, pos=pos)
-        except gs.GenesisException:
-            sampler = "random"
-
-    if sampler in ("random", "regular"):
-        # sample a cube first
-        size = np.array([2 * outer_radius, 2 * outer_radius, 2 * outer_radius])
-        positions = _box_to_particles(
-            p_size=p_size,
-            pos=pos,
-            size=size,
-            sampler=sampler,
-        )
-        # reject out-of-boundary particles
-        positions_r = np.linalg.norm(positions - np.array(pos), axis=1)
-        positions = positions[positions_r <= outer_radius]
-
-    # reject inner particles
-    positions_r = np.linalg.norm(positions - np.array(pos), axis=1)
-    positions = positions[positions_r >= inner_radius]
-
+    if inner_radius > 0.0:
+        positions = positions[np.linalg.norm(positions, axis=-1) >= inner_radius]
     return positions
 
 
@@ -957,9 +874,3 @@ class FoamGenerator:
             self.bubble_decay,
         )
         return self.foams_pos
-
-
-def filter_surface(positions, particle_radius):
-    """Return whether each particle lies at the surface of the set, which a particle with few neighbors does."""
-    neighbors_start, _ = _find_neighbors(positions, positions, 4.0 * particle_radius)
-    return np.diff(neighbors_start) < 20

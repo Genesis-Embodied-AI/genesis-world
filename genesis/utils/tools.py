@@ -5,11 +5,11 @@ import os
 import time
 
 import numpy as np
-import quadrants as qd
 from PIL import Image
 
 import genesis as gs
 from genesis.utils.misc import get_entry_point_name
+from genesis.utils.video_encoder import VideoEncoder
 
 
 def animate(imgs, filename=None, fps=60):
@@ -31,18 +31,13 @@ def animate(imgs, filename=None, fps=60):
     os.makedirs(os.path.abspath(os.path.dirname(filename)), exist_ok=True)
 
     gs.logger.info(f'Saving video to ~<"{filename}">~...')
-    from moviepy import ImageSequenceClip
-
-    imgs = ImageSequenceClip(imgs, fps=fps)
-    imgs.write_videofile(
-        filename,
-        fps=fps,
-        logger=None,
-        codec="libx264",
-        preset="ultrafast",
-        # ffmpeg_params=["-crf", "0"],
-    )
-    gs.logger.info("Video saved.")
+    encoder = VideoEncoder(filename, fps)
+    try:
+        for img in imgs:
+            # The alpha channel of a color image is dropped, since the video has none
+            encoder.write(img[..., :3] if img.ndim == 3 else img)
+    finally:
+        encoder.close()
 
 
 def save_img_arr(arr, filename="img.png"):
@@ -51,117 +46,6 @@ def save_img_arr(arr, filename="img.png"):
     img = Image.fromarray(arr)
     img.save(filename)
     gs.logger.info(f"Image saved to ~<{filename}>~.")
-
-
-class Timer:
-    def __init__(self, skip=False, level=0, qd_sync=False):
-        self.accu_log = dict()
-        self.skip = skip
-        self.level = level
-        self.qd_sync = qd_sync
-        self.msg_width = 0
-        self.reset()
-
-    def reset(self):
-        self.just_reset = True
-        if self.level == 0 and not self.skip:
-            try:
-                column, _lines = os.get_terminal_size()
-            except OSError:
-                column = 80
-            print("─" * column)
-        if self.qd_sync and not self.skip:
-            qd.sync()
-        self.prev_time = self.init_time = time.perf_counter()
-
-    def _stamp(self, msg="", _ratio=1.0):
-        if self.skip:
-            return
-
-        if self.qd_sync:
-            qd.sync()
-
-        self.cur_time = time.perf_counter()
-        self.msg_width = max(self.msg_width, len(msg))
-        step_time = 1000 * (self.cur_time - self.prev_time) * _ratio
-        accu_time = 1000 * (self.cur_time - self.init_time) * _ratio
-
-        if msg not in self.accu_log:
-            self.accu_log[msg] = [1, step_time, accu_time]
-        else:
-            self.accu_log[msg][0] += 1
-            self.accu_log[msg][1] += step_time
-            self.accu_log[msg][2] += accu_time
-
-        if self.level > 0:
-            prefix = " │  " * (self.level - 1)
-            if self.just_reset:
-                prefix += " ╭──"
-            else:
-                prefix += " ├──"
-        else:
-            prefix = ""
-
-        print(
-            f"{prefix}[{msg.ljust(self.msg_width)}] step: {step_time:5.3f}ms | accu: {accu_time:5.3f}ms | step_avg: {self.accu_log[msg][1] / self.accu_log[msg][0]:5.3f}ms | accu_avg: {self.accu_log[msg][2] / self.accu_log[msg][0]:5.3f}ms"
-        )
-
-        self.prev_time = time.perf_counter()
-        self.just_reset = False
-
-    def stamp(self, msg="", _ratio=1.0):
-        return
-        if self.skip:
-            return
-
-        if self.qd_sync:
-            qd.sync()
-
-        self.cur_time = time.perf_counter()
-        self.msg_width = max(self.msg_width, len(msg))
-        step_time = 1000 * (self.cur_time - self.prev_time) * _ratio
-        accu_time = 1000 * (self.cur_time - self.init_time) * _ratio
-
-        if msg not in self.accu_log:
-            self.accu_log[msg] = [1, step_time, accu_time]
-        else:
-            self.accu_log[msg][0] += 1
-            self.accu_log[msg][1] += step_time
-            self.accu_log[msg][2] += accu_time
-
-        if self.level > 0:
-            prefix = " │  " * (self.level - 1)
-            if self.just_reset:
-                prefix += " ╭──"
-            else:
-                prefix += " ├──"
-        else:
-            prefix = ""
-
-        print(
-            f"{prefix}[{msg.ljust(self.msg_width)}] step: {step_time:5.3f}ms | accu: {accu_time:5.3f}ms | step_avg: {self.accu_log[msg][1] / self.accu_log[msg][0]:5.3f}ms | accu_avg: {self.accu_log[msg][2] / self.accu_log[msg][0]:5.3f}ms"
-        )
-
-        self.prev_time = time.perf_counter()
-        self.just_reset = False
-
-
-timers = dict()
-
-
-def create_timer(name=None, new=False, level=0, qd_sync=False, skip_first_call=False):
-    if name is None:
-        return Timer()
-    else:
-        if name in timers and not new:
-            timer = timers[name]
-            timer.skip = False
-            timer.reset()
-            return timer
-        else:
-            timer = Timer(skip=skip_first_call, level=level, qd_sync=qd_sync)
-            timers[name] = timer
-            return timer
 
 
 class Rate:

@@ -862,32 +862,32 @@ class Scene(RBC):
 
         gs._scene_registry.append(weakref.ref(self, _destroy_callback))
 
-        with gs.logger.timer(f"Building scene ~~~<{self._uid}>~~~..."):
-            self._parallelize(n_envs, env_spacing, n_envs_per_row, center_envs_at_origin)
+        gs.logger.info(f"Building scene ~~~<{self._uid}>~~~...")
+        self._parallelize(n_envs, env_spacing, n_envs_per_row, center_envs_at_origin)
 
-            with namespace(self._namespace):
-                self._sim.build()
+        with namespace(self._namespace):
+            self._sim.build()
 
-            # reset state
-            self._reset()
+        # reset state
+        self._reset()
 
-            self._is_built = True
+        self._is_built = True
 
-        with gs.logger.timer("Compiling simulation kernels..."):
-            self._sim.step()
-            try:
-                self._sim.check_errno()
-            except gs.GenesisException as e:
-                gs.logger.warning(
-                    "The initial state is invalid. Register a valid one with 'scene.reset(state)', or overwrite it "
-                    "manually following 'scene.build' and every call to 'scene.reset()', otherwise stepping will fail "
-                    f"with: {e}"
-                )
-            self._reset()
+        gs.logger.info("Compiling simulation kernels...")
+        self._sim.step()
+        try:
+            self._sim.check_errno()
+        except gs.GenesisException as e:
+            gs.logger.warning(
+                "The initial state is invalid. Register a valid one with 'scene.reset(state)', or overwrite it "
+                "manually following 'scene.build' and every call to 'scene.reset()', otherwise stepping will fail "
+                f"with: {e}"
+            )
+        self._reset()
 
         # visualizer
-        with gs.logger.timer("Building visualizer..."):
-            self._visualizer.build()
+        gs.logger.info("Building visualizer...")
+        self._visualizer.build()
 
         # recorders, which lay out the phases a step times once (see 'StepTimer.add_phases')
         self._sim.step_timer.add_phases("recorders", "rendering", "video")

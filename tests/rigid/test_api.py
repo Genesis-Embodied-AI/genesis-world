@@ -1447,6 +1447,9 @@ def test_object_repr():
             assert sub._repr_brief()
             assert repr(sub)
 
+    # An option value prints the name of its type, an enumeration included
+    assert "<integrator>: " in repr(gs.options.RigidOptions())
+
     # A morph created from a file prints its path. A morph created from inline XML prints the model name its
     # document declares, and never the document itself.
     assert "panda.xml" in repr(panda.main_morph)

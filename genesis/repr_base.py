@@ -1,7 +1,9 @@
 import inspect
 
+import numpy as np
+import torch
+
 import genesis as gs
-import genesis.utils.repr as ru
 from genesis.styles import colors, formats, styless
 
 
@@ -67,7 +69,7 @@ class RBC:
 
             # content example: <gs.List>(len=0, [])
             try:
-                content = ru.brief(getattr(self, attr))
+                content = brief(getattr(self, attr))
             except Exception:
                 continue
             idx = content.find(">")
@@ -106,3 +108,22 @@ class RBC:
 
     def __format__(self, format_spec):
         return self.__repr_name__()
+
+
+def brief(x):
+    """Describe a value briefly, for the repr of genesis objects."""
+    if isinstance(x, RBC):
+        return x._repr_brief()
+    # The type renders as "<class 'module.name'>", or "<enum 'name'>" for an enumeration
+    repr_name = f"<{str(x if isinstance(x, type) else type(x)).split(' ', 1)[1][1:-2]}>"
+    if isinstance(x, (int, float, dict, bool, list, tuple, np.integer, np.floating)):
+        return f"{repr_name}: {x}"
+    if isinstance(x, str):
+        return f"{repr_name}: '{x}'"
+    if isinstance(x, (np.ndarray, torch.Tensor)):
+        if np.prod(x.shape) <= 20:
+            return f"{repr_name}: {x!r}"
+        return f"{repr_name}, shape: {x.shape}"
+    if x is None:
+        return "None"
+    return repr_name

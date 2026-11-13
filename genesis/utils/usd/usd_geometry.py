@@ -348,10 +348,10 @@ def parse_prim_geoms(
                     )
                 )
         if is_collision:
-            # A bound UsdPhysicsMaterialAPI overrides the default friction. Prefer dynamic friction,
+            # A bound UsdPhysicsMaterialAPI states the friction. Prefer dynamic friction,
             # falling back to static; restitution has no rigid-rigid equivalent in the solver and is
             # dropped (with a one-time warning).
-            geom_friction = gu.default_friction()
+            geom_friction = None
             physics_material = context.get_physics_material(prim)
             if physics_material is not None:
                 # PhysicsMaterial fields are None when unauthored, so an explicitly authored 0 (a
@@ -378,9 +378,10 @@ def parse_prim_geoms(
                 quat=geom_quat,
                 contype=1,
                 conaffinity=1,
-                friction=geom_friction,
                 prim_path=str(prim.GetPath()),
             )
+            if geom_friction is not None:
+                collision_g_info["friction"] = geom_friction
             if physics_material is not None and physics_material.density is not None:
                 collision_g_info["density"] = physics_material.density
 

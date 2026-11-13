@@ -540,32 +540,32 @@ def convex_decompose(mesh, coacd_options):
             is_cached_loaded = True
 
     if not is_cached_loaded:
-        with gs.logger.timer("Running convex decomposition."):
-            mesh = coacd.Mesh(mesh.vertices, mesh.faces)
-            args = coacd_options
-            result = coacd.run_coacd(
-                mesh,
-                threshold=args.threshold,
-                max_convex_hull=args.max_convex_hull,
-                preprocess_mode=args.preprocess_mode,
-                preprocess_resolution=args.preprocess_resolution,
-                resolution=args.resolution,
-                mcts_nodes=args.mcts_nodes,
-                mcts_iterations=args.mcts_iterations,
-                mcts_max_depth=args.mcts_max_depth,
-                pca=args.pca,
-                merge=args.merge,
-                decimate=args.decimate,
-                max_ch_vertex=args.max_ch_vertex,
-                extrude=args.extrude,
-                extrude_margin=args.extrude_margin,
-                apx_mode=args.apx_mode,
-                seed=args.seed,
-            )
-            mesh_parts = []
-            for vs, fs in result:
-                mesh_parts.append(trimesh.Trimesh(vs, fs))
-            cache.save({"mesh_parts": mesh_parts, "mesh_scale": mesh_scale})
+        gs.logger.info("Running convex decomposition.")
+        mesh = coacd.Mesh(mesh.vertices, mesh.faces)
+        args = coacd_options
+        result = coacd.run_coacd(
+            mesh,
+            threshold=args.threshold,
+            max_convex_hull=args.max_convex_hull,
+            preprocess_mode=args.preprocess_mode,
+            preprocess_resolution=args.preprocess_resolution,
+            resolution=args.resolution,
+            mcts_nodes=args.mcts_nodes,
+            mcts_iterations=args.mcts_iterations,
+            mcts_max_depth=args.mcts_max_depth,
+            pca=args.pca,
+            merge=args.merge,
+            decimate=args.decimate,
+            max_ch_vertex=args.max_ch_vertex,
+            extrude=args.extrude,
+            extrude_margin=args.extrude_margin,
+            apx_mode=args.apx_mode,
+            seed=args.seed,
+        )
+        mesh_parts = []
+        for vs, fs in result:
+            mesh_parts.append(trimesh.Trimesh(vs, fs))
+        cache.save({"mesh_parts": mesh_parts, "mesh_scale": mesh_scale})
 
     return mesh_parts
 
@@ -1075,43 +1075,31 @@ def create_frame(
 ):
     origin = create_sphere(radius=origin_radius, subdivisions=2)
 
-    x = create_arrow(
-        length=axis_length,
-        radius=axis_radius,
-        l_ratio=head_length / axis_length,
-        r_ratio=head_radius / axis_radius,
-        body_color=(0.7, 0.0, 0.0, 1.0),
-        head_color=(0.7, 0.7, 0.7, 1.0),
-        sections=sections,
-    )
-    y = create_arrow(
-        length=axis_length,
-        radius=axis_radius,
-        l_ratio=head_length / axis_length,
-        r_ratio=head_radius / axis_radius,
-        body_color=(0.0, 0.7, 0.0, 1.0),
-        head_color=(0.7, 0.7, 0.7, 1.0),
-        sections=sections,
-    )
-    z = create_arrow(
-        length=axis_length,
-        radius=axis_radius,
-        l_ratio=head_length / axis_length,
-        r_ratio=head_radius / axis_radius,
-        body_color=(0.0, 0.0, 0.7, 1.0),
-        head_color=(0.7, 0.7, 0.7, 1.0),
-        sections=sections,
-    )
+    # The arrows point along z, then rotate onto x and y
+    axes = []
+    for body_color, euler in (
+        ((0.7, 0.0, 0.0, 1.0), (0.0, 90.0, 0.0)),
+        ((0.0, 0.7, 0.0, 1.0), (-90.0, 0.0, 0.0)),
+        ((0.0, 0.0, 0.7, 1.0), (0.0, 0.0, 0.0)),
+    ):
+        axis = create_arrow(
+            length=axis_length,
+            radius=axis_radius,
+            l_ratio=head_length / axis_length,
+            r_ratio=head_radius / axis_radius,
+            body_color=body_color,
+            head_color=(0.7, 0.7, 0.7, 1.0),
+            sections=sections,
+        )
+        axis.vertices = gu.transform_by_R(axis.vertices, gu.euler_to_R(euler))
+        axes.append(axis)
 
-    x.vertices = gu.transform_by_R(x.vertices, gu.euler_to_R((0.0, 90.0, 0.0)))
-    y.vertices = gu.transform_by_R(y.vertices, gu.euler_to_R((-90.0, 0.0, 0.0)))
-
-    return trimesh.util.concatenate([origin, x, y, z])
+    return trimesh.util.concatenate([origin, *axes])
 
 
 def create_camera_frustum(camera, color):
     # camera
-    camera_mesh = load_trimesh(os.path.join(get_src_dir(), "assets", "meshes", "camera/camera.glb"), force="mesh")
+    camera_mesh = load_trimesh(os.path.join(get_assets_dir(), "meshes", "camera", "camera.glb"), force="mesh")
     camera_mesh.visual = camera_mesh.visual.to_color()
     camera_mesh.apply_translation([0.0, 0.0, 1.0])
     camera_mesh.apply_scale(0.05)
@@ -1137,14 +1125,9 @@ def create_camera_frustum(camera, color):
         ]
     )
 
-    # Define the faces of the frustum
+    # Define the side faces of the frustum, leaving it open at its near and far ends
     faces = np.array(
         [
-            # # near face
-            # [1, 2, 3, 4],
-            # # far face
-            # [5, 6, 7, 8],
-            # side face
             [2, 1, 5, 6],
             [3, 2, 6, 7],
             [4, 3, 7, 8],
@@ -1176,7 +1159,6 @@ def create_tets_mesh(n_tets=1, halfsize=1.0, quats=None, randomize_halfsize=True
             np.tile(np.random.uniform(0.3, 1.9, size=(n_tets * 4, 1)), [1, vert_per_tet // 4 * 3]).reshape(-1, 3)
             * halfsize
         )
-        # halfsize = np.random.uniform(0.2, 1.9, size=(n_tets * vert_per_tet, 3)) * halfsize
 
     vertices = (
         np.tile(
@@ -1584,39 +1566,6 @@ def tetrahedralize_mesh(mesh, tet_cfg):
     verts, elems, *_ = tet.tetrahedralize(switches=make_tetgen_switches(tet_cfg))
 
     return verts, elems
-
-
-def visualize_tet(tet, mesh, show_surface=True, plot_cell_qual=False):
-    grid = tet.grid
-    if show_surface:
-        grid.plot(show_edges=True)
-    else:
-        # get cell centroids
-        cells = grid.cells.reshape(-1, 5)[:, 1:]
-        cell_center = grid.points[cells].mean(axis=1)
-
-        # extract cells below the 0 xy plane
-        cell_ind = (cell_center[:, 2] < 0.0).nonzero(as_tuple=False)
-        subgrid = grid.extract_cells(cell_ind)
-
-        # advanced plotting
-        if plot_cell_qual:
-            cell_qual = subgrid.compute_cell_quality()["CellQuality"]
-            subgrid.plot(
-                scalars=cell_qual, stitle="Quality", cmap="bwr", clim=[0, 1], flip_scalars=True, show_edges=True
-            )
-        else:
-            # Delaying import of 'pyvista' because it is an optional dependency
-            import pyvista as pv
-
-            faces = np.concatenate([np.full((mesh.faces.shape[0], 1), mesh.faces.shape[1]), mesh.faces], axis=1)
-            pv_data = pv.PolyData(mesh.vertices, faces)
-
-            plotter = pv.Plotter()
-            plotter.add_mesh(subgrid, "lightgrey", lighting=True, show_edges=True)
-            plotter.add_mesh(pv_data, "r", "wireframe")
-            plotter.add_legend([[" Input Mesh ", "r"], [" Tessellated Mesh ", "black"]])
-            plotter.show()
 
 
 def check_exr_compression(exr_path):

@@ -54,6 +54,11 @@ from .inertial import (
 # Rounding a pose parsed from a file may carry, within which it reads as the identity
 POSE_EPS = 1e-9
 
+# Friction coefficients of a geom whose material and asset both leave them unset (see '_describe_geoms')
+_DEFAULT_FRICTION = 1.0
+_DEFAULT_FRICTION_TORSIONAL = 0.005
+_DEFAULT_FRICTION_ROLLING = 0.0001
+
 
 @dataclass(kw_only=True)
 class BaseRigidGeomDescription:
@@ -1701,12 +1706,12 @@ class RigidEntityDescription(KinematicEntityDescription):
         for g_info in cg_infos:
             coefficients = []
             for material_coefficient, asset_coefficient, default_coefficient in (
-                (self.material.friction, g_info.get("friction"), gu.default_friction),
-                (self.material.friction_torsional, g_info.get("friction_torsional"), gu.default_friction_torsional),
-                (self.material.friction_rolling, g_info.get("friction_rolling"), gu.default_friction_rolling),
+                (self.material.friction, g_info.get("friction"), _DEFAULT_FRICTION),
+                (self.material.friction_torsional, g_info.get("friction_torsional"), _DEFAULT_FRICTION_TORSIONAL),
+                (self.material.friction_rolling, g_info.get("friction_rolling"), _DEFAULT_FRICTION_ROLLING),
             ):
                 coefficient = asset_coefficient if material_coefficient is None else material_coefficient
-                coefficients.append(default_coefficient() if coefficient is None else coefficient)
+                coefficients.append(default_coefficient if coefficient is None else coefficient)
             friction, friction_torsional, friction_rolling = coefficients
             cg_descs.append(
                 RigidGeomDescription(

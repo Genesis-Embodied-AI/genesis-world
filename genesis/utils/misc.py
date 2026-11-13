@@ -1,6 +1,5 @@
 import ctypes
 import dataclasses
-import datetime
 import functools
 import io
 import logging
@@ -439,12 +438,6 @@ def get_entry_point_name():
 
 def get_src_dir():
     return os.path.dirname(gs.__file__)
-
-
-def get_gen_log_dir():
-    current_time = datetime.datetime.now()
-    unique_id = current_time.strftime("%Y%m%d_%H%M%S_%f")
-    return os.path.join(os.path.dirname(gs.__file__), "gen", "logs", unique_id)
 
 
 def get_assets_dir():

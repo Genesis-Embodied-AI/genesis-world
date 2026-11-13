@@ -19,14 +19,13 @@ class DroneEntity(RigidEntity):
         self._propellers_link_idx = torch.tensor(
             [link.idx for link in propellers_link], dtype=gs.tc_int, device=gs.device
         )
-        try:
+        self._animate_propellers = all(link.vgeoms for link in propellers_link)
+        if self._animate_propellers:
             self._propellers_vgeom_idxs = torch.tensor(
                 [link.vgeoms[0].idx for link in propellers_link], dtype=gs.tc_int, device=gs.device
             )
-            self._animate_propellers = True
-        except Exception:
+        else:
             gs.logger.warning("No visual geometry found for propellers. Skipping propeller animation.")
-            self._animate_propellers = False
 
         self._propellers_spin = torch.tensor(morph.propellers_spin, dtype=gs.tc_float, device=gs.device)
         self._model = morph.model
@@ -104,11 +103,6 @@ class DroneEntity(RigidEntity):
     def n_propellers(self):
         """The number of propellers on the drone."""
         return self._n_propellers
-
-    @property
-    def COM_link_idx(self):
-        """The index of the center-of-mass (COM) link of the drone."""
-        return self._COM_link_idx
 
     @property
     def propellers_idx(self):
