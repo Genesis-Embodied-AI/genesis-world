@@ -1214,7 +1214,7 @@ class KinematicEntityDescription(EntityDescription):
         # Exclude joints with 0 dofs to align with Mujoco
         links_j_infos = [[j_info for j_info in link_j_infos if j_info["n_dofs"] > 0] for link_j_infos in links_j_infos]
 
-        # The names from the root of the kinematic tree down to each link, which a 'gs.LinkIndex' selects on. Every
+        # The names from the root of the kinematic tree down to each link, which a 'gs.indices.Link' selects on. Every
         # parent precedes its children.
         for l_info in l_infos:
             parent_idx = l_info["parent_idx"]
@@ -1470,9 +1470,9 @@ class KinematicEntityDescription(EntityDescription):
         if not self.options.settings:
             return
 
-        # A setting of a selection holding a 'gs.GeomIndex' overrides one of links alone, and the later of two settings
-        # of one level applies. The density set on a geom is kept apart from the one the asset states, since it weighs
-        # in the estimate of the inertia alone (see '_resolve_inertial').
+        # A setting of a geom selection overrides one of links, and the later of two settings of one level applies. The
+        # density set on a geom is kept apart from the one the asset states, since it weighs in the estimate of the
+        # inertia alone (see '_resolve_inertial').
         cg_infos = [
             g_info
             for link_g_infos in links_g_infos
@@ -1496,7 +1496,7 @@ class KinematicEntityDescription(EntityDescription):
             for group in setting.selectors:
                 is_in_group = np.zeros(len(cg_infos), dtype=np.bool_)
                 for selector in group:
-                    if isinstance(selector, gs.LinkIndex):
+                    if isinstance(selector, gs.indices.Link):
                         is_in_group |= np.isin(geoms_link_idx, selector.resolve(links_path))
                     else:
                         is_in_group[selector.resolve(geoms_name)] = True

@@ -56,7 +56,7 @@ def main():
             model="linear_corotated",
         ),
     )
-    blob_options.select(gs.VertexIndex.in_box(*blob_fixed_bounds)).set_is_fixed(True)
+    blob_options.select(gs.indices.Vertex.in_box(*blob_fixed_bounds)).set_is_fixed(True)
     blob = scene.add_entity(options=blob_options)
 
     cube = scene.add_entity(
@@ -85,7 +85,7 @@ def main():
             model="linear_corotated",
         ),
     )
-    cylinder_options.select(gs.VertexIndex.closest_to(cylinder_fixed_pos, max_distance=0.01)).set_is_fixed(True)
+    cylinder_options.select(gs.indices.Vertex.closest_to(cylinder_fixed_pos, max_distance=0.01)).set_is_fixed(True)
     scene.add_entity(options=cylinder_options)
 
     # Recording every simulation step would be far denser than any player needs, and the step size here is tiny.
