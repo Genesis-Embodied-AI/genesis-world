@@ -1,4 +1,4 @@
-from .entities import Geom, Setting, Vertex
+from .blocks import Geom, Setting, Vertex
 from .misc import CoacdOptions, FoamOptions
 from .profiling import ProfilingOptions
 from .scene import SceneOptions

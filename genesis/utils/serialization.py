@@ -149,14 +149,30 @@ def _field_check(cls: type, name: str) -> TypeAdapter:
     What a field constrains stands beside its type rather than in it, so the two are put back together here.
     """
     info = cls.model_fields[name]
-    admitted = typing.Annotated[tuple([info.annotation, *info.metadata])] if info.metadata else info.annotation
+    annotation = _bind_self(info.annotation, cls)
+    admitted = typing.Annotated[tuple([annotation, *info.metadata])] if info.metadata else annotation
     return TypeAdapter(admitted)
+
+
+def _bind_self(annotation, cls: type):
+    """Return a declared type with 'typing.Self' standing for the class declaring it, as pydantic reads it."""
+    if annotation is typing.Self:
+        return cls
+    origin, args = typing.get_origin(annotation), typing.get_args(annotation)
+    if not args:
+        return annotation
+    bound_args = tuple(_bind_self(arg, cls) for arg in args)
+    if origin is typing.Annotated:
+        return typing.Annotated[tuple([bound_args[0], *annotation.__metadata__])]
+    if origin in (types.UnionType, typing.Union):
+        return typing.Union[bound_args]
+    return origin[bound_args]
 
 
 def _declared_fields(cls: type) -> dict[str, type]:
     """Return the declared type of each field of a class. Those types drive how a value loads back."""
     if issubclass(cls, Options):
-        return {name: info.annotation for name, info in cls.model_fields.items()}
+        return {name: _bind_self(info.annotation, cls) for name, info in cls.model_fields.items()}
     return typing.get_type_hints(cls)
 
 

@@ -840,8 +840,10 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                 if changed and not scale_disabled:
                     # New options rather than an edit in place, since the rebuild re-creates an entity handed its own
                     # options from the description resolved at the old scale (see 'InteractiveScene._apply_rebuild').
+                    # The surface of the entity carries the visualization mode the overlay may have switched since
                     new_morph = morph.model_copy(update={"scale": new_scale})
-                    kwargs["options"] = kwargs["options"].model_copy(update={"morph": new_morph})
+                    surface = self.scene.get_entity(name).surface
+                    kwargs["options"] = kwargs["options"].model_copy(update={"morph": new_morph, "surface": surface})
                     self._pending_dirty = True
 
                 imgui.same_line()
