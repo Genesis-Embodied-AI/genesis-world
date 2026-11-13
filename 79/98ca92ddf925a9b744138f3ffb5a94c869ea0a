@@ -1,0 +1,21 @@
+examples/deformable/differentiable_push.py
+  s_4e532cc51f4368::t_acd15364dc584f 118,140,143,146
+genesis/engine/entities/hybrid_entity.py
+  s_4e532cc51f4368::t_acd15364dc584f 462-464,549
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7998ca92ddf925a9b744138f3ffb5a94c869ea0a",
+  "prompts": {},
+  "sessions": {
+    "s_4e532cc51f4368": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "70ed08a1-5a04-49fd-9697-c03270ba2dff",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
