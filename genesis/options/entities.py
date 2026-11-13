@@ -161,10 +161,7 @@ class Link(_GeomFields):
 
 
 class Rigid(BaseEntity["RigidEntity"]):
-    """Options of a rigid entity, which the rigid solver simulates with contacts, joints and constraints.
-
-    Use it for every entity whose motion follows from physics. Its links collide, so every geom adds to the cost of
-    collision detection and constraint solving.
+    """Options for an entity simulated with rigid-body dynamics.
 
     Parameters
     ----------
@@ -194,10 +191,7 @@ class Rigid(BaseEntity["RigidEntity"]):
 
 
 class Kinematic(BaseEntity["KinematicEntity"]):
-    """Options of a kinematic entity, which follows the poses it is given and takes no part in physics.
-
-    Use it for a ghost or a reference motion: forward kinematics is all it costs, while it collides with nothing and
-    nothing pushes it.
+    """Options for an entity simulated with kinematics only, with no collision.
 
     Parameters
     ----------
@@ -226,12 +220,7 @@ class Vertex(_FrozenOptions):
 
 
 class FEM(BaseEntity["FEMEntity"]):
-    """Options of a deformable entity, which the finite element method (FEM) solver simulates on a volume mesh.
-
-    Use it for a solid whose deformation matters, such as a soft gripper pad or a rubber block. Every element of the
-    volume mesh adds to the cost of each substep, so a coarse mesh simulates faster while a fine one resolves the
-    deformation more accurately. A Cloth material simulates a shell on the surface mesh instead, under the IPC
-    coupler alone.
+    """Options for an entity simulated with the finite element method (FEM).
 
     Parameters
     ----------
@@ -262,10 +251,7 @@ class _EmittableParticles(BaseEntity[EntityT]):
 
 
 class MPM(_EmittableParticles["MPMEntity"]):
-    """Options of a particle entity, which the material point method (MPM) solver simulates on a background grid.
-
-    Use it for a continuum that deforms without bound, tears or flows, such as sand, snow, dough or a liquid. Its
-    accuracy and cost both follow the particle size and the grid resolution of the solver.
+    """Options for an entity simulated with the material point method (MPM).
 
     Parameters
     ----------
@@ -280,10 +266,7 @@ class MPM(_EmittableParticles["MPMEntity"]):
 
 
 class SPH(_EmittableParticles["SPHEntity"]):
-    """Options of a liquid entity, which the smoothed particle hydrodynamics (SPH) solver simulates as particles.
-
-    Use it for a liquid whose free surface and splashes matter. Each particle interacts with its neighbors, so the cost
-    grows with the particle count that the particle size of the solver sets.
+    """Options for an entity simulated with smoothed particle hydrodynamics (SPH).
 
     Parameters
     ----------
@@ -297,14 +280,7 @@ class SPH(_EmittableParticles["SPHEntity"]):
 
 
 class PBD(_EmittableParticles["PBDBaseEntity"]):
-    """Options of an entity the position-based dynamics (PBD) solver simulates, whose material decides its kind.
-
-    Use it where speed and stability matter more than physically accurate stiffness, pressure and viscosity, which the
-    finite element method (FEM), the material point method (MPM) and smoothed particle hydrodynamics (SPH) offer at a
-    higher cost. A Cloth material makes a sheet, such as a towel or a flag, remeshed to the particle size of the
-    solver. An Elastic material makes a soft solid on a volume mesh. A Liquid material makes a liquid of incompressible
-    particles, each interacting with its neighbors so that the cost grows with the particle count. A Particle material
-    makes free particles.
+    """Options for an entity simulated with position-based dynamics (PBD).
 
     Parameters
     ----------
@@ -318,11 +294,7 @@ class PBD(_EmittableParticles["PBDBaseEntity"]):
 
 
 class Hybrid(BaseEntity["HybridEntity"]):
-    """Options of a hybrid entity, a soft skin simulated by the material point method around a rigid skeleton.
-
-    Use it for a soft robot actuated through its joints. The scene adds the rigid skeleton and the soft skin as two
-    entities of their own, so the entity costs as much as both of them together. The morph is a URDF, whose links the
-    skin is grown around, or a mesh, whose skeleton is extracted from the skin.
+    """Options for an entity simulated with a rigid skeleton inside a material point method (MPM) skin.
 
     Parameters
     ----------
