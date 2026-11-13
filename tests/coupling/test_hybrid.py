@@ -215,7 +215,7 @@ def test_build_rigid_and_soft_parts(xml_path, show_viewer):
     )
     scene.build()
 
-    # The soft part built from a rigid link is the shell around it, leaving the link itself empty
+    # The soft part built from a rigid link is a shell of the material thickness around it, leaving the link empty
     geom = box.part_rigid.geoms[0]
     sd, *_ = igl.signed_distance(
         tensor_to_array(box.part_soft.get_particles_pos()),
@@ -223,7 +223,7 @@ def test_build_rigid_and_soft_parts(xml_path, show_viewer):
         geom.init_faces,
         sign_type=igl.SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER,
     )
-    assert (sd > 0.0).all()
+    assert ((sd > 0.0) & (sd < box.material.thickness)).all()
 
 
 @pytest.mark.debug(False)  # Disable debug for speedup
