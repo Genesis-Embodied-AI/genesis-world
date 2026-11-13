@@ -1,0 +1,90 @@
+genesis/engine/entities/mpm_entity.py
+  s_c62ec9da443b15::t_53e07d03c52619 65-66,84
+genesis/engine/entities/sph_entity.py
+  s_c62ec9da443b15::t_53e07d03c52619 34-45,48-58
+tests/parsers/test_usd.py
+  s_c62ec9da443b15::t_53e07d03c52619 566-582,590-593
+tests/core/test_entity_options.py
+  s_c62ec9da443b15::t_53e07d03c52619 1-355
+examples/deformable/fem_hard_and_soft_constraint.py
+  s_c62ec9da443b15::t_53e07d03c52619 69-91
+genesis/engine/solvers/sph_solver.py
+  s_c62ec9da443b15::t_53e07d03c52619 354,366
+genesis/engine/materials/rigid.py
+  s_c62ec9da443b15::t_53e07d03c52619 114,117
+genesis/options/solvers.py
+  s_c62ec9da443b15::t_b678d439de88d2 938-941
+genesis/engine/materials/MPM/snow.py
+  s_c62ec9da443b15::t_53e07d03c52619 44-46
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_c62ec9da443b15::t_53e07d03c52619 9,206-208,228-232
+genesis/engine/couplers/ipc_coupler/coupler.py
+  s_c62ec9da443b15::t_53e07d03c52619 571-577
+genesis/engine/entities/rigid_entity/rigid_link.py
+  s_c62ec9da443b15::t_53e07d03c52619 330-334
+tests/deformable/test_fem.py
+  s_c62ec9da443b15::t_53e07d03c52619 10,851-946
+tests/rigid/test_serialization.py
+  s_c62ec9da443b15::t_53e07d03c52619 522,532,543,576-584
+genesis/options/__init__.py
+  s_c62ec9da443b15::t_53e07d03c52619 1-6,14,29,31,33,35,44
+genesis/engine/entities/rigid_entity/description.py
+  s_c62ec9da443b15::t_53e07d03c52619 28,86,103,233-234,394-395,426,430-431,437-440,455,460,477-501,610-613,615,689-691,1270,1407-1414,1435-1437,1464,1470-1471,1488-1497,1594-1602,1727-1731,1762-1764,1768,1770-1783,1785-1790,1801,1806-1811
+  s_c62ec9da443b15::t_790feb92443345 91-93
+genesis/engine/entities/hybrid_entity.py
+  s_c62ec9da443b15::t_53e07d03c52619 65-66
+genesis/engine/solvers/fem_solver.py
+  s_c62ec9da443b15::t_31e588cb4abbb9 804-807,815-818
+  s_c62ec9da443b15::t_53e07d03c52619 834,849,1215-1220
+genesis/engine/entities/pbd_entity.py
+  s_c62ec9da443b15::t_53e07d03c52619 140-141,155,274-275,290,392-393,408,504-515,518-528,578-589,592-602
+genesis/utils/mesh.py
+  s_c62ec9da443b15::t_53e07d03c52619 618,628,794-797
+.github/contributing/ARCHITECTURE.md
+  s_c62ec9da443b15::t_53e07d03c52619 64,85,96-118
+genesis/engine/solvers/pbd_solver.py
+  s_c62ec9da443b15::t_53e07d03c52619 361,378,395,408,421
+genesis/engine/entities/particle_entity.py
+  s_c62ec9da443b15::t_53e07d03c52619 103-104,106
+genesis/options/indices.py
+  s_c62ec9da443b15::t_53e07d03c52619 1-290
+genesis/engine/solvers/kinematic_solver.py
+  s_c62ec9da443b15::t_53e07d03c52619 180,185-186,193-199
+genesis/utils/serialization.py
+  s_c62ec9da443b15::t_53e07d03c52619 156-160,162,245-253,262,283,289,400,402-405,517-520
+genesis/engine/entities/base_entity.py
+  s_c62ec9da443b15::t_53e07d03c52619 1,22-23,26-31,48-49,64,124-132
+genesis/engine/entities/fem_entity.py
+  s_c62ec9da443b15::t_53e07d03c52619 164-165,167,358-359
+genesis/options/entities.py
+  s_c62ec9da443b15::t_a5b034a0a90ebe 330-331
+  s_c62ec9da443b15::t_53e07d03c52619 1-329,332-472
+genesis/engine/materials/base.py
+  s_c62ec9da443b15::t_53e07d03c52619 1,21-31
+genesis/__init__.py
+  s_c62ec9da443b15::t_53e07d03c52619 515,521
+genesis/engine/simulator.py
+  s_c62ec9da443b15::t_53e07d03c52619 158,163-167,169-174,176
+genesis/engine/solvers/mpm_solver.py
+  s_c62ec9da443b15::t_53e07d03c52619 480,496
+genesis/engine/scene.py
+  s_c62ec9da443b15::t_53e07d03c52619 2,45,307-309,314,322-333,336,341,346,349,352-353,355-363,374-377,380,382,389-391,396,398-441,447,453-455,467-481,483,485,487-488,490-491,493-501,506-507,509-519,523,525-527,530,532,536-537,544-561,566,570-574,835-836,838-839,846-851,853-858,870-881,884-885,887-888,890,894,899-900
+examples/rigid/link_and_geom_options.py
+  s_c62ec9da443b15::t_53e07d03c52619 1-63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8d8c988de654ccc04a8f9566791788a304f4e147",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
