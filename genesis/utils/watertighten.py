@@ -1217,14 +1217,14 @@ def watertighten_mesh(
     target_face_num: int = 500,
     sigma: float = 0.8,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return a watertight wrap of the input triangle soup, strictly outside it and within `alpha` of it.
+    """Return a watertight wrap of the input triangle soup, whose vertices lie on its surface.
 
     Pipeline: padded unsigned distance field on a regular grid (`_sdf_field`); separable Gaussian blur to kill
     sub-voxel aliasing; manifold dual-contouring iso-surface extraction at level `alpha`
     (`_extract_dual_contour_mesh`); analytical snap onto the `alpha`-isosurface to remove SDF-grid noise; quadric-error
-    decimation with manifold + normal-flip guards (`_decimate_quadric_error`); inward ray-cast snap of each wrap vertex
-    onto the source surface where the source is locally closed (vertices that bridge open holes stay at the `alpha`-iso
-    to preserve the wrap closure). All adaptive parameters (`alpha`, `pitch`, cost cutoff) come from `_adaptive_params`.
+    decimation with manifold + normal-flip guards (`_decimate_quadric_error`); snap of each wrap vertex onto its closest
+    source point, which removes the `alpha` offset (a vertex bridging a hole of the source lands on its rim). All
+    adaptive parameters (`alpha`, `pitch`, cost cutoff) come from `_adaptive_params`.
 
     Parameters
     ----------
@@ -1259,20 +1259,5 @@ def watertighten_mesh(
     moved = out_norm[:, 0] > 1e-9
     v[moved] = (closest + alpha * (outward / np.maximum(out_norm, 1e-12)))[moved]
     v, f = _decimate_quadric_error(v, f, target_faces=max(2 * target_face_num, 1), max_cost=max_cost)
-    # Snap each wrap vertex onto its nearest source point - removes the `alpha`-offset inflation entirely on solid
-    # bulk regions where the source has well-defined two-sided geometry. Vertices that bridge an open hole in the
-    # source must NOT be snapped: their nearest source point sits on the hole's rim, and pulling them onto it would
-    # collapse the wrap onto a sliver of geometry, destroying the closure that the wrap is supposed to provide.
-    # We distinguish the two cases with a single inward ray cast: bulk vertices hit the source on their way inward,
-    # hole-bridging vertices do not.
     _, _, closest = igl.point_mesh_squared_distance(v, verts, faces)
-    direction = closest - v
-    norm = np.linalg.norm(direction, axis=1, keepdims=True)
-    inward = direction / np.maximum(norm, 1e-12)
-    src = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-    _, ray_idx, _ = src.ray.intersects_location(v, inward, multiple_hits=False)
-    has_hit = np.zeros(v.shape[0], dtype=np.bool_)
-    has_hit[ray_idx] = True
-    snapped = v.copy()
-    snapped[has_hit] = closest[has_hit]
-    return snapped, f
+    return closest, f

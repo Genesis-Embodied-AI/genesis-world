@@ -718,7 +718,7 @@ def test_mesh_wall_thickness():
     wrap_small = trimesh.Trimesh(*watertighten_mesh(box_open.vertices, box_open.faces), process=False)
     wrap_large = trimesh.Trimesh(*watertighten_mesh(10.0 * box_open.vertices, box_open.faces), process=False)
     assert_equal(len(wrap_small.faces), len(wrap_large.faces))
-    assert_allclose(1000.0 * wrap_small.volume, wrap_large.volume, rtol=TOL)
+    assert_allclose(1000.0 * wrap_small.volume, wrap_large.volume, rtol=TOL_DOUBLE)
 
 
 @pytest.mark.required
