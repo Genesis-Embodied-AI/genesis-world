@@ -213,9 +213,6 @@ class RasterizerContext:
         self.seg_node_map = dict()
         self.seg_color_map = SegmentationColorMap()
 
-        self.init_meshes()
-
-    def init_meshes(self):
         self.world_frame_shown = False
         self.link_frame_shown = False
         self.camera_frustum_shown = False

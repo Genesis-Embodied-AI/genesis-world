@@ -2551,18 +2551,6 @@ def default_solver_params():
     return np.array([0.0, 1.0, 9.0e-01, 9.5e-01, 1.0e-03, 5.0e-01, 2.0])
 
 
-def default_friction():
-    return 1.0
-
-
-def default_friction_torsional():
-    return 0.005
-
-
-def default_friction_rolling():
-    return 0.0001
-
-
 def default_dofs_kp(n=6):
     return np.full((n,), fill_value=100.0, dtype=gs.np_float)
 

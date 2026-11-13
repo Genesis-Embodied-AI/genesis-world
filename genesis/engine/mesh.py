@@ -662,12 +662,6 @@ class Mesh(RBC, serialization.SerializationMixin):
         color_texture = gs.textures.ColorTexture(color=tuple(color))
         opacity_texture = color_texture.check_dim(3)
         self._surface.update_texture(color_texture=color_texture, opacity_texture=opacity_texture, force=True)
-        self.update_trimesh_visual()
-
-    def update_trimesh_visual(self):
-        """
-        Update the trimesh obj's visual attributes using its surface and uvs.
-        """
         self._mesh.visual = mu.surface_uvs_to_trimesh_visual(self.surface, self.uvs, len(self.verts))
         self._metadata["is_visual_overwritten"] = True
 
