@@ -391,13 +391,13 @@ class Resolution:
     options: Options
     is_mujoco_compatible: bool
     links_inertial_info: list[list[LinkInertialInfo]] = field(default_factory=list)
-    # The names of every collision geom as its asset states them, which the geom options of the entity select on
+    # Names of the collision geoms as the asset states them, which the geom options of the entity select on
     geoms_name: list[str] = field(default_factory=list)
-    # The number of collision geoms of the morph being resolved, which a 'gs.GeomIndex.at' selection counts, None for a
-    # single-link morph, and the ordinal of the first collision geom of the next link it resolves
+    # Number of collision geoms of the morph that 'gs.GeomIndex.at' counts over, None for a single-link morph
     n_geoms: int | None = None
+    # Ordinal of the first collision geom of the next link to resolve
     geoms_start: int = 0
-    # The paths of the links whose link or geom options give a density to one of their collision geoms
+    # Paths of the links to which the link or geom options give a density
     links_path_with_density: set[tuple[str, ...]] = field(default_factory=set)
 
 
@@ -1431,8 +1431,7 @@ class KinematicEntityDescription(EntityDescription):
                     root.pos = gu.transform_by_trans_quat(com_root, root.pos, root.quat)
                     root.quat = gu.transform_quat_by_quat(principal_quat, root.quat)
 
-            # A density the link or geom options give may move the center of mass off the anchor, which stays where a
-            # kinematic entity of the same asset puts it (see '_resolve_inertial'), so the body is unaligned
+            # Link or geom option densities may move the center of mass off the anchor, so the body is unaligned
             if any(links_path[i_l] in resolution.links_path_with_density for i_l in subtree):
                 root.is_aligned = False
                 gs.logger.warning(
@@ -1461,7 +1460,7 @@ class KinematicEntityDescription(EntityDescription):
 
         # Split and convexify collision geometry. Must be done before alignment so that convexified geoms are used
         # to compute the inertia frame.
-        # A parse states the path from the root of the tree down to the link, a single-link morph holding its link alone
+        # Names from the root of the tree down to the link, the link alone for a single-link morph
         link_path = l_info.get("path", (l_info["name"],))
         cg_infos, vg_infos = self._resolve_geoms(morph, g_infos, l_info["is_robot"], link_path, resolution)
 
@@ -1521,12 +1520,10 @@ class KinematicEntityDescription(EntityDescription):
             if morph.visualization and not is_col:
                 vg_infos.append(g_info)
 
-        # The link and geom options are set on the collision geoms before post-processing, so that geoms of different
-        # options never fuse. Their density stays out of the authored ones, which anchor an aligned link where a
-        # kinematic entity of the same asset anchors it (see '_resolve_inertial'). The geom options of the entity rank
-        # below the link options, which rank below the geom options of the links. Of two selections of one rank giving
-        # one field of one geom, the first one applies. A selection may match no geom of this link, as long as it
-        # matches a geom of the entity.
+        # The options are set before post-processing, so that geoms of different options never fuse. They rank from
+        # the geom options of the entity, to the link options, to the geom options of the link. Of two selections of
+        # one rank, the first one applies. A selection may match no geom of this link, as long as it matches one of the
+        # entity.
         geoms_name = [g_info["mesh"].metadata.get("name", "") for g_info in cg_infos]
         resolution.geoms_name += geoms_name
         geoms_start = resolution.geoms_start
@@ -1828,9 +1825,8 @@ class RigidEntityDescription(KinematicEntityDescription):
     def _describe_geoms(self, cg_infos):
         """Resolve what a parse stated about each collision geom into the description the geom is built from.
 
-        A coefficient is the one the link and geom options give the geom where they give one (see '_resolve_geoms'),
-        then the entity material's, then the asset's, and the solver's default where none states any. What only the
-        resolution needs stays behind in the parsed info (see 'RigidGeomDescription').
+        A coefficient comes from the link and geom options (see '_resolve_geoms'), then the entity material, then the
+        asset, then the solver default.
         """
         cg_descs = []
         for g_info in cg_infos:

@@ -315,8 +315,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                 morph = tuple(entity.morphs) if len(entity.morphs) > 1 else entity.main_morph
             else:
                 morph = entity.morph
-            # The options carry what the editor leaves as it is, such as the solver of the entity and its link and geom
-            # options, and the morph the editor edits replaces theirs on rebuild
+            # The options keep the link and geom options through the rebuild, the edited morph replacing theirs
             kwargs: dict[str, Any] = {"morph": morph, "options": entity.options}
             # The material and the surface tell the rebuild whether the entity is unchanged (see 'InteractiveScene')
             if isinstance(entity, gs.engine.entities.KinematicEntity):
