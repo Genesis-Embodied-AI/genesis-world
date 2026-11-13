@@ -591,7 +591,8 @@ class Mesh(URDFType):
         self.scale = scale
         # Meshes left unspecified are loaded on first access, since parsing the URDF tree alone does not need them
         self._meshes = None
-        self._mesh_path = filename
+        # The path is resolved now, so that the meshes load from the directory the mesh was constructed in
+        self._mesh_path = os.path.abspath(filename)
         self._is_collision = False
         if meshes is not None:
             self.meshes = meshes
