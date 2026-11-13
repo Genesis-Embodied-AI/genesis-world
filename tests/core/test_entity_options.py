@@ -44,27 +44,7 @@ def torus_box_sphere_mjcf(asset_tmp_path):
 
 
 @pytest.mark.required
-def test_reject_material_for_solver():
-    scene = gs.Scene()
-    # The material of another solver is refused, naming the entity options admitting it
-    with pytest.raises(gs.GenesisException, match="gs.entities.FEM"):
-        gs.entities.MPM(morph=gs.morphs.Sphere(), material=gs.materials.FEM.Elastic())
-    with pytest.raises(gs.GenesisException, match="gs.entities.Rigid"):
-        gs.entities.Kinematic(morph=gs.morphs.Sphere(), material=gs.materials.Rigid())
-
-    # A subclass a user declares admits the materials of its base, which the shorthand keeps giving to the base
-    class UserRigid(gs.entities.Rigid):
-        pass
-
-    with pytest.raises(gs.GenesisException, match="gs.entities.Kinematic"):
-        UserRigid(morph=gs.morphs.Sphere(), material=gs.materials.Kinematic())
-    assert type(scene.add_entity(gs.morphs.Sphere()).options) is gs.entities.Rigid
-    with pytest.raises(gs.GenesisException, match="either entity options"):
-        scene.add_entity(morph=gs.morphs.Sphere(), options=gs.entities.Rigid(morph=gs.morphs.Sphere()))
-
-
-@pytest.mark.required
-def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box_sphere_mjcf):
+def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box_sphere_mjcf):
     DT = 1e-2
     N_STEPS = 10
     PUSH_FORCE = 50.0
@@ -79,8 +59,7 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
         ),
         show_viewer=show_viewer,
     )
-    # A value set on a geom selection overrides one set on links alone, even later, and of two values set on links
-    # alone, the later one applies. An ordinal counts the collision geoms of the entity, the root link holding none.
+    # The root link holds no collision geom, so the geom of 'arm2' is the second one of the entity
     arm_options = gs.entities.Rigid(
         morph=gs.morphs.URDF(
             file="urdf/simple/two_link_arm.urdf",
@@ -99,7 +78,6 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
     arm_options.select(gs.LinkIndex.named("arm1")).set_friction(0.6)
     arm_options.select(gs.LinkIndex.subtree("base")).set_friction_torsional(0.02)
     arm = scene.add_entity(options=arm_options)
-    # Entities sharing one collision mesh keep the values each of them sets
     spheres = []
     for i, friction in enumerate((0.5, 1.5)):
         sphere_options = gs.entities.Rigid(
@@ -112,7 +90,7 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
         )
         sphere_options.select(gs.GeomIndex.named("*")).set_friction(friction)
         spheres.append(scene.add_entity(options=sphere_options))
-    # The convex pieces of a decomposed mesh all take the values of the mesh
+    # The torus is decomposed into convex pieces
     mixed_geoms_options = gs.entities.Rigid(
         morph=gs.morphs.MJCF(
             file=torus_box_sphere_mjcf,
@@ -125,10 +103,8 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
             friction_rolling=0.0005,
         ),
     )
-    # A list of selectors holds the geoms any of them holds
     caps = [gs.GeomIndex.named("top_cap"), gs.GeomIndex.named("bottom_cap")]
     mixed_geoms_options.select(caps).set(gs.options.Geom(friction_torsional=0.05, friction_rolling=0.002))
-    # The geom name selects in every link of the subtree, of which the parent has none of that name
     mixed_geoms_options.select(gs.LinkIndex.subtree("body"), gs.GeomIndex.named("tip")).set_friction(1.2)
     with mixed_geoms_options.select(gs.LinkIndex.named("body")) as body:
         body.select(gs.GeomIndex.named("tor*")).set_friction(0.7)
@@ -159,7 +135,6 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
             ),
         ),
     )
-    # The entity holds a read-only copy of its options, so that later edits of the options leave it as it is
     box_options = gs.entities.Rigid(
         morph=gs.morphs.Box(
             pos=(5.0, 0.0, 0.0),
@@ -173,7 +148,6 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
     with pytest.raises(gs.GenesisException, match="read-only"):
         box.options.select(gs.GeomIndex.at(0)).set_friction(3.0)
 
-    # Every kind of selection travels through a scene file
     exported = tmp_path / f"selections{SCENE_FORMAT}"
     rigid_options = gs.entities.Rigid(
         morph=gs.morphs.Box(
@@ -200,14 +174,26 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
     assert loaded["rigid"].model_dump() == rigid_options.model_dump()
     assert loaded["fem"].model_dump() == fem_options.model_dump()
 
-    # Refused as the quantities are set
+    with pytest.raises(gs.GenesisException, match="gs.entities.FEM"):
+        gs.entities.MPM(morph=gs.morphs.Sphere(), material=gs.materials.FEM.Elastic())
+    with pytest.raises(gs.GenesisException, match="gs.entities.Rigid"):
+        gs.entities.Kinematic(morph=gs.morphs.Sphere(), material=gs.materials.Rigid())
+
+    # A subclass a user declares admits the materials of its base, which the shorthand keeps giving to the base
+    class UserRigid(gs.entities.Rigid):
+        pass
+
+    with pytest.raises(gs.GenesisException, match="gs.entities.Kinematic"):
+        UserRigid(morph=gs.morphs.Sphere(), material=gs.materials.Kinematic())
+    assert type(gs.Scene().add_entity(gs.morphs.Sphere()).options) is gs.entities.Rigid
+    with pytest.raises(gs.GenesisException, match="either entity options"):
+        scene.add_entity(morph=gs.morphs.Sphere(), options=gs.entities.Rigid(morph=gs.morphs.Sphere()))
     with pytest.raises(gs.GenesisException, match="gs.LinkIndex and gs.GeomIndex alone"):
         gs.entities.Rigid(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1))).select(gs.VertexIndex.at(0)).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="one kind of part"):
         box_options.select([gs.LinkIndex.named("box_baselink"), gs.GeomIndex.at(0)]).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="sets no quantity"):
         box_options.select(gs.GeomIndex.at(0)).set(gs.options.Geom())
-    # Refused as the entity is added
     out_of_range_options = box_options.model_copy()
     out_of_range_options.select(gs.LinkIndex.named("box_baselink"), gs.GeomIndex.at(1)).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="selects no valid geom among 1"):
