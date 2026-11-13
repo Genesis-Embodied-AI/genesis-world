@@ -257,19 +257,23 @@ def parse_urdf(morph, surface):
             for tmesh, metadata in zip(tmeshes, metadatas, strict=True):
                 # Overwrite surface color by original color specified in URDF file only if necessary
                 is_urdf_material = False
-                # trimesh gives a mesh holding texture coordinates and no material its placeholder material, which
-                # states nothing about the appearance the asset authored
-                has_asset_material = tmesh.visual.defined and not (
-                    isinstance(tmesh.visual, trimesh.visual.texture.TextureVisuals)
-                    and hash(tmesh.visual.material) == hash(trimesh.visual.material.empty_material())
-                )
                 if geom_is_col:
                     geom_surface = gs.surfaces.Collision()
+                # The asset material is checked last, since hashing it reads its whole texture. trimesh gives a mesh
+                # holding texture coordinates and no material its placeholder material, which states nothing about the
+                # appearance the asset authored.
                 elif (
                     surface.texture is None
                     and geom_prop.material is not None
                     and (geom_prop.material.texture is not None or geom_prop.material.color is not None)
-                    and (morph.prioritize_urdf_material or not has_asset_material)
+                    and (
+                        morph.prioritize_urdf_material
+                        or not tmesh.visual.defined
+                        or (
+                            isinstance(tmesh.visual, trimesh.visual.texture.TextureVisuals)
+                            and hash(tmesh.visual.material) == hash(trimesh.visual.material.empty_material())
+                        )
+                    )
                 ):
                     is_urdf_material = True
                     if geom_prop.material.texture is not None:
