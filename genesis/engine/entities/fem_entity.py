@@ -12,7 +12,6 @@ import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.entities.rigid_entity import RigidLink
-from genesis.options.morphs import Morph
 from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
 from genesis.utils.misc import broadcast_tensor, tensor_to_array, unique_rows
@@ -134,8 +133,8 @@ class FEMEntity(Entity):
         The simulation scene that this entity belongs to.
     solver : Solver
         The physics solver instance used for simulation.
-    morph : Morph
-        The morph specification that defines the entity's shape.
+    options : gs.entities.FEM
+        The entity options the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         The surface mesh associated with the entity (for rendering or collision).
     idx : int
@@ -156,7 +155,6 @@ class FEMEntity(Entity):
         self,
         scene: "Scene",
         solver: "FEMSolver",
-        morph: Morph,
         surface: Surface,
         idx: int,
         options: "gs.entities.FEM",
@@ -165,9 +163,8 @@ class FEMEntity(Entity):
         s_start: int = 0,
         vvert_start: int = 0,
         vface_start: int = 0,
-        name: str | None = None,
     ) -> None:
-        super().__init__(idx, scene, morph, solver, surface, name=name, options=options)
+        super().__init__(idx, scene, solver, surface, options)
 
         self._v_start = v_start  # offset for vertex index of elements
         self._el_start = el_start  # offset for element index

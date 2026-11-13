@@ -25,7 +25,6 @@ import genesis as gs
 from genesis.constants import EQUALITY_TYPE, GEOM_TYPE, JOINT_TYPE
 from genesis.engine.materials.base import Material
 from genesis.engine.mesh import InertialProperties
-from genesis.options.indices import get_links_path
 from genesis.options.morphs import Morph
 from genesis.options.options import Options
 from genesis.options.surfaces import Surface
@@ -392,8 +391,8 @@ class Resolution:
     options: Options
     is_mujoco_compatible: bool
     links_inertial_info: list[list[LinkInertialInfo]] = field(default_factory=list)
-    # Paths of the links to which the settings of the entity give a density
-    links_path_with_density: set[tuple[str, ...]] = field(default_factory=set)
+    # Indices of the links to which the settings of the entity give a density, among the links of a morph
+    links_idx_with_density: set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -405,42 +404,32 @@ class KinematicEntityDescription(EntityDescription):
     written into the geoms it overrides. A geom carries its mesh, so an entity is created from this alone, with no
     asset to read and no geometry to process again.
 
-    The morphs, material and surface it was given stand here as well, since a link states none of them: the material
-    carries the physics the geoms are simulated under, the surface how they are drawn, and a morph what a kind of
-    entity needs beyond its links - the propeller links of a drone, the grid of a terrain. 'morphs' lists every
-    morph the entity dispatches, the primary first, and a homogeneous entity lists exactly one.
+    The entity options it was given stand here as well, since a link states none of what they hold: the material
+    carries the physics the geoms are simulated under, and a morph what a kind of entity needs beyond its links - the
+    propeller links of a drone, the grid of a terrain. The surface is the one resolved from the options, which states
+    how the geoms are drawn.
     """
 
-    morphs: list[Morph]
     surface: Surface
-    name: str | None = None
     links: list[KinematicLinkDescription] = field(default_factory=list)
     variants: list[KinematicVariantDescription] = field(default_factory=list)
     attachment: KinematicAttachmentDescription | None = None
 
-    def __post_init__(self):
-        # A file holds the material twice, in the description and in its options, which load as one material
-        self.material = self.options.material
-
     @classmethod
     def resolve(
         cls,
-        morphs: Sequence[Morph],
+        options: gs.entities.BaseEntity,
         surface: Surface,
         solver_options: Options,
         enable_mujoco_compatibility: bool,
-        options: gs.entities.BaseEntity,
-        name: str | None = None,
     ) -> Self:
-        """Resolve what an entity is created with into the description it is built from.
+        """Resolve the entity options an entity is created with into the description it is built from.
 
         This is where every asset a morph names is read and post-processed, so an entity created from the returned
-        description opens no file. 'morphs' lists the primary morph first, then one morph per heterogeneous variant.
-        'solver_options' are those of the solver simulating the entity, which the parsers check the assets against.
-        'options' are the entity options the other arguments were taken from, which also give the material and whether
-        to visualize contacts.
+        description opens no file. 'surface' is the one resolved from the options. 'solver_options' are those of the
+        solver simulating the entity, which the parsers check the assets against.
         """
-        morphs = list(morphs)
+        morphs = options.morphs
         if len(morphs) > 1:
             if not all(
                 isinstance(morph, (gs.morphs.Primitive, gs.morphs.Mesh, gs.morphs.URDF, gs.morphs.MJCF))
@@ -475,13 +464,7 @@ class KinematicEntityDescription(EntityDescription):
                 ):
                     morph.default_armature = None
 
-        desc = cls(
-            material=options.material,
-            morphs=morphs,
-            surface=surface,
-            name=name,
-            options=options,
-        )
+        desc = cls(options, surface)
         resolution = Resolution(solver_options, enable_mujoco_compatibility)
         desc._load_morph(morphs[0], resolution)
         return desc
@@ -513,7 +496,7 @@ class KinematicEntityDescription(EntityDescription):
         Each variant is loaded as additional geoms/vgeoms attached to links.
         Each variant is described beside the links (see 'KinematicVariantDescription').
         """
-        if not len(self.morphs) > 1:
+        if not len(self.options.morphs) > 1:
             return
 
         # The per-variant offset and inertial alignment are tracked for a single root only; a multi-root entity (one
@@ -530,14 +513,16 @@ class KinematicEntityDescription(EntityDescription):
                 offset_pos=self.links[0].offset_pos,
                 offset_quat=self.links[0].offset_quat,
                 # Only a scene or robot description file yields a robot link, and those morphs state a default armature.
-                default_armature=self.morphs[0].default_armature if any(l.is_robot for l in self.links) else None,
+                default_armature=self.options.morphs[0].default_armature
+                if any(l.is_robot for l in self.links)
+                else None,
             )
         )
 
         n_links = len(self.links)
 
         # Load additional heterogeneous variants
-        for morph in self.morphs[1:]:
+        for morph in self.options.morphs[1:]:
             if isinstance(morph, (gs.morphs.URDF, gs.morphs.MJCF)):
                 # Parse variant scene file
                 v_l_infos, v_links_j_infos, v_links_g_infos, _ = self._parse_scene(morph, resolution)
@@ -591,9 +576,7 @@ class KinematicEntityDescription(EntityDescription):
                 # only the morph pose offset is composed into the variant's init_qpos and offset.
                 offset_pos = np.array(morph.offset_pos, dtype=gs.np_float)
                 offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
-                v_links_path = get_links_path(
-                    [v_l_info["name"] for v_l_info in v_l_infos], [v_l_info["parent_idx"] for v_l_info in v_l_infos]
-                )
+                v_links_path = [v_l_info["path"] for v_l_info in v_l_infos]
                 self._resolve_geoms_values(morph, v_links_path, v_links_g_infos, resolution)
                 cg_vg_infos = []
                 for v_l_info, v_g_infos in zip(v_l_infos, v_links_g_infos):
@@ -669,7 +652,7 @@ class KinematicEntityDescription(EntityDescription):
                     g_infos = self._load_mesh(morph, resolution, load_geom_only_for_heterogeneous=True)
                 else:
                     g_infos = self._load_primitive(morph, resolution, load_geom_only_for_heterogeneous=True)
-                if morph.fixed != self.morphs[0].fixed:
+                if morph.fixed != self.options.morphs[0].fixed:
                     gs.raise_exception("Mixing fixed and non-fixed morphs in heterogeneous entities is not supported.")
                 self._resolve_geoms_values(morph, [(self.links[0].name,)], [g_infos], resolution)
                 cg_infos, vg_infos = self._resolve_geoms(morph, g_infos, is_robot=False)
@@ -1231,15 +1214,19 @@ class KinematicEntityDescription(EntityDescription):
         # Exclude joints with 0 dofs to align with Mujoco
         links_j_infos = [[j_info for j_info in link_j_infos if j_info["n_dofs"] > 0] for link_j_infos in links_j_infos]
 
+        # The names from the root of the kinematic tree down to each link, which a 'gs.LinkIndex' selects on. Every
+        # parent precedes its children.
+        for l_info in l_infos:
+            parent_idx = l_info["parent_idx"]
+            l_info["path"] = (*l_infos[parent_idx]["path"], l_info["name"]) if parent_idx >= 0 else (l_info["name"],)
+
         return l_infos, links_j_infos, links_g_infos, eqs_info
 
     def _load_scene(self, morph, resolution: Resolution):
         l_infos, links_j_infos, links_g_infos, _eqs_info = self._parse_scene(morph, resolution)
 
         # Add (link, joints, geoms) tuples sequentially
-        links_path = get_links_path(
-            [l_info["name"] for l_info in l_infos], [l_info["parent_idx"] for l_info in l_infos]
-        )
+        links_path = [l_info["path"] for l_info in l_infos]
         self._resolve_geoms_values(morph, links_path, links_g_infos, resolution)
         for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
             self._resolve_link(l_info, link_j_infos, link_g_infos, morph, resolution)
@@ -1257,7 +1244,6 @@ class KinematicEntityDescription(EntityDescription):
         """
         links = self.links
         variants = self.variants
-        links_path = get_links_path([l_desc.name for l_desc in links], [l_desc.parent_idx for l_desc in links])
         links_alignment_inv = {}
         for i_root, root in enumerate(links):
             if root.parent_idx != -1 or not root.is_aligned:
@@ -1395,7 +1381,7 @@ class KinematicEntityDescription(EntityDescription):
                     root.quat = gu.transform_quat_by_quat(principal_quat, root.quat)
 
             # Densities set on links or geoms may move the center of mass off the anchor, so the body is unaligned
-            if any(links_path[i_l] in resolution.links_path_with_density for i_l in subtree):
+            if not resolution.links_idx_with_density.isdisjoint(subtree):
                 root.is_aligned = False
                 gs.logger.warning(
                     f"A density set on links or geoms of the body of link '{root.name}' may move its center of mass "
@@ -1465,17 +1451,17 @@ class KinematicEntityDescription(EntityDescription):
         link. A selection that holds no collision geom of the morph raises, so that each heterogeneous variant holds
         what the entity selects.
         """
-        if not isinstance(self.material, gs.materials.Rigid):
+        if not isinstance(self.options.material, gs.materials.Rigid):
             return
 
         # An explicitly set material value overrides the one the asset states for each geom. Dropping the density up
         # front keeps the align anchor, its all-or-none source check, and the build-time inertial estimate consistently
         # uniform-density.
         for material_value, name in (
-            (self.material.rho, "density"),
-            (self.material.friction, "friction"),
-            (self.material.friction_torsional, "friction_torsional"),
-            (self.material.friction_rolling, "friction_rolling"),
+            (self.options.material.rho, "density"),
+            (self.options.material.friction, "friction"),
+            (self.options.material.friction_torsional, "friction_torsional"),
+            (self.options.material.friction_rolling, "friction_rolling"),
         ):
             if material_value is not None:
                 for link_g_infos in links_g_infos:
@@ -1527,7 +1513,7 @@ class KinematicEntityDescription(EntityDescription):
                         geoms_field_level[(i_g, name)] = level
                         cg_infos[i_g][name] = value
                         if name == "rho":
-                            resolution.links_path_with_density.add(links_path[geoms_link_idx[i_g]])
+                            resolution.links_idx_with_density.add(int(geoms_link_idx[i_g]))
 
     def _resolve_geoms(
         self, morph: Morph, g_infos: list[dict[str, Any]], is_robot: bool
@@ -1634,8 +1620,8 @@ class KinematicEntityDescription(EntityDescription):
                 is_mass_explicit = None
 
         dynamics_hint = None
-        if isinstance(self.material, gs.materials.Rigid):
-            rho = self.material.rho
+        if isinstance(self.options.material, gs.materials.Rigid):
+            rho = self.options.material.rho
             if rho is None:
                 if resolution.is_mujoco_compatible:
                     rho = RHO_MUJOCO
@@ -1773,9 +1759,7 @@ class RigidEntityDescription(KinematicEntityDescription):
         l_infos, links_j_infos, links_g_infos, eqs_info = self._parse_scene(morph, resolution)
 
         # Add (link, joints, geoms) tuples sequentially
-        links_path = get_links_path(
-            [l_info["name"] for l_info in l_infos], [l_info["parent_idx"] for l_info in l_infos]
-        )
+        links_path = [l_info["path"] for l_info in l_infos]
         self._resolve_geoms_values(morph, links_path, links_g_infos, resolution)
         for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
             self._resolve_link(l_info, link_j_infos, link_g_infos, morph, resolution)
@@ -1810,16 +1794,16 @@ class RigidEntityDescription(KinematicEntityDescription):
         A coefficient comes from the parsed geom (see '_resolve_geoms_values'), then the entity material, then the
         solver default.
         """
-        sdf_max_res = self.material.sdf_max_res
-        if isinstance(self.morphs[0], gs.morphs.Primitive):
+        sdf_max_res = self.options.material.sdf_max_res
+        if isinstance(self.options.morphs[0], gs.morphs.Primitive):
             sdf_max_res = min(sdf_max_res, PRIMITIVE_SDF_MAX_RES)
         cg_descs = []
         for g_info in cg_infos:
             coefficients = []
             for name, material_coefficient, default_coefficient in (
-                ("friction", self.material.friction, gu.default_friction),
-                ("friction_torsional", self.material.friction_torsional, gu.default_friction_torsional),
-                ("friction_rolling", self.material.friction_rolling, gu.default_friction_rolling),
+                ("friction", self.options.material.friction, gu.default_friction),
+                ("friction_torsional", self.options.material.friction_torsional, gu.default_friction_torsional),
+                ("friction_rolling", self.options.material.friction_rolling, gu.default_friction_rolling),
             ):
                 coefficient = g_info.get(name, material_coefficient)
                 coefficients.append(default_coefficient() if coefficient is None else coefficient)
@@ -1841,7 +1825,7 @@ class RigidEntityDescription(KinematicEntityDescription):
                     sdf=SignedDistanceFieldDescription.from_geometry(
                         g_info["mesh"],
                         g_info["type"],
-                        self.material,
+                        self.options.material,
                         sdf_max_res,
                     ),
                 )
