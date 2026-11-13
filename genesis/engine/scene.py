@@ -354,9 +354,8 @@ class Scene(RBC):
     ) -> "Entity":
         """Add an entity to the scene, constructed from entity options or from individual arguments.
 
-        The class of ``options`` decides the kind of entity and the solver simulating it, such as
-        ``gs.entities.Rigid``, ``gs.entities.Kinematic`` or ``gs.entities.FEM``. The entity holds them as
-        ``entity.options``.
+        The class of ``options``, such as ``gs.entities.Rigid``, ``gs.entities.Kinematic`` or ``gs.entities.FEM``,
+        decides the kind of entity and the solver simulating it. The entity holds them as ``entity.options``.
 
         The individual arguments are a shorthand for the options of the entities the material is given to, such as
         ``options=gs.entities.Rigid(...)`` for ``gs.materials.Rigid``, and stand for those options alone. Passing
