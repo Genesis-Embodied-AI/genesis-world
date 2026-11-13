@@ -222,6 +222,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._box_box_detection = options.box_box_detection
         self._requires_grad = self._sim.options.requires_grad
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
+        self._is_solved_in_global_newton = False
 
         # The differentiable solve keeps every body in its iteration trace, so hibernation stays off there (see the
         # use_hibernation option).
@@ -294,6 +295,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._n_faces = self.n_faces
         self._n_edges = self.n_edges
         self._n_equalities = self.n_equalities
+        self._is_solved_in_global_newton = self.is_solved_in_global_newton
 
         self._geoms = self.geoms
         self._equalities = self.equalities
@@ -755,9 +757,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 gs.raise_exception(
                     "Only approximate_implicitfast integrator is supported yet when requires_grad is True."
                 )
-            from genesis.engine.couplers import SAPCoupler, IPCCoupler
+            from genesis.engine.couplers import SAPCoupler
 
-            if isinstance(self.sim.coupler, (SAPCoupler, IPCCoupler)):
+            if isinstance(self.sim.coupler, SAPCoupler):
                 gs.raise_exception(
                     f"{type(self.sim.coupler).__name__} is not supported yet when requires_grad is True."
                 )
@@ -1273,7 +1275,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._is_forward_vel_updated = True
 
     def substep(self):
-        from genesis.engine.couplers import IPCCoupler, SAPCoupler
+        from genesis.engine.couplers import SAPCoupler
 
         # The replay of a substep for its backward pass starts from a checkpoint, which holds no derived quantity, so it
         # recomputes the cartesian space as the substep before did. It launches every stage on its own, reversed by the
@@ -1288,10 +1290,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             kernel_flush_external_wrenches(self.dyn_state.links)
 
         # Coupling forces from the previous coupling phase may target hibernated links (see
-        # kernel_wakeup_coupled_links in abd/misc.py). They exist when another solver is active, or when the IPC coupler
-        # couples rigid links with its own bodies.
-        is_ipc_coupled = isinstance(self.sim.coupler, IPCCoupler) and self.sim.coupler.has_any_rigid_coupling
-        if self._use_hibernation and (len(self.sim.active_solvers) > 1 or is_ipc_coupled):
+        # kernel_wakeup_coupled_links in abd/misc.py). They can only exist when another solver is active.
+        if self._use_hibernation and len(self.sim.active_solvers) > 1:
             kernel_wakeup_coupled_links(
                 self.dyn_state,
                 self.constraint_solver.constraint_state,
@@ -1346,7 +1346,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # The work before the constraint solve is captured as three graphs, since the compile time of a kernel grows
             # faster than its size while one more graph replay costs next to nothing. The collision detection takes a
             # graph of its own, the one Collider.detection launches, so that a scene compiles it once whether it steps
-            # or detects collisions alone. The work after the solve is captured as one graph.
+            # or detects collisions alone. The work after the solve is captured as one graph. A substep solved within
+            # the Newton solve of the implicit MPM solver stops once its constraint rows are assembled, the Newton solve
+            # writing the constraint solution that the work after the solve reads (see 'substep_post_coupling').
+            is_solved_in_global_newton = self.is_solved_in_global_newton
             collider = self.collider
             constraint_solver = self.constraint_solver
             collider._contact_data_cache.clear()
@@ -1374,25 +1377,27 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     self.rigid_config,
                     collider.collider_config,
                 )
-                func_solve_body(
+                if not is_solved_in_global_newton:
+                    func_solve_body(
+                        self.dyn_state,
+                        constraint_solver.constraint_state,
+                        self.dyn_info,
+                        self.rigid_info,
+                        self.rigid_config,
+                        constraint_solver._n_iterations,
+                    )
+            if not is_solved_in_global_newton:
+                kernel_substep_post(
                     self.dyn_state,
+                    collider.collider_state,
                     constraint_solver.constraint_state,
                     self.dyn_info,
                     self.rigid_info,
                     self.rigid_config,
-                    constraint_solver._n_iterations,
+                    not self._disable_constraint,
+                    self._options.noslip_iterations > 0,
+                    self._errno,
                 )
-            kernel_substep_post(
-                self.dyn_state,
-                collider.collider_state,
-                constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                not self._disable_constraint,
-                self._options.noslip_iterations > 0,
-                self._errno,
-            )
 
         if not isinstance(self.sim.coupler, SAPCoupler):
             self._is_forward_pos_updated = not self._enable_mujoco_compatibility
@@ -1588,16 +1593,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def substep_pre_coupling(self):
         if self.is_active:
-            # Skip rigid body computation when using IPCCoupler (IPC handles rigid simulation)
-            from genesis.engine.couplers import IPCCoupler
-
-            if isinstance(self.sim.coupler, IPCCoupler):
-                # If any rigid entity is coupled to IPC, skip pre-coupling rigid simulation
-                # The rigid simulation will be done in post-coupling phase instead
-                if self.sim.coupler.has_any_rigid_coupling:
-                    return
-
-            # Run Genesis rigid simulation step for non-IPC couplers
             self.substep()
 
     def reset_grad(self):
@@ -1611,7 +1606,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             qd_zero_grad(self.dyn_state.entities)
 
     def substep_post_coupling(self):
-        from genesis.engine.couplers import SAPCoupler, IPCCoupler
+        from genesis.engine.couplers import SAPCoupler
 
         if not self.is_active:
             return
@@ -1619,11 +1614,18 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if isinstance(self.sim.coupler, SAPCoupler):
             update_qacc_from_qvel_delta(self.dyn_state, self.rigid_info, self.rigid_config)
             kernel_step_2(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno)
-        elif isinstance(self.sim.coupler, IPCCoupler):
-            # If any rigid entity is coupled to IPC, perform rigid simulation in post-coupling phase.
-            # Collision exclusion for IPC-coupled links is handled in the collider at build time.
-            if self.sim.coupler.has_any_rigid_coupling:
-                self.substep()
+        elif self.is_solved_in_global_newton:
+            kernel_substep_post(
+                self.dyn_state,
+                self.collider.collider_state,
+                self.constraint_solver.constraint_state,
+                self.dyn_info,
+                self.rigid_info,
+                self.rigid_config,
+                not self._disable_constraint,
+                self._options.noslip_iterations > 0,
+                self._errno,
+            )
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------
@@ -3207,6 +3209,26 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
+
+    @property
+    def is_solved_in_global_newton(self) -> bool:
+        """
+        Whether the substeps of the rigid solver are solved within the global Newton solve of the implicit MPM solver or
+        of the cloth, the accelerations of its dofs joining the unknowns of the particles or of the vertices of the cloth
+        (see NewtonSolver).
+
+        They are once a rigid geom that couples with the particles or with the cloth moves (see
+        'LegacyCouplerOptions.rigid_mpm' and 'needs_coup' of gs.materials.Rigid), the geoms fixed in the world acting on
+        them alone. A substep then stops once its constraint rows are assembled, and finishes from the accelerations that
+        the Newton solve hands it (see 'substep_post_coupling').
+        """
+        if self.is_built:
+            return self._is_solved_in_global_newton
+        return (
+            self.sim.newton_solver.is_active
+            and (self.sim.coupler.rigid_couplings[0] or self.sim.fem_solver.is_solved_in_global_newton)
+            and any(geom.needs_coup and not geom.is_fixed for geom in self.geoms)
+        )
 
     @property
     def n_geoms(self):

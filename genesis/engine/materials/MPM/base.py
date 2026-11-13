@@ -1,4 +1,5 @@
 import re
+from enum import IntEnum
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import quadrants as qd
@@ -27,6 +28,27 @@ def _validate_sampler(v: str) -> str:
 
 
 SamplerType = Annotated[str, BeforeValidator(_validate_sampler)]
+
+
+class MPMModel(IntEnum):
+    """The energy density of a material under the implicit solver, a function of the singular values of its deformation
+    gradient (see 'MPMOptions.use_implicit_solver')."""
+
+    FIXED_COROTATED = 0
+    STABLE_NEOHOOKEAN = 1
+    EXTENDED_HENCKY = 2
+    LIQUID = 3
+
+
+class MPMPlasticity(IntEnum):
+    """The plastic return map of a material under the implicit solver, applied once the particles left the grid."""
+
+    NONE = 0
+    VON_MISES = 1
+    CLAMP = 2
+    SNOW = 3
+    SAND = 4
+    LIQUID = 5
 
 
 @qd.data_oriented

@@ -39,9 +39,6 @@ class Elastic(Base):
         - 'stable_neohookean': A numerically stable Neo-Hookean model
         - 'linear_corotated': Linear corotated elasticity model
         Default is 'linear'.
-    contact_resistance : float | None, optional
-        IPC contact resistance/stiffness override. ``None`` uses the coupler global
-        default. Default is None.
     """
 
     model: Literal["linear", "stable_neohookean", "linear_corotated"] = "linear"

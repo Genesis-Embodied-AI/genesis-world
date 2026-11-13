@@ -209,165 +209,6 @@ class SAPCouplerOptions(BaseCouplerOptions):
     max_contacts: NonNegativeInt = 4096
 
 
-class IPCCouplerOptions(BaseCouplerOptions):
-    """
-    Options configuring the Incremental Potential Contact (IPC) coupler.
-
-    Time step, gravity, and differentiable simulation mode are derived from ``SimOptions``
-    (``dt``, ``gravity``, ``requires_grad``) and should not be set here.
-
-    Parameters
-    ----------
-    Newton Solver Options
-    ---------------------
-    newton_max_iterations : int, optional
-        Maximum iterations for Newton solver. Defaults to None (use libuipc default: 1024).
-    newton_min_iterations : int, optional
-        Minimum iterations for Newton solver. Defaults to None (use libuipc default: 1).
-    newton_tolerance : float, optional
-        Velocity tolerance for Newton solver convergence. Defaults to None (use libuipc default: 0.05).
-    newton_ccd_tolerance : float, optional
-        CCD (Continuous Collision Detection) tolerance for Newton solver. Defaults to None (use libuipc default: 1.0).
-    newton_use_adaptive_tolerance : bool, optional
-        Whether Newton solver should use adaptive tolerance. Defaults to None (use libuipc default: False).
-    newton_translation_tolerance : float, optional
-        Translation rate tolerance for Newton solver. Defaults to None (use libuipc default: 0.1).
-    newton_semi_implicit_enable : bool, optional
-        Whether to enable semi-implicit Newton solver mode. Defaults to None (use libuipc default: False).
-    newton_semi_implicit_beta_tolerance : float, optional
-        Beta tolerance for semi-implicit Newton solver. Defaults to None (use libuipc default: 1e-3).
-
-    Line Search Options
-    -------------------
-    n_linesearch_iterations : int, optional
-        Maximum iterations for line search. Defaults to None (use libuipc default: 8).
-    linesearch_report_energy : bool, optional
-        Whether to report energy during line search. Defaults to None (use libuipc default: False).
-
-    Linear System Options
-    ---------------------
-    linear_system_solver : str, optional
-        Linear system solver type. Options: 'linear_pcg', 'direct', etc. Defaults to None (use libuipc default: 'linear_pcg').
-    linear_system_tolerance : float, optional
-        Tolerance for linear system solver. Defaults to None (use libuipc default: 1e-3).
-
-    Contact Options
-    ---------------
-    contact_enable : bool, optional
-        Whether to enable contact detection. Defaults to None (use libuipc default: True).
-    contact_d_hat : float, optional
-        Contact distance threshold. Defaults to None (use libuipc default: 0.01).
-    contact_friction_enable : bool, optional
-        Whether to enable friction in contact. Defaults to None (use libuipc default: True).
-    contact_resistance : float, optional
-        Ground/default contact resistance/stiffness. It is used for ground contact pairs and
-        as the per-entity fallback when a material does not define ``contact_resistance``.
-        For ground pairs, it is combined with entity ``material.contact_resistance`` via
-        geometric mean. Defaults to 1e9.
-    contact_eps_velocity : float, optional
-        Epsilon velocity for contact. Defaults to None (use libuipc default: 0.01).
-    contact_constitution : str, optional
-        Contact constitution model. Options: 'ipc', 'isometric'. Defaults to None (use libuipc default: 'ipc').
-
-    Collision Detection Options
-    ---------------------------
-    collision_detection_method : str, optional
-        Collision detection method. Options: 'linear_bvh', 'spatial_hash', etc. Defaults to None (use libuipc default: 'linear_bvh').
-
-    CFL Options
-    -----------
-    cfl_enable : bool, optional
-        Whether to enable CFL (Courant-Friedrichs-Lewy) condition. Defaults to None (use libuipc default: False).
-
-    Sanity Check Options
-    --------------------
-    sanity_check_enable : bool, optional
-        Whether to enable sanity checks. Defaults to None (use libuipc default: True).
-
-    Genesis Coupling Options
-    ------------------------
-    constraint_strength_translation : float, optional
-        Translation strength for IPC soft transform constraint coupling.
-        Higher values create stiffer position coupling between Genesis rigid bodies and IPC ABD objects.
-        Defaults to 100.0.
-    constraint_strength_rotation : float, optional
-        Rotation strength for IPC soft transform constraint coupling.
-        Higher values create stiffer orientation coupling between Genesis rigid bodies and IPC ABD objects.
-        Defaults to 100.0.
-    enable_rigid_ground_contact : bool, optional
-        Whether to enable ground contact in IPC system. When False, objects in IPC will not collide
-        with the ground plane. Defaults to True.
-    enable_rigid_rigid_contact : bool, optional
-        Whether to enable contact detection between rigid bodies (ABD objects) in the IPC system.
-        When False, only soft-soft and soft-rigid collisions are detected by IPC; rigid-rigid
-        collisions within IPC are skipped. Defaults to True.
-    two_way_coupling : bool, optional
-        Whether to apply coupling forces/torques from IPC back to Genesis rigid bodies. Defaults to True.
-    enable_rigid_dofs_sync : bool, optional
-        Whether to synchronize the IPC reference DOF state with Genesis each step for
-        external_articulation entities. When True, IPC gets tighter coupling with Genesis joint
-        state but may amplify small divergences. When False, IPC uses its own DOF reference
-        without per-step updates. Defaults to False.
-    free_base_driven_by_ipc : bool, optional
-        For external_articulation with non-fixed base: whether base link is fully driven by IPC physics.
-        When False, base link uses SoftTransformConstraint controlled by Genesis. When True, base link
-        is fully driven by IPC physics. Defaults to False.
-    _show_ipc_gui : bool, optional
-        [Dev/debug] Enable the libuipc built-in polyscope GUI viewer for inspecting the IPC scene.
-        Defaults to False.
-    """
-
-    # Newton solver options (None = use libuipc default)
-    newton_max_iterations: PositiveInt | None = None
-    newton_min_iterations: PositiveInt | None = None
-    newton_tolerance: PositiveFloat | None = None
-    newton_ccd_tolerance: PositiveFloat | None = None
-    newton_use_adaptive_tolerance: StrictBool | None = None
-    newton_translation_tolerance: PositiveFloat | None = None
-    newton_semi_implicit_enable: StrictBool | None = None
-    newton_semi_implicit_beta_tolerance: PositiveFloat | None = None
-
-    # Line search options (None = use libuipc default)
-    n_linesearch_iterations: PositiveInt | None = None
-    linesearch_report_energy: StrictBool | None = None
-
-    # Linear system options (None = use libuipc default)
-    linear_system_solver: Literal["linear_pcg", "direct"] | None = None
-    linear_system_tolerance: PositiveFloat | None = None
-
-    # Contact options
-    contact_enable: StrictBool | None = None
-    contact_d_hat: PositiveFloat | None = None
-    contact_friction_enable: StrictBool | None = None
-    contact_resistance: PositiveFloat = 1e9
-    contact_eps_velocity: PositiveFloat | None = None
-    contact_constitution: Literal["ipc", "isometric"] | None = None
-
-    # Collision detection options
-    collision_detection_method: Literal["linear_bvh", "spatial_hash"] | None = None
-
-    # CFL options
-    cfl_enable: StrictBool | None = None
-
-    # Sanity check options
-    sanity_check_enable: StrictBool | None = None
-
-    # Genesis coupling options
-    constraint_strength_translation: PositiveFloat = 100.0
-    constraint_strength_rotation: PositiveFloat = 100.0
-    enable_rigid_ground_contact: StrictBool = True
-    enable_rigid_rigid_contact: StrictBool = True
-    two_way_coupling: StrictBool = True
-    enable_rigid_dofs_sync: StrictBool = False
-    free_base_driven_by_ipc: StrictBool = False
-
-    _show_ipc_gui: bool = PrivateAttr(default=False)
-
-    def __init__(self, *, _show_ipc_gui: StrictBool = False, **data) -> None:
-        super().__init__(**data)
-        self._show_ipc_gui = bool(_show_ipc_gui)
-
-
 ############################ Solvers inside simulator ############################
 """
 Parameters in these solver-specific options will override SimOptions if available.
@@ -692,6 +533,24 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
         Lower bound of the simulation domain. Defaults to (-1.0, -1.0, 0.0).
     upper_bound : tuple, shape (3,), optional
         Upper bound of the simulation domain. Defaults to (1.0, 1.0, 1.0).
+    use_implicit_solver : bool, optional
+        Whether to use the implicit solver, which stays stable at a time step far larger than the explicit solver
+        allows, and resolves the contact of the particles with the rigid entities within the same solve as their motion
+        (see NewtonOptions). Each of its substeps costs several iterations, which the larger time step pays back.
+        Differentiable simulation, CPIC, custom materials and the contact with FEM, PBD and SPH entities require the
+        explicit solver. The contact with moving rigid entities requires the pyramidal friction cone and the Newton
+        constraint solver of the rigid solver, with hibernation and noslip iterations off (see RigidOptions). A muscle
+        only contracts under the implicit solver: a negative actuation acts as zero. Defaults to False.
+    wall_timeconst : float, optional
+        Time constant in seconds over which the walls of the domain push back the particles that penetrate them, raised
+        to twice the substep when smaller. A smaller value gives stiffer walls that the particles penetrate less, but
+        more iterations of the solve near the walls. Defaults to 0.01. Only used when `use_implicit_solver` is True.
+    liquid_smoothing_velocity : float, optional
+        Velocity in m/s under which the resistance of a liquid to compression fades in, its stiffness rising from zero
+        to its bulk modulus over the compression the liquid undergoes at that velocity over a substep. A larger value
+        lets the solve of a liquid near rest take fewer iterations, but softens the liquid more. If None, resolved based
+        on the tolerance of the solve: 'NewtonOptions.velocity_tol', the smallest velocity the solve resolves. Defaults
+        to None. Only used when `use_implicit_solver` is True.
     use_sparse_grid : bool, optional
         This option is deprecated.
     leaf_block_size : int, optional
@@ -705,6 +564,10 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
     # These will later be converted to discrete grid bound. The actual grid boundary could be slightly tighter.
     lower_bound: Vec3FType = (-1.0, -1.0, 0.0)
     upper_bound: Vec3FType = (1.0, 1.0, 1.0)
+
+    use_implicit_solver: StrictBool = False
+    wall_timeconst: PositiveFloat = 1e-2
+    liquid_smoothing_velocity: NonNegativeFloat | None = None
 
     def __init__(self, *, use_sparse_grid: bool = False, leaf_block_size: int = 8, **data):
         super().__init__(**data)
@@ -723,6 +586,8 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
     def model_post_init(self, context: Any) -> None:
         if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
             gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
+        if self.use_implicit_solver and self.enable_CPIC:
+            gs.raise_exception("'enable_CPIC' requires the explicit solver, got 'use_implicit_solver=True'.")
 
 
 class SPHOptions(GravityMixin, TimeBasedMixin):
@@ -952,3 +817,162 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
     damping_alpha: NonNegativeFloat = 0.5
     damping_beta: NonNegativeFloat = 5e-4
     max_vertex_constraints: NonNegativeInt = 64
+
+
+class NewtonOptions(Options):
+    """
+    Options of the iterative solve of the implicit material point method (MPM) solver and of the cloth, which moves
+    the particles or the cloth over every substep together with the rigid entities in contact with them.
+
+    The implicit MPM solver is enabled by `MPMOptions.use_implicit_solver`, and the cloth is solved this way whenever
+    the scene holds a `gs.materials.FEM.Cloth` entity.
+
+    Parameters
+    ----------
+    velocity_tol : float, optional
+        Convergence tolerance of the solve, in m/s: the solve of a substep stops once an iteration changes the velocity
+        of every MPM particle, cloth vertex and rigid entity in contact with them by less than this value. A smaller value
+        gives a more accurate motion at the cost of more iterations per substep, and a larger one a faster but less
+        accurate one. Defaults to 5e-2.
+    max_iterations : int, optional
+        Iterations of a substep at most. A solve reaching it stops short of 'velocity_tol' and logs a warning. Defaults
+        to 1024.
+    line_search_max_iterations : int, optional
+        Trial steps of an iteration at most, each one shorter than the previous, the last one being kept. More trials
+        let an iteration progress where the motion is hard to resolve, at the cost of more work per iteration. Defaults
+        to 12.
+    line_search_shrink : float, optional
+        Factor of the step of an iteration between two trials, strictly between 0 and 1. A smaller factor reaches an
+        acceptable step in fewer trials, while a larger one keeps a longer step at the cost of more trials. Defaults to
+        0.5.
+    pcg_max_iterations : int, optional
+        Iterations at most of the inner linear solve of an iteration. A larger cap lets a stiff scene converge, at the
+        cost of a longer worst-case substep. Defaults to 1024.
+    pcg_tol : float, optional
+        Relative accuracy of the inner linear solve of an iteration. A looser value makes every iteration cheaper, the
+        next iterations correcting its inexact result, at the cost of more iterations. Defaults to 1e-4.
+    graph_mode : str, optional
+        How the iterations of a substep run on the device. 'multi' has the host check the solve after every iteration,
+        which runs on every Quadrants build and compiles fastest, at the cost of the device waiting on the host at each
+        iteration. 'mono' has the host check the solve once per substep, which runs the scenes with cloth faster and
+        those of implicit MPM particles alone slightly slower, at the cost of a longer compilation on first use. It
+        requires a Quadrants built locally from the dev-fast branch of alanray-tech/quadrants, which has task-level
+        checkpoint regions: no released Quadrants has them yet. Both give the same motion. Defaults to 'multi'.
+    """
+
+    velocity_tol: PositiveFloat = 5e-2
+    max_iterations: PositiveInt = 1024
+    line_search_max_iterations: PositiveInt = 12
+    line_search_shrink: PositiveFloat = 0.5
+    pcg_max_iterations: PositiveInt = 1024
+    pcg_tol: PositiveFloat = 1e-4
+    graph_mode: Literal["mono", "multi"] = "multi"
+
+    def model_post_init(self, context: Any) -> None:
+        if self.line_search_shrink >= 1.0:
+            gs.raise_exception(f"'line_search_shrink' must be below 1, got {self.line_search_shrink}.")
+
+
+class IPCOptions(Options):
+    """
+    Options of the incremental potential contact (IPC) of the cloth, which keeps it from crossing the surfaces it
+    touches.
+
+    The contact acts within a band of width 'd_hat' beyond the contact thickness of the cloth (see
+    `gs.materials.FEM.Cloth`), its repulsion growing without bound as the gap closes, so the cloth never reaches the
+    thickness. The contact of the cloth with itself and with other cloths is reliable in double precision,
+    `gs.init(precision='64')`: in single precision, cloths at rest on one another creep and their motion depends on the
+    order in which their contacts are found.
+
+    Parameters
+    ----------
+    d_hat : float, optional
+        Width of the contact band, in m. A wider band starts pushing the cloth away earlier, which spreads the contact
+        over more substeps and eases the solve, at the cost of a visible gap: a cloth at rest hovers within the band.
+        Defaults to 1e-2.
+    friction_eps_v : float, optional
+        Sliding velocity below which the friction of a contact eases into static friction, in m/s. A smaller value holds
+        a resting cloth more firmly in place at the cost of a stiffer, harder solve, while a larger one lets it creep.
+        Defaults to 1e-2.
+    ccd_bound : str, optional
+        How a step of the solve finds how far the cloth may move before touching: 'directional' bounds the motion by how
+        fast the gap between two surfaces closes, 'additive' by how far each surface moves in any direction. Both stop
+        at the same contact, 'directional' in fewer passes for cloth sliding over a surface. Defaults to 'directional'.
+    ccd_partition : bool, optional
+        Whether every group of cloths in contact with one another moves by a step of its own, as far as its own contacts
+        allow. Off, a contact anywhere in a scene shortens the step of every cloth in it, which slows the solve of
+        scenes with many separate cloths, without changing the motion it converges to. Defaults to True.
+    adaptive_kappa_mode : str, optional
+        Whether the stiffness of the contact grows where a cloth presses so hard into it that the gap nearly closes:
+        'per-vertex' stiffens the contacts of the vertices concerned, and relaxes them once they stay calm, 'off' keeps
+        the stiffness of the cloth material. A stiffer contact holds a heavy load at a wider gap, which keeps the solve
+        fast, at the cost of a contact force that depends on the past of the load. Defaults to 'per-vertex'.
+    adaptive_kappa_tick : str, optional
+        When the stiffness of the contact grows: 'newton' within the solve of a substep, as soon as a gap closes,
+        'frame' once per substep. Growing within the solve answers a sudden load at once, at the cost of a few more
+        iterations of that substep. Defaults to 'newton'.
+    adaptive_kappa_gap_ratio : float, optional
+        Gap below which a contact stiffens, as a fraction of 'd_hat' beyond the contact thickness. A larger ratio keeps
+        cloths farther apart under load, at the cost of stiffer contacts. Defaults to 0.01.
+    adaptive_kappa_grow : float, optional
+        Factor of the stiffness each time a contact stiffens, above 1. A larger factor opens a closing gap in fewer
+        steps, at the cost of a harder solve right after. Defaults to 2.
+    adaptive_kappa_max_scale : float, optional
+        Largest factor of the stiffness of the cloth material that a contact reaches. A larger one holds heavier loads,
+        at the cost of a harder solve under them. Defaults to 128.
+    adaptive_kappa_calm_time : float, optional
+        Time a stiffened contact holds its stiffness once its gap reopens, in s, before it relaxes. A longer time holds
+        a repeated load steadily, at the cost of a stiff contact that outlives it. Defaults to 0.3.
+    adaptive_kappa_relax_time : float, optional
+        Time constant of the relaxation of a stiffened contact back to the stiffness of the cloth material, in s. A
+        longer time relaxes more smoothly and more slowly. Defaults to 0.4.
+    adaptive_kappa_hysteresis : float, optional
+        Factor of 'adaptive_kappa_gap_ratio' up to which a contact keeps its stiffness without relaxing, at least 1. A
+        larger factor avoids stiffening and relaxing in turn under a varying load. Defaults to 2.
+    init_collision_pair_capacity : int, optional
+        Pairs of surfaces near enough to touch that the scene holds at first. More pairs grow the storage as the scene
+        needs, at the cost of repeating the search that found them, so a larger value saves that work in crowded scenes
+        at the cost of memory. Defaults to 1000.
+    capacity_grow_factor : float, optional
+        Factor of the storage of the pairs of surfaces over the pairs found when it grows, above 1. A larger factor
+        grows less often at the cost of memory. Defaults to 1.2.
+    intersection_check : bool, optional
+        Whether building the scene checks that no cloth crosses itself or another cloth, and raises an exception naming
+        the crossing edge and triangle. The solve cannot separate cloths that start crossed, so the check finds the
+        mistake at once, at the cost of a slower build. Defaults to False.
+    vertex_constraint_strength_ratio : float, optional
+        Stiffness of the pull of a hard vertex constraint of the cloth toward its target, as a ratio of the mass of the
+        vertex (see `FEMEntity.set_vertex_constraints`). The pull moves the vertex within the solve, so that the contact
+        stops it short of crossing a surface. A larger ratio reaches a moving target in fewer iterations, at the cost of
+        a stiffer solve while the vertex is held off its target. Defaults to 1e4.
+    vertex_constraint_fix_tol : float, optional
+        Distance from its target within which a hard vertex constraint of the cloth holds the vertex fixed, as a
+        fraction of `NewtonOptions.velocity_tol` times the substep. A held vertex leaves the solve, which speeds it up.
+        A larger fraction holds the vertex sooner, at the cost of a larger offset from its target. Defaults to 0.2.
+    """
+
+    d_hat: PositiveFloat = 1e-2
+    friction_eps_v: PositiveFloat = 1e-2
+    ccd_bound: Literal["directional", "additive"] = "directional"
+    ccd_partition: StrictBool = True
+    adaptive_kappa_mode: Literal["per-vertex", "off"] = "per-vertex"
+    adaptive_kappa_tick: Literal["newton", "frame"] = "newton"
+    adaptive_kappa_gap_ratio: PositiveFloat = 0.01
+    adaptive_kappa_grow: PositiveFloat = 2.0
+    adaptive_kappa_max_scale: PositiveFloat = 128.0
+    adaptive_kappa_calm_time: NonNegativeFloat = 0.3
+    adaptive_kappa_relax_time: PositiveFloat = 0.4
+    adaptive_kappa_hysteresis: PositiveFloat = 2.0
+    init_collision_pair_capacity: PositiveInt = 1000
+    capacity_grow_factor: PositiveFloat = 1.2
+    intersection_check: StrictBool = False
+    vertex_constraint_strength_ratio: PositiveFloat = 1e4
+    vertex_constraint_fix_tol: PositiveFloat = 0.2
+
+    def model_post_init(self, context: Any) -> None:
+        if not self.adaptive_kappa_grow > 1.0:
+            gs.raise_exception(f"'adaptive_kappa_grow' must be above 1, got {self.adaptive_kappa_grow}.")
+        if not self.capacity_grow_factor > 1.0:
+            gs.raise_exception(f"'capacity_grow_factor' must be above 1, got {self.capacity_grow_factor}.")
+        if self.adaptive_kappa_hysteresis < 1.0:
+            gs.raise_exception(f"'adaptive_kappa_hysteresis' must be at least 1, got {self.adaptive_kappa_hysteresis}.")

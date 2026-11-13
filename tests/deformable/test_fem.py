@@ -6,7 +6,10 @@ import torch
 
 import igl
 
+import quadrants as qd
+
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -1508,3 +1511,587 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(xml_path, tol, show_
     assert_allclose(com_pos_z_f - com_pos_0[..., 2], com_pos_delta, tol=0.05)
     sphere_center = sphere.get_verts_pos()[..., sphere_center_idx, :]
     assert_allclose(sphere_center, sphere_target_poss, tol=tol)
+
+
+@pytest.mark.required
+def test_cloth_pinned_vertices(cloth_grid_obj_path, show_viewer):
+    DT = 0.01
+    GRAVITY = 9.8
+    N_GRID = 8
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            gravity=(0.0, 0.0, -GRAVITY),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(3.5, 0.0, 0.6),
+            camera_lookat=(0.0, -0.5, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cloth_grid_obj_path,
+            pos=(0.0, 0.0, 1.0),
+        ),
+        material=gs.materials.FEM.Cloth(
+            E=2e4,
+            shear_modulus=2e3,
+            bending="hinge",
+            bending_E=1e6,
+        ),
+    )
+    scene.build(n_envs=2)
+    # The two corners of the edge at y = -0.5, and the center of the cloth
+    pins_idx = [0, N_GRID]
+    center_idx = (N_GRID // 2) * (N_GRID + 1) + N_GRID // 2
+    cloth.set_vertex_constraints(verts_idx_local=pins_idx)
+
+    for i_step in range(1, 101):
+        scene.step()
+        verts_pos = cloth.get_verts_pos()
+        assert_allclose(verts_pos[:, pins_idx], cloth.init_positions[pins_idx], tol=gs.EPS)
+        # The center falls freely until the pull of the pins reaches it, as backward Euler integrates gravity
+        if i_step == 10:
+            assert_allclose(verts_pos[:, center_idx, 2], 1.0 - GRAVITY * DT**2 * i_step * (i_step + 1) / 2, atol=5e-6)
+    # The cloth swings down under the edge of its pins, past them
+    assert (verts_pos[:, center_idx, 1] < -0.5).all()
+    assert (verts_pos[:, center_idx, 2] < 1.0).all()
+    # The GPU accumulates the forces of the vertices atomically, in an order that differs between environments
+    assert_allclose(verts_pos[0], verts_pos[1], tol=1e-5)
+
+
+@pytest.mark.required
+# Double precision, see test_cloth_contact_between_cloths
+@pytest.mark.precision("64")
+def test_cloth_vertex_constraints(cloth_grid_obj_path, tmp_path, show_viewer):
+    DT = 0.02
+    VELOCITY_TOL = 1e-2
+    CONTACT_THICKNESS = 1e-3
+    N_GRID = 8
+    N_DRAG_STEPS = 40
+
+    # The scene of test_cloth_ground_contact, the corner of the cloth dragged as CGQ's cloth_grab.py does
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+        ),
+        newton_options=gs.options.NewtonOptions(
+            velocity_tol=VELOCITY_TOL,
+        ),
+        ipc_options=gs.options.IPCOptions(
+            d_hat=4e-3,
+            vertex_constraint_strength_ratio=1e5,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, -2.0, 1.2),
+            camera_lookat=(0.0, 0.0, 0.3),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cloth_grid_obj_path,
+            pos=(0.0, 0.0, 0.15),
+        ),
+        material=gs.materials.FEM.Cloth(
+            E=5e4,
+            rho=400.0,
+            shear_modulus=2e4,
+            bending_E=2e6,
+            contact_thickness=CONTACT_THICKNESS,
+            friction_mu=0.2,
+            contact_resistance=1e5,
+        ),
+    )
+    scene.build(n_envs=2)
+    # The four vertices of the corner at x = y = 0.5, the vertex 0 lying at the opposite corner
+    grip_idx = [(N_GRID - k) * (N_GRID + 1) + N_GRID - l for k in (0, 1) for l in (0, 1)]
+    grip_pos = cloth.get_verts_pos()[0, grip_idx]
+    # The first environment grabs the corner where it starts, the second one pulls it 0.15 m under the ground with soft
+    # constraints, the rest of the cloth falling onto the ground in both
+    cloth.set_vertex_constraints(verts_idx_local=grip_idx, envs_idx=[0])
+    cloth.set_vertex_constraints(
+        verts_idx_local=grip_idx,
+        target_poss=grip_pos - torch.tensor([0.0, 0.0, 0.3], dtype=gs.tc_float, device=gs.device),
+        is_soft_constraint=True,
+        stiffness=1e3,
+        envs_idx=[1],
+    )
+
+    # The grabbed corner is lifted by 0.5 m, pulled inward by 0.3 m and turned up by 0.8 rad about the y axis
+    for i_step in range(1, N_DRAG_STEPS + 1):
+        ratio = i_step / N_DRAG_STEPS
+        cos, sin = math.cos(0.8 * ratio), math.sin(0.8 * ratio)
+        rotation = torch.tensor(
+            [[cos, 0.0, -sin], [0.0, 1.0, 0.0], [sin, 0.0, cos]], dtype=gs.tc_float, device=gs.device
+        )
+        targets_pos = grip_pos @ rotation.T + ratio * torch.tensor(
+            [-0.3, 0.0, 0.5], dtype=gs.tc_float, device=gs.device
+        )
+        cloth.update_constraint_targets(verts_idx_local=grip_idx, target_poss=targets_pos, envs_idx=[0])
+        scene.step()
+        verts_pos = cloth.get_verts_pos()
+        # The grabbed corner follows its target up to the convergence tolerance of the solve, and the contact keeps
+        # every vertex out of the ground, the soft pull included
+        assert ((verts_pos[0, grip_idx] - targets_pos).norm(dim=-1) < VELOCITY_TOL * DT).all()
+        assert (verts_pos[..., 2] > CONTACT_THICKNESS).all()
+    # The soft pull presses its corner deeper into the contact band than the free corner opposite it rests
+    assert (verts_pos[1, grip_idx, 2] < verts_pos[1, 0, 2]).all()
+
+    # Released from about 0.9 m, the corner falls back onto the cloth and the ground within 0.6 s
+    cloth.remove_vertex_constraints(verts_idx_local=grip_idx, envs_idx=[0])
+    for _ in range(30):
+        scene.step()
+        assert (cloth.get_verts_pos()[..., 2] > CONTACT_THICKNESS).all()
+    assert (cloth.get_verts_pos()[0, grip_idx, 2] < 0.2).all()
+
+    # The drag never folds the cloth across itself
+    path = str(tmp_path / "cloth.obj")
+    faces = igl.read_triangle_mesh(cloth_grid_obj_path)[1]
+    igl.write_triangle_mesh(path, tensor_to_array(cloth.get_verts_pos()[0], dtype=gs.np_float), faces)
+    scene_check = gs.Scene(ipc_options=gs.options.IPCOptions(intersection_check=True))
+    scene_check.add_entity(morph=gs.morphs.Mesh(file=path), material=gs.materials.FEM.Cloth())
+    scene_check.build()
+
+
+@pytest.mark.required
+def test_cloth_ground_contact(cloth_grid_obj_path, show_viewer):
+    CONTACT_THICKNESS = 1e-3
+    D_HAT = 4e-3
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.02,
+        ),
+        newton_options=gs.options.NewtonOptions(
+            velocity_tol=1e-2,
+        ),
+        ipc_options=gs.options.IPCOptions(
+            d_hat=D_HAT,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, -1.5, 0.5),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cloth_grid_obj_path,
+            pos=(0.0, 0.0, 0.15),
+        ),
+        material=gs.materials.FEM.Cloth(
+            E=5e4,
+            rho=400.0,
+            shear_modulus=2e4,
+            bending_E=2e6,
+            contact_thickness=CONTACT_THICKNESS,
+            friction_mu=0.2,
+            contact_resistance=1e5,
+        ),
+    )
+    scene.build(n_envs=2)
+
+    # The cloth lands within 0.2 s and never enters its contact thickness, then rests in the contact band
+    for _ in range(50):
+        scene.step()
+        assert (cloth.get_verts_pos()[..., 2] > CONTACT_THICKNESS).all()
+    verts_z = cloth.get_verts_pos()[..., 2]
+    assert (verts_z < CONTACT_THICKNESS + D_HAT).all()
+    assert_allclose(cloth.get_verts_vel(), 0.0, atol=5e-7)
+
+
+@pytest.mark.required
+# The contact between cloths resolves its gaps in double precision, the precision of its reference
+@pytest.mark.precision("64")
+@pytest.mark.parametrize(
+    "graph_mode",
+    [
+        "multi",
+        pytest.param(
+            "mono",
+            marks=pytest.mark.skipif(
+                not getattr(qd, "CHECKPOINT_TASK_REGIONS", False),
+                reason="The mono graph mode requires a Quadrants built locally from the dev-fast branch of "
+                "alanray-tech/quadrants (task-level checkpoint regions), which no released Quadrants has yet.",
+            ),
+        ),
+    ],
+)
+def test_cloth_contact_between_cloths(graph_mode, cloth_grid_obj_factory, tmp_path, show_viewer):
+    CONTACT_THICKNESS = 1e-3
+    VELOCITY_TOL = 1e-1
+    CUBE_SIZE = 0.05
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+        ),
+        newton_options=gs.options.NewtonOptions(
+            velocity_tol=VELOCITY_TOL,
+            graph_mode=graph_mode,
+        ),
+        # The capacity of the pairs starts below the pairs of the first contact, so that it grows to keep them all
+        ipc_options=gs.options.IPCOptions(
+            d_hat=1e-3,
+            init_collision_pair_capacity=1,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.6, -0.6, 0.45),
+            camera_lookat=(0.0, 0.0, 0.05),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    # A 4 x 4 grid of fixed cubes 15 cm apart, under four horizontal cloths of decreasing sizes, the smaller ones higher
+    for i in range(4):
+        for j in range(4):
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    size=(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE),
+                    pos=((i - 1.5) * 0.15, (j - 1.5) * 0.15, 0.5 * CUBE_SIZE),
+                    fixed=True,
+                ),
+            )
+    resolutions = (16, 8, 4, 2)
+    layers = [
+        scene.add_entity(
+            morph=gs.morphs.Mesh(
+                file=cloth_grid_obj_factory(n),
+                scale=size,
+                pos=(0.0, 0.0, z),
+            ),
+            material=gs.materials.FEM.Cloth(
+                E=6e4,
+                bending="hinge",
+                bending_E=1e6,
+                contact_thickness=CONTACT_THICKNESS,
+                friction_mu=0.0,
+                contact_resistance=1e5,
+            ),
+        )
+        for n, size, z in zip(resolutions, (0.5, 0.3, 0.2, 0.1), (0.08, 0.12, 0.14, 0.16))
+    ]
+    scene.build(n_envs=2)
+
+    # The stack lands on the cubes and comes to rest within 0.3 s
+    for _ in range(50):
+        scene.step()
+    # Every layer rests above the ground, at rest up to the convergence tolerance of the solve
+    for layer in layers:
+        assert (layer.get_verts_pos()[..., 2] > CONTACT_THICKNESS).all()
+        assert (layer.get_verts_vel().norm(dim=-1) < VELOCITY_TOL).all()
+    # The layers keep their order at their shared center
+    centers_z = torch.stack(
+        [layer.get_verts_pos()[..., (n // 2) * (n + 1) + n // 2, 2] for layer, n in zip(layers, resolutions)]
+    )
+    assert (centers_z[1:] > centers_z[:-1]).all()
+
+    # The layers never cross: their final shapes form a scene that passes the check of crossing cloths
+    scene_check = gs.Scene(ipc_options=gs.options.IPCOptions(intersection_check=True))
+    for i_layer, (layer, n) in enumerate(zip(layers, resolutions)):
+        faces = igl.read_triangle_mesh(cloth_grid_obj_factory(n))[1]
+        path = str(tmp_path / f"layer{i_layer}.obj")
+        igl.write_triangle_mesh(path, tensor_to_array(layer.get_verts_pos()[0], dtype=gs.np_float), faces)
+        scene_check.add_entity(morph=gs.morphs.Mesh(file=path), material=gs.materials.FEM.Cloth())
+    scene_check.build()
+
+
+@pytest.mark.required
+# Double precision, see test_cloth_contact_between_cloths
+@pytest.mark.precision("64")
+def test_cloth_self_contact(cloth_folded_obj_path, show_viewer):
+    N_LENGTH, N_WIDTH = 24, 6
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.3, -1.0, 0.4),
+            camera_lookat=(-0.15, 0.0, 0.05),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cloth_folded_obj_path,
+        ),
+        # The quadratic bending assumes a flat rest shape, while this cloth is folded at rest
+        material=gs.materials.FEM.Cloth(
+            E=2e4,
+            shear_modulus=2e3,
+            bending="hinge",
+            bending_E=1e6,
+        ),
+    )
+    scene.build()
+
+    # The vertices of the flat part of the lower layer of every row, and those of the upper layer above them
+    rows_start = np.arange(N_WIDTH + 1)[:, None] * (N_LENGTH + 1)
+    lower_idx = (rows_start + np.arange(10)).reshape(-1)
+    upper_idx = (rows_start + N_LENGTH - np.arange(10)).reshape(-1)
+    gaps_min = []
+    for _ in range(50):
+        scene.step()
+        verts_z = cloth.get_verts_pos()[..., 2]
+        gaps_min.append(float((verts_z[upper_idx] - verts_z[lower_idx]).min()))
+    # The upper layer falls onto the lower one once it lands and rests on it, never crossing it
+    assert min(gaps_min) > 0.0
+    assert gaps_min[-1] < 0.02
+
+
+@pytest.mark.required
+def test_cloth_rigid_contact(cloth_grid_obj_path, show_viewer):
+    CONTACT_THICKNESS = 1e-3
+    D_HAT = 1e-3
+    BOX_SIZE = 0.1
+
+    scene = gs.Scene(
+        ipc_options=gs.options.IPCOptions(
+            d_hat=D_HAT,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, -0.5, 0.3),
+            camera_lookat=(0.0, 0.0, 0.03),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    # A free box dropped onto a cloth lying on the ground, several vertices of the cloth under its bottom face
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cloth_grid_obj_path,
+            scale=0.4,
+            pos=(0.0, 0.0, 0.01),
+        ),
+        material=gs.materials.FEM.Cloth(
+            E=2e4,
+            shear_modulus=2e3,
+            bending="hinge",
+            bending_E=3e3,
+            contact_thickness=CONTACT_THICKNESS,
+            friction_mu=1.0,
+        ),
+    )
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            pos=(0.0, 0.0, 0.08),
+        ),
+    )
+    scene.build(n_envs=2)
+
+    box_vz = []
+    for _ in range(50):
+        scene.step()
+        box_vz.append(box.get_vel()[..., 2])
+    # The box comes to rest on the cloth, in its contact band, the contact keeping the cloth off the ground
+    assert (torch.stack(box_vz[-20:]).abs() < 1e-6).all()
+    verts = cloth.get_verts_pos()
+    is_under_box = (verts[..., :2].abs() < 0.5 * BOX_SIZE).all(dim=-1)
+    gaps_min = (
+        box.get_pos()[..., 2] - 0.5 * BOX_SIZE - torch.where(is_under_box, verts[..., 2], -1.0).max(dim=-1).values
+    )
+    assert ((CONTACT_THICKNESS < gaps_min) & (gaps_min < CONTACT_THICKNESS + D_HAT)).all()
+    assert (verts[..., 2] > CONTACT_THICKNESS).all()
+
+
+@pytest.mark.required
+# Double precision, see test_cloth_contact_between_cloths
+@pytest.mark.precision("64")
+def test_cloth_robot_contact(cloth_grid_obj_factory, tmp_path, show_viewer):
+    N_GRID = 12
+    SUPPORT_SIZE = 0.05
+    BRIDGE_CENTER = (0.55, 0.0, 0.44)
+    HOME_QPOS = (0.0, 0.0, 0.0, -1.5708, 0.0, 1.5708, -0.7854, 0.04, 0.04)
+    # The center between the fingertip pads of the Panda lies on the z axis of its hand, 0.1034 m from its origin
+    FINGERTIPS_OFFSET = 0.1034
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+        ),
+        ipc_options=gs.options.IPCOptions(
+            d_hat=1e-3,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.45, -1.25, 1.05),
+            camera_lookat=(0.52, 0.0, 0.48),
+        ),
+        show_viewer=show_viewer,
+    )
+    franka = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        ),
+    )
+    # A cloth bridging two fixed supports 12 cm apart, the gripper grasping it in the gap between them
+    for x in (BRIDGE_CENTER[0] - 0.085, BRIDGE_CENTER[0] + 0.085):
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                size=(SUPPORT_SIZE, SUPPORT_SIZE, SUPPORT_SIZE),
+                pos=(x, 0.0, BRIDGE_CENTER[2] - 0.5 * SUPPORT_SIZE),
+                fixed=True,
+            ),
+        )
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cloth_grid_obj_factory(N_GRID),
+            scale=0.32,
+            pos=(BRIDGE_CENTER[0], BRIDGE_CENTER[1], BRIDGE_CENTER[2] + 0.03),
+        ),
+        material=gs.materials.FEM.Cloth(
+            E=2e4,
+            shear_modulus=2e3,
+            bending_E=3e3,
+            friction_mu=2.0,
+        ),
+    )
+    scene.build(n_envs=2)
+
+    arm_dofs, finger_dofs = range(7), range(7, 9)
+    franka.set_qpos(HOME_QPOS)
+    franka.set_dofs_kp((4500, 4500, 3500, 3500, 2000, 2000, 2000), dofs_idx_local=arm_dofs)
+    franka.set_dofs_kv((450, 450, 350, 350, 200, 200, 200), dofs_idx_local=arm_dofs)
+    franka.set_dofs_force_range(-400.0, 400.0, dofs_idx_local=arm_dofs)
+    franka.set_dofs_kp(500.0, dofs_idx_local=finger_dofs)
+    franka.set_dofs_kv(20.0, dofs_idx_local=finger_dofs)
+    franka.set_dofs_force_range(-100.0, 100.0, dofs_idx_local=finger_dofs)
+    hand = franka.get_link("hand")
+
+    # The patch of the cloth around its center, a 5 cm square, which the fingertips pinch
+    bridge = torch.tensor(BRIDGE_CENTER, dtype=gs.tc_float, device=gs.device)
+    is_patch = ((cloth.init_positions[:, :2] - bridge[:2]).abs() < 0.027).all(dim=-1)
+    # The fingertips center hovers above the bridge, descends into the gap below the cloth, holds while the fingers
+    # close, lifts, carries the cloth sideways and holds while the fingers open, moving linearly from where it is to
+    # each target, the hand facing down
+    grasp = bridge + torch.tensor((0.0, 0.0, -0.018), dtype=gs.tc_float, device=gs.device)
+    lift_target = grasp + torch.tensor((0.0, 0.0, 0.16), dtype=gs.tc_float, device=gs.device)
+    transport_target = lift_target + torch.tensor((-0.14, 0.1, 0.0), dtype=gs.tc_float, device=gs.device)
+    phases = (
+        (30, bridge + torch.tensor((0.0, 0.0, 0.2), dtype=gs.tc_float, device=gs.device), 0.04, 0.04),
+        (50, grasp, 0.04, 0.04),
+        (40, grasp, 0.0, 0.0),
+        (40, lift_target, 0.0, 0.0),
+        (40, transport_target, 0.0, 0.0),
+        (15, transport_target, 0.0, 0.04),
+    )
+    # The cloth settles on the supports, the arm at its home pose
+    for _ in range(20):
+        franka.control_dofs_position(HOME_QPOS)
+        scene.step()
+    patches_center = [cloth.get_verts_pos()[:, is_patch].mean(dim=1)]
+    hand_offset = torch.tensor((0.0, 0.0, FINGERTIPS_OFFSET), dtype=gs.tc_float, device=gs.device)
+    for n_steps, center_target, fingers_start, fingers_target in phases:
+        center_start = hand.get_pos() + gu.transform_by_quat(hand_offset.expand(2, 3), hand.get_quat())
+        for i_step in range(n_steps):
+            alpha = (i_step + 1) / n_steps
+            qpos = franka.inverse_kinematics(
+                link=hand,
+                pos=(1.0 - alpha) * center_start + alpha * center_target + hand_offset,
+                quat=torch.tensor((0.0, 1.0, 0.0, 0.0), dtype=gs.tc_float, device=gs.device).expand(2, 4),
+                init_qpos=franka.get_qpos(),
+                max_samples=1,
+                max_solver_iters=12,
+                damping=0.05,
+                max_step_size=0.1,
+                dofs_idx_local=arm_dofs,
+            )
+            franka.control_dofs_position(qpos[:, :7], dofs_idx_local=arm_dofs)
+            franka.control_dofs_position(
+                (1.0 - alpha) * fingers_start + alpha * fingers_target, dofs_idx_local=finger_dofs
+            )
+            scene.step()
+        patches_center.append(cloth.get_verts_pos()[:, is_patch].mean(dim=1))
+    settled, lifted, transported, released = (patches_center[i] for i in (0, 4, 5, 6))
+    # The closed fingers lift the patch, carry it sideways and let it fall once they open
+    assert ((lifted[:, 2] - settled[:, 2]) > 0.04).all()
+    assert ((transported[:, :2] - lifted[:, :2]).norm(dim=-1) > 0.05).all()
+    assert ((transported[:, 2] - released[:, 2]) > 0.005).all()
+
+    # The cloth never crosses itself: its final shape passes the check of crossing cloths
+    scene_check = gs.Scene(ipc_options=gs.options.IPCOptions(intersection_check=True))
+    path = str(tmp_path / "cloth.obj")
+    faces = igl.read_triangle_mesh(cloth_grid_obj_factory(N_GRID))[1]
+    igl.write_triangle_mesh(path, tensor_to_array(cloth.get_verts_pos()[0], dtype=gs.np_float), faces)
+    scene_check.add_entity(morph=gs.morphs.Mesh(file=path), material=gs.materials.FEM.Cloth())
+    scene_check.build()
+
+
+@pytest.mark.required
+def test_cloth_unsupported_scenes(cloth_grid_obj_path, box_obj_path):
+    scene = gs.Scene(mpm_options=gs.options.MPMOptions(use_implicit_solver=True))
+    scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
+    scene.add_entity(
+        morph=gs.morphs.Box(pos=(0.0, 0.0, 0.5), size=(0.1, 0.1, 0.1)), material=gs.materials.MPM.Elastic()
+    )
+    with pytest.raises(gs.GenesisException, match="together with the implicit MPM solver"):
+        scene.build()
+
+    scene = gs.Scene()
+    scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
+    scene.add_entity(morph=gs.morphs.Mesh(file=box_obj_path, pos=(0.0, 0.0, 1.0)), material=gs.materials.FEM.Elastic())
+    with pytest.raises(gs.GenesisException, match="together with volumetric FEM entities"):
+        scene.build()
+
+    scene = gs.Scene(rigid_options=gs.options.RigidOptions(integrator=gs.integrator.implicitfast))
+    scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
+    scene.add_entity(morph=gs.morphs.Box(pos=(0.0, 0.0, 1.0), size=(0.1, 0.1, 0.1)))
+    with pytest.raises(gs.GenesisException, match="does not support RigidOptions"):
+        scene.build()
+
+    scene = gs.Scene(rigid_options=gs.options.RigidOptions(use_hibernation=True))
+    scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
+    scene.add_entity(morph=gs.morphs.Box(pos=(0.0, 0.0, 1.0), size=(0.1, 0.1, 0.1)))
+    with pytest.raises(gs.GenesisException, match="use_hibernation=False"):
+        scene.build()
+
+    scene = gs.Scene(sim_options=gs.options.SimOptions(requires_grad=True))
+    scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
+    with pytest.raises(gs.GenesisException, match="requires_grad=True"):
+        scene.build()
+
+    scene = gs.Scene(coupler_options=gs.options.SAPCouplerOptions())
+    scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
+    with pytest.raises(gs.GenesisException, match="requires LegacyCouplerOptions"):
+        scene.build()
+
+    scene = gs.Scene(ipc_options=gs.options.IPCOptions(), coupler_options=gs.options.SAPCouplerOptions())
+    with pytest.raises(gs.GenesisException, match="IPCOptions configure the contact of the cloth"):
+        scene.build()
+
+    scene = gs.Scene(ipc_options=gs.options.IPCOptions(intersection_check=True))
+    scene.add_entity(
+        morph=gs.morphs.Mesh(file=cloth_grid_obj_path, pos=(0.0, 0.0, 0.5)), material=gs.materials.FEM.Cloth()
+    )
+    scene.add_entity(
+        morph=gs.morphs.Mesh(file=cloth_grid_obj_path, pos=(0.0, 0.0, 0.5), euler=(90.0, 0.0, 0.0)),
+        material=gs.materials.FEM.Cloth(),
+    )
+    with pytest.raises(gs.GenesisException, match="The cloth starts crossed"):
+        scene.build()
+
+    scene = gs.Scene()
+    cloth = scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
+    box = scene.add_entity(morph=gs.morphs.Box(pos=(0.0, 0.0, 1.0), size=(0.1, 0.1, 0.1)))
+    scene.build()
+    with pytest.raises(gs.GenesisException, match="moves within the same solve as the cloth"):
+        cloth.set_vertex_constraints(verts_idx_local=[0], link=box.base_link)
+    with pytest.raises(gs.GenesisException, match="must be non-negative"):
+        cloth.set_vertex_constraints(verts_idx_local=[0], is_soft_constraint=True, stiffness=-1.0)

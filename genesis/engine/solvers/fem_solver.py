@@ -10,9 +10,21 @@ import igl
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.geom as gu
 import genesis.utils.simt as su
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
+from genesis.engine.materials.FEM.cloth import (
+    func_baraff_witkin_energy,
+    func_baraff_witkin_gradient_hessian,
+    func_dihedral_angle,
+    func_dihedral_bending_energy,
+    func_dihedral_bending_gradient_hessian,
+    func_quadratic_bending_energy,
+    func_quadratic_bending_gradient_hessian,
+    func_triangle_deformation_gradient,
+    func_triangle_gradient_hessian,
+)
 from genesis.engine.materials.FEM.elastic import (
     FEMModel,
     func_linear_corotated_energy,
@@ -33,6 +45,8 @@ from genesis.engine.materials.FEM.muscle import (
     func_muscle_fiber_stress,
     func_muscle_stress,
 )
+from genesis.engine.numerics.bcoo import func_add_by_key, func_write_triplet
+from genesis.engine.numerics.newton_rows import NewtonRows, NewtonSegment
 from genesis.engine.solvers.rigid.data import LinksState
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
@@ -73,6 +87,7 @@ from .base_solver import (
     kernel_get_values,
     kernel_set_actu,
 )
+from .ipc_contact import IPCInfo, IPCState, IPCSurfacePrimitives, surface_area_weights
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
@@ -135,6 +150,13 @@ COROTATED = "corotated"
 MUSCLE_FIBERS = "muscle_fibers"
 # The corners of the elements gathered by vertex, which the GPU kernels walk (see 'vertices_corners_idx')
 CORNER_BLOCKS = "corner_blocks"
+# The cloth solved by the Newton solver (see 'FEMSolver.is_solved_in_global_newton'), and its bending of each model
+CLOTH = "cloth"
+QUADRATIC_BENDING = "quadratic_bending"
+DIHEDRAL_BENDING = "dihedral_bending"
+CLOTH_TRIANGLES = Size("cloth_triangles")
+QUADRATIC_HINGES = Size("quadratic_hinges")
+DIHEDRAL_HINGES = Size("dihedral_hinges")
 
 
 class FEMVertices(Data, kind=DataKind.STATE, shape=(VERTICES, ENVS)):
@@ -284,6 +306,27 @@ class FEMVVertsRender(Data, kind=DataKind.SCRATCH, shape=(VVERTS, ENVS)):
     pos: qd.Tensor = field((float, 3))
 
 
+class FEMClothVertices(Data, kind=DataKind.SCRATCH, shape=(VERTICES, ENVS)):
+    """
+    The vertices of the cloth in the Newton solve of a substep, whose unknown is the position `pos_next` of every vertex
+    (see FEMVertices).
+
+    `pos_tilde` is the position the vertex reaches without forces, x + dt v + dt^2 g, `is_fixed` whether a constraint
+    holds it fixed, its row staying fixed, and `pos_start` and `displacement` the start point and the direction of the
+    line search. A constrained vertex is pulled toward `target_pos` by the potential 1/2 `constraint_mass` |x -
+    target_pos|^2 while it is not fixed, `is_kinematic` saying that a hard constraint drives it without inertia (see
+    'kernel_cloth_predict').
+    """
+
+    pos_tilde: qd.Tensor = field((float, 3))
+    is_fixed: qd.Tensor = field(bool)
+    pos_start: qd.Tensor = field((float, 3))
+    displacement: qd.Tensor = field((float, 3))
+    is_kinematic: qd.Tensor = field(bool)
+    target_pos: qd.Tensor = field((float, 3))
+    constraint_mass: qd.Tensor = field(float)
+
+
 class FEMState(Data, kind=DataKind.STATE):
     """Runtime state of the finite element method (FEM) solver."""
 
@@ -297,6 +340,7 @@ class FEMState(Data, kind=DataKind.STATE):
     coarse_solve: FEMCoarseSolve = field(labels=IMPLICIT)
     solve_loops: FEMSolveLoops = field(labels=IMPLICIT)
     vverts_render: FEMVVertsRender
+    cloth_vertices: FEMClothVertices = field(labels=CLOTH)
 
 
 class FEMElementsInfo(Data, kind=DataKind.CONSTANT, shape=(ELEMENTS,)):
@@ -345,6 +389,42 @@ class FEMSurfacesInfo(Data, kind=DataKind.CONSTANT, shape=(SURFACES,)):
 
     tri2v: qd.Tensor = field((int, 3))
     tri2el: qd.Tensor = field(int)
+
+
+class FEMClothTriangles(Data, kind=DataKind.CONSTANT, shape=(CLOTH_TRIANGLES,)):
+    """
+    The membrane triangles of the cloth solved by the Newton solver (see 'func_baraff_witkin_energy' in
+    materials/FEM/cloth.py).
+
+    `rest_inv` is the inverse of the edges of a triangle at rest in its own plane, `volume` its rest area times the
+    thickness of the shell, and the stiffnesses those of its material.
+    """
+
+    verts_idx: qd.Tensor = field((int, 3))
+    rest_inv: qd.Tensor = field((float, (2, 2)))
+    volume: qd.Tensor = field(float)
+    stretch_stiffness: qd.Tensor = field(float)
+    shear_stiffness: qd.Tensor = field(float)
+    strain_limit_multiplier: qd.Tensor = field(float)
+
+
+class FEMClothQuadraticHinges(Data, kind=DataKind.CONSTANT, shape=(QUADRATIC_HINGES,)):
+    """The hinges of the quadratic bending (see 'func_quadratic_bending_energy' in materials/FEM/cloth.py), their
+    vertices in the order (edge0, edge1, wing0, wing1)."""
+
+    verts_idx: qd.Tensor = field((int, 4))
+    bending_form: qd.Tensor = field((float, (4, 4)))
+    stiffness: qd.Tensor = field(float)
+
+
+class FEMClothDihedralHinges(Data, kind=DataKind.CONSTANT, shape=(DIHEDRAL_HINGES,)):
+    """The hinges of the dihedral bending (see 'func_dihedral_bending_energy' in materials/FEM/cloth.py), their
+    vertices in the order (wing0, edge0, edge1, wing1)."""
+
+    verts_idx: qd.Tensor = field((int, 4))
+    rest_angle: qd.Tensor = field(float)
+    weight: qd.Tensor = field(float)
+    stiffness: qd.Tensor = field(float)
 
 
 class FEMInfo(Data, kind=DataKind.CONSTANT):
@@ -421,6 +501,14 @@ class FEMInfo(Data, kind=DataKind.CONSTANT):
     # cluster.
     coarse_entities_cluster_start: qd.Tensor = field(int, shape=(COARSE_ENTITIES + 1,), labels=IMPLICIT)
     coarse_entities_entry_start: qd.Tensor = field(int, shape=(COARSE_ENTITIES + 1,), labels=IMPLICIT)
+    # The cloth solved by the Newton solver
+    cloth_triangles: FEMClothTriangles = field(labels=CLOTH)
+    cloth_quadratic_hinges: FEMClothQuadraticHinges = field(labels=QUADRATIC_BENDING)
+    cloth_dihedral_hinges: FEMClothDihedralHinges = field(labels=DIHEDRAL_BENDING)
+    # The ratio to its mass of the stiffness of the pull of a hard constraint of the cloth on its vertex, and the
+    # distance from its target within which the vertex is held fixed (see 'kernel_cloth_predict')
+    cloth_constraint_strength_ratio: qd.Tensor = field(float, shape=(), labels=CLOTH)
+    cloth_constraint_pin_dist: qd.Tensor = field(float, shape=(), labels=CLOTH)
 
 
 # TODO: constraints set after a saved state survive 'scene.reset' (see MPMParticleConstraints in mpm_solver.py)
@@ -430,7 +518,8 @@ class FEMVertexConstraints(Data, kind=DataKind.INFO, shape=(CONSTRAINT_SLOTS, EN
 
     A constrained vertex is set to `target_pos`, or pulled toward it by a critically damped spring of stiffness
     `stiffness` for a soft constraint, the target following the rigid link `link_idx` when there is one, at the offset
-    `link_offset_pos` from where the link stood at `link_init_quat`.
+    `link_offset_pos` from where the link stood at `link_init_quat`. A vertex of the cloth is driven toward its target
+    within the Newton solve instead (see 'kernel_cloth_predict').
     """
 
     # Slot of the constraint of each vertex, -1 for a free vertex, and slots in use by environment
@@ -467,6 +556,11 @@ class FEMConfig(Config):
     has_linear_corotated: bool
     shared_model: int
     has_muscle: bool
+    # Whether the entities are cloth solved by the Newton solver (see 'FEMSolver.is_solved_in_global_newton'), and
+    # whether some cloth bends by the quadratic or the dihedral model
+    has_cloth: bool
+    has_quadratic_bending: bool
+    has_dihedral_bending: bool
 
 
 class FEMClusters(NamedTuple):
@@ -482,18 +576,45 @@ class FEMClusters(NamedTuple):
     coarse_entities_entry_start: np.ndarray
 
 
+class FEMClothRest(NamedTuple):
+    """The cloth solved by the Newton solver at rest, from the entities (see FEMInfo), one row per item."""
+
+    triangles_verts_idx: np.ndarray
+    triangles_rest_inv: np.ndarray
+    triangles_volume: np.ndarray
+    triangles_stretch_stiffness: np.ndarray
+    triangles_shear_stiffness: np.ndarray
+    triangles_strain_limit_multiplier: np.ndarray
+    quadratic_hinges_verts_idx: np.ndarray
+    quadratic_hinges_bending_form: np.ndarray
+    quadratic_hinges_stiffness: np.ndarray
+    dihedral_hinges_verts_idx: np.ndarray
+    dihedral_hinges_rest_angle: np.ndarray
+    dihedral_hinges_weight: np.ndarray
+    dihedral_hinges_stiffness: np.ndarray
+    vertices_mass: np.ndarray
+
+
 class FEMData(Data):
     """Every array of the FEM solver but its vertex constraints, allocated from the solver once its scene is built.
 
     `n_surface_vertices` and `n_surface_elements` are the numbers of vertices and elements on the surface of the
-    entities, which the solver derives from their topology, and `clusters` the clusters of their vertices.
+    entities, which the solver derives from their topology, `clusters` the clusters of their vertices, and
+    `cloth_rest` the cloth solved by the Newton solver at rest, None without it.
     """
 
     fem_info: FEMInfo
     fem_state: FEMState
     errno: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
 
-    def __init__(self, solver: "FEMSolver", n_surface_vertices: int, n_surface_elements: int, clusters: FEMClusters):
+    def __init__(
+        self,
+        solver: "FEMSolver",
+        n_surface_vertices: int,
+        n_surface_elements: int,
+        clusters: FEMClusters,
+        cloth_rest: FEMClothRest | None,
+    ):
         config = solver.fem_config
         is_implicit = config.use_implicit_solver
         info_values = {}
@@ -524,12 +645,27 @@ class FEMData(Data):
                     # The elimination runs in single precision (see 'FEMCoarseSolve')
                     coarse_pivot_rtol=1e-4,
                 )
+            if config.has_cloth:
+                ipc_options = solver._scene.options.ipc
+                velocity_tol = solver._scene.options.newton.velocity_tol
+                info_values.update(
+                    cloth_constraint_strength_ratio=ipc_options.vertex_constraint_strength_ratio,
+                    cloth_constraint_pin_dist=ipc_options.vertex_constraint_fix_tol * velocity_tol * substep_dt,
+                )
             unused = {
                 IMPLICIT: not is_implicit,
                 COROTATED: not config.has_linear_corotated,
                 MUSCLE_FIBERS: not (is_implicit and config.has_muscle),
                 CORNER_BLOCKS: not config.enable_cooperative_kernels and not is_implicit,
+                CLOTH: not config.has_cloth,
+                QUADRATIC_BENDING: not config.has_quadratic_bending,
+                DIHEDRAL_BENDING: not config.has_dihedral_bending,
             }
+        n_cloth_triangles, n_quadratic_hinges, n_dihedral_hinges = 0, 0, 0
+        if cloth_rest is not None:
+            n_cloth_triangles = len(cloth_rest.triangles_verts_idx)
+            n_quadratic_hinges = len(cloth_rest.quadratic_hinges_verts_idx)
+            n_dihedral_hinges = len(cloth_rest.dihedral_hinges_verts_idx)
         super().__init__(
             sizes=dict(
                 envs=solver._B,
@@ -545,10 +681,18 @@ class FEMData(Data):
                 clusters_elements=len(clusters.clusters_elements_idx),
                 coarse_entities=len(clusters.coarse_entities_cluster_start) - 1,
                 coarse_entries=clusters.coarse_entities_entry_start[-1],
+                cloth_triangles=n_cloth_triangles,
+                quadratic_hinges=n_quadratic_hinges,
+                dihedral_hinges=n_dihedral_hinges,
             ),
             values=dict(fem_info=info_values),
             env_first={
-                (FEMData.fem_state.vertices, FEMData.fem_state.elements, FEMData.fem_state.vverts_render): False,
+                (
+                    FEMData.fem_state.vertices,
+                    FEMData.fem_state.elements,
+                    FEMData.fem_state.vverts_render,
+                    FEMData.fem_state.cloth_vertices,
+                ): False,
                 (
                     FEMData.fem_state.elements_material,
                     FEMData.fem_state.elements_energy,
@@ -647,6 +791,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             and enable_cooperative_kernels
             and 2 * self._B * get_gpu_cores_per_unit() >= get_gpu_core_count()
         )
+        cloth_rest = self._build_cloth_rest() if self.is_solved_in_global_newton else None
         self.fem_config = FEMConfig(
             use_implicit_solver=self._use_implicit_solver,
             enable_cooperative_kernels=enable_cooperative_kernels,
@@ -665,6 +810,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             # multiprocessor with them, which runs faster with the test there.
             shared_model=next(iter(models)) if len(models) == 1 and not is_pcg_solved_per_env_block else -1,
             has_muscle=any([isinstance(material, FEM.Muscle) for material in materials]),
+            has_cloth=cloth_rest is not None,
+            has_quadratic_bending=cloth_rest is not None and len(cloth_rest.quadratic_hinges_verts_idx) > 0,
+            has_dihedral_bending=cloth_rest is not None and len(cloth_rest.dihedral_hinges_verts_idx) > 0,
         )
 
         is_active = self.is_active
@@ -730,7 +878,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             coarse_entities_cluster_start=np.concatenate(([0], np.cumsum(entities_n_clusters))),
             coarse_entities_entry_start=coarse_entities_entry_start,
         )
-        self.data_manager = FEMData(self, len(surface_vertices), len(surface_elements), clusters)
+        self.data_manager = FEMData(self, len(surface_vertices), len(surface_elements), clusters, cloth_rest)
         self.fem_state = self.data_manager.fem_state
         self.fem_info = self.data_manager.fem_info
         self.register_errors(
@@ -796,6 +944,26 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     (self.fem_info.coarse_entities_cluster_start, clusters.coarse_entities_cluster_start),
                     (self.fem_info.coarse_entities_entry_start, clusters.coarse_entities_entry_start),
                 ]
+            if cloth_rest is not None:
+                cloth_triangles = self.fem_info.cloth_triangles
+                quadratic_hinges = self.fem_info.cloth_quadratic_hinges
+                dihedral_hinges = self.fem_info.cloth_dihedral_hinges
+                topology_values += [
+                    (cloth_triangles.verts_idx, cloth_rest.triangles_verts_idx),
+                    (cloth_triangles.rest_inv, cloth_rest.triangles_rest_inv),
+                    (cloth_triangles.volume, cloth_rest.triangles_volume),
+                    (cloth_triangles.stretch_stiffness, cloth_rest.triangles_stretch_stiffness),
+                    (cloth_triangles.shear_stiffness, cloth_rest.triangles_shear_stiffness),
+                    (cloth_triangles.strain_limit_multiplier, cloth_rest.triangles_strain_limit_multiplier),
+                    (quadratic_hinges.verts_idx, cloth_rest.quadratic_hinges_verts_idx),
+                    (quadratic_hinges.bending_form, cloth_rest.quadratic_hinges_bending_form),
+                    (quadratic_hinges.stiffness, cloth_rest.quadratic_hinges_stiffness),
+                    (dihedral_hinges.verts_idx, cloth_rest.dihedral_hinges_verts_idx),
+                    (dihedral_hinges.rest_angle, cloth_rest.dihedral_hinges_rest_angle),
+                    (dihedral_hinges.weight, cloth_rest.dihedral_hinges_weight),
+                    (dihedral_hinges.stiffness, cloth_rest.dihedral_hinges_stiffness),
+                    (self.fem_info.vertices.mass, cloth_rest.vertices_mass),
+                ]
             # An empty array keeps the single slot every array is sized to at least, which no kernel reads
             for array, values in topology_values:
                 if len(values) == 0:
@@ -810,6 +978,143 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             kernel_clear_vertex_constraints(self.vertex_constraints)
 
         self._build_gravity(self.fem_info.gravity)
+
+    def _build_cloth_rest(self) -> FEMClothRest:
+        """
+        Compute the cloth solved by the Newton solver at rest, from the initial positions of its entities.
+
+        Every triangle reads its edges in its own plane, rotated onto the xy plane by the shortest rotation taking its
+        normal onto +z, which sets the stretch axes of its membrane, an antiparallel normal keeping the x and y axes
+        reversed. A vertex carries a third of the mass of the triangles around it, the shell being 2 * thickness thick.
+        The hinges, the edges shared by exactly two triangles, follow the increasing order of their vertices, the wings
+        in the order of their triangles.
+        """
+        entities_rest = []
+        for entity in self._entities:
+            material = entity.material
+            pos = tensor_to_array(entity.init_positions, dtype=gs.np_float)
+            tris = entity.elems
+            n_tris = len(tris)
+            edge_a, edge_b = pos[tris[:, 1]] - pos[tris[:, 0]], pos[tris[:, 2]] - pos[tris[:, 0]]
+            normals = np.cross(edge_a, edge_b)
+            areas = 0.5 * np.linalg.norm(normals, axis=-1)
+            if not (areas > 0.0).all():
+                gs.raise_exception("The triangles of a cloth must have a positive area. Check the input mesh.")
+            unit_normals = normals / (2.0 * areas[:, None])
+            rotations = gu.z_to_R(unit_normals).swapaxes(-1, -2)
+            rotations[unit_normals[:, 2] + 1.0 < 1e-12] = np.diag([-1.0, -1.0, 1.0])
+            rest_edges = np.stack((rotations @ edge_a[..., None], rotations @ edge_b[..., None]), axis=-1)[:, :2, 0]
+            thickness = material.thickness
+            shear_modulus = material.E / 2.0 if material.shear_modulus is None else material.shear_modulus
+            vertices_mass = np.zeros(entity.n_vertices, dtype=gs.np_float)
+            np.add.at(vertices_mass, tris, (2.0 * thickness * material.rho / 3.0 * areas)[:, None])
+
+            # The hinges: every edge of a triangle with the vertex opposite to it, grouped by edge
+            corners = tris[:, ((0, 1, 2), (1, 2, 0), (2, 0, 1))].reshape((-1, 3))
+            edges = np.sort(corners[:, :2], axis=-1)
+            order = np.lexsort((edges[:, 1], edges[:, 0]))
+            _, edges_start, edges_count = np.unique(edges[order], axis=0, return_index=True, return_counts=True)
+            first, second = order[edges_start[edges_count == 2]], order[edges_start[edges_count == 2] + 1]
+            edge0, edge1, wing0, wing1 = edges[first, 0], edges[first, 1], corners[first, 2], corners[second, 2]
+            # Flexural rigidity of the shell, of no Poisson effect
+            bending_E = material.E if material.bending_E is None else material.bending_E
+            rigidity = bending_E * (2.0 * thickness) ** 3 / 12.0
+            is_bending = bending_E > 0.0
+            # The quadratic bending form Q0 = K0 K0^T / (A0 + A1) of the cotangents of the angles at the edge
+            x_i, x_j, x_k, x_l = pos[edge0], pos[edge1], pos[wing0], pos[wing1]
+            cotangents = []
+            for u, v in (
+                (x_j - x_i, x_k - x_i),
+                (x_j - x_i, x_l - x_i),
+                (x_i - x_j, x_k - x_j),
+                (x_i - x_j, x_l - x_j),
+            ):
+                cross_norm = np.linalg.norm(np.cross(u, v), axis=-1)
+                cotangents.append(
+                    np.where(cross_norm > 1e-30, (u * v).sum(axis=-1) / np.maximum(cross_norm, 1e-30), 0.0)
+                )
+            c01, c02, c03, c04 = cotangents
+            K0 = np.stack((c03 + c04, c01 + c02, -c01 - c03, -c02 - c04), axis=-1)
+            area_sum = 0.5 * (
+                np.linalg.norm(np.cross(x_j - x_i, x_k - x_i), axis=-1)
+                + np.linalg.norm(np.cross(x_j - x_i, x_l - x_i), axis=-1)
+            )
+            bending_form = np.where(
+                (area_sum > 1e-30)[:, None, None],
+                K0[:, :, None] * K0[:, None, :] / np.maximum(area_sum, 1e-30)[:, None, None],
+                0.0,
+            )
+            is_quadratic = (material.bending == "quadratic" and is_bending) & bending_form.any(axis=(-1, -2))
+            # The dihedral weight |e|^2 / (A0 + A1) and the rest angle of the hinge (wing0, edge0, edge1, wing1)
+            normal0, normal1 = np.cross(x_i - x_k, x_j - x_k), np.cross(x_j - x_l, x_i - x_l)
+            edge = x_j - x_i
+            area_sum = 0.5 * (np.linalg.norm(normal0, axis=-1) + np.linalg.norm(normal1, axis=-1))
+            weight = np.where(area_sum > 1e-30, (edge * edge).sum(axis=-1) / np.maximum(area_sum, 1e-30), 0.0)
+            rest_angle = np.arctan2(
+                (np.cross(normal0, normal1) * edge).sum(axis=-1) / np.linalg.norm(edge, axis=-1),
+                (normal0 * normal1).sum(axis=-1),
+            )
+            is_dihedral = (material.bending == "hinge" and is_bending) & (weight > 0.0)
+
+            entities_rest.append(
+                FEMClothRest(
+                    triangles_verts_idx=tris + entity.v_start,
+                    triangles_rest_inv=np.linalg.inv(rest_edges),
+                    triangles_volume=2.0 * areas * thickness,
+                    triangles_stretch_stiffness=np.full(n_tris, material.E / 2.0, dtype=gs.np_float),
+                    triangles_shear_stiffness=np.full(n_tris, shear_modulus / 2.0, dtype=gs.np_float),
+                    triangles_strain_limit_multiplier=np.full(
+                        n_tris, material.strain_limit_multiplier, dtype=gs.np_float
+                    ),
+                    quadratic_hinges_verts_idx=np.stack((edge0, edge1, wing0, wing1), axis=-1)[is_quadratic]
+                    + entity.v_start,
+                    quadratic_hinges_bending_form=bending_form[is_quadratic],
+                    quadratic_hinges_stiffness=np.full(is_quadratic.sum(), rigidity, dtype=gs.np_float),
+                    dihedral_hinges_verts_idx=np.stack((wing0, edge0, edge1, wing1), axis=-1)[is_dihedral]
+                    + entity.v_start,
+                    dihedral_hinges_rest_angle=rest_angle[is_dihedral],
+                    dihedral_hinges_weight=weight[is_dihedral],
+                    dihedral_hinges_stiffness=np.full(is_dihedral.sum(), 0.5 * rigidity, dtype=gs.np_float),
+                    vertices_mass=vertices_mass,
+                )
+            )
+        return FEMClothRest(*[np.concatenate(arrays) for arrays in zip(*entities_rest)])
+
+    def build_cloth_contact_surface(self) -> IPCSurfacePrimitives:
+        """
+        Compute the contact primitives the cloth publishes into the contact surface (see 'IPCSurfacePrimitives' in
+        genesis/engine/solvers/ipc_contact.py), from the initial positions and the materials of its entities.
+
+        The vertices keep their indices in the solver. A vertex stands for a third of the area of the triangles around
+        it, an edge likewise and a triangle for its area, and its contact thickness defaults to the thickness of its
+        shell. Every cloth entity is a contact body, in the order of the entities.
+        """
+        d_hat = self._scene.options.ipc.d_hat
+        entities_primitives = []
+        for i_body, entity in enumerate(self._entities):
+            material = entity.material
+            pos = tensor_to_array(entity.init_positions, dtype=gs.np_float)
+            areas, edges_verts_idx, edges_area_weight, edges_rest_length2, vertices_area_weight = surface_area_weights(
+                pos, entity.elems
+            )
+            thickness = material.thickness if material.contact_thickness is None else material.contact_thickness
+            entities_primitives.append(
+                IPCSurfacePrimitives(
+                    vertices_thickness=np.full(entity.n_vertices, thickness, dtype=gs.np_float),
+                    vertices_d_hat=np.full(entity.n_vertices, d_hat, dtype=gs.np_float),
+                    vertices_area_weight=vertices_area_weight,
+                    vertices_resistance=np.full(entity.n_vertices, material.contact_resistance, dtype=gs.np_float),
+                    vertices_friction_mu=np.full(entity.n_vertices, material.friction_mu, dtype=gs.np_float),
+                    vertices_body_idx=np.full(entity.n_vertices, i_body, dtype=gs.np_int),
+                    vertices_is_rigid=np.zeros(entity.n_vertices, dtype=bool),
+                    edges_verts_idx=edges_verts_idx + entity.v_start,
+                    edges_area_weight=edges_area_weight,
+                    edges_rest_length2=edges_rest_length2,
+                    triangles_verts_idx=entity.elems + entity.v_start,
+                    triangles_area_weight=areas,
+                )
+            )
+        return IPCSurfacePrimitives(*[np.concatenate(arrays) for arrays in zip(*entities_primitives)])
 
     def reset_grad(self) -> None:
         if self._requires_grad:
@@ -875,12 +1180,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         )
 
     def add_cloth(self, v_start: int, s_start: int, verts: np.ndarray, tri2v: np.ndarray, tri2el: np.ndarray) -> None:
-        """
-        Add cloth vertices and surface triangles to the solver, for position tracking and coupling only.
-
-        Cloth elements and mass are owned by the incremental potential contact (IPC) coupler, so the vertex info holds
-        placeholder values and each surface triangle references itself as element.
-        """
+        """Add the vertices and the surface triangles of a cloth entity at rest, each triangle referencing itself as
+        element."""
         kernel_add_cloth(v_start, s_start, verts, tri2v, tri2el, self.fem_state, self.fem_info)
 
     def add_vverts(
@@ -902,13 +1203,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def substep_pre_coupling(self) -> None:
         if not self.is_active:
             return
-        # The IPC coupler simulates the FEM entities itself. Imported here to avoid a circular dependency, the couplers
-        # depending on the solvers.
-        from genesis.engine.couplers import IPCCoupler
-
-        if isinstance(self._sim.coupler, IPCCoupler):
-            return
         links_state = self._sim.rigid_solver.dyn_state.links
+        if self.fem_config.has_cloth:
+            # The Newton solver solves the substep from the prediction (see NewtonSolver)
+            kernel_cloth_predict(self.fem_state, links_state, self.fem_info, self.vertex_constraints)
+            return
         if self._use_implicit_solver:
             kernel_precompute_material_data(self.fem_state, self.fem_info, self.fem_config)
             kernel_init_pos_and_inertia(self.fem_state, links_state, self.fem_info, self.vertex_constraints)
@@ -938,6 +1237,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def substep_post_coupling(self) -> None:
         if not self.is_active:
+            return
+        if self.fem_config.has_cloth:
+            kernel_cloth_finish(self.fem_state, self.fem_info, self._sim.newton_solver._errno, self._errno)
+            kernel_copy_next_to_curr(self.fem_state)
             return
         kernel_compute_pos(self.fem_state, self.fem_info, self._errno)
         if not self._use_implicit_solver:
@@ -1053,8 +1356,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         Get the internal elastic force on every vertex, computed from the current state.
 
         The force of each element follows the material model of the solver in use, and the forces of a body sum to zero.
-        Damping, gravity and contact forces are left out. With the incremental potential contact (IPC) coupler, which
-        simulates the FEM entities itself, it raises an exception.
+        Damping, gravity and contact forces are left out.
 
         Returns
         -------
@@ -1063,12 +1365,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         """
         if not self.is_active:
             return None
-        # Imported here to avoid a circular dependency (see 'substep_pre_coupling')
-        from genesis.engine.couplers import IPCCoupler
-
-        # The IPC coupler simulates the FEM entities with its own models, and leaves the elements of Cloth ones empty.
-        if isinstance(self._sim.coupler, IPCCoupler):
-            gs.raise_exception("The internal forces of FEM entities are not available with the IPC coupler.")
 
         # The linear corotated model takes the rotation of each element from the current state
         if self._use_implicit_solver:
@@ -1202,12 +1498,26 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             Stiffness k of the springs of a soft constraint, in N/m. Defaults to 0.0.
         envs_idx : None | int | array_like, shape (M,), optional
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
-        """
-        # Imported here to avoid a circular dependency (see 'substep_pre_coupling')
-        from genesis.engine.couplers import IPCCoupler
 
-        if isinstance(self._sim.coupler, IPCCoupler):
-            gs.raise_exception("Vertex constraints are not supported by the IPC coupler.")
+        Notes
+        -----
+        The vertices of a cloth move toward their targets within its solve, so that its contact stops them short of
+        crossing a surface rather than letting them jump there. A hard constraint drives its vertices without inertia,
+        as stiffly as 'IPCOptions.vertex_constraint_strength_ratio' sets, and holds each one fixed once it reaches its
+        target within 'IPCOptions.vertex_constraint_fix_tol'. A target at the current position of its vertex holds it
+        fixed at once. A soft constraint is a spring of stiffness k, without the critical damping of the springs of the
+        other FEM entities. A vertex whose constraint is removed keeps the velocity of its last substep. A cloth vertex
+        cannot follow a link that moves within the same solve.
+        """
+        if self.fem_config.has_cloth:
+            if stiffness < 0.0:
+                gs.raise_exception(f"The stiffness of a vertex constraint must be non-negative, got {stiffness}.")
+            rigid_solver = self._sim.rigid_solver
+            if link_idx >= 0 and rigid_solver.is_solved_in_global_newton and not rigid_solver.links[link_idx].is_fixed:
+                gs.raise_exception(
+                    f"A cloth vertex cannot follow the link '{rigid_solver.links[link_idx].name}', which moves within the "
+                    "same solve as the cloth."
+                )
 
         is_target_current = target_poss is None
         target_poss, verts_idx, envs_idx = self._sanitize_io_variables(
@@ -1283,6 +1593,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     @property
     def damping(self) -> float:
         return self._damping
+
+    @property
+    def is_solved_in_global_newton(self) -> bool:
+        """
+        Whether the entities are cloth whose substeps the Newton solver solves (see NewtonSolver), the positions of their
+        vertices being its unknowns, which they are for every scene holding a 'gs.materials.FEM.Cloth' entity.
+        """
+        return any([isinstance(entity.material, FEM.Cloth) for entity in self._entities])
 
     @property
     def n_vertices(self) -> int:
@@ -3074,6 +3392,456 @@ def kernel_get_forces(
         gather_internal_force=True,
         update_loop_flag=False,
     )
+
+
+# ------------------------------------------------------------------------------------
+# ------------------------------- cloth in the Newton solve --------------------------
+# ------------------------------------------------------------------------------------
+
+# The cloth owns the segment of the rows of its vertices (see NewtonSegment in numerics/newton_rows.py), the row of a
+# vertex following those of the vertices of the previous environments. Its triplets are the diagonal block of every
+# row, then the upper triangle of the blocks of every triangle, of every quadratic hinge and of every dihedral hinge,
+# environment by environment. 'func_cloth_assemble' declares the same counts as locals, the fast cache of a kernel
+# keying on the source of its funcs and missing the module globals they read.
+TRIANGLE_PAIRS = 6
+HINGE_PAIRS = 10
+
+
+@qd.kernel(fastcache=True)
+def kernel_cloth_predict(
+    fem_state: FEMState, links_state: LinksState, fem_info: FEMInfo, vertex_constraints: FEMVertexConstraints
+):
+    """
+    Predict the substep of the cloth, and start its Newton solve at the positions at the start of the substep.
+
+    Every vertex reaches x + dt v + dt^2 g without forces. A constrained vertex is pulled toward its target (see
+    'func_constraint_target') within the solve, so that the contact stops it short of crossing a surface. A hard
+    constraint drives its vertex without inertia, by the stiffness 'cloth_constraint_strength_ratio' times its mass,
+    and holds it fixed once within 'cloth_constraint_pin_dist' of its target, from the start of the substep on or as
+    soon as an iteration brings it there (see 'func_cloth_pin_constraints'). A soft constraint of stiffness k adds the
+    spring dt^2 k to the inertia of its vertex. The constraints are read once per substep, so a vertex released keeps
+    the velocity of its last substep.
+    """
+    dt = fem_info.substep_dt[None]
+    for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape, axes=qd.static(eoa(fem_state.vertices.pos))):
+        pos = fem_state.vertices.pos[i_v, i_b]
+        fem_state.cloth_vertices.pos_tilde[i_v, i_b] = (
+            pos + dt * fem_state.vertices.vel[i_v, i_b] + dt * dt * fem_info.gravity[i_b]
+        )
+        is_kinematic = False
+        is_fixed = False
+        target_pos = pos
+        constraint_mass = gs.qd_float(0.0)
+        # An environment without constraint reads no slot (see 'func_is_vertex_free')
+        i_s = -1
+        if vertex_constraints.envs_n_constraints[i_b] > 0:
+            i_s = vertex_constraints.vertices_slot[i_v, i_b]
+        if i_s >= 0:
+            target_pos = func_constraint_target(i_s, i_b, links_state, vertex_constraints)
+            if vertex_constraints.is_soft_constraint[i_s, i_b]:
+                constraint_mass = dt * dt * vertex_constraints.stiffness[i_s, i_b]
+            else:
+                is_kinematic = True
+                constraint_mass = fem_info.cloth_constraint_strength_ratio[None] * fem_info.vertices.mass[i_v]
+                pin_dist = fem_info.cloth_constraint_pin_dist[None]
+                is_fixed = (pos - target_pos).norm_sqr() < pin_dist * pin_dist
+        fem_state.cloth_vertices.is_kinematic[i_v, i_b] = is_kinematic
+        fem_state.cloth_vertices.is_fixed[i_v, i_b] = is_fixed
+        fem_state.cloth_vertices.target_pos[i_v, i_b] = target_pos
+        fem_state.cloth_vertices.constraint_mass[i_v, i_b] = constraint_mass
+        fem_state.vertices.pos_next[i_v, i_b] = pos
+
+
+@qd.func(requires_top_level=True)
+def func_cloth_pin_constraints(fem_state: FEMState, ipc_state: IPCState, fem_info: FEMInfo):
+    """Hold fixed the vertices of the cloth that a hard constraint drives and that reached their target since the
+    previous iteration of the Newton solve, in the cloth and in the contact surface, before the assembly reads them."""
+    pin_dist = fem_info.cloth_constraint_pin_dist[None]
+    for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape):
+        if fem_state.cloth_vertices.is_kinematic[i_v, i_b] and not fem_state.cloth_vertices.is_fixed[i_v, i_b]:
+            pos_error = fem_state.vertices.pos_next[i_v, i_b] - fem_state.cloth_vertices.target_pos[i_v, i_b]
+            if pos_error.norm_sqr() < pin_dist * pin_dist:
+                fem_state.cloth_vertices.is_fixed[i_v, i_b] = True
+                ipc_state.vertices.is_fixed[i_v, i_b] = True
+
+
+@qd.func
+def func_add_stencil_terms(
+    i_b: int,
+    triplet_start: int,
+    row_start: int,
+    verts_idx,
+    gradient,
+    hessian,
+    newton_rows: NewtonRows,
+    fem_state: FEMState,
+):
+    """
+    Add the gradient of an element of the cloth in environment i_b to the rows of its free vertices, and write the
+    blocks of the upper triangle of its Hessian from the triplet `triplet_start` on, a block touching a fixed vertex
+    being zero.
+    """
+    n_vertices = fem_state.vertices.pos.shape[0]
+    n_stencil = qd.static(verts_idx.n)
+    is_fixed = qd.Vector([fem_state.cloth_vertices.is_fixed[verts_idx[k], i_b] for k in qd.static(range(n_stencil))])
+    rows = qd.Vector([row_start + i_b * n_vertices + verts_idx[k] for k in qd.static(range(n_stencil))])
+    for k in qd.static(range(n_stencil)):
+        if not is_fixed[k]:
+            qd.atomic_add(newton_rows.gradient[rows[k]], qd.Vector([gradient[3 * k + d] for d in qd.static(range(3))]))
+    i_pair = 0
+    for k in qd.static(range(n_stencil)):
+        for l in qd.static(range(k, n_stencil)):
+            block = qd.Matrix(
+                [[hessian[3 * k + a, 3 * l + b] for b in qd.static(range(3))] for a in qd.static(range(3))]
+            )
+            if is_fixed[k] or is_fixed[l]:
+                block = qd.Matrix.zero(gs.qd_float, 3, 3)
+            func_write_triplet(newton_rows.matrix, triplet_start + i_pair, rows[k], rows[l], block, is_symmetric=True)
+            i_pair += 1
+
+
+@qd.func(requires_top_level=True)
+def func_cloth_assemble(newton_rows: NewtonRows, fem_state: FEMState, fem_info: FEMInfo, fem_config: qd.template()):
+    """
+    Assemble the gradient and the projected Hessian of the elastic incremental potential of the cloth at the positions
+    of its vertices, in its segment of the rows, the triplets of its contacts following its own (see
+    'func_contact_assemble' in genesis/engine/solvers/ipc_contact.py).
+
+    The potential is the inertia 1/2 m |x - x_tilde|^2 of every vertex and dt^2 times the energies of the membrane of
+    its triangles and of the bending of its hinges (see materials/FEM/cloth.py). A constrained vertex adds the pull 1/2
+    m_c |x - x_c|^2 toward its target, a hard constraint replacing its inertia (see 'kernel_cloth_predict'). A fixed
+    vertex keeps an identity block and a zero gradient, so that its row moves it by nothing.
+    """
+    # See TRIANGLE_PAIRS at module level
+    TRIANGLE_PAIRS = qd.static(6)
+    HINGE_PAIRS = qd.static(10)
+    n_vertices = fem_state.vertices.pos.shape[0]
+    n_envs = fem_state.vertices.pos.shape[1]
+    i_seg = qd.static(int(NewtonSegment.CLOTH_VERTICES))
+    row_start = newton_rows.segments_start[i_seg]
+    triplet_start = newton_rows.segments_triplet_start[i_seg]
+    dt = fem_info.substep_dt[None]
+    for i_v, i_b in qd.ndrange(n_vertices, n_envs):
+        i_r = row_start + i_b * n_vertices + i_v
+        gradient = qd.Vector.zero(gs.qd_float, 3)
+        hessian = qd.Matrix.identity(gs.qd_float, 3)
+        if not fem_state.cloth_vertices.is_fixed[i_v, i_b]:
+            mass = fem_info.vertices.mass[i_v]
+            if fem_state.cloth_vertices.is_kinematic[i_v, i_b]:
+                mass = gs.qd_float(0.0)
+            constraint_mass = fem_state.cloth_vertices.constraint_mass[i_v, i_b]
+            x = fem_state.vertices.pos_next[i_v, i_b]
+            gradient = mass * (x - fem_state.cloth_vertices.pos_tilde[i_v, i_b]) + constraint_mass * (
+                x - fem_state.cloth_vertices.target_pos[i_v, i_b]
+            )
+            hessian = (mass + constraint_mass) * qd.Matrix.identity(gs.qd_float, 3)
+        newton_rows.rows_env[i_r] = i_b
+        newton_rows.gradient[i_r] = gradient
+        func_write_triplet(newton_rows.matrix, triplet_start + i_r - row_start, i_r, i_r, hessian, is_symmetric=True)
+
+    # The membrane of the triangles
+    n_triangles = fem_info.cloth_triangles.verts_idx.shape[0]
+    triangles_start = triplet_start + n_envs * n_vertices
+    for i_t, i_b in qd.ndrange(n_triangles, n_envs):
+        verts_idx = fem_info.cloth_triangles.verts_idx[i_t]
+        rest_inv = fem_info.cloth_triangles.rest_inv[i_t]
+        F = func_triangle_deformation_gradient(
+            fem_state.vertices.pos_next[verts_idx[0], i_b],
+            fem_state.vertices.pos_next[verts_idx[1], i_b],
+            fem_state.vertices.pos_next[verts_idx[2], i_b],
+            rest_inv,
+        )
+        gradient_F, hessian_F = func_baraff_witkin_gradient_hessian(
+            F,
+            fem_info.cloth_triangles.stretch_stiffness[i_t],
+            fem_info.cloth_triangles.shear_stiffness[i_t],
+            fem_info.cloth_triangles.strain_limit_multiplier[i_t],
+        )
+        gradient, hessian = func_triangle_gradient_hessian(rest_inv, gradient_F, hessian_F)
+        scale = dt * dt * fem_info.cloth_triangles.volume[i_t]
+        func_add_stencil_terms(
+            i_b,
+            triangles_start + TRIANGLE_PAIRS * (i_b * n_triangles + i_t),
+            row_start,
+            verts_idx,
+            scale * gradient,
+            scale * hessian,
+            newton_rows,
+            fem_state,
+        )
+
+    # The bending of the hinges
+    hinges_start = triangles_start + TRIANGLE_PAIRS * n_envs * n_triangles
+    if qd.static(fem_config.has_quadratic_bending):
+        n_hinges = fem_info.cloth_quadratic_hinges.verts_idx.shape[0]
+        for i_h, i_b in qd.ndrange(n_hinges, n_envs):
+            verts_idx = fem_info.cloth_quadratic_hinges.verts_idx[i_h]
+            gradient, hessian = func_quadratic_bending_gradient_hessian(
+                qd.Matrix.rows([fem_state.vertices.pos_next[verts_idx[k], i_b] for k in qd.static(range(4))]),
+                fem_info.cloth_quadratic_hinges.bending_form[i_h],
+                fem_info.cloth_quadratic_hinges.stiffness[i_h],
+            )
+            func_add_stencil_terms(
+                i_b,
+                hinges_start + HINGE_PAIRS * (i_b * n_hinges + i_h),
+                row_start,
+                verts_idx,
+                dt * dt * gradient,
+                dt * dt * hessian,
+                newton_rows,
+                fem_state,
+            )
+        hinges_start += HINGE_PAIRS * n_envs * n_hinges
+    if qd.static(fem_config.has_dihedral_bending):
+        n_hinges = fem_info.cloth_dihedral_hinges.verts_idx.shape[0]
+        for i_h, i_b in qd.ndrange(n_hinges, n_envs):
+            verts_idx = fem_info.cloth_dihedral_hinges.verts_idx[i_h]
+            gradient, hessian = func_dihedral_bending_gradient_hessian(
+                qd.Matrix.rows([fem_state.vertices.pos_next[verts_idx[k], i_b] for k in qd.static(range(4))]),
+                fem_info.cloth_dihedral_hinges.rest_angle[i_h],
+                fem_info.cloth_dihedral_hinges.weight[i_h],
+                fem_info.cloth_dihedral_hinges.stiffness[i_h],
+            )
+            func_add_stencil_terms(
+                i_b,
+                hinges_start + HINGE_PAIRS * (i_b * n_hinges + i_h),
+                row_start,
+                verts_idx,
+                dt * dt * gradient,
+                dt * dt * hessian,
+                newton_rows,
+                fem_state,
+            )
+
+
+@qd.func(requires_top_level=True)
+def func_cloth_energy(
+    energies: qd.Tensor, envs_mask: qd.Tensor, fem_state: FEMState, fem_info: FEMInfo, fem_config: qd.template()
+):
+    """Add the elastic incremental potential of the cloth at the positions of its vertices into the entry of every
+    environment selected (see 'func_cloth_assemble'), the items of an environment following one another."""
+    n_vertices = fem_state.vertices.pos.shape[0]
+    n_envs = fem_state.vertices.pos.shape[1]
+    dt = fem_info.substep_dt[None]
+    qd.loop_config(block_dim=256)
+    for i_th in range((n_envs * n_vertices + 31) // 32 * 32):
+        i_b_key = gs.qd_int(-1)
+        energy = gs.qd_float(0.0)
+        if i_th < n_envs * n_vertices:
+            i_b = i_th // n_vertices
+            i_v = i_th % n_vertices
+            if envs_mask[i_b] and not fem_state.cloth_vertices.is_fixed[i_v, i_b]:
+                i_b_key = i_b
+                mass = fem_info.vertices.mass[i_v]
+                if fem_state.cloth_vertices.is_kinematic[i_v, i_b]:
+                    mass = gs.qd_float(0.0)
+                x = fem_state.vertices.pos_next[i_v, i_b]
+                energy = 0.5 * mass * (x - fem_state.cloth_vertices.pos_tilde[i_v, i_b]).norm_sqr() + 0.5 * (
+                    fem_state.cloth_vertices.constraint_mass[i_v, i_b]
+                    * (x - fem_state.cloth_vertices.target_pos[i_v, i_b]).norm_sqr()
+                )
+        func_add_by_key(i_b_key, energy, energies)
+
+    n_triangles = fem_info.cloth_triangles.verts_idx.shape[0]
+    qd.loop_config(block_dim=256)
+    for i_th in range((n_envs * n_triangles + 31) // 32 * 32):
+        i_b_key = gs.qd_int(-1)
+        energy = gs.qd_float(0.0)
+        if i_th < n_envs * n_triangles:
+            i_b = i_th // n_triangles
+            i_t = i_th % n_triangles
+            if envs_mask[i_b]:
+                i_b_key = i_b
+                verts_idx = fem_info.cloth_triangles.verts_idx[i_t]
+                F = func_triangle_deformation_gradient(
+                    fem_state.vertices.pos_next[verts_idx[0], i_b],
+                    fem_state.vertices.pos_next[verts_idx[1], i_b],
+                    fem_state.vertices.pos_next[verts_idx[2], i_b],
+                    fem_info.cloth_triangles.rest_inv[i_t],
+                )
+                energy = (dt * dt * fem_info.cloth_triangles.volume[i_t]) * func_baraff_witkin_energy(
+                    F,
+                    fem_info.cloth_triangles.stretch_stiffness[i_t],
+                    fem_info.cloth_triangles.shear_stiffness[i_t],
+                    fem_info.cloth_triangles.strain_limit_multiplier[i_t],
+                )
+        func_add_by_key(i_b_key, energy, energies)
+
+    if qd.static(fem_config.has_quadratic_bending):
+        n_hinges = fem_info.cloth_quadratic_hinges.verts_idx.shape[0]
+        qd.loop_config(block_dim=256)
+        for i_th in range((n_envs * n_hinges + 31) // 32 * 32):
+            i_b_key = gs.qd_int(-1)
+            energy = gs.qd_float(0.0)
+            if i_th < n_envs * n_hinges:
+                i_b = i_th // n_hinges
+                i_h = i_th % n_hinges
+                if envs_mask[i_b]:
+                    i_b_key = i_b
+                    verts_idx = fem_info.cloth_quadratic_hinges.verts_idx[i_h]
+                    energy = (dt * dt) * func_quadratic_bending_energy(
+                        qd.Matrix.rows([fem_state.vertices.pos_next[verts_idx[k], i_b] for k in qd.static(range(4))]),
+                        fem_info.cloth_quadratic_hinges.bending_form[i_h],
+                        fem_info.cloth_quadratic_hinges.stiffness[i_h],
+                    )
+            func_add_by_key(i_b_key, energy, energies)
+    if qd.static(fem_config.has_dihedral_bending):
+        n_hinges = fem_info.cloth_dihedral_hinges.verts_idx.shape[0]
+        qd.loop_config(block_dim=256)
+        for i_th in range((n_envs * n_hinges + 31) // 32 * 32):
+            i_b_key = gs.qd_int(-1)
+            energy = gs.qd_float(0.0)
+            if i_th < n_envs * n_hinges:
+                i_b = i_th // n_hinges
+                i_h = i_th % n_hinges
+                if envs_mask[i_b]:
+                    i_b_key = i_b
+                    verts_idx = fem_info.cloth_dihedral_hinges.verts_idx[i_h]
+                    angle = func_dihedral_angle(
+                        fem_state.vertices.pos_next[verts_idx[0], i_b],
+                        fem_state.vertices.pos_next[verts_idx[1], i_b],
+                        fem_state.vertices.pos_next[verts_idx[2], i_b],
+                        fem_state.vertices.pos_next[verts_idx[3], i_b],
+                    )
+                    energy = (dt * dt) * func_dihedral_bending_energy(
+                        angle,
+                        fem_info.cloth_dihedral_hinges.rest_angle[i_h],
+                        fem_info.cloth_dihedral_hinges.weight[i_h],
+                        fem_info.cloth_dihedral_hinges.stiffness[i_h],
+                    )
+            func_add_by_key(i_b_key, energy, energies)
+
+
+@qd.func(requires_top_level=True)
+def func_cloth_init_line_search(
+    newton_rows: NewtonRows,
+    envs_mask: qd.Tensor,
+    max_displacement: qd.Tensor,
+    fem_state: FEMState,
+    ipc_state: IPCState,
+    has_rigid: qd.template(),
+):
+    """
+    Set the Newton direction of the vertices of the cloth of every environment selected, minus the solution of the
+    linear solve, from their start point, a fixed vertex staying still, and publish it as their sweep in the contact
+    surface (see 'func_cloth_publish_contact').
+
+    The largest update of the position of a vertex adds to the entry of its environment in `max_displacement`. The
+    contacts bound the step along the direction afterwards (see 'func_contact_ccd' in
+    genesis/engine/solvers/ipc_contact.py).
+    """
+    n_vertices = fem_state.vertices.pos.shape[0]
+    row_start = newton_rows.segments_start[qd.static(int(NewtonSegment.CLOTH_VERTICES))]
+    for i_v, i_b in qd.ndrange(n_vertices, fem_state.vertices.pos.shape[1]):
+        if envs_mask[i_b]:
+            displacement = qd.Vector.zero(gs.qd_float, 3)
+            if not fem_state.cloth_vertices.is_fixed[i_v, i_b]:
+                displacement = -newton_rows.solution[row_start + i_b * n_vertices + i_v]
+            x = fem_state.vertices.pos_next[i_v, i_b]
+            fem_state.cloth_vertices.pos_start[i_v, i_b] = x
+            fem_state.cloth_vertices.displacement[i_v, i_b] = displacement
+            ipc_state.vertices.displacement[i_v, i_b] = displacement
+            if qd.static(has_rigid):
+                ipc_state.vertices.pivot_displacement[i_v, i_b] = displacement
+            qd.atomic_max(max_displacement[i_b], qd.max(qd.abs(displacement).max(), 0.0))
+
+
+@qd.func(requires_top_level=True)
+def func_cloth_step_forward(
+    envs_mask: qd.Tensor, alpha: qd.Tensor, fem_state: FEMState, ipc_state: IPCState, has_rigid: qd.template()
+):
+    """Move the vertices of the cloth of every environment selected to the trial point of its step `alpha` along the
+    Newton direction, and publish their positions in the contact surface (see 'func_cloth_publish_contact')."""
+    for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape):
+        if envs_mask[i_b]:
+            x = (
+                fem_state.cloth_vertices.pos_start[i_v, i_b]
+                + alpha[i_b] * fem_state.cloth_vertices.displacement[i_v, i_b]
+            )
+            fem_state.vertices.pos_next[i_v, i_b] = x
+            ipc_state.vertices.pos[i_v, i_b] = x
+            if qd.static(has_rigid):
+                ipc_state.vertices.pivot[i_v, i_b] = x
+
+
+@qd.func(requires_top_level=True)
+def func_cloth_publish_contact(ipc_state: IPCState, fem_state: FEMState, has_rigid: qd.template()):
+    """
+    Publish the vertices of the cloth at the start point of the substep into their range of the contact surface, its
+    first one, the indices of the vertices in the solver (see IPCVertices in genesis/engine/solvers/ipc_contact.py).
+
+    A vertex stands at its start point, its lagged position being its position at the start of the substep, and a
+    vertex held at its target takes no contact terms. A vertex of the cloth moves straight, its own pivot without
+    rotation.
+    """
+    for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape):
+        x = fem_state.vertices.pos_next[i_v, i_b]
+        ipc_state.vertices.pos[i_v, i_b] = x
+        ipc_state.vertices.pos_lagged[i_v, i_b] = fem_state.vertices.pos[i_v, i_b]
+        ipc_state.vertices.is_fixed[i_v, i_b] = fem_state.cloth_vertices.is_fixed[i_v, i_b]
+        if qd.static(has_rigid):
+            ipc_state.vertices.pivot[i_v, i_b] = x
+            ipc_state.vertices.pivot_displacement[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            ipc_state.vertices.rotation[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
+
+
+@qd.func(requires_top_level=True)
+def func_cloth_publish_rows(newton_rows: NewtonRows, ipc_state: IPCState, fem_state: FEMState):
+    """Publish the row of every vertex of the cloth in the contact surface, in the segment of the cloth (see
+    'func_cloth_assemble')."""
+    n_vertices = fem_state.vertices.pos.shape[0]
+    row_start = newton_rows.segments_start[qd.static(int(NewtonSegment.CLOTH_VERTICES))]
+    for i_v, i_b in qd.ndrange(n_vertices, fem_state.vertices.pos.shape[1]):
+        ipc_state.vertices.row[i_v, i_b] = row_start + i_b * n_vertices + i_v
+
+
+@qd.func(requires_top_level=True)
+def func_cloth_scale_direction(
+    envs_mask: qd.Tensor,
+    alpha: qd.Tensor,
+    fem_state: FEMState,
+    ipc_state: IPCState,
+    ipc_info: IPCInfo,
+    has_rigid: qd.template(),
+    is_by_body: qd.template(),
+):
+    """Scale the Newton direction of the vertices of the cloth of every environment selected by the step of their
+    environment in `alpha`, or with `is_by_body` by that of the group of the contact body of their entity (see
+    IPCBodies in genesis/engine/solvers/ipc_contact.py), their sweep in the contact surface along."""
+    for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape):
+        if envs_mask[i_b]:
+            scale = gs.qd_float(0.0)
+            if qd.static(is_by_body):
+                i_body = ipc_info.vertices.body_idx[i_v]
+                scale = alpha[i_body, i_b]
+            else:
+                scale = alpha[i_b]
+            displacement = scale * fem_state.cloth_vertices.displacement[i_v, i_b]
+            fem_state.cloth_vertices.displacement[i_v, i_b] = displacement
+            ipc_state.vertices.displacement[i_v, i_b] = displacement
+            if qd.static(has_rigid):
+                ipc_state.vertices.pivot_displacement[i_v, i_b] = displacement
+
+
+@qd.kernel(fastcache=True)
+def kernel_cloth_finish(fem_state: FEMState, fem_info: FEMInfo, newton_errno: qd.Tensor, errno: qd.Tensor):
+    """
+    Set the velocities of the vertices of the cloth at the end of the substep from their displacement over it.
+
+    An environment whose Newton solve failed keeps the state of its vertices until the error raises (see
+    'func_flag_failures' in newton_solver.py).
+    """
+    dt = fem_info.substep_dt[None]
+    for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape, axes=qd.static(eoa(fem_state.vertices.pos))):
+        pos = fem_state.vertices.pos[i_v, i_b]
+        if newton_errno[i_b] != 0:
+            fem_state.vertices.pos_next[i_v, i_b] = pos
+            fem_state.vertices.vel_next[i_v, i_b] = fem_state.vertices.vel[i_v, i_b]
+        else:
+            pos_next = fem_state.vertices.pos_next[i_v, i_b]
+            fem_state.vertices.vel_next[i_v, i_b] = (pos_next - pos) / dt
+            if not qd_isfinite(pos_next):
+                errno[i_b] = errno[i_b] | FEMErrorCode.INVALID_VERTEX_NAN
 
 
 # ------------------------------------------------------------------------------------

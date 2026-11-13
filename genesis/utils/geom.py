@@ -167,6 +167,113 @@ def qd_svd(A: qd.types.matrix(3, 3)):
 
 
 @qd.func
+def qd_symmetric_eigen(A, tolerance: float, max_sweeps: int):
+    """Decompose a symmetric matrix into Q diag(eigenvalues) Q^T by cyclic Jacobi rotations.
+
+    The sweeps stop once the off-diagonal entries have a Frobenius norm below 'tolerance' times the one of the matrix, or
+    after 'max_sweeps' sweeps. A rotation is skipped where its off-diagonal entry is below 1e-300, so that rows and
+    columns of zeros padding a smaller matrix cost no work. Returns the eigenvalues, in no particular order, and the
+    orthonormal eigenvectors as the columns of a matrix.
+    """
+    n = qd.static(A.n)
+    B = A
+    Q = qd.Matrix.identity(gs.qd_float, n)
+    frobenius2 = (A * A).sum()
+    for _ in range(max_sweeps):
+        # Summed over the off-diagonal entries alone, since the total minus the diagonal would cancel to rounding noise
+        off2 = gs.qd_float(0.0)
+        for i in qd.static(range(n)):
+            for j in qd.static(range(n)):
+                if qd.static(i != j):
+                    off2 = off2 + B[i, j] * B[i, j]
+        if off2 < tolerance * tolerance * frobenius2:
+            break
+        for p in range(n - 1):
+            for q in range(p + 1, n):
+                b_pq = B[p, q]
+                if qd.abs(b_pq) >= 1e-300:
+                    tau = (B[q, q] - B[p, p]) / (2.0 * b_pq)
+                    t = 1.0 / (qd.abs(tau) + qd.sqrt(1.0 + tau * tau))
+                    if tau < 0.0:
+                        t = -t
+                    c = 1.0 / qd.sqrt(1.0 + t * t)
+                    s = t * c
+                    for k in range(n):
+                        b_kp = B[k, p]
+                        b_kq = B[k, q]
+                        B[k, p] = c * b_kp - s * b_kq
+                        B[k, q] = s * b_kp + c * b_kq
+                    for k in range(n):
+                        b_pk = B[p, k]
+                        b_qk = B[q, k]
+                        B[p, k] = c * b_pk - s * b_qk
+                        B[q, k] = s * b_pk + c * b_qk
+                    for k in range(n):
+                        q_kp = Q[k, p]
+                        q_kq = Q[k, q]
+                        Q[k, p] = c * q_kp - s * q_kq
+                        Q[k, q] = s * q_kp + c * q_kq
+    return qd.Vector([B[i, i] for i in qd.static(range(n))]), Q
+
+
+@qd.func
+def qd_project_psd(A, max_rank: qd.template(), rank_tolerance: float, tolerance: float, max_sweeps: int):
+    """Project a symmetric matrix onto the positive semi-definite (PSD) cone by clamping its negative eigenvalues to zero.
+
+    A matrix of rank at most 'max_rank' is first written as V T V^T, V an orthonormal basis of its range built from its
+    columns by Gram-Schmidt, so that only the small matrix T gets decomposed, and the projection is rebuilt from the
+    positive eigenpairs of T alone. Columns whose part outside the basis is below 'rank_tolerance' times the Frobenius
+    norm of the matrix add no direction. A matrix of higher rank is decomposed whole, and returned untouched if already
+    PSD. 'tolerance' and 'max_sweeps' are those of qd_symmetric_eigen. Returns the projected matrix, exactly symmetric.
+    """
+    n = qd.static(A.n)
+    frobenius = qd.sqrt((A * A).sum())
+    basis = qd.Matrix.zero(gs.qd_float, n, max_rank)
+    rank = 0
+    is_low_rank = True
+    for j in range(n):
+        column = qd.Vector([A[i, j] for i in qd.static(range(n))])
+        # Classical Gram-Schmidt alone loses orthogonality in floating point, hence a second pass
+        for _ in qd.static(range(2)):
+            for i_b in range(rank):
+                axis = qd.Vector([basis[k, i_b] for k in qd.static(range(n))])
+                column = column - axis.dot(column) * axis
+        column_norm = column.norm()
+        if column_norm > rank_tolerance * frobenius:
+            if rank < max_rank:
+                column = column * (1.0 / column_norm)
+                for k in qd.static(range(n)):
+                    basis[k, rank] = column[k]
+                rank = rank + 1
+            else:
+                is_low_rank = False
+
+    projected = qd.Matrix.zero(gs.qd_float, n, n)
+    if is_low_rank:
+        # Padded with zeros beyond the rank, which the rotations of the decomposition skip
+        reduced = qd.Matrix.zero(gs.qd_float, max_rank, max_rank)
+        for j in range(rank):
+            image = A @ qd.Vector([basis[k, j] for k in qd.static(range(n))])
+            for i in range(rank):
+                reduced[i, j] = qd.Vector([basis[k, i] for k in qd.static(range(n))]).dot(image)
+        eigenvalues, eigenvectors = qd_symmetric_eigen(reduced, tolerance, max_sweeps)
+        for e in range(rank):
+            if eigenvalues[e] > 0.0:
+                axis = basis @ qd.Vector([eigenvectors[k, e] for k in qd.static(range(max_rank))])
+                projected = projected + eigenvalues[e] * axis.outer_product(axis)
+    else:
+        eigenvalues, eigenvectors = qd_symmetric_eigen(A, tolerance, max_sweeps)
+        if eigenvalues.min() >= 0.0:
+            projected = A
+        else:
+            for e in range(n):
+                if eigenvalues[e] > 0.0:
+                    axis = qd.Vector([eigenvectors[k, e] for k in qd.static(range(n))])
+                    projected = projected + eigenvalues[e] * axis.outer_product(axis)
+    return projected
+
+
+@qd.func
 def qd_R_to_xyz(R, eps):
     """
     Convert a rotation matrix into intrinsic x-y-z Euler angles.
@@ -279,6 +386,30 @@ def qd_quat_to_R(quat, eps):
         )
 
     return R
+
+
+@qd.func
+def qd_R_to_quat(R):
+    """
+    Converts a 3x3 rotation matrix to a unit quaternion, from its largest diagonal combination for accuracy.
+    """
+    t = gs.qd_float(0.0)
+    quat = qd.Vector.zero(gs.qd_float, 4)
+    if R[2, 2] < 0.0:
+        if R[0, 0] > R[1, 1]:
+            t = 1.0 + R[0, 0] - R[1, 1] - R[2, 2]
+            quat = qd.Vector([R[2, 1] - R[1, 2], t, R[1, 0] + R[0, 1], R[0, 2] + R[2, 0]], dt=gs.qd_float)
+        else:
+            t = 1.0 - R[0, 0] + R[1, 1] - R[2, 2]
+            quat = qd.Vector([R[0, 2] - R[2, 0], R[1, 0] + R[0, 1], t, R[2, 1] + R[1, 2]], dt=gs.qd_float)
+    else:
+        if R[0, 0] < -R[1, 1]:
+            t = 1.0 - R[0, 0] - R[1, 1] + R[2, 2]
+            quat = qd.Vector([R[1, 0] - R[0, 1], R[0, 2] + R[2, 0], R[2, 1] + R[1, 2], t], dt=gs.qd_float)
+        else:
+            t = 1.0 + R[0, 0] + R[1, 1] + R[2, 2]
+            quat = qd.Vector([t, R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]], dt=gs.qd_float)
+    return quat / (2.0 * qd.sqrt(t))
 
 
 @qd.func
