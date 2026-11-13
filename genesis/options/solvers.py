@@ -70,8 +70,7 @@ class LegacyCouplerOptions(BaseCouplerOptions):
         between them, at the cost of the memory of one more signed distance field per decomposed mesh. The rigid
         contacts keep the pieces. The rigid links holding a coupled geom thinner than three cells of the MPM grid also
         keep the particles from exchanging momentum with the cells on their other side, which stops liquid from leaking
-        through thin walls at the cost of extra work for the particles near them. Building such a scene with
-        'requires_grad=True' raises, since this separation has no gradient.
+        through thin walls at the cost of extra work for the particles near them.
     rigid_sph : bool, optional
         Whether to enable coupling between rigid and SPH solvers. Defaults to True. The liquid sampled inside a coupled
         rigid body, or within half a particle size of its surface, is removed when the scene is built, with a warning.
