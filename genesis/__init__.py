@@ -55,8 +55,9 @@ use_deterministic_algorithms: bool | None = None
 debug: bool | None = None
 EPS: float | None = None
 SEED: int | None = None
-# FIXME: The quadrants stub types the call of a scalar dtype as returning None, so `gs.qd_float(x)` would type as None.
-# Annotating the scalar dtypes as Any keeps those calls untyped.
+# Dtypes bound by 'init' from its precision and backend.
+# FIXME: The quadrants stub types the call of a scalar dtype as returning None, so the scalar dtypes are Any until the
+# stub is fixed. This leaves every use of 'qd_float', 'qd_int' and 'qd_bool' unchecked.
 qd_float: Any
 np_float: type[np.floating]
 tc_float: torch.dtype
