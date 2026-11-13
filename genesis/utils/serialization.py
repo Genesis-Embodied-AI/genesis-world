@@ -28,6 +28,7 @@ from pydantic import AfterValidator, TypeAdapter, ValidationError, ValidationInf
 
 import genesis as gs
 from genesis.options.options import Options
+from genesis.repr_base import get_public_name
 
 # What every member of an archive is stamped with, so a file is the bytes its scene comes to and nothing else.
 EPOCH = (1980, 1, 1, 0, 0, 0)
@@ -238,16 +239,6 @@ def _layout(cls: type) -> list[str] | dict[str, int | str]:
     return sorted(_declared_fields(cls))
 
 
-def _schema_name(cls: type) -> str:
-    """The name a class is recorded under in the schema of a file, unique among the classes of Genesis.
-
-    The entity options share their names with the materials, such as 'Rigid', so they are recorded as 'entities.Rigid'.
-    """
-    if cls.__module__ == "genesis.options.entities":
-        return f"entities.{cls.__name__}"
-    return cls.__name__
-
-
 def schema(classes: set[type]) -> dict:
     """Records what each of these classes is made of, under the name each is written as.
 
@@ -256,7 +247,7 @@ def schema(classes: set[type]) -> dict:
     that gained a field since keeps loading while one whose fields moved is rejected by name. Sorted by name, so what
     a file holds follows from the classes alone rather than from the order they are met in.
     """
-    return {_schema_name(cls): _layout(cls) for cls in sorted(classes, key=_schema_name)}
+    return {get_public_name(cls): _layout(cls) for cls in sorted(classes, key=get_public_name)}
 
 
 def declared_schema(expect: dict) -> dict:
@@ -277,13 +268,13 @@ def declared_schema(expect: dict) -> dict:
                 continue
             seen.add(declared)
             if issubclass(declared, (IntEnum, StrEnum)):
-                layout[_schema_name(declared)] = _layout(declared)
+                layout[get_public_name(declared)] = _layout(declared)
             elif _has_declared_fields(declared):
                 for cls in _classes_by_name(declared).values():
                     if cls in seen and cls is not declared:
                         continue
                     seen.add(cls)
-                    layout[_schema_name(cls)] = _layout(cls)
+                    layout[get_public_name(cls)] = _layout(cls)
                     declarations.extend(_declared_fields(cls).values())
     return layout
 
@@ -394,7 +385,7 @@ def _export_value(value, expect, exported: "Exported"):
         if issubclass(type(value), Options):
             # An option object carries the names of the fields the user gave, since rebuilding one needs them. They
             # are sorted, so exporting the same scene twice gives the same file.
-            values = {"values": values, "given": sorted(value.model_fields_set.intersection(values))}
+            values = {"values": values, "given": sorted(value.model_fields_set)}
         return values if _accepted_classes(expect) == (type(value),) else {"@": type(value).__name__, **values}
     # A union mixing an option with a sequence of them, such as one morph or several, exports as the argument it holds
     deduced = _deduce_union(expect, value)
