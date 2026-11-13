@@ -281,7 +281,7 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     )
             gs.logger.debug(f"Rigid entity {i_e}: coupling type '{coup_type.name.lower()}'")
 
-            # The IPC coupler builds the affine bodies of an entity from the density of its material alone
+            # IPC takes the density and friction of the material, so per-link and per-geom values do not reach it
             entity_options = entity.options
             links_options = entity_options.links.values()
             geoms_options = [
@@ -290,8 +290,8 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
             ]
             if any(options.rho is not None for options in (*links_options, *geoms_options)):
                 gs.raise_exception(
-                    f"The IPC coupler simulates entity '{entity.name}' at the density of its material alone, so "
-                    "the link and geom options cannot give a density."
+                    f"Entity '{entity.name}' sets 'rho' on a link or geom, which the IPC coupler does not support. "
+                    "Set it on the material instead."
                 )
             if any(
                 options.friction is not None
@@ -300,9 +300,8 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 for options in (*links_options, *geoms_options)
             ):
                 gs.logger.warning(
-                    f"The IPC coupler simulates the contacts of entity '{entity.name}' with the friction of its "
-                    "material, so the friction its link and geom options give applies to the contacts the rigid solver "
-                    "handles alone."
+                    f"Entity '{entity.name}' sets friction on a link or geom. IPC contacts use the friction of the "
+                    "material, so this friction only applies to contacts handled by the rigid solver."
                 )
 
             # Resolve link filter from material
