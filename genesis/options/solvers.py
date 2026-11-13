@@ -123,7 +123,8 @@ class SAPCouplerOptions(BaseCouplerOptions):
         relative one. A larger value stops the solves of scenes moving slowly earlier, at the cost of accuracy near
         rest. Defaults to None, which leaves the relative tolerance alone.
     sap_convergence_rtol : float, optional
-        Tolerance of the SAP solve on the norm of the gradient of its cost relative to the momentum of the scene. A
+        Tolerance of the SAP solve on the norm of the gradient of its cost relative to the momentum of the scene, and on
+        the share of each kinematic tree and FEM entity relative to its own momentum and the impulses it receives. A
         smaller value solves the contacts more accurately, so that resting contacts slip less within a step, at the cost
         of more Newton iterations per substep. Defaults to None, which takes 1e-4 in double precision and 1e-3 in single
         precision: single precision with its default runs fastest, while double precision solves about ten times more

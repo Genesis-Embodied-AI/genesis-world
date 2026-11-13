@@ -793,6 +793,12 @@ def test_sap_equality_constraints(show_viewer, xml_path, n_envs, is_batched, tol
     assert_allclose(qpos_after[..., i_target_q] / SCALE, TARGET_POSITION, atol=MAX_RESIDUAL_RATIO * TARGET_POSITION)
     assert_allclose(qpos_after[..., i_unrelated_q] / SCALE, UNRELATED_POSITION, tol=tol)
 
+    # The solve leaves the light bar a velocity error, in the norm of its kinetic energy, of at most its convergence
+    # tolerance (MAX_RESIDUAL_RATIO at most by default) times its momentum, which exceeds its impulses, even next to the
+    # large corrections of the target pull and of the welds. Its rotation about its center of mass holds over a quarter
+    # of the kinetic energy of the bar swinging about its end, so the swing is off by twice that at most.
+    assert_allclose(bar.get_ang()[..., 1], bar_swing * DT, rtol=2.0 * MAX_RESIDUAL_RATIO)
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("model_name", ["box_on_masked_stick"])

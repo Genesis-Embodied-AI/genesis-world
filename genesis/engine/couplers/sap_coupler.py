@@ -166,8 +166,8 @@ RIGID_FLOOR_VERT_STIFFNESS = 1.0e6
 EQUALITY_BETA = 0.1
 EQUALITY_STIFFNESS = 1.0e8
 
-# Largest residual of a SAP solve stopped at its Newton iteration cap, relative to the momentum and the impulses of its
-# environment (see func_update_envs_active): a momentum left unbalanced above a tenth of them leaves velocities off by
+# Largest residual of a SAP solve stopped at its Newton iteration cap, relative to the momentum and the impulses of each
+# of its bodies (see func_update_envs_active): a momentum left unbalanced above a tenth of them leaves velocities off by
 # as much, which inject energy into the contacts, while a solve stopped below it, as on a rare spike of the iterations,
 # keeps a meaningful output.
 CAP_RESIDUAL_MAX = 0.1
@@ -386,7 +386,7 @@ class SAPEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     is_active: qd.Tensor = field(bool)
     is_pcg_active: qd.Tensor = field(bool)
     is_linesearch_active: qd.Tensor = field(bool)
-    # Residual at the last convergence check, relative to the momentum and the impulses
+    # Largest residual of the bodies at the last convergence check, each relative to its momentum and its impulses
     relative_residual: qd.Tensor = field(float)
     # The scalars of the preconditioned conjugate gradient (PCG) solve, those of the FEM vertices when it solves the
     # rigid dofs apart (see is_pcg_coupled)
@@ -1779,8 +1779,9 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 SAPErrorCode.OVERFLOW_CONTACTS: functools.partial(report_overflow, SAPErrorCode.OVERFLOW_CONTACTS),
                 SAPErrorCode.INVALID_SOLVE: lambda: (
                     "SAP solve stopped at its Newton iteration cap with a residual |gradient| / max(|momentum|, "
-                    f"|impulse|) of {CAP_RESIDUAL_MAX} or more, which leaves its velocities meaningless. Please "
-                    f"increase the value of {type(self).__name__}'s option 'n_sap_iterations'."
+                    f"|impulse|) of {CAP_RESIDUAL_MAX} or more on a kinematic tree or FEM entity, which leaves its "
+                    f"velocities meaningless. Please increase the value of {type(self).__name__}'s option "
+                    "'n_sap_iterations'."
                 ),
             },
         )
@@ -3158,6 +3159,7 @@ def func_update_envs_active(
     newton_counter: qd.Tensor,
     sap_state: SAPState,
     fem_info: FEMInfo,
+    rigid_info: RigidInfo,
     sap_info: SAPInfo,
     sap_config: qd.template(),
     constraint_handlers: qd.template(),
@@ -3165,8 +3167,10 @@ def func_update_envs_active(
     """
     Stop the environments whose gradient is small enough, the others adding up the coarse Hessians of the contacts.
 
-    The lanes of a chunk (see CHUNK_SIZE) take an environment, adding up its norms and the Hessians of its contacts
-    restricted to the rigid motions of each FEM entity, which they stride in their sorted order.
+    An environment stops once its gradient is small relative to its momentum, and the gradient of each of its bodies,
+    the kinematic trees of the rigid solver then the FEM entities, is small relative to the momentum and the impulses of
+    that body. The lanes of a chunk (see CHUNK_SIZE) take an environment, striding its bodies and adding up the Hessians
+    of its contacts restricted to the rigid motions of each FEM entity, which they stride in their sorted order.
     """
     N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
     for i_t in range(sap_state.envs.is_active.shape[0] * N_LANES):
@@ -3177,31 +3181,76 @@ def func_update_envs_active(
             # The first lane overwrites the flag below, which nothing orders after the reads of the other lanes, so they
             # take the flag it read: lanes disagreeing on it would sum the coarse Hessians in divergent flow.
             is_active = su.qd_block_shuffle(qd.cast(is_active, qd.i32), 0) != 0
-        norms = func_chunks_total(
-            i_b,
-            0,
-            sap_state.vertices_dofs_partials.shape[0],
-            VertexDofSum.GRADIENT_NORM,
-            i_lane,
-            sap_state,
-            n_lanes=N_LANES,
-            n_sums=3,
-        )
-        gradient_norm = norms[VertexDofSum.GRADIENT_NORM]
-        momentum_norm = norms[VertexDofSum.MOMENTUM_NORM]
-        impulse_norm = norms[VertexDofSum.IMPULSE_NORM]
         if is_active:
-            # The sums are squared norms, compared as norms like the tolerances. The tolerance scales with the momentum
-            # alone: the impulses holding a resting body against gravity would otherwise dominate it, leaving the slow
-            # motions of that body under the threshold so that they never damp out. The residual checked at the
-            # iteration cap keeps the impulses in its scale, which a body at rest has alone.
-            norm_thr = sap_info.convergence_atol[None] + sap_info.convergence_rtol[None] * qd.sqrt(momentum_norm)
-            is_active = qd.sqrt(gradient_norm) >= norm_thr
+            atol = sap_info.convergence_atol[None]
+            rtol = sap_info.convergence_rtol[None]
+            n_trees = 0
+            if qd.static(sap_config.has_rigid):
+                n_trees = sap_info.n_rigid_trees[None]
+            n_entities = 0
+            if qd.static(sap_config.has_fem):
+                n_entities = sap_state.fem_coarse.mass.shape[0]
+            # Each lane sums the dofs of its own trees, then the lanes sum the vertex chunks of each FEM entity together,
+            # so that a large entity spreads over the lanes. The norms of the environment add up those of its bodies,
+            # each in a fixed order.
+            n_tree_rounds = (n_trees + N_LANES - 1) // N_LANES
+            norms = qd.Vector.zero(gs.qd_float, 3)
+            residual_max = gs.qd_float(0.0)
+            is_body_active = False
+            for i_round in range(n_tree_rounds + n_entities):
+                body_norms = qd.Vector.zero(gs.qd_float, 3)
+                if i_round < n_tree_rounds:
+                    if qd.static(sap_config.has_rigid):
+                        i_tree = i_round * N_LANES + i_lane
+                        if i_tree < n_trees:
+                            i_d_start = rigid_info.trees_dof_start[i_tree]
+                            for i_d in range(i_d_start, i_d_start + rigid_info.trees_n_dofs[i_tree]):
+                                mass = rigid_info.mass_mat[i_d, i_d, i_b]
+                                gradient = sap_state.rigid_dofs.gradient[i_d, i_b]
+                                v = sap_state.rigid_dofs.v[i_d, i_b]
+                                impulse = sap_state.rigid_dofs.impulse[i_d, i_b]
+                                body_norms = body_norms + qd.Vector(
+                                    [gradient**2 / mass, v**2 * mass, impulse**2 / mass]
+                                )
+                        norms = norms + body_norms
+                else:
+                    if qd.static(sap_config.has_fem):
+                        i_e = i_round - n_tree_rounds
+                        body_norms = func_chunks_total(
+                            i_b,
+                            sap_info.entities_chunk_start[i_e],
+                            sap_info.entities_chunk_start[i_e + 1],
+                            VertexDofSum.GRADIENT_NORM,
+                            i_lane,
+                            sap_state,
+                            n_lanes=N_LANES,
+                            n_sums=3,
+                        )
+                        # Every lane holds the sums of the entity, which the first one alone adds to those of the lanes
+                        if i_lane == 0:
+                            norms = norms + body_norms
+                # The momentum and the impulses of a body scale its own tolerance, so that a light body next to a large
+                # correction converges as well. The sums are squared norms, compared as norms like the tolerances.
+                gradient_norm = body_norms[VertexDofSum.GRADIENT_NORM]
+                scale_norm = qd.max(body_norms[VertexDofSum.MOMENTUM_NORM], body_norms[VertexDofSum.IMPULSE_NORM])
+                if qd.sqrt(gradient_norm) > atol + rtol * qd.sqrt(scale_norm):
+                    is_body_active = True
+                residual_max = qd.max(
+                    residual_max, qd.sqrt(gradient_norm / qd.max(scale_norm, sap_info.precision[None]))
+                )
+            if qd.static(N_LANES > 1):
+                for j in qd.static(range(3)):
+                    norms[j] = su.qd_block_sum(norms[j])
+                is_body_active = su.qd_block_any(is_body_active)
+                residual_max = su.qd_block_max(residual_max)
+            # The tolerance of the environment scales with its momentum alone: the impulses holding a resting body
+            # against gravity would otherwise dominate it, leaving the slow motions of that body under the threshold so
+            # that they never damp out.
+            norm_thr = atol + rtol * qd.sqrt(norms[VertexDofSum.MOMENTUM_NORM])
+            is_active = is_body_active or qd.sqrt(norms[VertexDofSum.GRADIENT_NORM]) >= norm_thr
             if i_lane == 0:
                 sap_state.envs.is_active[i_b] = is_active
-                sap_state.envs.relative_residual[i_b] = qd.sqrt(
-                    gradient_norm / qd.max(qd.max(momentum_norm, impulse_norm), sap_info.precision[None])
-                )
+                sap_state.envs.relative_residual[i_b] = residual_max
                 if is_active:
                     newton_counter[()] = sap_state.loops.n_newton_next[()]
         if qd.static(sap_config.has_fem):
@@ -3633,7 +3682,9 @@ def kernel_sap_solve(
             joint_equality_handler,
             op=VertexDofOp.GRADIENT,
         )
-        func_update_envs_active(newton_counter, sap_state, fem_info, sap_info, sap_config, constraint_handlers)
+        func_update_envs_active(
+            newton_counter, sap_state, fem_info, rigid_info, sap_info, sap_config, constraint_handlers
+        )
         if qd.static(sap_config.has_rigid):
             func_invert_rigid_hessian(dofs_state, sap_state, rigid_info, sap_info, sap_config)
 
@@ -4344,10 +4395,6 @@ def func_compute_rigid_dof(
         gradient = sap_state.rigid_dofs.gradient[i_d, i_b] - Jt_gamma
         sap_state.rigid_dofs.gradient[i_d, i_b] = gradient
         sap_state.rigid_dofs.impulse[i_d, i_b] = Jt_gamma
-        mass = rigid_info.mass_mat[i_d, i_d, i_b]
-        sums[VertexDofSum.GRADIENT_NORM] = gradient**2 / mass
-        sums[VertexDofSum.MOMENTUM_NORM] = sap_state.rigid_dofs.v[i_d, i_b] ** 2 * mass
-        sums[VertexDofSum.IMPULSE_NORM] = Jt_gamma**2 / mass
     if qd.static(op == VertexDofOp.PCG_INIT or op == VertexDofOp.PCG_UPDATE):
         # z = M^-1 r takes the row of the dof in the inverse of its mass block, which multiplies vectors that no dof
         # writes in this loop: the gradient, the opposite of r, then A p, along which the update steps r and z alike.
@@ -4906,11 +4953,13 @@ def func_one_exact_linesearch_iter(
     Run one pass of the exact line search using rtsafe, a Newton-Raphson iteration safeguarded by bisection.
 
     Each pass steps the velocities by the current step size and evaluates the derivative of the cost along the Newton
-    step f and its own derivative df there. The first pass evaluates the largest step size. An environment whose Newton
-    iteration decreased its cost by no more than its round-off stops its solve there, one whose cost still decreases at
-    the largest step size takes it, and the others start the bracket [alpha_min, alpha_max] holding the root of f. The
-    next passes shrink the bracket to the step size on the side where f has the sign it has at that end, and the next
-    step size takes a Newton step on f, or bisects the bracket when the Newton step leaves it or reduces f too slowly.
+    step f and its own derivative df there. The first pass evaluates the largest step size. An environment whose slope
+    along the Newton step is round-off takes the full step, or the largest step size where its cost still decreases, and
+    stops its solve when its last Newton iteration decreased its cost by no more than its round-off too. One whose cost
+    still decreases at the largest step size takes it, and the others start the bracket [alpha_min, alpha_max] holding
+    the root of f. The next passes shrink the bracket to the step size on the side where f has the sign it has at that
+    end, and the next step size takes a Newton step on f, or bisects the bracket when the Newton step leaves it or
+    reduces f too slowly.
     """
     func_compute_vertices_dofs(
         sap_state.envs.is_linesearch_active,
@@ -4953,6 +5002,7 @@ def func_one_exact_linesearch_iter(
         # The first pass evaluates the largest step size, which the kernel counts as an extra iteration
         is_first_pass = sap_state.loops.n_linesearch_next[()] == sap_info.n_linesearch_iterations[None]
         cost_tol = gs.qd_float(0.0)
+        is_stagnating = False
         if is_first_pass:
             totals = func_chunks_total(
                 i_b,
@@ -4988,15 +5038,14 @@ def func_one_exact_linesearch_iter(
                 + energy_constraints
             )
             sap_state.envs.prev_energy[i_b] = energy_scale
-            # The solve stops once a Newton iteration decreases its cost by no more than its round-off: a tolerance on
-            # its gradient below what the precision of the simulation resolves would otherwise run it to the cap.
+            # The solve stops once the last Newton iteration decreased its cost by no more than its round-off and the
+            # slope of this one is round-off too (see below): a tolerance on its gradient below what the precision of
+            # the simulation resolves would otherwise run it to the cap. The slope keeps an inexact Newton step that
+            # left a light body aside from stopping the step that resolves it.
             energy_decrease = sap_state.envs.energy_newton_prev[i_b] - energy
             sap_state.envs.energy_newton_prev[i_b] = energy
             cost_tol = sap_info.linesearch_cost_atol[None] + sap_info.linesearch_cost_rtol[None] * energy_scale
-            if energy_decrease < cost_tol:
-                sap_state.envs.is_active[i_b] = False
-                sap_state.envs.is_linesearch_active[i_b] = False
-                continue
+            is_stagnating = energy_decrease < cost_tol
             sap_state.envs.d2ellA_dalpha2[i_b] = totals[VertexDofSum.D2ELLA]
         dell_dalpha = func_chunks_total(
             i_b,
@@ -5016,8 +5065,11 @@ def func_one_exact_linesearch_iter(
         )
         if is_first_pass:
             sap_state.envs.is_linesearch_active[i_b] = sap_state.envs.dell_dalpha[i_b] > 0.0
+            is_slope_roundoff = -sap_state.envs.m[i_b] < cost_tol
+            if is_slope_roundoff and is_stagnating:
+                sap_state.envs.is_active[i_b] = False
             # When the slope is round-off, the full step is taken and the line search ends
-            if sap_state.envs.is_linesearch_active[i_b] and -sap_state.envs.m[i_b] < cost_tol:
+            if sap_state.envs.is_linesearch_active[i_b] and is_slope_roundoff:
                 sap_state.envs.is_linesearch_active[i_b] = False
                 sap_state.envs.step_size[i_b] = 1.0
                 if qd.static(sap_config.has_fem):
