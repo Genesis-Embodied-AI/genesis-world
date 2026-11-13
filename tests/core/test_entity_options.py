@@ -64,7 +64,7 @@ def test_reject_material_for_solver():
 
 
 @pytest.mark.required
-def test_selection_precedence(tmp_path, caplog, show_viewer, tol, two_box_free_mjcf, torus_box_sphere_mjcf):
+def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box_sphere_mjcf):
     DT = 1e-2
     N_STEPS = 10
     PUSH_FORCE = 50.0
@@ -79,133 +79,77 @@ def test_selection_precedence(tmp_path, caplog, show_viewer, tol, two_box_free_m
         ),
         show_viewer=show_viewer,
     )
-    # Link and geom options override the material of the entity on the geoms they select, the geom options winning
-    arm = scene.add_entity(
-        options=gs.entities.Rigid(
-            morph=gs.morphs.URDF(
-                file="urdf/simple/two_link_arm.urdf",
-                pos=(0.0, -1.0, 0.6),
-                fixed=True,
-                recompute_inertia=True,
-            ),
-            material=gs.materials.Rigid(
-                rho=500.0,
-                friction=0.5,
-            ),
-            links={
-                # An ordinal selects in every link of the subtree holding collision geoms, the root holding none
-                gs.LinkIndex.subtree("base"): gs.options.Link(
-                    geoms={
-                        gs.GeomIndex.at(0): gs.options.Geom(
-                            friction_torsional=0.02,
-                        ),
-                    },
-                ),
-                gs.LinkIndex.subtree("arm1"): gs.options.Link(
-                    friction_rolling=0.003,
-                ),
-                gs.LinkIndex.named("arm2"): gs.options.Link(
-                    rho=2000.0,
-                    friction=0.8,
-                    geoms={
-                        gs.GeomIndex.at(0): gs.options.Geom(
-                            friction=1.5,
-                        ),
-                    },
-                ),
-            },
+    # A value set on a geom selection overrides one set on links alone, even later, and of two values set on links
+    # alone, the later one applies. An ordinal counts the collision geoms of the entity, the root link holding none.
+    arm_options = gs.entities.Rigid(
+        morph=gs.morphs.URDF(
+            file="urdf/simple/two_link_arm.urdf",
+            pos=(0.0, -1.0, 0.6),
+            fixed=True,
+            recompute_inertia=True,
+        ),
+        material=gs.materials.Rigid(
+            rho=500.0,
+            friction=0.5,
         ),
     )
-    # Entities sharing one collision mesh keep the geom options each of them gives
-    spheres = [
-        scene.add_entity(
-            options=gs.entities.Rigid(
-                morph=gs.morphs.Mesh(
-                    file="meshes/sphere.obj",
-                    pos=(1.0 + i, -1.0, 0.6),
-                    scale=0.1,
-                    fixed=True,
-                ),
-                geoms={
-                    gs.GeomIndex.named("*"): gs.options.Geom(
-                        friction=friction,
-                    ),
-                },
+    arm_options.select(gs.GeomIndex.at(1)).set_friction(1.5)
+    arm_options.select(gs.LinkIndex.subtree("arm1")).set_friction(0.9).set_friction_rolling(0.003)
+    arm_options.select(gs.LinkIndex.named("arm2")).set(gs.options.Geom(rho=2000.0, friction=0.8))
+    arm_options.select(gs.LinkIndex.named("arm1")).set_friction(0.6)
+    arm_options.select(gs.LinkIndex.subtree("base")).set_friction_torsional(0.02)
+    arm = scene.add_entity(options=arm_options)
+    # Entities sharing one collision mesh keep the values each of them sets
+    spheres = []
+    for i, friction in enumerate((0.5, 1.5)):
+        sphere_options = gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                pos=(1.0 + i, -1.0, 0.6),
+                scale=0.1,
+                fixed=True,
             ),
         )
-        for i, friction in enumerate((0.5, 1.5))
-    ]
-    # The convex pieces of a decomposed mesh all take the options of the mesh
-    mixed_geoms_body = scene.add_entity(
-        options=gs.entities.Rigid(
-            morph=gs.morphs.MJCF(
-                file=torus_box_sphere_mjcf,
-                pos=(4.0, 1.0, 0.6),
-                decompose_robot_error_threshold=0.0,
-            ),
-            material=gs.materials.Rigid(
-                friction=0.3,
-                friction_torsional=0.01,
-                friction_rolling=0.0005,
-            ),
-            links={
-                # The geom name selects in every link of the subtree, of which the parent has none of that name
-                gs.LinkIndex.subtree("body"): gs.options.Link(
-                    geoms={
-                        gs.GeomIndex.named("tip"): gs.options.Geom(
-                            friction=1.2,
-                        ),
-                    },
-                ),
-                gs.LinkIndex.named("body"): gs.options.Link(
-                    geoms={
-                        gs.GeomIndex.named("tor*"): gs.options.Geom(
-                            friction=0.7,
-                        ),
-                        gs.GeomIndex.at([False, True, False, False]): gs.options.Geom(
-                            friction=1.5,
-                        ),
-                        gs.GeomIndex.at(slice(1, 3)): gs.options.Geom(
-                            friction_torsional=0.03,
-                        ),
-                    },
-                ),
-            },
-            # An ordinal of the entity counts its collision geoms over every link, so the fifth one is the capsule
-            geoms={
-                gs.GeomIndex.named("*_cap"): gs.options.Geom(
-                    friction_torsional=0.05,
-                    friction_rolling=0.002,
-                ),
-                gs.GeomIndex.at(4): gs.options.Geom(
-                    friction_rolling=0.001,
-                ),
-            },
+        sphere_options.select(gs.GeomIndex.named("*")).set_friction(friction)
+        spheres.append(scene.add_entity(options=sphere_options))
+    # The convex pieces of a decomposed mesh all take the values of the mesh
+    mixed_geoms_options = gs.entities.Rigid(
+        morph=gs.morphs.MJCF(
+            file=torus_box_sphere_mjcf,
+            pos=(4.0, 1.0, 0.6),
+            decompose_robot_error_threshold=0.0,
+        ),
+        material=gs.materials.Rigid(
+            friction=0.3,
+            friction_torsional=0.01,
+            friction_rolling=0.0005,
         ),
     )
+    # A list of selectors holds the geoms any of them holds
+    caps = [gs.GeomIndex.named("top_cap"), gs.GeomIndex.named("bottom_cap")]
+    mixed_geoms_options.select(caps).set(gs.options.Geom(friction_torsional=0.05, friction_rolling=0.002))
+    # The geom name selects in every link of the subtree, of which the parent has none of that name
+    mixed_geoms_options.select(gs.LinkIndex.subtree("body"), gs.GeomIndex.named("tip")).set_friction(1.2)
+    with mixed_geoms_options.select(gs.LinkIndex.named("body")) as body:
+        body.select(gs.GeomIndex.named("tor*")).set_friction(0.7)
+        body.select(gs.GeomIndex.at([False, True, False, False, False])).set_friction(1.5)
+        body.select(gs.GeomIndex.at(slice(1, 3))).set_friction_torsional(0.03)
+    # The fifth collision geom of the entity is the capsule of the second link
+    mixed_geoms_options.select(gs.GeomIndex.at(4)).set_friction_rolling(0.001)
+    mixed_geoms_body = scene.add_entity(options=mixed_geoms_options)
     # Geom densities weigh in the mass of an aligned body alone, whose frame stays where its kinematic ghost puts it
-    dense_body = scene.add_entity(
-        options=gs.entities.Rigid(
-            morph=gs.morphs.MJCF(
-                file=two_box_free_mjcf,
-                pos=(3.0, 1.0, 0.6),
-                align=True,
-                recompute_inertia=True,
-            ),
-            links={
-                gs.LinkIndex.named("body"): gs.options.Link(
-                    geoms={
-                        gs.GeomIndex.at(0): gs.options.Geom(
-                            rho=8000.0,
-                        ),
-                        gs.GeomIndex.at(1): gs.options.Geom(
-                            rho=1000.0,
-                        ),
-                    },
-                ),
-            },
+    dense_body_options = gs.entities.Rigid(
+        morph=gs.morphs.MJCF(
+            file=two_box_free_mjcf,
+            pos=(3.0, 1.0, 0.6),
+            align=True,
+            recompute_inertia=True,
         ),
     )
+    with dense_body_options.select(gs.LinkIndex.named("body")) as body:
+        body.select(gs.GeomIndex.at(0)).set_rho(8000.0)
+        body.select(gs.GeomIndex.at(1)).set_rho(1000.0)
+    dense_body = scene.add_entity(options=dense_body_options)
     dense_body_ghost = scene.add_entity(
         options=gs.entities.Kinematic(
             morph=gs.morphs.MJCF(
@@ -215,6 +159,19 @@ def test_selection_precedence(tmp_path, caplog, show_viewer, tol, two_box_free_m
             ),
         ),
     )
+    # The entity holds a read-only copy of its options, so that later edits of the options leave it as it is
+    box_options = gs.entities.Rigid(
+        morph=gs.morphs.Box(
+            pos=(5.0, 0.0, 0.0),
+            size=(0.1, 0.1, 0.1),
+        ),
+    )
+    box_options.select(gs.GeomIndex.at(0)).set_friction(2.0)
+    box_options.select(gs.GeomIndex.at([True])).set_friction(1.0)
+    box = scene.add_entity(options=box_options)
+    box_options.select(gs.GeomIndex.at(0)).set_friction(3.0)
+    with pytest.raises(gs.GenesisException, match="read-only"):
+        box.options.select(gs.GeomIndex.at(0)).set_friction(3.0)
 
     # Every kind of selection travels through a scene file
     exported = tmp_path / f"selections{SCENE_FORMAT}"
@@ -222,89 +179,53 @@ def test_selection_precedence(tmp_path, caplog, show_viewer, tol, two_box_free_m
         morph=gs.morphs.Box(
             size=(0.1, 0.1, 0.1),
         ),
-        links={
-            gs.LinkIndex.subtree("box_*"): gs.options.Link(),
-            gs.LinkIndex.named("box_baselink"): gs.options.Link(
-                geoms={
-                    gs.GeomIndex.at([0]): gs.options.Geom(),
-                    gs.GeomIndex.at([True]): gs.options.Geom(),
-                    gs.GeomIndex.at(slice(0, 1)): gs.options.Geom(),
-                    gs.GeomIndex.named("box*"): gs.options.Geom(),
-                },
-            ),
-        },
-        geoms={
-            gs.GeomIndex.named("*"): gs.options.Geom(),
-        },
     )
+    rigid_options.select(gs.LinkIndex.subtree("box_*")).set_friction(1.0)
+    with rigid_options.select(gs.LinkIndex.named("box_baselink")) as box_link:
+        box_link.select(gs.GeomIndex.at([0])).set_rho(1000.0)
+        box_link.select(gs.GeomIndex.at([True])).set_friction_torsional(0.01)
+        box_link.select(gs.GeomIndex.at(slice(0, 1))).set_friction_rolling(0.001)
+    rigid_options.select([gs.GeomIndex.named("box*"), gs.GeomIndex.named("*")]).set_friction(2.0)
     fem_options = gs.entities.FEM(
         morph=gs.morphs.Box(
             size=(0.1, 0.1, 0.1),
         ),
         material=gs.materials.FEM.Elastic(),
-        vertices={
-            gs.VertexIndex.at(0) | gs.VertexIndex.closest_to(pos=(0.05, 0.05, 0.05), max_distance=0.01): (
-                gs.options.Vertex()
-            ),
-            gs.VertexIndex.in_box(lower=(0.0, 0.0, 0.0), upper=(0.1, 0.1, 0.1)): gs.options.Vertex(),
-        },
     )
+    corners = [gs.VertexIndex.at(0), gs.VertexIndex.closest_to(pos=(0.05, 0.05, 0.05), max_distance=0.01)]
+    fem_options.select(corners).set_is_fixed(True)
+    fem_options.select(gs.VertexIndex.in_box(lower=(0.0, 0.0, 0.0), upper=(0.1, 0.1, 0.1))).set_is_fixed(True)
     serialization.export(exported, {"rigid": rigid_options, "fem": fem_options})
     loaded = serialization.load(exported, {"rigid": gs.entities.Rigid, "fem": gs.entities.FEM})
     assert loaded["rigid"].model_dump() == rigid_options.model_dump()
     assert loaded["fem"].model_dump() == fem_options.model_dump()
 
-    with caplog.at_level("WARNING"):
-        overlapping_box = scene.add_entity(
-            options=gs.entities.Rigid(
-                morph=gs.morphs.Box(
-                    pos=(5.0, 0.0, 0.0),
-                    size=(0.1, 0.1, 0.1),
-                ),
-                links={
-                    gs.LinkIndex.named("box_baselink"): gs.options.Link(
-                        geoms={
-                            gs.GeomIndex.at(0): gs.options.Geom(
-                                friction=2.0,
-                            ),
-                            gs.GeomIndex.at([True]): gs.options.Geom(
-                                friction=1.0,
-                            ),
-                        },
-                    ),
-                },
-            )
-        )
-    assert "equal specificity give 'friction'" in caplog.text
-    with pytest.raises(gs.GenesisException, match="selects no valid geom"):
-        scene.add_entity(
-            options=gs.entities.Rigid(
-                morph=gs.morphs.Box(pos=(5.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
-                links={
-                    gs.LinkIndex.named("box_baselink"): gs.options.Link(
-                        geoms={gs.GeomIndex.at(1): gs.options.Geom(friction=1.0)}
-                    )
-                },
-            )
-        )
-    with pytest.raises(gs.GenesisException, match="No collision geom of the entity"):
-        scene.add_entity(
-            options=arm.options.model_copy(update={"geoms": {gs.GeomIndex.named("leg*"): gs.options.Geom()}})
-        )
+    # Refused as the quantities are set
+    with pytest.raises(gs.GenesisException, match="gs.LinkIndex and gs.GeomIndex alone"):
+        gs.entities.Rigid(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1))).select(gs.VertexIndex.at(0)).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="one kind of part"):
+        box_options.select([gs.LinkIndex.named("box_baselink"), gs.GeomIndex.at(0)]).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="sets no quantity"):
+        box_options.select(gs.GeomIndex.at(0)).set(gs.options.Geom())
+    # Refused as the entity is added
+    out_of_range_options = box_options.model_copy()
+    out_of_range_options.select(gs.LinkIndex.named("box_baselink"), gs.GeomIndex.at(1)).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="selects no valid geom among 1"):
+        scene.add_entity(options=out_of_range_options)
+    disjoint_options = arm.options.model_copy()
+    disjoint_options.select(gs.LinkIndex.named("arm1"), gs.GeomIndex.at(1)).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="holds no collision geom"):
+        scene.add_entity(options=disjoint_options)
+    unknown_link_options = arm.options.model_copy()
+    unknown_link_options.select(gs.LinkIndex.named("arm3")).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="links_to_keep"):
-        scene.add_entity(
-            options=arm.options.model_copy(update={"links": {gs.LinkIndex.named("arm3"): gs.options.Link()}})
-        )
-    with pytest.raises(gs.GenesisException, match="selects no valid geom among 2"):
-        scene.add_entity(
-            options=arm.options.model_copy(update={"geoms": {gs.GeomIndex.at(2): gs.options.Geom(friction=1.0)}})
-        )
+        scene.add_entity(options=unknown_link_options)
 
     scene.build(n_envs=2)
     with pytest.raises(gs.GenesisException, match="read-only"):
         arm.options.morph.pos = (9.0, 9.0, 9.0)
 
-    # The mass of each box is its volume, 0.2^3 m^3, times the density its geom options give
+    # The mass of each box is its volume, 0.2^3 m^3, times the density set on its geom
     assert_allclose(dense_body.get_mass(), (8000.0 + 1000.0) * 0.2**3, tol=tol)
     assert_allclose(dense_body.get_qpos(), dense_body_ghost.get_qpos(), tol=tol)
     # A force on the translation of the body acts at its frame, off its center of mass, so it spins the body
@@ -312,12 +233,12 @@ def test_selection_precedence(tmp_path, caplog, show_viewer, tol, two_box_free_m
     for _ in range(N_STEPS):
         scene.step()
 
-    # The mass of each link is the volume of its box, 1 x 0.1 x 0.1 m^3, times the density its options resolve to
+    # The mass of each link is the volume of its box, 1 x 0.1 x 0.1 m^3, times the density set on it
     assert_allclose(arm.get_link("arm1").get_mass(), 500.0 * 0.01, tol=tol)
     assert_allclose(arm.get_link("arm2").get_mass(), 2000.0 * 0.01, tol=tol)
-    assert_allclose(arm.get_link("arm1").geoms[0].get_friction(), 0.5, tol=gs.EPS)
+    assert_allclose(arm.get_link("arm1").geoms[0].get_friction(), 0.6, tol=gs.EPS)
     assert_allclose(arm.get_link("arm2").geoms[0].get_friction(), 1.5, tol=gs.EPS)
-    assert_allclose(overlapping_box.geoms[0].get_friction(), 2.0, tol=gs.EPS)
+    assert_allclose(box.geoms[0].get_friction(), 1.0, tol=gs.EPS)
     for geom in arm.geoms:
         assert_allclose(geom.get_friction_torsional(), 0.02, tol=gs.EPS)
         assert_allclose(geom.get_friction_rolling(), 0.003, tol=gs.EPS)

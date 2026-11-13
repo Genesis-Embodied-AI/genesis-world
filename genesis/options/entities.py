@@ -1,15 +1,16 @@
 """Typed options an entity is constructed from, each class deciding the kind of entity and the solver simulating it."""
 
 import copy
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from types import TracebackType
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, Self, TypeVar
 
-from pydantic import ConfigDict, Field, InstanceOf, StrictBool, model_validator
+from pydantic import ConfigDict, Field, InstanceOf, StrictBool, ValidationInfo, field_validator, model_validator
 
 import genesis as gs
 from genesis.engine import materials
 from genesis.engine.materials.base import Material
-from genesis.typing import FrozenDictType, ValidFloat
+from genesis.typing import ValidFloat
 
 from .indices import GeomIndex, LinkIndex, VertexIndex
 from .morphs import Morph
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 
 
 EntityT = TypeVar("EntityT", bound="Entity")
+
+Selector = LinkIndex | GeomIndex | VertexIndex
 
 
 def get_entity_options_cls(material: Material) -> type["BaseEntity"] | None:
@@ -66,7 +69,9 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
     """Options an entity is constructed from, as passed to ``Scene.add_entity(options=...)``.
 
     A concrete subclass decides the kind of entity and the solver simulating it, and declares the materials it admits.
-    The options are immutable: derive a variant with ``model_copy(update=...)``.
+    The options are a builder until ``Scene.add_entity`` takes them: assign their fields, or set quantities on parts of
+    the entity through ``select`` where the kind of entity has parts. ``Scene.add_entity`` keeps a read-only copy, so
+    later edits leave the entity as it is.
 
     Parameters
     ----------
@@ -79,6 +84,9 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
     name : str | None, optional
         The name of the entity, unique within the scene. If None, a name is generated from the morph.
     """
+
+    # Assigning a field runs the validators, as constructing the options does
+    model_config = ConfigDict(frozen=False, validate_assignment=True)
 
     # Options class of the solver simulating the entity, None for a hybrid entity, whose parts are entities of their own
     _solver_options_cls: ClassVar[type[Options] | None] = None
@@ -112,52 +120,155 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
         return self.morph if isinstance(self.morph, tuple) else (self.morph,)
 
 
-class _GeomFields(_FrozenOptions):
-    rho: ValidFloat | None = None
-    friction: Annotated[ValidFloat, Field(ge=0.01, le=5.0)] | None = None
-    friction_torsional: Annotated[ValidFloat, Field(ge=0.0)] | None = None
-    friction_rolling: Annotated[ValidFloat, Field(ge=0.0)] | None = None
+class Geom(_FrozenOptions):
+    """Quantities of the collision geoms of a rigid entity, set on a selection of its links or geoms.
 
-
-class Geom(_GeomFields):
-    """Options of the collision geoms of a rigid entity that a ``gs.GeomIndex`` selects.
-
-    The fields given explicitly override those of the entity material for the selected geoms. Given in the 'geoms' of
-    link options, they override the link options as well, while in the 'geoms' of entity options the link options
-    override them. The fields left unset keep theirs.
+    The fields given explicitly override those of the entity material for the selected geoms (see ``Rigid.select``).
+    The fields left unset keep theirs.
 
     Parameters
     ----------
     rho : float | None, optional
         The density (kg/m^3). It estimates the mass and the inertia of a link the asset states none for, or of every
         moving link under the 'recompute_inertia' option of the morph. An aligned body is then simulated unaligned.
-        The IPC coupler rejects it. If None, the geoms take the density of their link. Default is None.
+        The IPC coupler rejects it. If None, the geoms keep the density of the material. Default is None.
     friction : float | None, optional
         The sliding friction coefficient of the contacts of the geoms (see ``gs.materials.Rigid.friction``). If None,
-        the geoms take that of their link. Default is None.
+        the geoms keep that of the material. Default is None.
     friction_torsional : float | None, optional
-        The torsional friction coefficient (see ``gs.materials.Rigid.friction_torsional``). If None, the geoms take that
-        of their link. Default is None.
+        The torsional friction coefficient (see ``gs.materials.Rigid.friction_torsional``). If None, the geoms keep
+        that of the material. Default is None.
     friction_rolling : float | None, optional
-        The rolling friction coefficient (see ``gs.materials.Rigid.friction_rolling``). If None, the geoms take that of
-        their link. Default is None.
+        The rolling friction coefficient (see ``gs.materials.Rigid.friction_rolling``). If None, the geoms keep that of
+        the material. Default is None.
     """
 
+    rho: ValidFloat | None = None
+    friction: Annotated[ValidFloat, Field(ge=0.01, le=5.0)] | None = None
+    friction_torsional: Annotated[ValidFloat, Field(ge=0.0)] | None = None
+    friction_rolling: Annotated[ValidFloat, Field(ge=0.0)] | None = None
 
-class Link(_GeomFields):
-    """Options of the links of a rigid entity that a ``gs.LinkIndex`` selects.
 
-    The density and the friction coefficients given explicitly apply to every collision geom of the selected links,
-    overriding those of the entity material and of the geom options of the entity. If None, the links keep those.
+class Vertex(_FrozenOptions):
+    """Quantities of the vertices of a deformable entity, set on a selection of its vertices.
 
     Parameters
     ----------
-    geoms : dict[gs.GeomIndex, gs.options.Geom], optional
-        The options of collision geoms of each selected link, a ``gs.GeomIndex`` ordinal counting the collision geoms of
-        that link alone (see ``gs.GeomIndex.at``). They override the options of the link. Default is no geom options.
+    is_fixed : bool, optional
+        Whether the vertices stay at their initial positions, as a hard constraint the solver enforces at every
+        substep. It holds an entity in place by a few vertices, such as a soft pad clamped by one face. The vertices are
+        vertex constraints from the build on, which ``FEMEntity.remove_vertex_constraints`` releases like any other. The
+        IPC coupler does not support it, so a Cloth material rejects it. Default is False.
     """
 
-    geoms: FrozenDictType[GeomIndex, Geom] = {}
+    is_fixed: StrictBool = False
+
+
+class Setting(_FrozenOptions):
+    """Quantities set on a selection of parts of an entity, as ``select`` records them into its entity options.
+
+    Parameters
+    ----------
+    selectors : tuple[tuple[gs.LinkIndex | gs.GeomIndex | gs.VertexIndex, ...], ...]
+        The groups of selectors of the parts. A part is selected when every group holds it, and a group holds the parts
+        any of its selectors holds. The selectors of one group are of one kind.
+    block : gs.options.Geom | gs.options.Vertex
+        The quantities set on the parts, of which the fields given explicitly apply.
+    """
+
+    selectors: Annotated[
+        tuple[Annotated[tuple[LinkIndex | GeomIndex | VertexIndex, ...], Field(min_length=1, strict=False)], ...],
+        Field(min_length=1, strict=False),
+    ]
+    block: Geom | Vertex
+
+    @model_validator(mode="after")
+    def _check_setting(self) -> Self:
+        for group in self.selectors:
+            if len({type(selector) for selector in group}) > 1:
+                gs.raise_exception(
+                    f"A list of selectors holds the parts any of them holds, so they select one kind of part, got "
+                    f"{[type(selector).__name__ for selector in group]}."
+                )
+        if not self.block.model_fields_set:
+            gs.raise_exception(f"gs.options.{type(self.block).__name__} sets no quantity. Give at least one field.")
+        return self
+
+    @property
+    def selection_repr(self) -> str:
+        """The selection of the setting on one line, for error messages."""
+        return " and ".join(
+            "["
+            + ", ".join(f"{type(selector).__name__}{selector.model_dump(exclude_none=True)}" for selector in group)
+            + "]"
+            for group in self.selectors
+        )
+
+
+class _EntitySelection:
+    """A selection of parts of an entity, recording into its entity options the quantities set on it.
+
+    Every setter returns the selection, so that calls chain on it. ``select`` narrows the selection to the parts that
+    the given selectors hold too, and ``with`` binds the selection to a name for a block.
+    """
+
+    def __init__(self, options: "BaseEntity", selectors: tuple["Selector | Sequence[Selector]", ...]) -> None:
+        if not selectors:
+            gs.raise_exception("'select' takes at least one selector.")
+        self._options = options
+        self._selectors = tuple(
+            (selector,) if isinstance(selector, (LinkIndex, GeomIndex, VertexIndex)) else tuple(selector)
+            for selector in selectors
+        )
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None
+    ) -> None:
+        return None
+
+    def select(self, *selectors: "Selector | Sequence[Selector]") -> Self:
+        """Return the selection of the parts of this selection that every argument holds.
+
+        An argument is a selector, or a list of selectors of one kind holding the parts any of them holds.
+        """
+        return type(self)(self._options, (*self._selectors, *selectors))
+
+    def set(self, *blocks: "Geom | Vertex") -> Self:
+        """Set on the selected parts the fields each block gives explicitly, a later call overriding an earlier one."""
+        settings = tuple(Setting(selectors=self._selectors, block=block) for block in blocks)
+        self._options.settings = (*self._options.settings, *settings)
+        return self
+
+
+class RigidSelection(_EntitySelection):
+    """A selection of links and collision geoms of a rigid entity (see ``Rigid.select``)."""
+
+    def set_rho(self, rho: float) -> Self:
+        """Set the density of the selected collision geoms (see ``gs.options.Geom.rho``)."""
+        return self.set(Geom(rho=rho))
+
+    def set_friction(self, friction: float) -> Self:
+        """Set the sliding friction coefficient of the selected collision geoms (see ``gs.options.Geom.friction``)."""
+        return self.set(Geom(friction=friction))
+
+    def set_friction_torsional(self, friction_torsional: float) -> Self:
+        """Set the torsional friction coefficient of the selected collision geoms."""
+        return self.set(Geom(friction_torsional=friction_torsional))
+
+    def set_friction_rolling(self, friction_rolling: float) -> Self:
+        """Set the rolling friction coefficient of the selected collision geoms."""
+        return self.set(Geom(friction_rolling=friction_rolling))
+
+
+class FEMSelection(_EntitySelection):
+    """A selection of vertices of a deformable entity (see ``FEM.select``)."""
+
+    def set_is_fixed(self, is_fixed: bool) -> Self:
+        """Set whether the selected vertices stay at their initial positions (see ``gs.options.Vertex.is_fixed``)."""
+        return self.set(Vertex(is_fixed=is_fixed))
 
 
 class Rigid(BaseEntity["RigidEntity"]):
@@ -170,24 +281,42 @@ class Rigid(BaseEntity["RigidEntity"]):
     visualize_contact : bool, optional
         Whether to draw the contact forces applied to the entity as arrows in the viewer and rendered images. Each
         arrow is drawn every frame, so reserve it for the entities being inspected. Default is False.
-    links : dict[gs.LinkIndex, gs.options.Link], optional
-        The options of the links each key selects, which override the material of the entity. A link the asset parser
-        merges into its parent has no name of its own, so keep it with the 'links_to_keep' option of the morph to
-        select it. Where two keys give one field of one link, the first key applies, with a warning. Default is no link
-        options.
-    geoms : dict[gs.GeomIndex, gs.options.Geom], optional
-        The options of the collision geoms each key selects among the collision geoms of the whole entity, by ordinal
-        (see ``gs.GeomIndex.at``) or by name in any of its links, raising if it selects no geom. They override the
-        material of the entity, and the options of the links override them in turn. Where two keys give one field of
-        one geom, the first key applies, with a warning. Default is no geom options.
+    settings : tuple[gs.options.Setting, ...], optional
+        The quantities set on selections of links and collision geoms, in the order they were set (see ``select``).
+        Default is none.
     """
 
     _solver_options_cls = RigidOptions
 
     material: materials.Rigid = Field(default_factory=materials.Rigid)
     visualize_contact: StrictBool = False
-    links: FrozenDictType[LinkIndex, Link] = {}
-    geoms: FrozenDictType[GeomIndex, Geom] = {}
+    settings: tuple[Setting, ...] = ()
+
+    # A field validator, since a model validator failing on an assignment leaves the assigned value in place
+    @field_validator("settings")
+    @classmethod
+    def _check_settings(cls, settings: tuple[Setting, ...]) -> tuple[Setting, ...]:
+        for setting in settings:
+            if not all(
+                isinstance(selector, (LinkIndex, GeomIndex)) for group in setting.selectors for selector in group
+            ):
+                gs.raise_exception("gs.entities.Rigid selects parts with gs.LinkIndex and gs.GeomIndex alone.")
+            if not isinstance(setting.block, Geom):
+                gs.raise_exception("gs.entities.Rigid sets gs.options.Geom alone on its parts.")
+        return settings
+
+    def select(self, *selectors: "LinkIndex | GeomIndex | Sequence[LinkIndex | GeomIndex]") -> RigidSelection:
+        """Select the links and the collision geoms that every argument holds, to set quantities of their geoms on.
+
+        An argument is a selector, or a list of selectors of one kind holding the parts any of them holds.
+
+        A quantity set on links applies to every collision geom of those links. For each field of each geom, a value
+        set on a selection holding a ``gs.GeomIndex`` overrides a value set on links alone, which overrides the
+        material. Between two selections of one of these levels, the later one applies. A selection that holds no
+        geom of the entity raises when the entity is added. A link the asset parser merges into its parent has no name
+        of its own, so keep it with the 'links_to_keep' option of the morph to select it.
+        """
+        return RigidSelection(self, selectors)
 
 
 class Kinematic(BaseEntity["KinematicEntity"]):
@@ -204,21 +333,6 @@ class Kinematic(BaseEntity["KinematicEntity"]):
     material: materials.Kinematic = Field(default_factory=materials.Kinematic)
 
 
-class Vertex(_FrozenOptions):
-    """Options of the vertices of a deformable entity that a ``gs.VertexIndex`` selects.
-
-    Parameters
-    ----------
-    is_fixed : bool, optional
-        Whether the vertices stay at their initial positions, as a hard constraint the solver enforces at every
-        substep. It holds an entity in place by a few vertices, such as a soft pad clamped by one face. The vertices are
-        vertex constraints from the build on, which ``FEMEntity.remove_vertex_constraints`` releases like any other. The
-        IPC coupler does not support it, so a Cloth material rejects it. Default is False.
-    """
-
-    is_fixed: StrictBool = False
-
-
 class FEM(BaseEntity["FEMEntity"]):
     """Options for an entity simulated with the finite element method (FEM).
 
@@ -226,22 +340,38 @@ class FEM(BaseEntity["FEMEntity"]):
     ----------
     material : gs.materials.FEM.Base
         The material of the entity, one of ``gs.materials.FEM.Elastic``, ``Cloth`` or ``Muscle``.
-    vertices : dict[gs.VertexIndex, gs.options.Vertex], optional
-        The options of the vertices each key selects among the vertices of the volume mesh. Where several keys give
-        one field of one vertex, the first key applies, with a warning. A Cloth material takes none. Default is no
-        vertex options.
+    settings : tuple[gs.options.Setting, ...], optional
+        The quantities set on selections of vertices of the volume mesh, in the order they were set (see ``select``). A
+        Cloth material takes none. Default is none.
     """
 
     _solver_options_cls = FEMOptions
 
     material: materials.FEM.Base
-    vertices: FrozenDictType[VertexIndex, Vertex] = {}
+    settings: tuple[Setting, ...] = ()
 
-    @model_validator(mode="after")
-    def _check_vertices(self) -> "FEM":
-        if isinstance(self.material, materials.FEM.Cloth) and self.vertices:
-            gs.raise_exception("gs.entities.FEM cannot honour 'vertices' for a Cloth material.")
-        return self
+    # A field validator, since a model validator failing on an assignment leaves the assigned value in place
+    @field_validator("settings")
+    @classmethod
+    def _check_settings(cls, settings: tuple[Setting, ...], info: ValidationInfo) -> tuple[Setting, ...]:
+        if isinstance(info.data.get("material"), materials.FEM.Cloth) and settings:
+            gs.raise_exception("gs.entities.FEM cannot honour settings of vertices for a Cloth material.")
+        for setting in settings:
+            if not all(isinstance(selector, VertexIndex) for group in setting.selectors for selector in group):
+                gs.raise_exception("gs.entities.FEM selects parts with gs.VertexIndex alone.")
+            if not isinstance(setting.block, Vertex):
+                gs.raise_exception("gs.entities.FEM sets gs.options.Vertex alone on its parts.")
+        return settings
+
+    def select(self, *selectors: "VertexIndex | Sequence[VertexIndex]") -> FEMSelection:
+        """Select the vertices of the volume mesh that every argument holds, to set quantities on.
+
+        An argument is a selector, or a list of selectors holding the vertices any of them holds.
+
+        Between two selections setting one field of one vertex, the later one applies. A selection that holds no vertex
+        raises when the entity is added.
+        """
+        return FEMSelection(self, selectors)
 
 
 class _EmittableParticles(BaseEntity[EntityT]):

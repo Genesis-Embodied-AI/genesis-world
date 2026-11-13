@@ -119,17 +119,12 @@ scene.add_entity(
 )
 ```
 
-Rigid entity options hold `links` and `geoms`, and FEM entity options hold `vertices`: mappings from a selection (`gs.LinkIndex`, `gs.GeomIndex`, `gs.VertexIndex`) to `gs.options.Link`, `gs.options.Geom` or `gs.options.Vertex`. They carry only the settings the solver already holds at that granularity: the density and friction of a collision geom, and the fixed vertices of an FEM entity. The options of a link override those of the entity, its geom options included, and the geom options of a link override those of the link, while of two selections of one rank giving one field of one target, the first one applies, with a warning. A `GeomIndex` ordinal counts the collision geoms as the asset states them, over the whole entity in its `geoms` and within each link in the `geoms` of link options, so the rigid description applies the options before post-processing splits or fuses the geoms. The rigid description resolves the link and geom options, and the FEM entity the vertex options, so the options classes hold data alone.
+Rigid and FEM entity options are builders until `Scene.add_entity` takes them, which keeps a read-only copy. `select` takes selectors (`gs.LinkIndex`, `gs.GeomIndex` on a rigid entity, `gs.VertexIndex` on an FEM entity) and returns a selection holding the parts every argument holds, an argument being a selector or a list of selectors of one kind, which holds the parts any of them holds. `selection.select` narrows the selection further, and `with` binds it to a name for a block. Setting a `gs.options.Geom` or `gs.options.Vertex` block on a selection, or one quantity through `set_<field>`, records a `gs.options.Setting` into the `settings` of the options, in call order, which is what a scene file stores. They carry only the settings the solver already holds at that granularity: the density and friction of a collision geom, and the fixed vertices of an FEM entity. For each field of each geom, a value set on a selection holding a `GeomIndex` overrides one set on links alone, which overrides the material, and of two values of one level the later applies. A `GeomIndex` ordinal counts the collision geoms of the entity as the asset states them, so the rigid description applies the settings before post-processing splits or fuses the geoms. The rigid description resolves the settings of links and geoms, and the FEM entity those of vertices, so the options classes hold data alone.
 
 ```python
-scene.add_entity(
-    options=gs.entities.Rigid(
-        morph=gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf"),
-        links={
-            gs.LinkIndex.named("arm2"): gs.options.Link(friction=1.2),
-        },
-    ),
-)
+arm_options = gs.entities.Rigid(morph=gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf"))
+arm_options.select(gs.LinkIndex.named("arm2")).set_friction(1.2)
+scene.add_entity(options=arm_options)
 ```
 
 Location: `genesis/options/entities.py`, `genesis/options/indices.py`

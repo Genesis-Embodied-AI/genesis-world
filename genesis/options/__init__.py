@@ -1,4 +1,4 @@
-from .entities import Geom, Link, Vertex
+from .entities import Geom, Setting, Vertex
 from .misc import CoacdOptions, FoamOptions
 from .profiling import ProfilingOptions
 from .scene import SceneOptions
@@ -26,13 +26,13 @@ __all__ = [
     "IPCCouplerOptions",
     "KinematicOptions",
     "LegacyCouplerOptions",
-    "Link",
     "MPMOptions",
     "PBDOptions",
     "ProfilingOptions",
     "RigidOptions",
     "SAPCouplerOptions",
     "SceneOptions",
+    "Setting",
     "SimOptions",
     "SPHOptions",
     "Vertex",

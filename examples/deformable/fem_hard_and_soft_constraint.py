@@ -44,25 +44,22 @@ def main():
     blob_fixed_bounds = np.array([[-0.1, -0.1, 0.085], [0.1, 0.1, 0.1]])
     cylinder_pos = SCENE_POS + np.array([-0.3, 0.3, 0])
     cylinder_fixed_pos = np.array([0.05, 0.0, 0.1])
-    blob = scene.add_entity(
-        options=gs.entities.FEM(
-            morph=gs.morphs.Sphere(
-                pos=blob_pos,
-                radius=0.1,
-            ),
-            material=gs.materials.FEM.Elastic(
-                E=1.0e4,
-                nu=0.45,
-                rho=1000.0,
-                model="linear_corotated",
-            ),
-            vertices={
-                gs.VertexIndex.in_box(lower=blob_fixed_bounds[0], upper=blob_fixed_bounds[1]): gs.options.Vertex(
-                    is_fixed=True,
-                ),
-            },
+    blob_options = gs.entities.FEM(
+        morph=gs.morphs.Sphere(
+            pos=blob_pos,
+            radius=0.1,
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1.0e4,
+            nu=0.45,
+            rho=1000.0,
+            model="linear_corotated",
         ),
     )
+    blob_options.select(gs.VertexIndex.in_box(lower=blob_fixed_bounds[0], upper=blob_fixed_bounds[1])).set_is_fixed(
+        True
+    )
+    blob = scene.add_entity(options=blob_options)
 
     cube = scene.add_entity(
         morph=gs.morphs.Box(
@@ -77,26 +74,21 @@ def main():
         ),
     )
 
-    scene.add_entity(
-        options=gs.entities.FEM(
-            morph=gs.morphs.Cylinder(
-                pos=cylinder_pos,
-                height=0.2,
-                radius=0.05,
-            ),
-            material=gs.materials.FEM.Elastic(
-                E=1.0e5,
-                nu=0.45,
-                rho=1000.0,
-                model="linear_corotated",
-            ),
-            vertices={
-                gs.VertexIndex.closest_to(pos=cylinder_fixed_pos, max_distance=0.01): gs.options.Vertex(
-                    is_fixed=True,
-                ),
-            },
+    cylinder_options = gs.entities.FEM(
+        morph=gs.morphs.Cylinder(
+            pos=cylinder_pos,
+            height=0.2,
+            radius=0.05,
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1.0e5,
+            nu=0.45,
+            rho=1000.0,
+            model="linear_corotated",
         ),
     )
+    cylinder_options.select(gs.VertexIndex.closest_to(pos=cylinder_fixed_pos, max_distance=0.01)).set_is_fixed(True)
+    scene.add_entity(options=cylinder_options)
 
     # Recording every simulation step would be far denser than any player needs, and the step size here is tiny.
     video_fps = min(100.0, 1.0 / args.dt)
