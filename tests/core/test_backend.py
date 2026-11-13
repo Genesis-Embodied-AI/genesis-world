@@ -66,11 +66,17 @@ def test_switching(backend, order):
             )
 
             scene = gs.Scene(show_viewer=False)
-            scene.add_entity(gs.morphs.Plane())
             scene.add_entity(
-                morph=gs.morphs.Box(
-                    size=(0.4, 0.4, 0.4),
-                    pos=(0.0, 0.0, 0.5),
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Plane(),
+                ),
+            )
+            scene.add_entity(
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Box(
+                        size=(0.4, 0.4, 0.4),
+                        pos=(0.0, 0.0, 0.5),
+                    ),
                 ),
             )
             scene.build()
@@ -115,11 +121,17 @@ def _basic_sim_child(args: list[str]):
     gs.init(backend=backend, precision="32")
 
     scene = gs.Scene(show_viewer=False)
-    scene.add_entity(gs.morphs.Plane())
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.4, 0.4, 0.4),
-            pos=(0.0, 0.0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.4, 0.4, 0.4),
+                pos=(0.0, 0.0, 0.5),
+            ),
         ),
     )
     scene.build()
@@ -159,7 +171,11 @@ def _termination_signal_child(args: list[str]):
     gs.init(backend=gs.constants.backend.cpu, precision="32")
 
     scene = gs.Scene(show_viewer=False)
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     scene.build()
 
     os.kill(os.getpid(), signal.SIGTERM)

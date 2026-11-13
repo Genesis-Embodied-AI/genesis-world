@@ -94,16 +94,20 @@ def test_default_plugin(n_envs, tmp_path):
     # The ground stays within the view of the camera, which the software renderer requires to render identical frames
     # of identical states
     scene.add_entity(
-        morph=gs.morphs.Plane(
-            plane_size=(1.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                plane_size=(1.0, 1.0),
+            ),
         ),
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.2),
-            size=(0.2, 0.2, 0.2),
-            euler=(30, 40, 0),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.2),
+                size=(0.2, 0.2, 0.2),
+                euler=(30, 40, 0),
+            ),
+        ),
     )
     cam = scene.add_camera(
         res=CAM_RES,
@@ -350,12 +354,14 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
         show_FPS=False,
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.5, 0.5, 0.5),
-            pos=(0.0, 0.0, 0.0),
-            # The viewer records whatever it last drew, which may lag a step behind the scene in contrast to cameras and
-            # camera sensors, so the box must not move by itself for the recorded frames to be deterministic
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.5, 0.5, 0.5),
+                pos=(0.0, 0.0, 0.0),
+                # The viewer records whatever it last drew, which may lag a step behind the scene in contrast to cameras and
+                # camera sensors, so the box must not move by itself for the recorded frames to be deterministic
+                fixed=True,
+            ),
         ),
     )
     scene.build()
@@ -470,7 +476,9 @@ def test_mouse_interaction_plugin(
     )
 
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     box = scene.add_entity(
         options=gs.entities.Rigid(
@@ -486,11 +494,13 @@ def test_mouse_interaction_plugin(
     )
     # One lane stacks a collision-only box under a visual-only one, so the two cast modes land on different entities.
     decoy = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, STACK_LANE_Y, DECOY_Z),
-            size=(DECOY_SIZE,) * 3,
-            fixed=True,
-            visualization=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, STACK_LANE_Y, DECOY_Z),
+                size=(DECOY_SIZE,) * 3,
+                fixed=True,
+                visualization=False,
+            ),
         ),
     )
     target = scene.add_entity(
@@ -520,22 +530,26 @@ def test_mouse_interaction_plugin(
     )
     # Without the opt-in material, an entity stays unpickable.
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, OPTOUT_LANE_Y, TARGET_Z),
-            size=(TARGET_SIZE,) * 3,
-            fixed=True,
-            collision=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, OPTOUT_LANE_Y, TARGET_Z),
+                size=(TARGET_SIZE,) * 3,
+                fixed=True,
+                collision=False,
+            ),
         ),
     )
     # Rotated so that none of its triangle edges lines up with a coordinate plane, which is what puts a probe aimed at
     # an edge within rounding of it. Parked far enough along y for the probes to reach it without crossing anything,
     # and high enough that the ones coming from below still start above the ground.
     edge_target = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, EDGE_LANE_Y, EDGE_RADIUS + 2.0 * EDGE_PROBE_RANGE),
-            quat=(0.5, 0.5, 0.5, 0.5),
-            radius=EDGE_RADIUS,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, EDGE_LANE_Y, EDGE_RADIUS + 2.0 * EDGE_PROBE_RANGE),
+                quat=(0.5, 0.5, 0.5, 0.5),
+                radius=EDGE_RADIUS,
+                fixed=True,
+            ),
         ),
     )
     # A plugin drawn before the mouse interaction one reports every draw of the plugins
@@ -822,14 +836,18 @@ def test_add_camera_consistency(add_box, renderer, show_viewer):
         show_viewer=True,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     if add_box:
         scene.add_entity(
-            morph=gs.morphs.Box(
-                pos=(0.1, 0.1, 0.1),
-                size=(0.1, 0.1, 0.1),
-                fixed=True,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    pos=(0.1, 0.1, 0.1),
+                    size=(0.1, 0.1, 0.1),
+                    fixed=True,
+                ),
             ),
         )
     camera = scene.add_camera(
@@ -887,7 +905,9 @@ def test_rasterizer_camera_sensor(renderer):
     # At least one entity is needed to ensure the rendered image is not entirely blank,
     # otherwise it is not possible to verify that something was actually rendered.
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     camera_sensor = scene.add_sensor(
         RasterizerCameraOptions(
@@ -925,10 +945,12 @@ def test_camera_render_honors_resolution(renderer):
         show_FPS=False,
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.0),
-            size=(2.0 * box_halfsize, 2.0 * box_halfsize, 2.0 * box_halfsize),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.0),
+                size=(2.0 * box_halfsize, 2.0 * box_halfsize, 2.0 * box_halfsize),
+                fixed=True,
+            ),
         ),
     )
     camera = scene.add_camera(
@@ -968,7 +990,9 @@ def test_thread_crash_reports_traceback():
         show_viewer=True,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     crash_plugin = CrashOnDrawPlugin()
     scene.viewer.add_plugin(crash_plugin)

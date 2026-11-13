@@ -50,7 +50,11 @@ def main():
         show_FPS=True,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     # Realistic steel density (the default is far too light); the bolt is fixed so its inertia is moot, but the nut's
     # weight then matches a real fastener.
@@ -60,28 +64,36 @@ def main():
     # [-11, 32] mm, so pos_z = 11 mm puts the head bottom at z = 0 (on the plane), the head top at z = 11 mm and the
     # shaft tip at z = 43 mm.
     scene.add_entity(
-        gs.morphs.Mesh(
-            pos=(0.0, 0.0, 0.011),
-            file="meshes/bolt_nut/bolt.stl",
-            decimate=False,
-            convexify=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                pos=(0.0, 0.0, 0.011),
+                file="meshes/bolt_nut/bolt.stl",
+                decimate=False,
+                convexify=False,
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            material=steel,
         ),
-        material=steel,
-        vis_mode="collision",
     )
 
     # Nut: pre-engaged at the top of the shaft (base at z = 24 mm, top ~42 mm just below the tip), so it screws the
     # whole way down. The threads mesh with clearance at this pose, so contact catches the nut rather than free-falling.
     nut = scene.add_entity(
-        gs.morphs.Mesh(
-            pos=(0.0, 0.0, 0.024),
-            file="meshes/bolt_nut/nut.stl",
-            decimate=False,
-            convexify=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                pos=(0.0, 0.0, 0.024),
+                file="meshes/bolt_nut/nut.stl",
+                decimate=False,
+                convexify=False,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            material=steel,
         ),
-        material=steel,
-        vis_mode="collision",
     )
 
     scene.build()

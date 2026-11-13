@@ -52,19 +52,27 @@ def main():
         show_viewer=args.vis,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
         ),
     )
 
     # Fixed wall: the robot presses its end-effector into it in the second half.
     scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.60, 0.0, 0.50),
-            size=(0.04, 0.30, 0.20),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.60, 0.0, 0.50),
+                size=(0.04, 0.30, 0.20),
+                fixed=True,
+            ),
         ),
     )
 

@@ -58,19 +58,25 @@ class HoverEnv:
             show_viewer=show_viewer,
         )
 
-        self.scene.add_entity(gs.morphs.Plane())
+        self.scene.add_entity(
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Plane(),
+            ),
+        )
 
         if self.env_cfg["visualize_target"]:
             self.target = self.scene.add_entity(
-                morph=gs.morphs.Mesh(
-                    file="meshes/sphere.obj",
-                    scale=0.05,
-                    fixed=False,
-                    collision=False,
-                ),
-                surface=gs.surfaces.Rough(
-                    diffuse_texture=gs.textures.ColorTexture(
-                        color=(1.0, 0.5, 0.5),
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Mesh(
+                        file="meshes/sphere.obj",
+                        scale=0.05,
+                        fixed=False,
+                        collision=False,
+                    ),
+                    surface=gs.surfaces.Rough(
+                        diffuse_texture=gs.textures.ColorTexture(
+                            color=(1.0, 0.5, 0.5),
+                        ),
                     ),
                 ),
             )
@@ -91,9 +97,11 @@ class HoverEnv:
         self.base_init_quat = torch.tensor(self.env_cfg["base_init_quat"], device=gs.device)
         self.inv_base_init_quat = inv_quat(self.base_init_quat)
         self.drone = self.scene.add_entity(
-            morph=gs.morphs.Drone(
-                file="urdf/drones/cf2x.urdf",
-            )
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Drone(
+                    file="urdf/drones/cf2x.urdf",
+                ),
+            ),
         )
 
         self.scene.build(n_envs=num_envs)

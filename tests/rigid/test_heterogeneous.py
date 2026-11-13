@@ -64,58 +64,74 @@ def test_physics_parity(fixed_base_dual_arm, fixed_base_dual_arm_high_damping, b
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     ref_dual_arms = []
     for i_env, offset in enumerate(REFERENCE_OFFSETS):
         ref_dual_arms.append(
             scene.add_entity(
-                gs.morphs.URDF(
-                    file=dual_arm_files[i_env // 2],
-                    pos=np.add(DUAL_ARM_POSITIONS[i_env // 2], offset),
-                    euler=DUAL_ARM_EULERS[i_env // 2],
-                    scale=DUAL_ARM_SCALES[i_env // 2],
-                    fixed=True,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.URDF(
+                        file=dual_arm_files[i_env // 2],
+                        pos=np.add(DUAL_ARM_POSITIONS[i_env // 2], offset),
+                        euler=DUAL_ARM_EULERS[i_env // 2],
+                        scale=DUAL_ARM_SCALES[i_env // 2],
+                        fixed=True,
+                    ),
                 ),
             )
         )
     het_dual_arm = scene.add_entity(
-        morph=tuple(
-            gs.morphs.URDF(file=file, pos=pos, euler=euler, scale=scale, fixed=True)
-            for file, pos, euler, scale in zip(dual_arm_files, DUAL_ARM_POSITIONS, DUAL_ARM_EULERS, DUAL_ARM_SCALES)
-        )
+        options=gs.entities.Rigid(
+            morph=tuple(
+                gs.morphs.URDF(file=file, pos=pos, euler=euler, scale=scale, fixed=True)
+                for file, pos, euler, scale in zip(dual_arm_files, DUAL_ARM_POSITIONS, DUAL_ARM_EULERS, DUAL_ARM_SCALES)
+            ),
+        ),
     )
     ref_cubes = []
     for cube_size, pos, offset in zip(CUBE_SIZES, CUBE_POSITIONS, REFERENCE_OFFSETS):
         ref_cubes.append(
             scene.add_entity(
-                gs.morphs.Box(
-                    size=(cube_size, cube_size, cube_size),
-                    pos=(pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]),
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Box(
+                        size=(cube_size, cube_size, cube_size),
+                        pos=(pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]),
+                    ),
                 ),
             )
         )
     het_cube = scene.add_entity(
-        morph=tuple(
-            gs.morphs.Box(size=(cube_size, cube_size, cube_size), pos=pos)
-            for cube_size, pos in zip(CUBE_SIZES, CUBE_POSITIONS)
-        )
+        options=gs.entities.Rigid(
+            morph=tuple(
+                gs.morphs.Box(size=(cube_size, cube_size, cube_size), pos=pos)
+                for cube_size, pos in zip(CUBE_SIZES, CUBE_POSITIONS)
+            ),
+        ),
     )
     ref_objs = []
     for file, pos, offset_euler, offset in zip(asset_files, POSITIONS, OFFSET_EULERS, REFERENCE_OFFSETS):
         ref_objs.append(
             scene.add_entity(
-                gs.morphs.MJCF(
-                    file=file,
-                    pos=(pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]),
-                    offset_euler=offset_euler,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.MJCF(
+                        file=file,
+                        pos=(pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]),
+                        offset_euler=offset_euler,
+                    ),
                 ),
             )
         )
     het_obj = scene.add_entity(
-        morph=tuple(
-            gs.morphs.MJCF(file=file, pos=pos, offset_euler=offset_euler)
-            for file, pos, offset_euler in zip(asset_files, POSITIONS, OFFSET_EULERS)
-        )
+        options=gs.entities.Rigid(
+            morph=tuple(
+                gs.morphs.MJCF(file=file, pos=pos, offset_euler=offset_euler)
+                for file, pos, offset_euler in zip(asset_files, POSITIONS, OFFSET_EULERS)
+            ),
+        ),
     )
     scene.build(n_envs=len(VARIANTS))
 
@@ -180,15 +196,19 @@ def test_variant_inertia_matches_standalone(undefined_inertia, implicit_inertial
     files = (undefined_inertia, implicit_inertial_origin)
     ref_objs = [
         scene.add_entity(
-            gs.morphs.URDF(
-                file=file,
-                pos=(0.0, 0.5 * i_file, 0.1),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file=file,
+                    pos=(0.0, 0.5 * i_file, 0.1),
+                ),
             ),
         )
         for i_file, file in enumerate(files)
     ]
     het_obj = scene.add_entity(
-        morph=tuple(gs.morphs.URDF(file=file, pos=(0.5, 0.5 * i_file, 0.1)) for i_file, file in enumerate(files)),
+        options=gs.entities.Rigid(
+            morph=tuple(gs.morphs.URDF(file=file, pos=(0.5, 0.5 * i_file, 0.1)) for i_file, file in enumerate(files)),
+        ),
     )
     scene.build(n_envs=len(files))
 
@@ -199,7 +219,11 @@ def test_variant_inertia_matches_standalone(undefined_inertia, implicit_inertial
 def test_fewer_envs_than_variants():
     # With n_envs < n_variants, environment i gets variant i and the variants beyond n_envs stay unused.
     scene = gs.Scene(show_viewer=False)
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     # 4 variants with different positions but only 2 environments
     morphs_heterogeneous = [
@@ -209,7 +233,9 @@ def test_fewer_envs_than_variants():
         gs.morphs.Sphere(radius=0.02, pos=(0.3, 0.0, 0.25)),
     ]
     het_obj = scene.add_entity(
-        morph=morphs_heterogeneous,
+        options=gs.entities.Rigid(
+            morph=morphs_heterogeneous,
+        ),
     )
 
     # Building with only 2 environments should work - each env gets a unique variant
@@ -239,28 +265,35 @@ def test_aabb(undefined_inertia, show_viewer, tol):
         gs.morphs.Sphere(radius=0.01, pos=(0.1, 0.0, 0.15)),
     )
     het_obj = scene.add_entity(
-        morph=morphs_heterogeneous,
+        options=gs.entities.Rigid(
+            morph=morphs_heterogeneous,
+        ),
     )
     # Fixed boxes of different sizes and poses, the second one turned by 45 degrees about the vertical, holding a
     # single copy of their vertices for every environment
     FIXED_POSITIONS = ((0.05, 0.08, 0.12), (0.05, 0.12, 0.1))
     het_fixed = scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.02, 0.02, 0.02), pos=FIXED_POSITIONS[0], fixed=True, batch_fixed_verts=False),
-            gs.morphs.Box(
-                size=(0.03, 0.03, 0.03),
-                pos=FIXED_POSITIONS[1],
-                euler=(0.0, 0.0, 45.0),
-                fixed=True,
-                batch_fixed_verts=False,
+        options=gs.entities.Rigid(
+            morph=(
+                gs.morphs.Box(size=(0.02, 0.02, 0.02), pos=FIXED_POSITIONS[0], fixed=True, batch_fixed_verts=False),
+                gs.morphs.Box(
+                    size=(0.03, 0.03, 0.03),
+                    pos=FIXED_POSITIONS[1],
+                    euler=(0.0, 0.0, 45.0),
+                    fixed=True,
+                    batch_fixed_verts=False,
+                ),
             ),
         ),
     )
     # Fixed spheres from a file, which drops their joint, at two scales
     FIXED_URDF_POS = (0.05, 0.4, 0.1)
     het_fixed_urdf = scene.add_entity(
-        morph=tuple(
-            gs.morphs.URDF(file=undefined_inertia, pos=FIXED_URDF_POS, scale=scale, fixed=True) for scale in (1.0, 2.0)
+        options=gs.entities.Rigid(
+            morph=tuple(
+                gs.morphs.URDF(file=undefined_inertia, pos=FIXED_URDF_POS, scale=scale, fixed=True)
+                for scale in (1.0, 2.0)
+            ),
         ),
     )
     # A camera rendering a sphere environment follows the entity from before the build
@@ -338,11 +371,17 @@ def test_aabb(undefined_inertia, show_viewer, tol):
 @pytest.mark.parametrize("backend", [gs.gpu])  # Grasping physics requires GPU
 def test_pick_heterogenous_objects(show_viewer):
     scene = gs.Scene(show_viewer=show_viewer)
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     franka = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+        ),
     )
 
     # 4 geometry variants: env i -> variant i
@@ -350,12 +389,14 @@ def test_pick_heterogenous_objects(show_viewer):
     # Note: spheres need larger radius to be reliably grasped by the Franka gripper
     sizes = [0.04, 0.02, 0.03, 0.025]  # box0, box1, sphere0, sphere1
     het_obj = scene.add_entity(
-        morph=[
-            gs.morphs.Box(size=(sizes[0],) * 3, pos=(0.65, 0.0, 0.02)),
-            gs.morphs.Box(size=(sizes[1],) * 3, pos=(0.65, 0.0, 0.02)),
-            gs.morphs.Sphere(radius=sizes[2], pos=(0.65, 0.0, 0.02)),
-            gs.morphs.Sphere(radius=sizes[3], pos=(0.65, 0.0, 0.02)),
-        ]
+        options=gs.entities.Rigid(
+            morph=[
+                gs.morphs.Box(size=(sizes[0],) * 3, pos=(0.65, 0.0, 0.02)),
+                gs.morphs.Box(size=(sizes[1],) * 3, pos=(0.65, 0.0, 0.02)),
+                gs.morphs.Sphere(radius=sizes[2], pos=(0.65, 0.0, 0.02)),
+                gs.morphs.Sphere(radius=sizes[3], pos=(0.65, 0.0, 0.02)),
+            ],
+        ),
     )
     scene.build(n_envs=4, env_spacing=(1, 1))
 
@@ -446,21 +487,16 @@ def test_invalid_variant_specification_raises():
 
     # PBD material should raise an exception
     with pytest.raises(gs.GenesisException, match="created from one morph"):
-        scene.add_entity(
-            morph=morphs_heterogeneous,
-            material=gs.materials.PBD.Cloth(),
-        )
+        scene.add_entity(options=gs.entities.PBD(morph=morphs_heterogeneous, material=gs.materials.PBD.Cloth()))
 
     # A morph family that cannot be a variant at all
     with pytest.raises(gs.GenesisException, match="only support Primitive, Mesh, URDF and MJCF"):
-        scene.add_entity(
-            morph=(gs.morphs.Box(size=(1.0, 1.0, 1.0)), gs.morphs.Terrain()),
-        )
+        scene.add_entity(options=gs.entities.Rigid(morph=(gs.morphs.Box(size=(1.0, 1.0, 1.0)), gs.morphs.Terrain())))
 
     # A basic object and an articulated robot in the same entity
     with pytest.raises(gs.GenesisException, match="must be consistent"):
         scene.add_entity(
-            morph=(gs.morphs.Box(size=(1.0, 1.0, 1.0)), gs.morphs.MJCF(file=MJCF_SPHERE)),
+            options=gs.entities.Rigid(morph=(gs.morphs.Box(size=(1.0, 1.0, 1.0)), gs.morphs.MJCF(file=MJCF_SPHERE)))
         )
 
 
@@ -470,7 +506,9 @@ def test_morph_property_raises():
 
     single_morph = gs.morphs.Box(size=(0.1, 0.1, 0.1))
     single_obj = scene.add_entity(
-        morph=single_morph,
+        options=gs.entities.Rigid(
+            morph=single_morph,
+        ),
     )
 
     rigid_morphs_heterogeneous = (
@@ -478,7 +516,9 @@ def test_morph_property_raises():
         gs.morphs.Cylinder(radius=0.05, height=0.2),
     )
     rigid_obj = scene.add_entity(
-        morph=rigid_morphs_heterogeneous,
+        options=gs.entities.Rigid(
+            morph=rigid_morphs_heterogeneous,
+        ),
     )
     kinematic_morphs_heterogeneous = (
         gs.morphs.Box(size=(0.2, 0.2, 0.2)),
@@ -490,8 +530,10 @@ def test_morph_property_raises():
         ),
     )
     tool = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.05, 0.05, 0.05),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.05, 0.05, 0.05),
+            ),
         ),
     )
 
@@ -521,17 +563,21 @@ def test_articulated_structure_mismatch(fixed_base_dual_arm, fixed_base_dual_arm
     # two_cube_revolute has 1 revolute joint; two_link_arm has 2 continuous joints
     with pytest.raises(gs.GenesisException):
         scene.add_entity(
-            morph=[
-                gs.morphs.URDF(file="urdf/simple/two_cube_revolute.urdf", pos=(0, 0, 0.1)),
-                gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf", pos=(0, 0, 0.1)),
-            ]
+            options=gs.entities.Rigid(
+                morph=(
+                    gs.morphs.URDF(file="urdf/simple/two_cube_revolute.urdf", pos=(0, 0, 0.1)),
+                    gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf", pos=(0, 0, 0.1)),
+                )
+            )
         )
 
     # Every variant shares the kinematic topology of the first one
     with pytest.raises(gs.GenesisException, match="Link parent mismatch"):
         scene.add_entity(
-            morph=[
-                gs.morphs.URDF(file=fixed_base_dual_arm, fixed=True),
-                gs.morphs.URDF(file=fixed_base_dual_arm_chained, fixed=True),
-            ]
+            options=gs.entities.Rigid(
+                morph=(
+                    gs.morphs.URDF(file=fixed_base_dual_arm, fixed=True),
+                    gs.morphs.URDF(file=fixed_base_dual_arm_chained, fixed=True),
+                )
+            )
         )

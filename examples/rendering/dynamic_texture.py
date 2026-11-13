@@ -226,7 +226,9 @@ def main():
         show_viewer=args.vis,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     width, height = TEXTURE_RESOLUTION
     is_stripe = np.broadcast_to(np.arange(width) // 32 % 2 == 0, (height, width))

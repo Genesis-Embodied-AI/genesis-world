@@ -20,13 +20,19 @@ def main():
         ),
         show_viewer=False,
     )
-    scene.add_entity(morph=gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     cube = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, -0.9, 1.0),
-            euler=(15.0, 30.0, 60.0),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, -0.9, 1.0),
+                euler=(15.0, 30.0, 60.0),
+            ),
+        ),
     )
 
     cam = scene.add_camera(

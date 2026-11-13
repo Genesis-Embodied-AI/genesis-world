@@ -70,13 +70,17 @@ def main():
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     entities = scene.add_stage(
-        morph=gs.morphs.USD(
-            file=f"{asset_path}/usd/Refrigerator055/Refrigerator055.usd",
-            pos=(0, 0, 0.9),
-            euler=(0, 0, 180),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.USD(
+                file=f"{asset_path}/usd/Refrigerator055/Refrigerator055.usd",
+                pos=(0, 0, 0.9),
+                euler=(0, 0, 180),
+            ),
         ),
     )
 

@@ -64,18 +64,26 @@ def main():
         layer_gap = 0.15
         z_floor = 0.35
         offset = 0.5 * (n_side - 1) * spacing
-        scene.add_entity(gs.morphs.Plane())
+        scene.add_entity(
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Plane(),
+            ),
+        )
         for i in range(n_side):
             for j in range(n_side):
                 for k in range(n_layers):
                     scene.add_entity(
-                        gs.morphs.Mesh(
-                            file="meshes/duck.obj",
-                            scale=0.02,
-                            pos=(i * spacing - offset, j * spacing - offset, z_floor + k * layer_gap),
-                            euler=(90.0, 0.0, (i * 37 + j * 53 + k * 71) % 360),
+                        options=gs.entities.Rigid(
+                            morph=gs.morphs.Mesh(
+                                file="meshes/duck.obj",
+                                scale=0.02,
+                                pos=(i * spacing - offset, j * spacing - offset, z_floor + k * layer_gap),
+                                euler=(90.0, 0.0, (i * 37 + j * 53 + k * 71) % 360),
+                            ),
+                            surface=gs.surfaces.Default(
+                                vis_mode="collision",
+                            ),
                         ),
-                        vis_mode="collision",
                     )
         camera_pos = (0.8 * n_side * spacing, 0.8 * n_side * spacing, 0.5 * n_side * spacing)
         camera_lookat = (0.0, 0.0, -0.1 * n_side * spacing)
@@ -83,10 +91,14 @@ def main():
         # One MJCF entity whose worldbody holds the ground plane and a chain of free-body dominoes; the leading domino
         # is tilted so gravity alone kicks off the cascade.
         scene.add_entity(
-            gs.morphs.MJCF(
-                file="xml/dominos.xml",
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MJCF(
+                    file="xml/dominos.xml",
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
             ),
-            vis_mode="collision",
         )
         camera_pos = (1.2, -2.2, 1.6)
         camera_lookat = (1.2, 0.0, 0.0)

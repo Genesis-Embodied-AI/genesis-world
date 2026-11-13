@@ -35,11 +35,13 @@ def main():
     heights_range = np.arange(-10, 20, 10)
     height_field[5:35, 5:35] = 200 + np.random.choice(heights_range, (30, 30))
     terrain = scene.add_entity(
-        morph=gs.morphs.Terrain(
-            horizontal_scale=horizontal_scale,
-            vertical_scale=vertical_scale,
-            height_field=height_field,
-            name="example",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Terrain(
+                horizontal_scale=horizontal_scale,
+                vertical_scale=vertical_scale,
+                height_field=height_field,
+                name="example",
+            ),
         ),
     )
     scene.build(n_envs=1)

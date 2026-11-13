@@ -173,8 +173,10 @@ def build_genesis_sim(
                 **morph_kwargs,
             )
         scene.add_entity(
-            morph,
-            visualize_contact=True,
+            options=gs.entities.Rigid(
+                morph=morph,
+                visualize_contact=True,
+            ),
         )
 
     # Force recomputation of invweights to make sure it works fine

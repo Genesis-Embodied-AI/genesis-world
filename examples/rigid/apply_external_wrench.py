@@ -23,12 +23,16 @@ def main():
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     cube = scene.add_entity(
-        gs.morphs.Box(
-            pos=(0, 0, 1.0),
-            size=(0.2, 0.2, 0.2),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0, 0, 1.0),
+                size=(0.2, 0.2, 0.2),
+            ),
         ),
     )
     scene.build(n_envs=1)

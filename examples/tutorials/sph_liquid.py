@@ -23,19 +23,21 @@ scene = gs.Scene(
 )
 
 plane = scene.add_entity(
-    morph=gs.morphs.Plane(),
+    options=gs.entities.Rigid(
+        morph=gs.morphs.Plane(),
+    ),
 )
 
 liquid = scene.add_entity(
-    # viscous liquid
-    material=gs.materials.SPH.Liquid(),
-    morph=gs.morphs.Box(
-        pos=(0.0, 0.0, 0.65),
-        size=(0.4, 0.4, 0.4),
-    ),
-    surface=gs.surfaces.Default(
-        color=(0.4, 0.8, 1.0),
-        vis_mode="particle",
+    options=gs.entities.SPH(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.65),
+            size=(0.4, 0.4, 0.4),
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.4, 0.8, 1.0),
+            vis_mode="particle",
+        ),
     ),
 )
 

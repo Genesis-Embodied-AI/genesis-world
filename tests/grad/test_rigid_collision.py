@@ -52,69 +52,105 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
             # A box and a sphere on a ground box, and beside it a capsule lying on a fixed capsule along it, which
             # multi-contact touches at both ends.
             ground = scene.add_entity(
-                gs.morphs.Box(
-                    size=(2.0, 2.0, 0.2),
-                    pos=(0.0, 0.0, -0.1),
-                    fixed=True,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Box(
+                        size=(2.0, 2.0, 0.2),
+                        pos=(0.0, 0.0, -0.1),
+                        fixed=True,
+                    ),
+                    surface=gs.surfaces.Default(
+                        vis_mode="collision",
+                    ),
                 ),
-                vis_mode="collision",
             )
             scene.add_entity(
-                gs.morphs.MJCF(
-                    file=mjcf_capsule_ground,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.MJCF(
+                        file=mjcf_capsule_ground,
+                    ),
+                    surface=gs.surfaces.Default(
+                        vis_mode="collision",
+                    ),
                 ),
-                vis_mode="collision",
             )
             entities = (
                 scene.add_entity(
-                    gs.morphs.Box(
-                        size=(0.4, 0.4, 0.4),
-                        pos=(-0.5, 0.0, 0.198),
-                        euler=(1.0, 1.0, 0.0),
+                    options=gs.entities.Rigid(
+                        morph=gs.morphs.Box(
+                            size=(0.4, 0.4, 0.4),
+                            pos=(-0.5, 0.0, 0.198),
+                            euler=(1.0, 1.0, 0.0),
+                        ),
+                        surface=gs.surfaces.Default(
+                            vis_mode="collision",
+                        ),
                     ),
-                    vis_mode="collision",
                 ),
                 scene.add_entity(
-                    gs.morphs.Sphere(
-                        radius=0.2,
-                        pos=(0.6, 0.0, 0.2),
+                    options=gs.entities.Rigid(
+                        morph=gs.morphs.Sphere(
+                            radius=0.2,
+                            pos=(0.6, 0.0, 0.2),
+                        ),
+                        surface=gs.surfaces.Default(
+                            vis_mode="collision",
+                        ),
                     ),
-                    vis_mode="collision",
                 ),
                 scene.add_entity(
-                    gs.morphs.MJCF(
-                        file=mjcf_capsule,
-                        pos=(1.5, 0.0, 0.1),
-                        euler=(0.0, 90.0, 0.0),
+                    options=gs.entities.Rigid(
+                        morph=gs.morphs.MJCF(
+                            file=mjcf_capsule,
+                            pos=(1.5, 0.0, 0.1),
+                            euler=(0.0, 90.0, 0.0),
+                        ),
+                        surface=gs.surfaces.Default(
+                            vis_mode="collision",
+                        ),
                     ),
-                    vis_mode="collision",
                 ),
             )
         else:
-            ground = scene.add_entity(gs.morphs.Plane())
+            ground = scene.add_entity(
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Plane(),
+                ),
+            )
             if shape == "box":
                 entity = scene.add_entity(
-                    gs.morphs.Box(
-                        size=(0.4, 0.4, 0.4),
-                        pos=(0.0, 0.0, 0.2),
+                    options=gs.entities.Rigid(
+                        morph=gs.morphs.Box(
+                            size=(0.4, 0.4, 0.4),
+                            pos=(0.0, 0.0, 0.2),
+                        ),
+                        surface=gs.surfaces.Default(
+                            vis_mode="collision",
+                        ),
                     ),
-                    vis_mode="collision",
                 )
             elif shape == "sphere":
                 entity = scene.add_entity(
-                    gs.morphs.Sphere(
-                        radius=0.2,
-                        pos=(0.0, 0.0, 0.2),
+                    options=gs.entities.Rigid(
+                        morph=gs.morphs.Sphere(
+                            radius=0.2,
+                            pos=(0.0, 0.0, 0.2),
+                        ),
+                        surface=gs.surfaces.Default(
+                            vis_mode="collision",
+                        ),
                     ),
-                    vis_mode="collision",
                 )
             elif shape == "capsule":
                 entity = scene.add_entity(
-                    gs.morphs.MJCF(
-                        file=mjcf_capsule,
-                        pos=(0.0, 0.0, 0.3),
+                    options=gs.entities.Rigid(
+                        morph=gs.morphs.MJCF(
+                            file=mjcf_capsule,
+                            pos=(0.0, 0.0, 0.3),
+                        ),
+                        surface=gs.surfaces.Default(
+                            vis_mode="collision",
+                        ),
                     ),
-                    vis_mode="collision",
                 )
             else:
                 raise ValueError(shape)
@@ -257,24 +293,36 @@ def test_contact_no_tunneling_forward(show_viewer):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     tops = []
     for x in (0.8, -0.8):
         scene.add_entity(
-            gs.morphs.Box(
-                size=(0.6, 0.6, 0.4),
-                pos=(x, 0.0, 0.2),
-                fixed=True,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(0.6, 0.6, 0.4),
+                    pos=(x, 0.0, 0.2),
+                    fixed=True,
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
             ),
-            vis_mode="collision",
         )
         tops.append(
             scene.add_entity(
-                gs.morphs.Box(
-                    size=(0.4, 0.4, 0.4),
-                    pos=(x, 0.0, 0.6),
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Box(
+                        size=(0.4, 0.4, 0.4),
+                        pos=(x, 0.0, 0.6),
+                    ),
+                    surface=gs.surfaces.Default(
+                        vis_mode="collision",
+                    ),
                 ),
-                vis_mode="collision",
             )
         )
     scene.build()
@@ -296,10 +344,12 @@ def test_diff_unsupported_configuration_raises():
         show_viewer=False,
     )
     scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.2,
-            pos=(0.0, 0.0, 0.2),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.2,
+                pos=(0.0, 0.0, 0.2),
+                fixed=True,
+            ),
         ),
     )
     ellipsoid_mjcf = ET.Element("mujoco", model="ellipsoid")
@@ -307,7 +357,9 @@ def test_diff_unsupported_configuration_raises():
     ET.SubElement(ellipsoid_body, "geom", type="ellipsoid", size="0.2 0.15 0.1")
     ET.SubElement(ellipsoid_body, "joint", name="ellipsoid_joint", type="free")
     scene.add_entity(
-        gs.morphs.MJCF(file=ET.tostring(ellipsoid_mjcf, encoding="unicode")),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(file=ET.tostring(ellipsoid_mjcf, encoding="unicode")),
+        ),
     )
 
     # A sphere/ellipsoid pair has an everywhere-curved Minkowski boundary on which diff_gjk's EPA never converges,
@@ -327,9 +379,11 @@ def test_diff_unsupported_configuration_raises():
         show_viewer=False,
     )
     scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.5),
+            ),
         ),
     )
     with pytest.raises(gs.GenesisException):
@@ -351,16 +405,20 @@ def test_diff_unsupported_configuration_raises():
         show_viewer=False,
     )
     base = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.5),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.5),
+                fixed=True,
+            ),
         ),
     )
     child = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.8),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.8),
+            ),
         ),
     )
     with pytest.raises(gs.GenesisException):
@@ -381,98 +439,126 @@ def test_contact_detection_jacobian_matches_fd(grad_capsule):
     vec_one = np.array([1.0, 1.0, 1.0])
     box_pos_offset = (0.0, 0.0, 0.0) + 0.5 * box_size * vec_one
     box0 = scene.add_entity(
-        gs.morphs.Box(
-            size=box_size * vec_one,
-            pos=box_pos_offset,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=box_size * vec_one,
+                pos=box_pos_offset,
+            ),
         ),
     )
     box1 = scene.add_entity(
-        gs.morphs.Box(
-            size=box_size * vec_one,
-            pos=box_pos_offset + 0.8 * box_size * np.array([0, 0, 1]),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=box_size * vec_one,
+                pos=box_pos_offset + 0.8 * box_size * np.array([0, 0, 1]),
+            ),
         ),
     )
     # Overlapping pairs of analytic detection, placed apart from each other and from the boxes: sphere-sphere,
     # sphere-box against an edge of the box, sphere-capsule, crossing capsules and side-by-side capsules, which
     # multi-contact touches at both ends, all off-axis.
     sphere0 = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.2,
-            pos=(2.0, 0.0, 0.2),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.2,
+                pos=(2.0, 0.0, 0.2),
+            ),
         ),
     )
     sphere1 = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.15,
-            pos=(2.02, 0.01, 0.46),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.15,
+                pos=(2.02, 0.01, 0.46),
+            ),
         ),
     )
     box2 = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.4, 0.4, 0.4),
-            pos=(4.0, 0.0, 0.0),
-            euler=(5.0, 10.0, 15.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.4, 0.4, 0.4),
+                pos=(4.0, 0.0, 0.0),
+                euler=(5.0, 10.0, 15.0),
+            ),
         ),
     )
     sphere2 = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.2,
-            pos=(4.3, 0.03, 0.3),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.2,
+                pos=(4.3, 0.03, 0.3),
+            ),
         ),
     )
     capsule0 = scene.add_entity(
-        gs.morphs.MJCF(
-            pos=(6.0, 0.0, 0.0),
-            euler=(80.0, 10.0, 0.0),
-            file=grad_capsule,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                pos=(6.0, 0.0, 0.0),
+                euler=(80.0, 10.0, 0.0),
+                file=grad_capsule,
+            ),
         ),
     )
     sphere3 = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.15,
-            pos=(6.03, 0.05, 0.22),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.15,
+                pos=(6.03, 0.05, 0.22),
+            ),
         ),
     )
     capsule1 = scene.add_entity(
-        gs.morphs.MJCF(
-            pos=(8.0, 0.0, 0.0),
-            euler=(90.0, 0.0, 0.0),
-            file=grad_capsule,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                pos=(8.0, 0.0, 0.0),
+                euler=(90.0, 0.0, 0.0),
+                file=grad_capsule,
+            ),
         ),
     )
     capsule2 = scene.add_entity(
-        gs.morphs.MJCF(
-            pos=(8.02, 0.03, 0.17),
-            euler=(0.0, 80.0, 20.0),
-            file=grad_capsule,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                pos=(8.02, 0.03, 0.17),
+                euler=(0.0, 80.0, 20.0),
+                file=grad_capsule,
+            ),
         ),
     )
     capsule3 = scene.add_entity(
-        gs.morphs.MJCF(
-            pos=(10.0, 0.0, 0.0),
-            euler=(0.0, 90.0, 0.0),
-            file=grad_capsule,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                pos=(10.0, 0.0, 0.0),
+                euler=(0.0, 90.0, 0.0),
+                file=grad_capsule,
+            ),
         ),
     )
     capsule4 = scene.add_entity(
-        gs.morphs.MJCF(
-            pos=(10.01, 0.02, 0.19),
-            euler=(0.0, 89.9, 0.1),
-            file=grad_capsule,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                pos=(10.01, 0.02, 0.19),
+                euler=(0.0, 89.9, 0.1),
+                file=grad_capsule,
+            ),
         ),
     )
     # A capsule lying on a plane below the other entities with one end lifted, where multi-contact adds a contact that
     # it slides to zero depth
     plane = scene.add_entity(
-        gs.morphs.Plane(
-            pos=(0.0, 0.0, -5.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(0.0, 0.0, -5.0),
+            ),
         ),
     )
     capsule5 = scene.add_entity(
-        gs.morphs.MJCF(
-            pos=(12.0, 0.0, -4.9002),
-            euler=(0.0, 89.8, 0.0),
-            file=grad_capsule,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                pos=(12.0, 0.0, -4.9002),
+                euler=(0.0, 89.8, 0.0),
+                file=grad_capsule,
+            ),
         ),
     )
     scene.build()
@@ -595,37 +681,51 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
         ),
         show_viewer=False,
     )
-    scene.add_entity(gs.morphs.Plane())
     scene.add_entity(
-        gs.morphs.Box(
-            size=(1, 1, 1),
-            pos=(10, 10, 0.49),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(1, 1, 1),
+                pos=(10, 10, 0.49),
+            ),
         ),
     )
     # A settled stack of three boxes forms one island whose dof list the solver reorders, and a pair stacked at first
     # then set apart leaves the factor of their former coupling in place.
     for i_box in range(3):
         scene.add_entity(
-            gs.morphs.Box(
-                size=(1, 1, 1),
-                pos=(-10, 10, 0.5 + 1.0 * i_box),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(1, 1, 1),
+                    pos=(-10, 10, 0.5 + 1.0 * i_box),
+                ),
             ),
         )
     scene.add_entity(
-        gs.morphs.Box(
-            size=(1, 1, 1),
-            pos=(10, -10, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(1, 1, 1),
+                pos=(10, -10, 0.5),
+            ),
         ),
     )
     top_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(1, 1, 1),
-            pos=(10, -10, 1.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(1, 1, 1),
+                pos=(10, -10, 1.5),
+            ),
         ),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
         ),
     )
     scene.build()

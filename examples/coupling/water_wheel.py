@@ -43,14 +43,20 @@ def main():
         show_viewer=args.vis,
     )
 
-    plane = scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     wheel = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/wheel/fancy_wheel.urdf",
-            pos=(0.5, 0.25, 1.6),
-            euler=(0, 0, 0),
-            fixed=True,
-            convexify=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/wheel/fancy_wheel.urdf",
+                pos=(0.5, 0.25, 1.6),
+                euler=(0, 0, 0),
+                fixed=True,
+                convexify=False,
+            ),
         ),
     )
 

@@ -45,12 +45,18 @@ def main():
     )
 
     # Rigid entities (RigidSolver)
-    plane = scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     go2 = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/go2/urdf/go2.urdf",
-            pos=(0.0, 0.0, 0.42),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/go2/urdf/go2.urdf",
+                pos=(0.0, 0.0, 0.42),
+            ),
         ),
     )
 

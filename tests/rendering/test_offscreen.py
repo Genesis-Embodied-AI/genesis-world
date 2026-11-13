@@ -56,16 +56,20 @@ def test_render_api(show_viewer, renderer_type, renderer):
             intensity=0.5,
         )
     scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, 0.0),
-            radius=1.0,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, 0.0),
+                radius=1.0,
+                fixed=True,
+            ),
         ),
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(2.0, 0.0, 0.0),
-            size=(0.5, 0.5, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(2.0, 0.0, 0.0),
+                size=(0.5, 0.5, 0.5),
+            ),
         ),
     )
     camera = scene.add_camera(
@@ -136,44 +140,52 @@ def test_emissive_composites(base_plus_emissive_glb, show_viewer, renderer):
         show_FPS=False,
     )
     image_quad = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=base_plus_emissive_glb,
-            pos=(-4.5, 0.0, 0.0),
-            fixed=True,
-            collision=False,
-            file_meshes_are_zup=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=base_plus_emissive_glb,
+                pos=(-4.5, 0.0, 0.0),
+                fixed=True,
+                collision=False,
+                file_meshes_are_zup=True,
+            ),
         ),
     )
     base_green = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(2.0, 2.0, 0.1),
-            pos=(-1.5, 0.0, 0.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.BSDF(
-            color=(0.0, 0.6, 0.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(2.0, 2.0, 0.1),
+                pos=(-1.5, 0.0, 0.0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.BSDF(
+                color=(0.0, 0.6, 0.0),
+            ),
         ),
     )
     emissive_green = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(2.0, 2.0, 0.1),
-            pos=(1.5, 0.0, 0.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.BSDF(
-            color=(0.0, 0.0, 0.0),
-            emissive=(0.0, 0.6, 0.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(2.0, 2.0, 0.1),
+                pos=(1.5, 0.0, 0.0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.BSDF(
+                color=(0.0, 0.0, 0.0),
+                emissive=(0.0, 0.6, 0.0),
+            ),
         ),
     )
     fem_quad = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(2.0, 2.0, 0.5),
-            pos=(4.5, 0.0, 0.0),
-        ),
-        material=gs.materials.FEM.Elastic(),
-        surface=gs.surfaces.BSDF(
-            color=(0.9, 0.0, 0.0),
-            emissive=(0.0, 0.0, 0.6),
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                size=(2.0, 2.0, 0.5),
+                pos=(4.5, 0.0, 0.0),
+            ),
+            surface=gs.surfaces.BSDF(
+                color=(0.9, 0.0, 0.0),
+                emissive=(0.0, 0.0, 0.6),
+            ),
+            material=gs.materials.FEM.Elastic(),
         ),
     )
     camera = scene.add_camera(
@@ -216,22 +228,24 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
         show_viewer=show_viewer,
     )
     screen = scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(-1.2, 0.0, 0.0),
-            plane_size=(1.0, 1.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Emission(
-            emissive_texture=gs.textures.DynamicTexture(
-                resolution=(16, 16),
-                variants={
-                    "blue": gs.textures.ColorTexture(
-                        color=(0.0, 0.0, 1.0),
-                    ),
-                    "red": gs.textures.ColorTexture(
-                        color=(1.0, 0.0, 0.0),
-                    ),
-                },
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(-1.2, 0.0, 0.0),
+                plane_size=(1.0, 1.0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Emission(
+                emissive_texture=gs.textures.DynamicTexture(
+                    resolution=(16, 16),
+                    variants={
+                        "blue": gs.textures.ColorTexture(
+                            color=(0.0, 0.0, 1.0),
+                        ),
+                        "red": gs.textures.ColorTexture(
+                            color=(1.0, 0.0, 0.0),
+                        ),
+                    },
+                ),
             ),
         ),
     )
@@ -261,35 +275,39 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
     )
     label = scene.add_entity(options=label_options)
     lamp = scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(1.2, 0.0, 0.0),
-            plane_size=(1.0, 1.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.3, 0.0, 0.0),
-            emissive_texture=gs.textures.DynamicTexture(
-                resolution=(16, 16),
-                variants=(
-                    None,
-                    gs.textures.ImageTexture(
-                        image_array=np.full((1, 1, 3), (0, 128, 0), dtype=np.uint8),
-                    ),
-                    gs.textures.ColorTexture(
-                        color=(0.0, 0.0, 0.0),
-                        is_batched=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(1.2, 0.0, 0.0),
+                plane_size=(1.0, 1.0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.3, 0.0, 0.0),
+                emissive_texture=gs.textures.DynamicTexture(
+                    resolution=(16, 16),
+                    variants=(
+                        None,
+                        gs.textures.ImageTexture(
+                            image_array=np.full((1, 1, 3), (0, 128, 0), dtype=np.uint8),
+                        ),
+                        gs.textures.ColorTexture(
+                            color=(0.0, 0.0, 0.0),
+                            is_batched=True,
+                        ),
                     ),
                 ),
             ),
         ),
     )
     reference = scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(2.4, 0.0, 0.0),
-            plane_size=(1.0, 1.0),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(2.4, 0.0, 0.0),
+                plane_size=(1.0, 1.0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Rough(),
         ),
-        surface=gs.surfaces.Rough(),
     )
     camera = scene.add_camera(
         pos=(0.0, 0.0, 4.0),
@@ -406,9 +424,9 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
     with pytest.raises(gs.GenesisException, match="No geom matches"):
         label.get_vgeoms(gs.indices.VGeom.named("lcd"))
     with pytest.raises(gs.GenesisException, match="selects no valid geom among 2"):
-        gs.Scene().add_entity(morph=gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf")).get_vgeoms(
-            gs.indices.VGeom.at(2)
-        )
+        gs.Scene().add_entity(
+            options=gs.entities.Rigid(morph=gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf"))
+        ).get_vgeoms(gs.indices.VGeom.at(2))
     with pytest.raises(gs.GenesisException, match="diffuse_texture"):
         gs.surfaces.Default(roughness_texture=gs.textures.DynamicTexture(resolution=(4, 4)))
     for texture in (
@@ -417,14 +435,17 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
     ):
         with pytest.raises(gs.GenesisException, match="texture coordinates"):
             gs.Scene().add_entity(
-                morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)),
-                surface=gs.surfaces.Emission(emissive_texture=texture),
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), surface=gs.surfaces.Emission(emissive_texture=texture)
+                )
             )
     with pytest.raises(gs.GenesisException, match="custom visual vertices"):
         unsupported_scene = gs.Scene()
         unsupported_scene.add_entity(
-            morph=gs.morphs.Mesh(file="meshes/duck.obj", enable_custom_vverts=True),
-            surface=gs.surfaces.Emission(emissive_texture=gs.textures.DynamicTexture(resolution=(4, 4))),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Mesh(file="meshes/duck.obj", enable_custom_vverts=True),
+                surface=gs.surfaces.Emission(emissive_texture=gs.textures.DynamicTexture(resolution=(4, 4))),
+            )
         )
         unsupported_scene.build()
 
@@ -458,52 +479,58 @@ def test_dynamic_texture_side_by_side_envs(show_viewer):
         show_viewer=show_viewer,
     )
     screen = scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(-0.45, 0.0, 0.0),
-            plane_size=(0.4, 1.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Emission(
-            emissive_texture=gs.textures.DynamicTexture(
-                resolution=(4, 4),
-                variants=(
-                    gs.textures.ColorTexture(
-                        color=(1.0, 0.0, 0.0),
-                    ),
-                    gs.textures.ColorTexture(
-                        color=(0.0, 0.0, 1.0),
-                    ),
-                    gs.textures.ColorTexture(
-                        color=(1.0, 0.0, 0.0),
-                        is_batched=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(-0.45, 0.0, 0.0),
+                plane_size=(0.4, 1.0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Emission(
+                emissive_texture=gs.textures.DynamicTexture(
+                    resolution=(4, 4),
+                    variants=(
+                        gs.textures.ColorTexture(
+                            color=(1.0, 0.0, 0.0),
+                        ),
+                        gs.textures.ColorTexture(
+                            color=(0.0, 0.0, 1.0),
+                        ),
+                        gs.textures.ColorTexture(
+                            color=(1.0, 0.0, 0.0),
+                            is_batched=True,
+                        ),
                     ),
                 ),
             ),
         ),
     )
     tile = scene.add_entity(
-        morph=gs.morphs.Plane(
-            plane_size=(0.4, 1.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Emission(
-            emissive_texture=gs.textures.ColorTexture(
-                color=((0.0, 1.0, 0.0), (1.0, 0.0, 1.0)),
-                is_batched=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                plane_size=(0.4, 1.0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Emission(
+                emissive_texture=gs.textures.ColorTexture(
+                    color=((0.0, 1.0, 0.0), (1.0, 0.0, 1.0)),
+                    is_batched=True,
+                ),
             ),
         ),
     )
     lamp = scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(0.45, 0.0, 0.0),
-            plane_size=(0.4, 1.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.3, 0.0, 0.0),
-            emissive_texture=gs.textures.ColorTexture(
-                color=((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
-                is_batched=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(0.45, 0.0, 0.0),
+                plane_size=(0.4, 1.0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.3, 0.0, 0.0),
+                emissive_texture=gs.textures.ColorTexture(
+                    color=((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+                    is_batched=True,
+                ),
             ),
         ),
     )
@@ -588,18 +615,22 @@ def test_render_api_advanced(tmp_path, n_envs, show_viewer, png_snapshot, render
         show_FPS=False,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
-        surface=gs.surfaces.Aluminium(
-            ior=10.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            surface=gs.surfaces.Aluminium(
+                ior=10.0,
+            ),
         ),
     )
     robot = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/go2/urdf/go2.urdf",
-            merge_fixed_links=False,
-        ),
-        material=gs.materials.Rigid(
-            rho=200.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/go2/urdf/go2.urdf",
+                merge_fixed_links=False,
+            ),
+            material=gs.materials.Rigid(
+                rho=200.0,
+            ),
         ),
     )
     cam_debug = scene.add_camera(
@@ -833,115 +864,137 @@ def test_deterministic(tmp_path, renderer_type, renderer, show_viewer, tol):
             intensity=0.5,
         )
     scene.add_entity(
-        morph=gs.morphs.Plane(
-            plane_size=(1.5, 1.5),
-        ),
-        surface=gs.surfaces.Aluminium(
-            ior=10.0,
-        ),
-    )
-    scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.1,
-            pos=(-0.2, -0.8, 0.2),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Rough(
-            diffuse_texture=gs.textures.ColorTexture(
-                color=(1.0, 0.5, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                plane_size=(1.5, 1.5),
+            ),
+            surface=gs.surfaces.Aluminium(
+                ior=10.0,
             ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.1,
-            pos=(-0.2, -0.5, 0.2),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Rough(
-            color=(1.0, 1.0, 1.0),
-        ),
-    )
-    scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.1,
-            pos=(-0.2, -0.2, 0.2),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Smooth(
-            color=(0.6, 0.8, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.1,
+                pos=(-0.2, -0.8, 0.2),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Rough(
+                diffuse_texture=gs.textures.ColorTexture(
+                    color=(1.0, 0.5, 0.5),
+                ),
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.1,
-            pos=(-0.2, 0.2, 0.2),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Iron(
-            color=(1.0, 1.0, 1.0),
-        ),
-    )
-    scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.1,
-            pos=(-0.2, 0.5, 0.2),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Gold(
-            color=(1.0, 1.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.1,
+                pos=(-0.2, -0.5, 0.2),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Rough(
+                color=(1.0, 1.0, 1.0),
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.1,
-            pos=(-0.2, 0.8, 0.2),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Glass(
-            color=(1.0, 1.0, 1.0),
-        ),
-    )
-    scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.1,
-            pos=(0.2, -0.8, 0.2),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Smooth(
-            color=(1.0, 1.0, 1.0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.1,
+                pos=(-0.2, -0.2, 0.2),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Smooth(
+                color=(0.6, 0.8, 1.0),
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/wooden_sphere_OBJ/wooden_sphere.obj",
-            scale=0.025,
-            pos=(0.2, -0.5, 0.2),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.1,
+                pos=(-0.2, 0.2, 0.2),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Iron(
+                color=(1.0, 1.0, 1.0),
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/wooden_sphere_OBJ/wooden_sphere.obj",
-            scale=0.025,
-            pos=(0.2, -0.2, 0.2),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.1,
+                pos=(-0.2, 0.5, 0.2),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Gold(
+                color=(1.0, 1.0, 1.0),
+            ),
         ),
-        surface=gs.surfaces.Rough(
-            diffuse_texture=gs.textures.ImageTexture(
-                image_path="textures/checker.png",
-            )
+    )
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.1,
+                pos=(-0.2, 0.8, 0.2),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Glass(
+                color=(1.0, 1.0, 1.0),
+            ),
+        ),
+    )
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.1,
+                pos=(0.2, -0.8, 0.2),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Smooth(
+                color=(1.0, 1.0, 1.0, 0.5),
+            ),
+        ),
+    )
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/wooden_sphere_OBJ/wooden_sphere.obj",
+                scale=0.025,
+                pos=(0.2, -0.5, 0.2),
+                fixed=True,
+            ),
+        ),
+    )
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/wooden_sphere_OBJ/wooden_sphere.obj",
+                scale=0.025,
+                pos=(0.2, -0.2, 0.2),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Rough(
+                diffuse_texture=gs.textures.ImageTexture(
+                    image_path="textures/checker.png",
+                )
+            ),
         ),
     )
     robot = scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        ),
     )
     cam = scene.add_camera(
         pos=CAM_POS_LOCAL,
@@ -1042,27 +1095,33 @@ def test_renders_heterogeneous_entities(n_envs, show_viewer, png_snapshot, rende
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(
-            plane_size=(5.0, 5.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                plane_size=(5.0, 5.0),
+            ),
         ),
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.3, 0.3, 0.3),
-        ),
-        surface=gs.surfaces.Smooth(
-            color=(0.3, 0.8, 0.3),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.3, 0.3, 0.3),
+            ),
+            surface=gs.surfaces.Smooth(
+                color=(0.3, 0.8, 0.3),
+            ),
         ),
     )
     heterogeneous = scene.add_entity(
-        morph=(
-            gs.morphs.Sphere(
-                radius=0.3,
-            ),
-            gs.morphs.Mesh(
-                file="meshes/duck/duck.obj",
-                scale=0.003,
-                euler=(90.0, 0.0, 90.0),
+        options=gs.entities.Rigid(
+            morph=(
+                gs.morphs.Sphere(
+                    radius=0.3,
+                ),
+                gs.morphs.Mesh(
+                    file="meshes/duck/duck.obj",
+                    scale=0.003,
+                    euler=(90.0, 0.0, 90.0),
+                ),
             ),
         ),
     )
@@ -1187,10 +1246,12 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
     )
 
     robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/simple/two_link_arm.urdf",
-            pos=(-1.0, -1.0, 0.5),
-            euler=(0, 0, 90),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_link_arm.urdf",
+                pos=(-1.0, -1.0, 0.5),
+                euler=(0, 0, 90),
+            ),
         ),
     )
 
@@ -1278,11 +1339,13 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
     # Every vertex of the scene must stay inside the camera frustum: the Apple Software Renderer misrasterizes
     # out-of-frustum geometry.
     fem = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/trashbag_rope.glb",
-            group_by_material=True,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file="meshes/trashbag_rope.glb",
+                group_by_material=True,
+            ),
+            material=gs.materials.FEM.Cloth(),
         ),
-        material=gs.materials.FEM.Cloth(),
     )
     camera = scene.add_camera(
         res=CAM_RES,
@@ -1361,18 +1424,22 @@ def test_point_cloud(renderer_type, renderer, show_viewer):
             intensity=0.5,
         )
     scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, OBJ_OFFSET, 0.0),
-            radius=SPHERE_RADIUS,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, OBJ_OFFSET, 0.0),
+                radius=SPHERE_RADIUS,
+                fixed=True,
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, -OBJ_OFFSET, 0.0),
-            size=(2.0 * BOX_HALFSIZE, 2.0 * BOX_HALFSIZE, 2.0 * BOX_HALFSIZE),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, -OBJ_OFFSET, 0.0),
+                size=(2.0 * BOX_HALFSIZE, 2.0 * BOX_HALFSIZE, 2.0 * BOX_HALFSIZE),
+                fixed=True,
+            ),
+        ),
     )
     camera_sphere = scene.add_camera(
         res=CAM_RES,
@@ -1470,7 +1537,9 @@ def test_render_planes(tmp_path, png_snapshot, renderer_type, renderer):
                 intensity=0.5,
             )
         scene.add_entity(
-            gs.morphs.Plane(plane_size=plane_size, tile_size=tile_size),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Plane(plane_size=plane_size, tile_size=tile_size),
+            ),
         )
         camera = scene.add_camera(
             res=(256, 256),
@@ -1535,10 +1604,12 @@ def test_context_isolation(renderer_type):
         show_FPS=False,
     )
     scene_a.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.5),
-            size=(0.3, 0.3, 0.3),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.5),
+                size=(0.3, 0.3, 0.3),
+            ),
+        ),
     )
     camera_a = scene_a.add_camera(
         res=(64, 64),
@@ -1555,10 +1626,12 @@ def test_context_isolation(renderer_type):
         show_FPS=False,
     )
     scene_b.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 5.0),
-            size=(0.3, 0.3, 0.3),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 5.0),
+                size=(0.3, 0.3, 0.3),
+            ),
+        ),
     )
     camera_b = scene_b.add_camera(
         res=(64, 64),
@@ -1613,9 +1686,11 @@ def test_camera_follow_entity(n_envs, renderer, show_viewer):
     )
     for pos in ((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, -1.0, 0.0)):
         obj = scene.add_entity(
-            gs.morphs.Box(
-                size=(0.1, 0.1, 0.1),
-                pos=pos,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(0.1, 0.1, 0.1),
+                    pos=pos,
+                ),
             ),
         )
         cam = scene.add_camera(
@@ -1765,17 +1840,21 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
         show_FPS=False,
     )
     scene.add_entity(
-        gs.morphs.Plane(
-            # Software rendering backends misrasterize geometry reaching outside the frustum, so every vertex of the
-            # ground stays in frame from each camera below. Collision keeps its own infinite plane.
-            plane_size=(1.4, 1.4),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                # Software rendering backends misrasterize geometry reaching outside the frustum, so every vertex of the
+                # ground stays in frame from each camera below. Collision keeps its own infinite plane.
+                plane_size=(1.4, 1.4),
+            ),
+        ),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+            visualize_contact=True,
         ),
-        visualize_contact=True,
     )
 
     cam = scene.add_camera(
@@ -1953,37 +2032,45 @@ def test_rasterizer_sensor_env_spacing_invariance(renderer, context_mode):
     # pattern anchored to the world rather than to the environment would show in the images. The floors stay clear of
     # each other and fit in every frame below, as a software renderer misrasterizes geometry outside the frustum.
     scene.add_entity(
-        gs.morphs.Plane(
-            plane_size=(1.4, 1.4),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                plane_size=(1.4, 1.4),
+            ),
         ),
     )
     scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.02,
-            pos=(0.0, 0.0, 0.05),
-            euler=(90.0, 90.0, 0.0),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.02,
+                pos=(0.0, 0.0, 0.05),
+                euler=(90.0, 90.0, 0.0),
+                fixed=True,
+            ),
         ),
     )
     scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.4, 0.3, 0.1),
-            size=(0.2, 0.2, 0.2),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.8, 0.2, 0.2),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.4, 0.3, 0.1),
+                size=(0.2, 0.2, 0.2),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.8, 0.2, 0.2),
+            ),
         ),
     )
     scene.add_entity(
-        gs.morphs.Sphere(
-            pos=(-0.4, 0.2, 0.15),
-            radius=0.15,
-            fixed=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.3, 0.9),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(-0.4, 0.2, 0.15),
+                radius=0.15,
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.3, 0.9),
+            ),
         ),
     )
     # The window draws the environments in one shared world, where a point light lights each of them differently, so
@@ -2056,12 +2143,16 @@ def test_video_recording_lifecycle(tmp_path, monkeypatch, renderer, show_viewer)
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.0, 0.0, 0.5),
-            size=(0.2, 0.2, 0.2),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.5),
+                size=(0.2, 0.2, 0.2),
+            ),
         ),
     )
     cam = scene.add_camera(
@@ -2173,21 +2264,25 @@ def test_transparent_surfaces_show_what_lies_behind_them(renderer, show_viewer):
     )
     # Same size and lined up along the axis the camera sits on, so that the nearer one covers the farther one
     red = scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.6, 0.0, 0.5),
-            size=(0.2, 0.2, 0.2),
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, ALPHA),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.6, 0.0, 0.5),
+                size=(0.2, 0.2, 0.2),
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.0, 0.0, ALPHA),
+            ),
         ),
     )
     blue = scene.add_entity(
-        gs.morphs.Box(
-            pos=(-0.6, 0.0, 0.5),
-            size=(0.2, 0.2, 0.2),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.0, 0.0, 1.0, ALPHA),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(-0.6, 0.0, 0.5),
+                size=(0.2, 0.2, 0.2),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.0, 0.0, 1.0, ALPHA),
+            ),
         ),
     )
     cam = scene.add_camera(

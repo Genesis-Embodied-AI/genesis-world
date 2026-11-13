@@ -32,16 +32,18 @@ from .conftest import (
 def test_morph_scale(scale, mesh_file, mesh_urdf):
     scene = gs.Scene(show_viewer=False)
     obj_orig = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=mesh_file,
-            file_meshes_are_zup=False,
-            pos=(0, 0, 1.0),
-            scale=1.0,
-            convexify=False,
-            fixed=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=mesh_file,
+                file_meshes_are_zup=False,
+                pos=(0, 0, 1.0),
+                scale=1.0,
+                convexify=False,
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.0, 0.0, 1.0),
+            ),
         ),
     )
     for vgeom in obj_orig.vgeoms:
@@ -50,25 +52,9 @@ def test_morph_scale(scale, mesh_file, mesh_urdf):
         mesh_orig.apply_scale(scale)
 
     obj_scaled = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=mesh_file,
-            file_meshes_are_zup=True,
-            pos=(0, 0, 1.0),
-            scale=scale,
-            convexify=False,
-            fixed=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.0, 1.0, 0.0, 1.0),
-        ),
-    )
-    assert obj_orig.n_vgeoms == obj_scaled.n_vgeoms
-
-    is_isotropic = np.unique(scale).size == 1
-    with nullcontext() if is_isotropic else pytest.raises(gs.GenesisException):
-        robot_scaled = scene.add_entity(
-            gs.morphs.URDF(
-                file=mesh_urdf,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=mesh_file,
                 file_meshes_are_zup=True,
                 pos=(0, 0, 1.0),
                 scale=scale,
@@ -76,7 +62,27 @@ def test_morph_scale(scale, mesh_file, mesh_urdf):
                 fixed=True,
             ),
             surface=gs.surfaces.Default(
-                color=(0.0, 0.0, 1.0, 1.0),
+                color=(0.0, 1.0, 0.0, 1.0),
+            ),
+        ),
+    )
+    assert obj_orig.n_vgeoms == obj_scaled.n_vgeoms
+
+    is_isotropic = np.unique(scale).size == 1
+    with nullcontext() if is_isotropic else pytest.raises(gs.GenesisException):
+        robot_scaled = scene.add_entity(
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file=mesh_urdf,
+                    file_meshes_are_zup=True,
+                    pos=(0, 0, 1.0),
+                    scale=scale,
+                    convexify=False,
+                    fixed=True,
+                ),
+                surface=gs.surfaces.Default(
+                    color=(0.0, 0.0, 1.0, 1.0),
+                ),
             ),
         )
         assert robot_scaled.n_vgeoms == obj_scaled.n_vgeoms
@@ -120,19 +126,23 @@ def test_urdf_scale(mesh_urdf, show_viewer):
         show_FPS=False,
     )
     obj_1 = scene.add_entity(
-        gs.morphs.URDF(
-            file=mesh_urdf,
-            convexify=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=mesh_urdf,
+                convexify=False,
+                fixed=True,
+            ),
         ),
     )
     mesh_1 = obj_1.vgeoms[0].vmesh.trimesh
     obj_2 = scene.add_entity(
-        gs.morphs.URDF(
-            file=mesh_urdf,
-            scale=SCALE_FACTOR,
-            convexify=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=mesh_urdf,
+                scale=SCALE_FACTOR,
+                convexify=False,
+                fixed=True,
+            ),
         ),
     )
     mesh_2 = obj_2.vgeoms[0].vmesh.trimesh
@@ -151,49 +161,61 @@ def test_mesh_yup(show_viewer):
     asset_path = get_hf_dataset(pattern="yup_zup_coverage/*")
 
     glb_y = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/yup_zup_coverage/cannon_y.glb",
-            convexify=False,
-            fixed=True,
-            file_meshes_are_zup=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/yup_zup_coverage/cannon_y.glb",
+                convexify=False,
+                fixed=True,
+                file_meshes_are_zup=False,
+            ),
         ),
     )
     glb_z = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/yup_zup_coverage/cannon_z.glb",
-            convexify=False,
-            fixed=True,
-            file_meshes_are_zup=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/yup_zup_coverage/cannon_z.glb",
+                convexify=False,
+                fixed=True,
+                file_meshes_are_zup=True,
+            ),
         ),
     )
     stl_y = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/yup_zup_coverage/cannon_y_-z.stl",
-            convexify=False,
-            fixed=True,
-            file_meshes_are_zup=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/yup_zup_coverage/cannon_y_-z.stl",
+                convexify=False,
+                fixed=True,
+                file_meshes_are_zup=False,
+            ),
         ),
     )
     stl_z = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/yup_zup_coverage/cannon_z_y.stl",
-            convexify=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/yup_zup_coverage/cannon_z_y.stl",
+                convexify=False,
+                fixed=True,
+            ),
         ),
     )
     obj_y = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/yup_zup_coverage/cannon_y_-z.obj",
-            convexify=False,
-            fixed=True,
-            file_meshes_are_zup=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/yup_zup_coverage/cannon_y_-z.obj",
+                convexify=False,
+                fixed=True,
+                file_meshes_are_zup=False,
+            ),
         ),
     )
     obj_z = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/yup_zup_coverage/cannon_z_y.obj",
-            convexify=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/yup_zup_coverage/cannon_z_y.obj",
+                convexify=False,
+                fixed=True,
+            ),
         ),
     )
 
@@ -232,11 +254,13 @@ def test_mesh_yup(show_viewer):
 def test_urdf_yup(file_meshes_are_zup, mesh_urdf, show_viewer):
     scene = gs.Scene(show_viewer=show_viewer)
     robot = scene.add_entity(
-        gs.morphs.URDF(
-            file=mesh_urdf,
-            convexify=False,
-            fixed=True,
-            file_meshes_are_zup=file_meshes_are_zup,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=mesh_urdf,
+                convexify=False,
+                fixed=True,
+                file_meshes_are_zup=file_meshes_are_zup,
+            ),
         ),
     )
 
@@ -269,13 +293,17 @@ def test_urdf_mesh_processing(mesh_path, mesh_urdf, color, show_viewer):
         show_FPS=False,
     )
     obj = scene.add_entity(
-        gs.morphs.Mesh(
-            file=mesh_path,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=mesh_path,
+            ),
         ),
     )
     robot = scene.add_entity(
-        gs.morphs.URDF(
-            file=mesh_urdf,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=mesh_urdf,
+            ),
         ),
     )
 
@@ -529,12 +557,14 @@ def test_glb_shared_texture_not_duplicated(tmp_path):
     scene = gs.Scene(show_viewer=False)
     entities = [
         scene.add_entity(
-            gs.morphs.Mesh(
-                file=str(glb_path),
-                pos=(0.0, 2.0 * i, 0.0),
-                collision=False,
-                fixed=True,
-                file_meshes_are_zup=False,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Mesh(
+                    file=str(glb_path),
+                    pos=(0.0, 2.0 * i, 0.0),
+                    collision=False,
+                    fixed=True,
+                    file_meshes_are_zup=False,
+                ),
             ),
         )
         for i in range(2)
@@ -678,9 +708,11 @@ def test_glb_multi_primitive_distinct_materials(tmp_path):
 
     scene = gs.Scene(show_viewer=False)
     entity = scene.add_entity(
-        gs.morphs.Mesh(
-            file=str(glb_path),
-            file_meshes_are_zup=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=str(glb_path),
+                file_meshes_are_zup=False,
+            ),
         ),
     )
     scene.build()
@@ -723,8 +755,10 @@ def test_float_texture_conversion(show_viewer, n_channels, float_type):
         show_FPS=False,
     )
     entity = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=(mesh,),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MeshSet(
+                files=(mesh,),
+            ),
         ),
     )
 
@@ -744,10 +778,12 @@ def test_2_channels_luminance_alpha_textures(show_viewer):
     )
     asset_path = get_hf_dataset(pattern="fridge/*")
     fridge = scene.add_entity(
-        gs.morphs.URDF(
-            file=f"{asset_path}/fridge/fridge.urdf",
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=f"{asset_path}/fridge/fridge.urdf",
+                fixed=True,
+            ),
+        ),
     )
 
 
@@ -757,7 +793,11 @@ def test_plane_texture_path_preservation(show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    plane = scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     # The texture path should be stored in metadata
     assert plane.vgeoms[0].vmesh.metadata["texture_path"] == "textures/checker.png"
@@ -767,13 +807,15 @@ def test_plane_texture_path_preservation(show_viewer):
 def test_mjcf_parse_material(material_mjcf, tol):
     scene = gs.Scene()
     entity = scene.add_entity(
-        gs.morphs.MJCF(
-            file=material_mjcf,
-            scale=1.0,
-            convexify=False,
-        ),
-        material=gs.materials.Rigid(
-            rho=1000.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=material_mjcf,
+                scale=1.0,
+                convexify=False,
+            ),
+            material=gs.materials.Rigid(
+                rho=1000.0,
+            ),
         ),
     )
     scene.build()
@@ -810,9 +852,11 @@ def test_mjcf_parse_mesh_normals(normals_mjcf):
 
     scene = gs.Scene()
     entity = scene.add_entity(
-        gs.morphs.MJCF(
-            file=mjcf_path,
-            convexify=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=mjcf_path,
+                convexify=False,
+            ),
         ),
     )
     scene.build()
@@ -856,9 +900,11 @@ def test_mjcf_2d_texture_mapping(textured_mjcf):
 
     scene = gs.Scene()
     entity = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=textured_mjcf,
-            scale=SCALE,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=textured_mjcf,
+                scale=SCALE,
+            ),
         ),
     )
     scene.build()
@@ -1020,11 +1066,13 @@ def test_convex_decompose_cache(monkeypatch, asset_tmp_path):
     for file, scale, pos, quat in zip(files, SCALES, POSES, QUATS):
         scene = gs.Scene(show_viewer=False)
         scene.add_entity(
-            morph=gs.morphs.Mesh(
-                file=file,
-                scale=scale,
-                pos=pos,
-                quat=quat,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Mesh(
+                    file=file,
+                    scale=scale,
+                    pos=pos,
+                    quat=quat,
+                ),
             ),
         )
         scene.build()

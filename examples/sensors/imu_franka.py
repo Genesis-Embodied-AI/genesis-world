@@ -36,9 +36,15 @@ def main():
         show_viewer=args.vis,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     franka = scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        ),
     )
     end_effector = franka.get_link("hand")
     motors_dof = (0, 1, 2, 3, 4, 5, 6)

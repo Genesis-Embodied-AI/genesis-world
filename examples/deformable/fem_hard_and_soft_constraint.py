@@ -38,7 +38,11 @@ def main():
         show_viewer=args.vis,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     blob_pos = SCENE_POS + np.array([-0.3, -0.3, 0])
     blob_fixed_bounds = np.array([[-0.1, -0.1, 0.085], [0.1, 0.1, 0.1]])

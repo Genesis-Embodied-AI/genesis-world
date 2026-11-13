@@ -86,44 +86,50 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/cloth.obj",
-            scale=1.0,
-            pos=(0.5, 0.5, 0.5),
-            euler=(180.0, 0.0, 0.0),
-        ),
-        material=gs.materials.PBD.Cloth(),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.4, 0.8, 1.0),
+        options=gs.entities.PBD(
+            morph=gs.morphs.Mesh(
+                file="meshes/cloth.obj",
+                scale=1.0,
+                pos=(0.5, 0.5, 0.5),
+                euler=(180.0, 0.0, 0.0),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.4, 0.8, 1.0),
+            ),
+            material=gs.materials.PBD.Cloth(),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/worm/worm.obj",
-            pos=(0.3, 0.3, 0.001),
-            scale=0.1,
-            euler=(90, 0, 0),
-        ),
-        material=gs.materials.MPM.Muscle(
-            E=5e5,
-            nu=0.45,
-            rho=10000.0,
-            sampler="random",
-            model="neohooken",
-            n_groups=4,
+        options=gs.entities.MPM(
+            morph=gs.morphs.Mesh(
+                file="meshes/worm/worm.obj",
+                pos=(0.3, 0.3, 0.001),
+                scale=0.1,
+                euler=(90, 0, 0),
+            ),
+            material=gs.materials.MPM.Muscle(
+                E=5e5,
+                nu=0.45,
+                rho=10000.0,
+                sampler="random",
+                model="neohooken",
+                n_groups=4,
+            ),
         ),
     )
     liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.65),
-            size=(0.4, 0.4, 0.4),
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="random",
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.4, 0.8, 1.0),
-            vis_mode="particle",
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.65),
+                size=(0.4, 0.4, 0.4),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.4, 0.8, 1.0),
+                vis_mode="particle",
+            ),
+            material=gs.materials.SPH.Liquid(
+                sampler="random",
+            ),
         ),
     )
     scene.build(n_envs=4, env_spacing=(2.0, 2.0))
@@ -192,46 +198,52 @@ def test_deformable_uv_textures(renderer_type, renderer, show_viewer, png_snapsh
     # Software Renderer misrasterizes a plane whose vertices fall outside the view, breaking pixel matching. The
     # RayTracer is unaffected, so keep its default size to preserve the existing snapshot.
     scene.add_entity(
-        morph=gs.morphs.Plane(
-            plane_size=(1.3, 1.3) if renderer_type == RENDERER_TYPE.RASTERIZER else (1e3, 1e3),
-        ),
-        surface=gs.surfaces.Aluminium(
-            ior=10.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                plane_size=(1.3, 1.3) if renderer_type == RENDERER_TYPE.RASTERIZER else (1e3, 1e3),
+            ),
+            surface=gs.surfaces.Aluminium(
+                ior=10.0,
+            ),
         ),
     )
 
     # Add PBD cloth with checker texture
     asset_path = get_hf_dataset(pattern="uv_plane.obj")
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/uv_plane.obj",
-            scale=0.4,
-            pos=(-0.2, 0.0, 0.4),
-        ),
-        material=gs.materials.PBD.Cloth(),
-        surface=gs.surfaces.Default(
-            vis_mode="visual",
-            diffuse_texture=gs.textures.ImageTexture(
-                image_path="textures/checker.png",
+        options=gs.entities.PBD(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/uv_plane.obj",
+                scale=0.4,
+                pos=(-0.2, 0.0, 0.4),
             ),
+            surface=gs.surfaces.Default(
+                vis_mode="visual",
+                diffuse_texture=gs.textures.ImageTexture(
+                    image_path="textures/checker.png",
+                ),
+            ),
+            material=gs.materials.PBD.Cloth(),
         ),
     )
 
     # Add FEM elastic object with checker texture
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.1,
-            pos=(0.2, 0.0, 0.2),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.4,
-        ),
-        surface=gs.surfaces.Default(
-            vis_mode="visual",
-            diffuse_texture=gs.textures.ImageTexture(
-                image_path="textures/checker.png",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.1,
+                pos=(0.2, 0.0, 0.2),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="visual",
+                diffuse_texture=gs.textures.ImageTexture(
+                    image_path="textures/checker.png",
+                ),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                nu=0.4,
             ),
         ),
     )
@@ -273,18 +285,22 @@ def test_set_vverts(renderer, show_viewer):
     # aspect 4:3): the Apple Software Renderer misrasterizes geometry whose vertices fall outside the view,
     # breaking the pixel comparisons below.
     plane = scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(0.0, 1.8, 0.0),
-            plane_size=(1.2, 2.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(0.0, 1.8, 0.0),
+                plane_size=(1.2, 2.0),
+            ),
         ),
     )
     entity = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.2,
-            pos=(0.0, 0.0, 0.5),
-            fixed=True,
-            enable_custom_vverts=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.2,
+                pos=(0.0, 0.0, 0.5),
+                fixed=True,
+                enable_custom_vverts=True,
+            ),
         ),
     )
     cam = scene.add_camera(
@@ -423,25 +439,31 @@ def test_set_vverts_sphere_to_box(renderer, show_viewer):
         show_FPS=False,
     )
     scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=radius,
-            pos=pos_sphere,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=radius,
+                pos=pos_sphere,
+                fixed=True,
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(2.0 * radius, 2.0 * radius, 2.0 * radius),
-            pos=pos_box,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(2.0 * radius, 2.0 * radius, 2.0 * radius),
+                pos=pos_box,
+                fixed=True,
+            ),
         ),
     )
     deformable = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=(sphere_tri,),
-            pos=pos_deformable,
-            fixed=True,
-            enable_custom_vverts=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MeshSet(
+                files=(sphere_tri,),
+                pos=pos_deformable,
+                fixed=True,
+                enable_custom_vverts=True,
+            ),
         ),
     )
     cam = scene.add_camera(

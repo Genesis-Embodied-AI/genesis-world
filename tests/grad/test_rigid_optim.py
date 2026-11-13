@@ -111,12 +111,14 @@ def test_goal_pose_optimization_converges(show_viewer):
         show_viewer=show_viewer,
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            pos=(0, 0, 0),
-            size=(0.1, 0.1, 0.2),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.9, 0.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0, 0, 0),
+                size=(0.1, 0.1, 0.2),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.9, 0.0, 0.0, 1.0),
+            ),
         ),
     )
     scene.build()

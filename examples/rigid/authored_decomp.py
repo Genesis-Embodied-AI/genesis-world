@@ -48,54 +48,68 @@ def main():
         show_viewer=args.vis,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     # Base/pole rests directly on the plane.
     scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="tower/base_pole.urdf",
-            pos=(0.0, 0.0, BASE_HEIGHT / 2),
-            file_meshes_are_zup=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="tower/base_pole.urdf",
+                pos=(0.0, 0.0, BASE_HEIGHT / 2),
+                file_meshes_are_zup=True,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision" if args.debug else "visual",
+            ),
+            material=gs.materials.Rigid(
+                rho=600.0,
+            ),
+            visualize_contact=False,
         ),
-        material=gs.materials.Rigid(
-            rho=600.0,
-        ),
-        vis_mode="collision" if args.debug else "visual",
-        visualize_contact=False,
     )
 
     # Stack the rings in the demo order. A slight overlap (-1e-4) ensures they rest in contact at init.
     height = BASE_HEIGHT
     for ring_idx in RINGS_ORDER:
         scene.add_entity(
-            morph=gs.morphs.URDF(
-                file=f"tower/ring_{ring_idx + 1:02d}.urdf",
-                pos=(0.0, 0.0, height + (RING_HEIGHT - 1e-4) / 2),
-                file_meshes_are_zup=True,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file=f"tower/ring_{ring_idx + 1:02d}.urdf",
+                    pos=(0.0, 0.0, height + (RING_HEIGHT - 1e-4) / 2),
+                    file_meshes_are_zup=True,
+                ),
+                surface=gs.surfaces.Default(
+                    color=RING_COLORS[ring_idx],
+                    vis_mode="collision" if args.debug else "visual",
+                ),
+                material=gs.materials.Rigid(
+                    rho=600.0,
+                ),
+                visualize_contact=args.debug,
             ),
-            surface=gs.surfaces.Default(
-                color=RING_COLORS[ring_idx],
-            ),
-            material=gs.materials.Rigid(
-                rho=600.0,
-            ),
-            vis_mode="collision" if args.debug else "visual",
-            visualize_contact=args.debug,
         )
         height += RING_HEIGHT - 1e-4
 
     # Ball caps the pole.
     scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="tower/ball.urdf",
-            pos=(0.0, 0.0, height + BALL_HEIGHT),
-            file_meshes_are_zup=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="tower/ball.urdf",
+                pos=(0.0, 0.0, height + BALL_HEIGHT),
+                file_meshes_are_zup=True,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision" if args.debug else "visual",
+            ),
+            material=gs.materials.Rigid(
+                rho=600.0,
+            ),
+            visualize_contact=False,
         ),
-        material=gs.materials.Rigid(
-            rho=600.0,
-        ),
-        vis_mode="collision" if args.debug else "visual",
-        visualize_contact=False,
     )
 
     scene.build()

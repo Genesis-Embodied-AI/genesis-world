@@ -33,21 +33,29 @@ def main():
     translation = np.array([np.nanmin(xs), np.nanmin(ys), 0])
 
     terrain_heightfield = scene.add_entity(
-        morph=gs.morphs.Terrain(
-            horizontal_scale=horizontal_scale,
-            vertical_scale=1.0,
-            height_field=hf_terrain,
-            pos=translation,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Terrain(
+                horizontal_scale=horizontal_scale,
+                vertical_scale=1.0,
+                height_field=hf_terrain,
+                pos=translation,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
 
     ball = scene.add_entity(
-        gs.morphs.Sphere(
-            pos=(10, 15, 10),
-            radius=1,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(10, 15, 10),
+                radius=1,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
 
     scene.build()

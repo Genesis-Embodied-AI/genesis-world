@@ -29,52 +29,64 @@ def main():
         show_viewer=args.vis,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.025, 0, 0.5),
-            quat=(0, 0, 0, 1),
-            size=(0.1, 0.1, 0.1),
-            contype=0b001,
-            conaffinity=0b001,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, 1.0),
-        ),
-    )
-    scene.add_entity(
-        gs.morphs.Box(
-            pos=(-0.025, 0, 1.0),
-            quat=(0, 0, 0, 1),
-            size=(0.1, 0.1, 0.1),
-            contype=0b010,
-            conaffinity=0b010,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.0, 1.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.025, 0, 0.5),
+                quat=(0, 0, 0, 1),
+                size=(0.1, 0.1, 0.1),
+                contype=0b001,
+                conaffinity=0b001,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.0, 0.0, 1.0),
+            ),
         ),
     )
     scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.0, 0, 1.5),
-            quat=(0, 0, 0, 1),
-            size=(0.1, 0.1, 0.1),
-            contype=0b011,
-            conaffinity=0b011,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.0, 0.0, 1.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(-0.025, 0, 1.0),
+                quat=(0, 0, 0, 1),
+                size=(0.1, 0.1, 0.1),
+                contype=0b010,
+                conaffinity=0b010,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.0, 1.0, 0.0, 1.0),
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/dragon/dragon.obj",
-            scale=0.004,
-            euler=(0, 0, 90),
-            pos=(-0.1, 0.0, 1.0),
-            contype=0b100,
-            conaffinity=0b100,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0, 1.5),
+                quat=(0, 0, 0, 1),
+                size=(0.1, 0.1, 0.1),
+                contype=0b011,
+                conaffinity=0b011,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.0, 0.0, 1.0, 1.0),
+            ),
+        ),
+    )
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/dragon/dragon.obj",
+                scale=0.004,
+                euler=(0, 0, 90),
+                pos=(-0.1, 0.0, 1.0),
+                contype=0b100,
+                conaffinity=0b100,
+            ),
         ),
     )
 

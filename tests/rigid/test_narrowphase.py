@@ -335,12 +335,16 @@ def scene_add_sphere(tmp_path: Path, scene: gs.Scene, radius: float) -> "RigidEn
     sphere_path = tmp_path / "sphere.xml"
     ET.ElementTree(sphere_mjcf).write(sphere_path)
     entity_sphere = scene.add_entity(
-        gs.morphs.MJCF(
-            file=sphere_path,
-            align=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=sphere_path,
+                align=False,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        vis_mode="collision",
-        visualize_contact=True,
     )
     return cast("RigidEntity", entity_sphere)
 
@@ -350,12 +354,16 @@ def scene_add_capsule(tmp_path: Path, scene: gs.Scene, half_length: float, radiu
     capsule_path = tmp_path / "sphere.xml"
     ET.ElementTree(capsule_mjcf).write(capsule_path)
     entity_capsule = scene.add_entity(
-        gs.morphs.MJCF(
-            file=capsule_path,
-            align=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=capsule_path,
+                align=False,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        vis_mode="collision",
-        visualize_contact=True,
     )
     return cast("RigidEntity", entity_capsule)
 
@@ -522,12 +530,16 @@ def scene_add_box(tmp_path: Path, scene: gs.Scene, size) -> "RigidEntity":
     box_path = tmp_path / "box.xml"
     ET.ElementTree(box_mjcf).write(box_path)
     entity_box = scene.add_entity(
-        gs.morphs.MJCF(
-            file=box_path,
-            align=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=box_path,
+                align=False,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        vis_mode="collision",
-        visualize_contact=True,
     )
     return cast("RigidEntity", entity_box)
 
@@ -770,11 +782,15 @@ def test_split_vs_monolithic_narrowphase(
     capsule_a = scene_add_capsule(tmp_path, scene, half_length=half_length, radius=radius)
     capsule_b = scene_add_capsule(tmp_path, scene, half_length=half_length, radius=radius)
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.3, 0.3, 0.3),
-            pos=(10.0, 0.0, 0.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.3, 0.3, 0.3),
+                pos=(10.0, 0.0, 0.0),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     # The monolithic arm runs GJK on one state per environment, which the split arm leaves unused
     with namespace(scene._namespace):
@@ -851,20 +867,28 @@ def test_contact_patch_full_box_box_manifold(show_viewer: bool) -> None:
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(0.0, 0.0, 0.0),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(0.0, 0.0, 0.0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     scene.add_entity(
-        gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(0.0, 0.0, 0.199),
-            euler=(0, 0, 45),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(0.0, 0.0, 0.199),
+                euler=(0, 0, 45),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     scene.build(n_envs=2)
     scene.step()
@@ -927,10 +951,16 @@ def test_multi_contact_overlap_corners(gjk_collision, n_base_sides, show_viewer,
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(base_morph)
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=base_morph,
+        ),
+    )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=BOX_SIZE,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=BOX_SIZE,
+            ),
         ),
     )
     scene.build(n_envs=N_ENVS)
@@ -1066,13 +1096,21 @@ def test_maximum_contact_area(show_viewer, tol):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=[gs.morphs.MeshSet(files=(mesh,), fixed=True) for mesh in bases_mesh],
-        vis_mode="collision",
+        options=gs.entities.Rigid(
+            morph=[gs.morphs.MeshSet(files=(mesh,), fixed=True) for mesh in bases_mesh],
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+        ),
     )
     top = scene.add_entity(
-        morph=[gs.morphs.MeshSet(files=(mesh,)) for mesh in tops_mesh],
-        visualize_contact=True,
-        vis_mode="collision",
+        options=gs.entities.Rigid(
+            morph=[gs.morphs.MeshSet(files=(mesh,)) for mesh in tops_mesh],
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
+        ),
     )
     scene.build(n_envs=len(SCALES) * N_YAWS, env_spacing=(6.0, 6.0))
 
@@ -1159,11 +1197,15 @@ def test_mesh_support_exactness(show_viewer, tol):
     )
     entities = [
         scene.add_entity(
-            morph=gs.morphs.MeshSet(
-                files=(mesh,),
-                pos=(4.0 * i_e, 0.0, 0.0),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MeshSet(
+                    files=(mesh,),
+                    pos=(4.0 * i_e, 0.0, 0.0),
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
             ),
-            vis_mode="collision",
         )
         for i_e, mesh in enumerate((*meshes, meshes[-1]))
     ]

@@ -26,9 +26,11 @@ def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, n_env
     )
     SCALE = 2.0
     entity = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=scaled_mjcf_joint_equalities,
-            scale=SCALE,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=scaled_mjcf_joint_equalities,
+                scale=SCALE,
+            ),
         ),
     )
     scene.build(n_envs=n_envs)
@@ -98,41 +100,53 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
         show_FPS=False,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     cube = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.04, 0.04, 0.04),
-            pos=CUBE_POS,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1, 0, 0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.04, 0.04, 0.04),
+                pos=CUBE_POS,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1, 0, 0),
+            ),
         ),
     )
     robot = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/universal_robots_ur5e/ur5e.xml",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/universal_robots_ur5e/ur5e.xml",
+            ),
         ),
     )
     fixed_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.04, 0.04, 0.04),
-            pos=(0.0, 1.0, 0.5),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.04, 0.04, 0.04),
+                pos=(0.0, 1.0, 0.5),
+                fixed=True,
+            ),
         ),
     )
     hanging_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.04, 0.04, 0.04),
-            pos=(0.0, 1.0, 0.02),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.04, 0.04, 0.04),
+                pos=(0.0, 1.0, 0.02),
+            ),
         ),
     )
     # The hung box swings on a connect pivot at the top of the gap between the two boxes into the fixed box, which stops
     # it since connected links keep colliding, where it would otherwise swing on to hang under the pivot.
     boxes = scene.add_entity(
-        gs.morphs.MJCF(
-            file=connected_boxes,
-            pos=(0.0, -1.0, 0.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=connected_boxes,
+                pos=(0.0, -1.0, 0.0),
+            ),
         ),
     )
     scene.build(n_envs=4, env_spacing=(3.0, 3.0))
@@ -254,50 +268,70 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
     # Y-up, so the upright screw axis given in its frame differs from the axis of the box.
     post_helix, post_free, post_held, post_stopped = (
         scene.add_entity(
-            gs.morphs.Box(
-                size=(0.02, POST_HEIGHT, 0.02),
-                pos=(x, 0.0, 0.5 * POST_HEIGHT),
-                offset_euler=(90.0, 0.0, 0.0),
-                fixed=True,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(0.02, POST_HEIGHT, 0.02),
+                    pos=(x, 0.0, 0.5 * POST_HEIGHT),
+                    offset_euler=(90.0, 0.0, 0.0),
+                    fixed=True,
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
             ),
-            vis_mode="collision",
         )
         for x in (0.0, 1.0, 2.0, 3.0)
     )
     nut_helix, nut_free, nut_held, nut_stopped = (
         scene.add_entity(
-            gs.morphs.Box(
-                size=(0.1, 0.1, 0.02),
-                pos=(x, 0.0, NUT_Z),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(0.1, 0.1, 0.02),
+                    pos=(x, 0.0, NUT_Z),
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
             ),
-            vis_mode="collision",
         )
         for x in (0.0, 1.0, 2.0, 3.0)
     )
     # The resting nut starts above the tip of its post, onto which it falls and rests until a screw takes it down
     post_resting = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.02, 0.02, POST_HEIGHT),
-            pos=(4.0, 0.0, 0.5 * POST_HEIGHT),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.02, 0.02, POST_HEIGHT),
+                pos=(4.0, 0.0, 0.5 * POST_HEIGHT),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     nut_resting = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.02),
-            pos=(4.0, 0.0, POST_HEIGHT + 0.015),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.02),
+                pos=(4.0, 0.0, POST_HEIGHT + 0.015),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     # The spindle swings, carrying a free nut and a nut sharing its kinematic tree, which slides and turns on it
     # through two joints.
     spindle = scene.add_entity(
-        gs.morphs.MJCF(
-            file=swinging_spindle,
-            pos=(6.0, 0.0, 0.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=swinging_spindle,
+                pos=(6.0, 0.0, 0.0),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     scene.build(n_envs=2, env_spacing=(0.0, 1.5))
 
@@ -454,16 +488,20 @@ def test_dynamic_weld_scene_reset():
         show_viewer=False,
     )
     box1 = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0, 0, 0.5),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0, 0, 0.5),
+            ),
+        ),
     )
     box2 = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.2, 0, 0.5),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.2, 0, 0.5),
+            ),
+        ),
     )
     scene.build(n_envs=2)
 
@@ -492,16 +530,20 @@ def test_urdf_mimic(show_viewer, tol, scaled_urdf_mimic):
         show_viewer=show_viewer,
     )
     hand = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/panda_bullet/hand.urdf",
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/panda_bullet/hand.urdf",
+                fixed=True,
+            ),
         ),
     )
     mimic = scene.add_entity(
-        gs.morphs.URDF(
-            file=scaled_urdf_mimic,
-            scale=2.0,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=scaled_urdf_mimic,
+                scale=2.0,
+                fixed=True,
+            ),
         ),
     )
     scene.build()
@@ -541,15 +583,19 @@ def test_get_constraints_api(show_viewer, tol):
         show_viewer=show_viewer,
     )
     robot = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
         ),
     )
     cube = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.05, 0.05, 0.05),
-            pos=(0.2, 0.0, 0.05),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.05, 0.05, 0.05),
+                pos=(0.2, 0.0, 0.05),
+            ),
+        ),
     )
     scene.build(n_envs=2)
 
@@ -583,10 +629,12 @@ def test_set_sol_params(n_envs, batched, tol):
         show_FPS=False,
     )
     robot = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-            pos=(0.0, 0.4, 0.1),
-            euler=(0, 0, 90),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+                pos=(0.0, 0.4, 0.1),
+                euler=(0, 0, 90),
+            ),
         ),
     )
     scene.build(n_envs=2)

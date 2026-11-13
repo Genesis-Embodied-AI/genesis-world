@@ -19,7 +19,11 @@ from ..utils.assertions import assert_allclose, assert_equal
 def test_gravity(show_viewer, tol):
     scene = gs.Scene(show_viewer=show_viewer)
 
-    sphere = scene.add_entity(gs.morphs.Sphere())
+    sphere = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(),
+        ),
+    )
     ghost = scene.add_entity(
         options=gs.entities.Kinematic(
             morph=gs.morphs.Sphere(
@@ -101,10 +105,12 @@ def test_all_fixed(show_viewer):
         show_FPS=False,
     )
     cube = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.0),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.0),
+                fixed=True,
+            ),
         ),
     )
     scene.build()
@@ -173,17 +179,21 @@ def test_many_boxes_dynamics(box_box_detection, gjk_collision, dynamics, show_vi
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     for n in range(N_SIDE**3):
         i, j, k = n // N_SIDE**2, (n // N_SIDE) % N_SIDE, n % N_SIDE
         scene.add_entity(
-            gs.morphs.Box(
-                pos=(i * (1.0 - 1e-3), j * (1.0 - 1e-3), k * (1.0 - 1e-3) + 0.5),
-                size=(1.0, 1.0, 1.0),
-            ),
-            surface=gs.surfaces.Default(
-                color=(*np.random.rand(3), 0.7),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    pos=(i * (1.0 - 1e-3), j * (1.0 - 1e-3), k * (1.0 - 1e-3) + 0.5),
+                    size=(1.0, 1.0, 1.0),
+                ),
+                surface=gs.surfaces.Default(
+                    color=(*np.random.rand(3), 0.7),
+                ),
             ),
         )
     scene.build()
@@ -236,21 +246,27 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     robot = scene.add_entity(
-        gs.morphs.MJCF(
-            file=xml_path,
-            quat=(1.0, 0, 1.0, 0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+                quat=(1.0, 0, 1.0, 0),
+            ),
         ),
     )
     duck = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.04,
-            pos=(1.0, 0.0, 1.0),
-            euler=(90, 0, 0),
-            collision=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.04,
+                pos=(1.0, 0.0, 1.0),
+                euler=(90, 0, 0),
+                collision=False,
+            ),
         ),
     )
     scene.build()
@@ -408,31 +424,43 @@ def test_energy_analytical_and_conservation(
         ),
         show_viewer=show_viewer,
     )
-    plane = scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     sphere_a = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=radius,
-            pos=(0, 0, h0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=radius,
+                pos=(0, 0, h0),
+            ),
         ),
     )
     sphere_b = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=radius,
-            pos=(0.5, 0, h0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=radius,
+                pos=(0.5, 0, h0),
+            ),
         ),
     )
     arm = scene.add_entity(
-        gs.morphs.MJCF(
-            file=spring_double_pendulum,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=spring_double_pendulum,
+            ),
         ),
     )
     # A load hung on the elbow link weighs on both joints of the arm and swings with it.
     arm_load = scene.add_entity(
-        gs.morphs.URDF(
-            file=implicit_inertial_origin_chain,
-            pos=(0.45, 0.5, 0.8),
-            fixed=True,
-            batch_fixed_verts=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=implicit_inertial_origin_chain,
+                pos=(0.45, 0.5, 0.8),
+                fixed=True,
+                batch_fixed_verts=True,
+            ),
         ),
     )
     arm_load.attach(arm, parent_link_name="arm_lower", pos=(0.2, 0.0, 0.0))
@@ -440,10 +468,12 @@ def test_energy_analytical_and_conservation(
     # child, and one link with armature on its angular DOFs.
     tumblers = [
         scene.add_entity(
-            gs.morphs.URDF(
-                file=implicit_inertial_origin_chain,
-                pos=(x, 1.0, 2.0),
-                merge_fixed_links=merge_fixed_links,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file=implicit_inertial_origin_chain,
+                    pos=(x, 1.0, 2.0),
+                    merge_fixed_links=merge_fixed_links,
+                ),
             ),
         )
         for x, merge_fixed_links in ((1.0, True), (1.6, False), (2.2, True))
@@ -451,18 +481,22 @@ def test_energy_analytical_and_conservation(
     # A fourth copy receives a fixed entity off its center of mass, so the body it tumbles as is the pair.
     tumblers.append(
         scene.add_entity(
-            gs.morphs.URDF(
-                file=implicit_inertial_origin_chain,
-                pos=(2.8, 1.0, 2.0),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file=implicit_inertial_origin_chain,
+                    pos=(2.8, 1.0, 2.0),
+                ),
             ),
         )
     )
     load = scene.add_entity(
-        gs.morphs.URDF(
-            file=implicit_inertial_origin_chain,
-            pos=(2.8, 1.0, 2.0),
-            fixed=True,
-            batch_fixed_verts=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=implicit_inertial_origin_chain,
+                pos=(2.8, 1.0, 2.0),
+                fixed=True,
+                batch_fixed_verts=True,
+            ),
         ),
     )
     load.attach(tumblers[-1], parent_link_name=tumblers[-1].base_link.name, pos=(0.3, 0.0, 0.0))
@@ -599,8 +633,10 @@ def test_contact_energy_dissipation(damped_flap, integrator, show_viewer):
         show_viewer=show_viewer,
     )
     entity = scene.add_entity(
-        gs.morphs.MJCF(
-            file=damped_flap,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=damped_flap,
+            ),
         ),
     )
     scene.build()
@@ -643,19 +679,23 @@ def test_dofs_force_balance(resting_light_stick, contact_resolution, show_viewer
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
-        surface=gs.surfaces.Default(
-            color=(0.8, 0.8, 0.8),
-            smooth=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            surface=gs.surfaces.Default(
+                color=(0.8, 0.8, 0.8),
+                smooth=False,
+            ),
         ),
     )
     entity = scene.add_entity(
-        gs.morphs.MJCF(
-            file=resting_light_stick,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.4, 0.9),
-            smooth=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=resting_light_stick,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.4, 0.9),
+                smooth=False,
+            ),
         ),
     )
     scene.build()
@@ -702,23 +742,29 @@ def test_dofs_force_balance_advanced(contact_resolution, show_viewer, tol):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     hand = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/shadow_hand/shadow_hand.urdf",
-            pos=(0.0, 0.0, 0.5),
-            euler=(-90, 0, 0),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/shadow_hand/shadow_hand.urdf",
+                pos=(0.0, 0.0, 0.5),
+                euler=(-90, 0, 0),
+                fixed=True,
+            ),
         ),
     )
     cube = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.05, 0.05, 0.05),
-            pos=(0.03, 0.33, 0.57),
-        ),
-        material=gs.materials.Rigid(
-            rho=400.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.05, 0.05, 0.05),
+                pos=(0.03, 0.33, 0.57),
+            ),
+            material=gs.materials.Rigid(
+                rho=400.0,
+            ),
         ),
     )
     scene.build()
@@ -784,19 +830,23 @@ def test_static_equilibrium(damped_pendulum_and_tilted_light_capsule, contact_re
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
-        surface=gs.surfaces.Default(
-            color=(0.8, 0.8, 0.8),
-            smooth=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            surface=gs.surfaces.Default(
+                color=(0.8, 0.8, 0.8),
+                smooth=False,
+            ),
         ),
     )
     entity = scene.add_entity(
-        gs.morphs.MJCF(
-            file=damped_pendulum_and_tilted_light_capsule,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.4, 0.9),
-            smooth=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=damped_pendulum_and_tilted_light_capsule,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.4, 0.9),
+                smooth=False,
+            ),
         ),
     )
     scene.build()
@@ -829,30 +879,42 @@ def test_mass_mat(xml_path, show_viewer, tol):
         show_FPS=False,
     )
     plane = scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     franka1 = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-            pos=(0, 0, 0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+                pos=(0, 0, 0),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        vis_mode="collision",
-        visualize_contact=True,
     )
     franka2 = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-            pos=(0, 2, 0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+                pos=(0, 2, 0),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        vis_mode="collision",
-        visualize_contact=True,
     )
     # High-DOF single tree: its mass submatrix exceeds GPU shared memory, exercising the cooperative >shared-cap
     # assemble (the low-DOF frankas exercise the under-cap shared-memory factor instead).
     long_chain = scene.add_entity(
-        gs.morphs.MJCF(
-            file=xml_path,
-            pos=(5, 0, 2),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+                pos=(5, 0, 2),
+            ),
         ),
     )
     scene.build()
@@ -895,8 +957,10 @@ def test_mass_block_partition(xml_path, show_viewer, tol):
         show_viewer=show_viewer,
     )
     entity = scene.add_entity(
-        gs.morphs.MJCF(
-            file=xml_path,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+            ),
         ),
     )
     scene.build(n_envs=0)
@@ -945,13 +1009,17 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
         show_viewer=show_viewer,
     )
     mono = scene.add_entity(
-        gs.morphs.MJCF(
-            file=mono_xml,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=mono_xml,
+            ),
         ),
     )
     arm = scene.add_entity(
-        gs.morphs.MJCF(
-            file=arm_xml_by_box_position[box_position],
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=arm_xml_by_box_position[box_position],
+            ),
         ),
     )
     box_morph = gs.morphs.Box(
@@ -959,24 +1027,38 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
         pos=(0.0, 2.0, 1.0),
     )
     if box_position == "between":
-        box = scene.add_entity(box_morph)
+        box = scene.add_entity(
+            options=gs.entities.Rigid(
+                morph=box_morph,
+            ),
+        )
     hand = scene.add_entity(
-        gs.morphs.MJCF(
-            file=hand_xml,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=hand_xml,
+            ),
         ),
     )
     hand_chained = scene.add_entity(
-        gs.morphs.MJCF(
-            file=hand_xml,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=hand_xml,
+            ),
         ),
     )
     hand_branch = scene.add_entity(
-        gs.morphs.MJCF(
-            file=hand_xml,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=hand_xml,
+            ),
         ),
     )
     if box_position == "after":
-        box = scene.add_entity(box_morph)
+        box = scene.add_entity(
+            options=gs.entities.Rigid(
+                morph=box_morph,
+            ),
+        )
     # Chained attach runs before its own parent is attached: re-rooting is transitive, so the order is free.
     hand_chained.attach(hand, "palm")
     if box_position == "between":
@@ -991,23 +1073,29 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
     hand_branch.attach(arm, "a2")
     # A free body attached onto a link the world carries is carried by it too
     pedestal = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(0.0, -2.0, 0.1),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(0.0, -2.0, 0.1),
+                fixed=True,
+            ),
+        ),
     )
     mounted = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, -2.0, 0.5),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, -2.0, 0.5),
+            ),
+        ),
     )
     mounted.attach(pedestal, pedestal.base_link.name, pos=(0.0, 0.0, 0.15))
     if box_position == "inside_target":
         hand_box = scene.add_entity(
-            gs.morphs.MJCF(
-                file=hand_xml,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MJCF(
+                    file=hand_xml,
+                ),
             ),
         )
         with np.testing.assert_raises_regex(gs.GenesisException, "Load the parent's trees as separate entities"):
@@ -1102,10 +1190,16 @@ def test_cholesky_tiling(monkeypatch, tol):
             show_viewer=False,
             show_FPS=False,
         )
-        scene.add_entity(gs.morphs.Plane())
+        scene.add_entity(
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Plane(),
+            ),
+        )
         gs_robot = scene.add_entity(
-            gs.morphs.URDF(
-                file="urdf/go2/urdf/go2.urdf",
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file="urdf/go2/urdf/go2.urdf",
+                ),
             ),
         )
         scene.build(n_envs=2)
@@ -1159,18 +1253,26 @@ def test_solve_arm_equivalence(n_stack, n_grid, monkeypatch, show_viewer, tol):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     # Islands of one body, a stack and a grid at once, each sunk a ten-thousandth of its height so contact has depth
     positions = [(0.0, 0.0, (1 - 1e-4) * SIZE / 2)]
     positions += [(10 * SIZE, 0.0, (1 - 1e-4) * SIZE * (0.5 + i)) for i in range(n_stack)]
     positions += [(20 * SIZE + SIZE * (i % 3), SIZE * (i // 3), (1 - 1e-4) * SIZE / 2) for i in range(n_grid)]
     for pos in positions:
         scene.add_entity(
-            morph=gs.morphs.Box(
-                size=(SIZE, SIZE, SIZE),
-                pos=pos,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(SIZE, SIZE, SIZE),
+                    pos=pos,
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
             ),
-            vis_mode="collision",
         )
     scene.build(n_envs=2)
     solver = scene.rigid_solver
@@ -1279,13 +1381,19 @@ def test_cholesky_tiling_large_shared_memory(show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     for i in range(19):
         scene.add_entity(
-            gs.morphs.Box(
-                size=(0.1, 0.1, 0.1),
-                pos=(0, 0, 0.5 + i * 0.15),
-            )
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(0.1, 0.1, 0.1),
+                    pos=(0, 0, 0.5 + i * 0.15),
+                ),
+            ),
         )
     scene.build(n_envs=2)
 

@@ -239,6 +239,16 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
     with pytest.raises(gs.GenesisException, match="gs.entities.Kinematic"):
         UserRigid(morph=gs.morphs.Sphere(), material=gs.materials.Kinematic())
     assert type(gs.Scene().add_entity(gs.morphs.Sphere()).options) is gs.entities.Rigid
+    # The individual arguments stand for the entity options of the solver of the material, 'vis_mode' setting the
+    # visualization mode on a copy of the surface
+    surface = gs.surfaces.Rough()
+    sphere = gs.Scene().add_entity(
+        gs.morphs.Sphere(), surface=surface, visualize_contact=True, vis_mode="collision", name="sphere"
+    )
+    assert sphere.options.surface.vis_mode == "collision"
+    assert surface.vis_mode is None
+    assert sphere.options.visualize_contact
+    assert sphere.options.name == "sphere"
     with pytest.raises(gs.GenesisException, match="either entity options"):
         scene.add_entity(morph=gs.morphs.Sphere(), options=gs.entities.Rigid(morph=gs.morphs.Sphere()))
     with pytest.raises(gs.GenesisException, match="got gs.indices.Vertex"):

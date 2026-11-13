@@ -37,10 +37,12 @@ def test_vector_field_plotter_subplots(mpl_agg_backend, png_snapshot):
         show_FPS=False,
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.5),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.5),
+            ),
+        ),
     )
 
     n_probes = 9
@@ -139,12 +141,14 @@ def test_plotter(tmp_path, monkeypatch, mpl_agg_backend, png_snapshot):
         show_FPS=False,
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.5),
-        ),
-        material=gs.materials.Rigid(
-            rho=1000.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.5),
+            ),
+            material=gs.materials.Rigid(
+                rho=1000.0,
+            ),
         ),
     )
 
@@ -204,13 +208,17 @@ def test_file_writers(tmp_path):
     )
 
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
 
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.06),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.06),
+            ),
         ),
     )
 
@@ -305,9 +313,11 @@ def test_error_handling(tmp_path, caplog):
         show_viewer=False,
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 1.0),
+            ),
         ),
     )
     # Recorder options are checked as they are built
@@ -408,12 +418,16 @@ def test_video_writer(tmp_path):
         show_FPS=False,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 1.0),
+            ),
         ),
     )
     camera = scene.add_camera(

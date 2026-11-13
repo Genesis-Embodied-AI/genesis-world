@@ -323,9 +323,11 @@ def test_requires_grad_parity(grad_free, grad_hopper, grad_chain3, tol, show_vie
             (grad_chain3, (-1.5, 0.0, 1.0)),
         ):
             scene.add_entity(
-                gs.morphs.MJCF(
-                    file=mjcf,
-                    pos=pos,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.MJCF(
+                        file=mjcf,
+                        pos=pos,
+                    ),
                 ),
             )
         scene.build(n_envs=2)

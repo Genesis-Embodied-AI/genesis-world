@@ -26,8 +26,10 @@ def test_position_control(show_viewer):
         show_FPS=False,
     )
     robot = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
         ),
     )
     scene.build(n_envs=2, env_spacing=(1.0, 1.0))
@@ -124,9 +126,11 @@ def test_reset_control(robot_path, tol):
         show_FPS=False,
     )
     robot = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=robot_path,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=robot_path,
+            ),
+        ),
     )
     scene.build()
     qpos = np.random.rand(robot.n_dofs)
@@ -176,9 +180,11 @@ def test_drone_propellers_force_application(n_envs, substeps, show_viewer, tol):
         show_viewer=show_viewer,
     )
     drone = scene.add_entity(
-        morph=gs.morphs.Drone(
-            pos=(0.0, 0.0, 1.0),
-            file="urdf/drones/cf2x.urdf",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Drone(
+                pos=(0.0, 0.0, 1.0),
+                file="urdf/drones/cf2x.urdf",
+            ),
         ),
     )
     scene.build(n_envs=n_envs)
@@ -249,18 +255,26 @@ def test_drone_advanced(show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    plane = scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     asset_path = get_hf_dataset(pattern="drone_sus/*")
     drones = []
     for offset, merge_fixed_links in ((-0.3, False), (0.3, True)):
         drone = scene.add_entity(
-            morph=gs.morphs.Drone(
-                file=f"{asset_path}/drone_sus/drone_sus.urdf",
-                merge_fixed_links=merge_fixed_links,
-                pos=(0.0, offset, 1.5),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Drone(
+                    file=f"{asset_path}/drone_sus/drone_sus.urdf",
+                    merge_fixed_links=merge_fixed_links,
+                    pos=(0.0, offset, 1.5),
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
+                visualize_contact=True,
             ),
-            vis_mode="collision",
-            visualize_contact=True,
         )
         drones.append(drone)
     scene.build()

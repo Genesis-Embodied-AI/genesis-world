@@ -19,12 +19,16 @@ scene = gs.Scene(
 )
 
 scene.add_entity(
-    gs.morphs.Plane(),
+    options=gs.entities.Rigid(
+        morph=gs.morphs.Plane(),
+    ),
 )
 robot = scene.add_entity(
-    gs.morphs.URDF(
-        file="urdf/anymal_c/urdf/anymal_c.urdf",
-        pos=(0, 0, 0.8),
+    options=gs.entities.Rigid(
+        morph=gs.morphs.URDF(
+            file="urdf/anymal_c/urdf/anymal_c.urdf",
+            pos=(0, 0, 0.8),
+        ),
     ),
 )
 n_envs = 30000 if "PYTEST_VERSION" not in os.environ else 2

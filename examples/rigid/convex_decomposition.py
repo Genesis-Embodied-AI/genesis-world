@@ -23,14 +23,18 @@ def main():
     )
 
     scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/tank.obj",
-            scale=5.0,
-            fixed=True,
-            euler=(80, 10, 90),
-            pos=(0.05, -0.1, 0.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/tank.obj",
+                scale=5.0,
+                fixed=True,
+                euler=(80, 10, 90),
+                pos=(0.05, -0.1, 0.0),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     for i, asset_name in enumerate(("donut_0", "mug_1", "cup_2", "apple_15")):
         asset_path = snapshot_download(
@@ -41,11 +45,15 @@ def main():
             max_workers=1,
         )
         scene.add_entity(
-            gs.morphs.MJCF(
-                file=f"{asset_path}/{asset_name}/output.xml",
-                pos=(0.0, 0.15 * (i - 1.5), 0.7),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MJCF(
+                    file=f"{asset_path}/{asset_name}/output.xml",
+                    pos=(0.0, 0.15 * (i - 1.5), 0.7),
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
             ),
-            vis_mode="collision",
         )
 
     scene.build()

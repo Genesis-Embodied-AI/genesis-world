@@ -68,25 +68,31 @@ def main():
             show_viewer=args.vis,
         )
         scene.add_entity(
-            gs.morphs.Plane(
-                pos=(0.0, 0.0, -HALF),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Plane(
+                    pos=(0.0, 0.0, -HALF),
+                ),
             ),
         )
         base = scene.add_entity(
-            gs.morphs.Box(
-                pos=(0.0, 0.0, 0.0),
-                size=(2 * HALF, 2 * HALF, 2 * HALF),
-                fixed=True,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    pos=(0.0, 0.0, 0.0),
+                    size=(2 * HALF, 2 * HALF, 2 * HALF),
+                    fixed=True,
+                ),
             ),
         )
         top = scene.add_entity(
-            gs.morphs.Box(
-                pos=(0.0, 0.0, TOP_FACE + HALF - PENETRATION),
-                size=(2 * HALF, 2 * HALF, 2 * HALF),
-            ),
-            surface=gs.surfaces.Default(
-                color=(0.85, 0.88, 0.92),
-                opacity=0.35,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    pos=(0.0, 0.0, TOP_FACE + HALF - PENETRATION),
+                    size=(2 * HALF, 2 * HALF, 2 * HALF),
+                ),
+                surface=gs.surfaces.Default(
+                    color=(0.85, 0.88, 0.92),
+                    opacity=0.35,
+                ),
             ),
         )
         scene.build()

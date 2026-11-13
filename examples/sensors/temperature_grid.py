@@ -58,69 +58,85 @@ def main():
         show_viewer=args.vis,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     # Sandbox: four fixed walls
     for i in range(4):
         scene.add_entity(
-            gs.morphs.Box(
-                size=(SANDBOX_SIZE + 2 * WALL_THICKNESS, WALL_THICKNESS, WALL_HEIGHT),
-                pos=(
-                    *((1 - 2 * (i % 2)) * (SANDBOX_SIZE / 2 + WALL_THICKNESS / 2), 0.0)[:: (2 * (i >= 2) - 1)],
-                    WALL_HEIGHT / 2,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(SANDBOX_SIZE + 2 * WALL_THICKNESS, WALL_THICKNESS, WALL_HEIGHT),
+                    pos=(
+                        *((1 - 2 * (i % 2)) * (SANDBOX_SIZE / 2 + WALL_THICKNESS / 2), 0.0)[:: (2 * (i >= 2) - 1)],
+                        WALL_HEIGHT / 2,
+                    ),
+                    euler=(0, 0, 90 * (i >= 2)),
+                    fixed=True,
                 ),
-                euler=(0, 0, 90 * (i >= 2)),
-                fixed=True,
-            ),
-            surface=gs.surfaces.Default(
-                color=(0.5, 0.45, 0.4, 1.0),
+                surface=gs.surfaces.Default(
+                    color=(0.5, 0.45, 0.4, 1.0),
+                ),
             ),
         )
 
     platform = scene.add_entity(
-        gs.morphs.Box(
-            size=(SANDBOX_SIZE, SANDBOX_SIZE, PLATFORM_HEIGHT),
-            pos=(0.0, 0.0, PLATFORM_HEIGHT / 2),
-            fixed=True,
-            visualization=False,  # sensor debug_draw will be shown
-        ),
-        material=gs.materials.Rigid(
-            friction=0.01,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(SANDBOX_SIZE, SANDBOX_SIZE, PLATFORM_HEIGHT),
+                pos=(0.0, 0.0, PLATFORM_HEIGHT / 2),
+                fixed=True,
+                visualization=False,  # sensor debug_draw will be shown
+            ),
+            material=gs.materials.Rigid(
+                friction=0.01,
+            ),
         ),
     )
 
     pusher_pos_init = np.array([0.0, 0.0, PLATFORM_HEIGHT + PUSHER_SIZE / 2], dtype=np.float32)
     pusher = scene.add_entity(
-        gs.morphs.Cylinder(
-            radius=PUSHER_SIZE,
-            height=PUSHER_SIZE,
-            pos=pusher_pos_init,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.2, 0.2, 1.0),
-        ),
-        material=gs.materials.Rigid(
-            friction=0.01,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Cylinder(
+                radius=PUSHER_SIZE,
+                height=PUSHER_SIZE,
+                pos=pusher_pos_init,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.2, 0.2, 1.0),
+            ),
+            material=gs.materials.Rigid(
+                friction=0.01,
+            ),
         ),
     )
 
     rect = scene.add_entity(
-        gs.morphs.Box(
-            size=(OBJ_SIZE, OBJ_SIZE * 2, OBJ_SIZE),
-            pos=(SANDBOX_SIZE / 4, 0, OBJ_Z),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(OBJ_SIZE, OBJ_SIZE * 2, OBJ_SIZE),
+                pos=(SANDBOX_SIZE / 4, 0, OBJ_Z),
+            ),
         ),
     )
     cylinder = scene.add_entity(
-        gs.morphs.Cylinder(
-            radius=OBJ_SIZE / 2,
-            height=OBJ_SIZE * 1.2,
-            pos=(0, SANDBOX_SIZE / 4, OBJ_Z),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Cylinder(
+                radius=OBJ_SIZE / 2,
+                height=OBJ_SIZE * 1.2,
+                pos=(0, SANDBOX_SIZE / 4, OBJ_Z),
+            ),
         ),
     )
     sphere = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=OBJ_SIZE / 2,
-            pos=(-SANDBOX_SIZE / 4, -SANDBOX_SIZE / 4, OBJ_Z),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=OBJ_SIZE / 2,
+                pos=(-SANDBOX_SIZE / 4, -SANDBOX_SIZE / 4, OBJ_Z),
+            ),
         ),
     )
     objects = [rect, cylinder, sphere]

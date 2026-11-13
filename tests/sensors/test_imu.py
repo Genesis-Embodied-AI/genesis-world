@@ -29,14 +29,20 @@ def test_sensor(free_box, show_viewer, tol, n_envs):
         show_viewer=show_viewer,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     box = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=free_box((0.05, 0.05, 0.05), 600),
-            pos=(0.0, 0.0, 0.2),
-            align=False,
-            default_armature=0.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=free_box((0.05, 0.05, 0.05), 600),
+                pos=(0.0, 0.0, 0.2),
+                align=False,
+                default_armature=0.0,
+            ),
         ),
     )
 
@@ -216,12 +222,16 @@ def test_lone_sensor_resolution_and_offset_setter(show_viewer, n_envs):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.05),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.05),
+            ),
         ),
     )
     imu = scene.add_sensor(

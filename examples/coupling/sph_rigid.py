@@ -34,19 +34,23 @@ def main():
 
     frictionless_rigid = gs.materials.Rigid(needs_coup=True, coup_friction=0.0)
     plane = scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     water = scene.add_entity(
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
-            mu=0.01,
-        ),
-        morph=gs.morphs.Box(
-            pos=(0.5, 0.0, 0.6),
-            size=(0.9, 1.6, 1.2),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.5, 0.7, 0.9, 1.0),
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.5, 0.0, 0.6),
+                size=(0.9, 1.6, 1.2),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.5, 0.7, 0.9, 1.0),
+            ),
+            material=gs.materials.SPH.Liquid(
+                sampler="regular",
+                mu=0.01,
+            ),
         ),
     )
 

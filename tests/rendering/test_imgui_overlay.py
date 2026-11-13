@@ -120,33 +120,39 @@ def _build_default_scene(*, enable_gui, run_in_thread=False):
     # also misrasterizes the plane when any of its vertices fall outside the camera frustum, so the camera is
     # pulled back below to keep all four corners visible.
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(2.0, 2.0, 0.02),
-            pos=(0.0, 0.0, -0.01),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(2.0, 2.0, 0.02),
+                pos=(0.0, 0.0, -0.01),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.60, 0.85, 0.55, 1.0),
+            ),
+            name="ground",
         ),
-        surface=gs.surfaces.Default(
-            color=(0.60, 0.85, 0.55, 1.0),
-        ),
-        name="ground",
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.15, 0.15, 0.15),
-            pos=(0.0, 0.4, 0.075),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.15, 0.15, 0.15),
+                pos=(0.0, 0.4, 0.075),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.85, 0.45, 0.20, 1.0),
+            ),
+            name="cube",
         ),
-        surface=gs.surfaces.Default(
-            color=(0.85, 0.45, 0.20, 1.0),
-        ),
-        name="cube",
     )
     # Shift the robot in the camera's right direction so the ImGui panel on the left hides less of it.
     scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-            pos=(0.0, 0.0, 0.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+                pos=(0.0, 0.0, 0.0),
+            ),
+            name="panda",
         ),
-        name="panda",
     )
     return scene
 
@@ -409,18 +415,22 @@ def test_capture_pending_entities_preserves_heterogeneous_morphs():
     scene = gs.Scene(show_viewer=False)
     single_morph = gs.morphs.Box(size=(0.1, 0.1, 0.1))
     single_entity = scene.add_entity(
-        morph=single_morph,
-        visualize_contact=True,
-        name="single",
+        options=gs.entities.Rigid(
+            morph=single_morph,
+            name="single",
+            visualize_contact=True,
+        ),
     )
     heterogeneous_morphs = (
         gs.morphs.Box(size=(0.2, 0.2, 0.2)),
         gs.morphs.Cylinder(radius=0.05, height=0.2),
     )
     heterogeneous_entity = scene.add_entity(
-        morph=heterogeneous_morphs,
-        visualize_contact=True,
-        name="heterogeneous",
+        options=gs.entities.Rigid(
+            morph=heterogeneous_morphs,
+            name="heterogeneous",
+            visualize_contact=True,
+        ),
     )
 
     plugin = ImGuiOverlayPlugin.__new__(ImGuiOverlayPlugin)

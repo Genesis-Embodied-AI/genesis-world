@@ -38,15 +38,21 @@ def main():
         show_viewer=args.vis,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     foot_link_names = ("FR_foot", "FL_foot", "RR_foot", "RL_foot")
     go2 = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/go2/urdf/go2.urdf",
-            pos=(0.0, 0.0, 0.2),
-            links_to_keep=foot_link_names,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/go2/urdf/go2.urdf",
+                pos=(0.0, 0.0, 0.2),
+                links_to_keep=foot_link_names,
+            ),
+        ),
     )
 
     for link_name in foot_link_names:

@@ -29,7 +29,9 @@ def main():
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
 
     # Only entities opting into visual raycasting can be grabbed with --use-visual-geom.

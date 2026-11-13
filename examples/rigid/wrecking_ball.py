@@ -183,13 +183,17 @@ def main():
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     # The ball passes through the model origin at the bottom of the swing, placed at mid-pile height.
     scene.add_entity(
-        gs.morphs.MJCF(
-            pos=(0.0, 0.0, 0.5 * args.pile_height * CUBE_SIZE),
-            file=wrecking_ball_mjcf(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                pos=(0.0, 0.0, 0.5 * args.pile_height * CUBE_SIZE),
+                file=wrecking_ball_mjcf(),
+            ),
         ),
     )
 
@@ -201,16 +205,18 @@ def main():
         for i_y in range(args.pile_width):
             for i_z in range(args.pile_height):
                 scene.add_entity(
-                    gs.morphs.Box(
-                        pos=(
-                            x_front + (i_x + 0.5) * cube_pitch,
-                            (i_y - 0.5 * (args.pile_width - 1)) * cube_pitch,
-                            i_z * cube_pitch + 0.5 * CUBE_SIZE,
+                    options=gs.entities.Rigid(
+                        morph=gs.morphs.Box(
+                            pos=(
+                                x_front + (i_x + 0.5) * cube_pitch,
+                                (i_y - 0.5 * (args.pile_width - 1)) * cube_pitch,
+                                i_z * cube_pitch + 0.5 * CUBE_SIZE,
+                            ),
+                            size=(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE),
                         ),
-                        size=(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE),
-                    ),
-                    surface=gs.surfaces.Rough(
-                        color=(0.62, 0.48, 0.42),
+                        surface=gs.surfaces.Rough(
+                            color=(0.62, 0.48, 0.42),
+                        ),
                     ),
                 )
 

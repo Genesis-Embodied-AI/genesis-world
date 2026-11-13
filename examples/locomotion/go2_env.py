@@ -57,17 +57,21 @@ class Go2Env:
 
         # add plain
         self.scene.add_entity(
-            gs.morphs.URDF(
-                file="urdf/plane/plane.urdf",
-                fixed=True,
-            )
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file="urdf/plane/plane.urdf",
+                    fixed=True,
+                ),
+            ),
         )
 
         self.robot = self.scene.add_entity(
-            gs.morphs.URDF(
-                file="urdf/go2/urdf/go2.urdf",
-                pos=self.env_cfg["base_init_pos"],
-                quat=self.env_cfg["base_init_quat"],
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file="urdf/go2/urdf/go2.urdf",
+                    pos=self.env_cfg["base_init_pos"],
+                    quat=self.env_cfg["base_init_quat"],
+                ),
             ),
         )
 

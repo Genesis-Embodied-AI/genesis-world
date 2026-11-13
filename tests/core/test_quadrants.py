@@ -105,13 +105,17 @@ def gs_static_child(args: list[str]):
         show_viewer=False,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     scene.add_entity(
-        gs.morphs.Box(
-            size=(0.4, 0.4, 0.4),
-            pos=(0.0, 0.0, 0.18),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.4, 0.4, 0.4),
+                pos=(0.0, 0.0, 0.18),
+            ),
+        ),
     )
     scene.build()
 
@@ -192,19 +196,25 @@ def gs_num_envs_child(args: list[str]):
 
     scene = gs.Scene(show_viewer=False)
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     scene.add_entity(
-        gs.morphs.Box(
-            size=(0.4, 0.4, 0.4),
-            pos=(0.0, 0.0, 0.18),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.4, 0.4, 0.4),
+                pos=(0.0, 0.0, 0.18),
+            ),
+        ),
     )
     scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.05,
-            pos=(0.0, 0.3, 0.04),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.05,
+                pos=(0.0, 0.3, 0.04),
+            ),
+        ),
     )
     scene.build(n_envs=args.n_envs, env_spacing=(0.5, 0.5))
 
@@ -289,14 +299,18 @@ def change_scene(args: list[str]):
             show_viewer=False,
         )
         scene.add_entity(
-            gs.morphs.Plane(),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Plane(),
+            ),
         )
         for i_obj in range(args.n_objs):
             scene.add_entity(
-                gs.morphs.Box(
-                    size=(0.4, 0.4, 0.4),
-                    pos=(0.0, 0.5 * i_obj, 0.5),
-                )
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Box(
+                        size=(0.4, 0.4, 0.4),
+                        pos=(0.0, 0.5 * i_obj, 0.5),
+                    ),
+                ),
             )
         scene.build(n_envs=args.n_envs)
 

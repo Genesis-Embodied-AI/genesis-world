@@ -51,7 +51,9 @@ if __name__ == "__main__":
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
 
     robot = scene.add_entity(
@@ -67,26 +69,30 @@ if __name__ == "__main__":
     )
 
     cube = scene.add_entity(
-        material=gs.materials.Rigid(
-            rho=300,
-        ),
-        morph=gs.morphs.Box(
-            pos=(0.5, 0.0, 0.07),
-            size=(0.04, 0.04, 0.04),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.5, 1, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.5, 0.0, 0.07),
+                size=(0.04, 0.04, 0.04),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.5, 1, 0.5),
+            ),
+            material=gs.materials.Rigid(
+                rho=300,
+            ),
         ),
     )
 
     target = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/axis.obj",
-            scale=0.15,
-            collision=False,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1, 0.5, 0.5, 1),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/axis.obj",
+                scale=0.15,
+                collision=False,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1, 0.5, 0.5, 1),
+            ),
         ),
     )
 

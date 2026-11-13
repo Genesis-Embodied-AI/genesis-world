@@ -37,31 +37,39 @@ def test_surface_distance_sensor_box_sphere(show_viewer, tol, n_envs):
         show_viewer=show_viewer,
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, 0.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, 0.0),
+            ),
         ),
     )
     # Tracked objects
     sphere1 = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=SPHERE_RADIUS,
-            pos=(0.0, 0.0, DISTANCE),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=SPHERE_RADIUS,
+                pos=(0.0, 0.0, DISTANCE),
+            ),
         ),
     )
     sphere2 = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=SPHERE_RADIUS,
-            pos=(0.0, 0.0, DISTANCE * 2.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=SPHERE_RADIUS,
+                pos=(0.0, 0.0, DISTANCE * 2.0),
+            ),
         ),
     )
     # Untracked distractor whose surface overlaps the box +y face by DISTRACTOR_PENETRATION (see above); the contact
     # pushes the free box centrally, so it only translates (no torque). It is also closer to the probes than either
     # tracked sphere, so a bug that ignored track_link_idx and measured every link would change the reading.
     sphere3 = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=SPHERE_RADIUS,
-            pos=(0.0, BOX_SIZE / 2.0 + SPHERE_RADIUS - DISTRACTOR_PENETRATION, 0.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=SPHERE_RADIUS,
+                pos=(0.0, BOX_SIZE / 2.0 + SPHERE_RADIUS - DISTRACTOR_PENETRATION, 0.0),
+            ),
         ),
     )
 
@@ -176,20 +184,28 @@ def test_kinematic_contact_probe_box_sphere_support(show_viewer, tol, n_envs):
         ),
         show_viewer=show_viewer,
     )
-    floor = scene.add_entity(gs.morphs.Plane())
+    floor = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, BOX_SIZE / 2 - PENETRATION),  # box is penetrating ground plane,
-            fixed=False,  # probe will not detect fixed-fixed contact,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, BOX_SIZE / 2 - PENETRATION),  # box is penetrating ground plane,
+                fixed=False,  # probe will not detect fixed-fixed contact,
+            ),
+        ),
     )
     sphere = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=SPHERE_RADIUS,
-            pos=(0.0, 0.0, BOX_SIZE + SPHERE_RADIUS + 0.2),  # start with sphere above the box,
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=SPHERE_RADIUS,
+                pos=(0.0, 0.0, BOX_SIZE + SPHERE_RADIUS + 0.2),  # start with sphere above the box,
+                fixed=True,
+            ),
+        ),
     )
 
     probe_local_pos = (
@@ -373,18 +389,22 @@ def test_raycast_probe_on_fully_fixed_solver(show_viewer):
     # geometric overlap.
     scene = gs.Scene(show_viewer=show_viewer)
     pad = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.2, 0.2, 0.05),
-            pos=(0.0, 0.0, 0.025),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.05),
+                pos=(0.0, 0.0, 0.025),
+                fixed=True,
+            ),
+        ),
     )
     scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.05),
-            pos=(0.0, 0.0, 0.06),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.05),
+                pos=(0.0, 0.0, 0.06),
+                fixed=True,
+            ),
+        ),
     )
     probe = scene.add_sensor(
         gs.sensors.ContactDepthProbe(
@@ -440,12 +460,18 @@ def test_contact_probe_hysteresis(show_viewer):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, BOX_Z_OFF),
-            fixed=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, BOX_Z_OFF),
+                fixed=False,
+            ),
         ),
     )
 
@@ -537,12 +563,18 @@ def test_contact_depth_probe_hysteresis_gain_and_dead_resample(show_viewer, tol)
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, BOX_Z_OFF),
-            fixed=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, BOX_Z_OFF),
+                fixed=False,
+            ),
         ),
     )
     common = dict(
@@ -658,18 +690,22 @@ def test_filler_probes_radius_zero(show_viewer, tol, n_envs):
         show_viewer=show_viewer,
     )
     sphere = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=SPHERE_RADIUS,
-            pos=(0.0, 0.0, SPHERE_RADIUS),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=SPHERE_RADIUS,
+                pos=(0.0, 0.0, SPHERE_RADIUS),
+                fixed=True,
+            ),
+        ),
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, SPHERE_RADIUS * 2 + BOX_SIZE / 2 - PENETRATION),
-            fixed=False,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, SPHERE_RADIUS * 2 + BOX_SIZE / 2 - PENETRATION),
+                fixed=False,
+            ),
+        ),
     )
     grid_pos = gu.generate_grid_points_on_plane(
         lo=(-BOX_SIZE / 2, -BOX_SIZE / 2, -BOX_SIZE / 2),
@@ -785,17 +821,21 @@ def test_contact_depth_query_sdf_vs_raycast_parity(show_viewer):
             show_viewer=show_viewer,
         )
         pad = scene.add_entity(
-            gs.morphs.Box(
-                size=PAD_SIZE,
-                pos=(0.0, 0.0, PAD_SIZE[2] / 2),
-                fixed=True,
-            )
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=PAD_SIZE,
+                    pos=(0.0, 0.0, PAD_SIZE[2] / 2),
+                    fixed=True,
+                ),
+            ),
         )
         ball = scene.add_entity(
-            gs.morphs.Sphere(
-                radius=BALL_R,
-                pos=(0.0, 0.0, 0.4),
-            )
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Sphere(
+                    radius=BALL_R,
+                    pos=(0.0, 0.0, 0.4),
+                ),
+            ),
         )
 
         common = dict(entity_idx=pad.idx, probe_local_pos=(CENTER_PROBE,), probe_radius=PROBE_R)
@@ -893,19 +933,27 @@ def test_filtered_contact_survives_prefilter_cap(show_viewer, monkeypatch, n_env
         ),
         show_viewer=show_viewer,
     )
-    plane = scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, BOX_SIZE / 2 - PENETRATION),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, BOX_SIZE / 2 - PENETRATION),
+            ),
+        ),
     )
     sphere = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=SPHERE_RADIUS,
-            pos=(0.0, 0.0, BOX_SIZE + SPHERE_RADIUS - 2 * PENETRATION),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=SPHERE_RADIUS,
+                pos=(0.0, 0.0, BOX_SIZE + SPHERE_RADIUS - 2 * PENETRATION),
+                fixed=True,
+            ),
+        ),
     )
     probe = scene.add_sensor(
         gs.sensors.ContactDepthProbe(
@@ -958,18 +1006,22 @@ def test_kinematic_taxel_crosstalk(show_viewer):
         show_viewer=show_viewer,
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, BOX_BOTTOM_Z + BOX_SIZE / 2),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, BOX_BOTTOM_Z + BOX_SIZE / 2),
+                fixed=True,
+            ),
+        ),
     )
     sphere = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=SPHERE_RADIUS,
-            pos=(0.0, 0.0, BOX_BOTTOM_Z + BOX_SIZE + SPHERE_RADIUS - 0.010),
-            fixed=False,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=SPHERE_RADIUS,
+                pos=(0.0, 0.0, BOX_BOTTOM_Z + BOX_SIZE + SPHERE_RADIUS - 0.010),
+                fixed=False,
+            ),
+        ),
     )
 
     common = dict(
@@ -1138,18 +1190,22 @@ def test_proximity_taxel_crosstalk(show_viewer):
         show_viewer=show_viewer,
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, BOX_BOTTOM_Z + BOX_SIZE / 2),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, BOX_BOTTOM_Z + BOX_SIZE / 2),
+                fixed=True,
+            ),
+        ),
     )
     sphere = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=SPHERE_RADIUS,
-            pos=(0.0, 0.0, BOX_BOTTOM_Z + BOX_SIZE + SPHERE_RADIUS - 0.012),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=SPHERE_RADIUS,
+                pos=(0.0, 0.0, BOX_BOTTOM_Z + BOX_SIZE + SPHERE_RADIUS - 0.012),
+                fixed=True,
+            ),
+        ),
     )
     common = dict(
         entity_idx=box.idx,
@@ -1209,19 +1265,27 @@ def test_proximity_taxel_twist_torque(show_viewer, tol, n_envs):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     pad = scene.add_entity(
-        gs.morphs.Box(
-            size=(PAD_SIZE, PAD_SIZE, PAD_SIZE),
-            pos=(0.0, 0.0, PAD_SIZE / 2),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(PAD_SIZE, PAD_SIZE, PAD_SIZE),
+                pos=(0.0, 0.0, PAD_SIZE / 2),
+                fixed=True,
+            ),
+        ),
     )
     # A free object: the twist term is driven by relative angular velocity, so the tracked body must actually spin.
     obj = scene.add_entity(
-        gs.morphs.Box(
-            size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
+            ),
+        ),
     )
     grid = gu.generate_grid_points_on_plane(
         lo=(-PAD_SIZE / 2, -PAD_SIZE / 2, PAD_SIZE / 2),
@@ -1298,18 +1362,22 @@ def test_proximity_sensor_box_on_box(show_viewer, tol, n_envs):
         show_viewer=show_viewer,
     )
     support = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, BOX_SIZE / 2),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, BOX_SIZE / 2),
+                fixed=True,
+            ),
+        ),
     )
     taxel_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, BOX_SIZE + BOX_SIZE / 2 - PENETRATION),
-            fixed=False,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, BOX_SIZE + BOX_SIZE / 2 - PENETRATION),
+                fixed=False,
+            ),
+        ),
     )
     sensor = scene.add_sensor(
         gs.sensors.ProximityTaxel(
@@ -1381,20 +1449,24 @@ def test_elastomer_sensor_sphere_ground_dilate_shear(show_viewer, tol, n_envs):
     )
 
     ground = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.8, 0.8, GROUND_THICKNESS),
-            pos=(0.0, 0.0, -GROUND_THICKNESS / 2),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.8, 0.8, GROUND_THICKNESS),
+                pos=(0.0, 0.0, -GROUND_THICKNESS / 2),
+                fixed=True,
+            ),
+        ),
     )
     # Sphere penetrating the ground (center below z=0 by PENETRATION).
     sphere_init_pos = (0.0, 0.0, SPHERE_RADIUS - PENETRATION)
     sphere = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=SPHERE_RADIUS,
-            pos=sphere_init_pos,
-            fixed=False,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=SPHERE_RADIUS,
+                pos=sphere_init_pos,
+                fixed=False,
+            ),
+        ),
     )
 
     probe_local_pos, probe_local_normal = gu.generate_ring_points_on_sphere(
@@ -1500,18 +1572,22 @@ def test_elastomer_sensor_grid_box_sphere(show_viewer, tol, n_envs):
         show_viewer=show_viewer,
     )
     sphere = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=SPHERE_RADIUS,
-            pos=(0.0, 0.0, SPHERE_RADIUS),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=SPHERE_RADIUS,
+                pos=(0.0, 0.0, SPHERE_RADIUS),
+                fixed=True,
+            ),
+        ),
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, SPHERE_RADIUS * 2 + BOX_SIZE / 2 - PENETRATION),
-            fixed=False,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, SPHERE_RADIUS * 2 + BOX_SIZE / 2 - PENETRATION),
+                fixed=False,
+            ),
+        ),
     )
     probe_local_pos = gu.generate_grid_points_on_plane(
         lo=(-BOX_SIZE / 2, -BOX_SIZE / 2, -BOX_SIZE / 2),
@@ -1724,23 +1800,27 @@ def test_heterogeneous_object(show_viewer, tol):
         show_viewer=show_viewer,
     )
     pad = scene.add_entity(
-        gs.morphs.Box(
-            size=PAD_SIZE,
-            pos=(0.0, 0.0, PAD_SIZE[2] / 2),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=PAD_SIZE,
+                pos=(0.0, 0.0, PAD_SIZE[2] / 2),
+                fixed=True,
+            ),
+        ),
     )
     obj = scene.add_entity(
-        morph=[
-            gs.morphs.Box(
-                size=(BOX_XY_SIZE, BOX_XY_SIZE, OBJECT_Z_SIZE),
+        options=gs.entities.Rigid(
+            morph=[
+                gs.morphs.Box(
+                    size=(BOX_XY_SIZE, BOX_XY_SIZE, OBJECT_Z_SIZE),
+                ),
+                gs.morphs.Sphere(
+                    radius=SPHERE_RADIUS,
+                ),
+            ],
+            material=gs.materials.Rigid(
+                friction=0.5,
             ),
-            gs.morphs.Sphere(
-                radius=SPHERE_RADIUS,
-            ),
-        ],
-        material=gs.materials.Rigid(
-            friction=0.5,
         ),
     )
 

@@ -27,7 +27,9 @@ def main():
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     # Geom 0 of each finger is the finger mesh, and 1 to 5 are the fingertip_pad_collision_* classes
     franka = scene.add_entity(
@@ -43,10 +45,12 @@ def main():
     )
 
     cube = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.04, 0.04, 0.04),
-            pos=(0.65, 0.0, 0.02),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.04, 0.04, 0.04),
+                pos=(0.65, 0.0, 0.02),
+            ),
+        ),
     )
     scene.build()
 

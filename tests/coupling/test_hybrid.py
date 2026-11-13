@@ -42,45 +42,53 @@ def test_rigid_mpm_muscle(show_viewer):
     )
 
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.85, 0.1, 0.1),
-            size=(0.1, 0.1, 0.1),
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0.85, 0.1, 0.1),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.MPM.Elastic(),
         ),
-        material=gs.materials.MPM.Elastic(),
     )
     robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/simple/two_link_arm.urdf",
-            pos=(0.45, 0.45, 0.2),
-            euler=(0.0, 0.0, 0.0),
-            scale=0.2,
-            fixed=True,
-        ),
-        material=gs.materials.Hybrid(
-            material_rigid=gs.materials.Rigid(
-                gravity_compensation=1.0,
+        options=gs.entities.Hybrid(
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_link_arm.urdf",
+                pos=(0.45, 0.45, 0.2),
+                euler=(0.0, 0.0, 0.0),
+                scale=0.2,
+                fixed=True,
             ),
-            material_soft=gs.materials.MPM.Muscle(
-                E=1e4,
-                nu=0.45,
-                rho=1000.0,
-                model="neohooken",
+            material=gs.materials.Hybrid(
+                material_rigid=gs.materials.Rigid(
+                    gravity_compensation=1.0,
+                ),
+                material_soft=gs.materials.MPM.Muscle(
+                    E=1e4,
+                    nu=0.45,
+                    rho=1000.0,
+                    model="neohooken",
+                ),
+                damping=1000.0,
+                thickness=0.05,
             ),
-            damping=1000.0,
-            thickness=0.05,
         ),
     )
     ball = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=BALL_POS_INIT,
-            radius=0.12,
-        ),
-        material=gs.materials.Rigid(
-            rho=1000,
-            friction=0.5,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=BALL_POS_INIT,
+                radius=0.12,
+            ),
+            material=gs.materials.Rigid(
+                rho=1000,
+                friction=0.5,
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -129,32 +137,38 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
     )
 
     plane = scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
 
     obj_rigid = scene.add_entity(
-        material=gs.materials.Rigid(
-            rho=1.0,
-        ),
-        morph=gs.morphs.Box(
-            pos=(0.0, -0.25, 0.1),
-            size=(0.2, 0.2, 0.2),
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.4, 0.4),
-            vis_mode="visual",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, -0.25, 0.1),
+                size=(0.2, 0.2, 0.2),
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.4, 0.4),
+                vis_mode="visual",
+            ),
+            material=gs.materials.Rigid(
+                rho=1.0,
+            ),
         ),
     )
 
     obj_sand = scene.add_entity(
-        material=gs.materials.MPM.Liquid(),
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.2),
-            size=(0.3, 0.3, 0.3),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.3, 0.3, 1.0),
-            vis_mode="particle",
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.2),
+                size=(0.3, 0.3, 0.3),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.3, 0.3, 1.0),
+                vis_mode="particle",
+            ),
+            material=gs.materials.MPM.Liquid(),
         ),
     )
 
@@ -191,13 +205,15 @@ def test_mesh_mpm_build(show_viewer):
         show_FPS=False,
     )
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.15,
-        ),
-        material=gs.materials.Hybrid(
-            material_rigid=gs.materials.Rigid(),
-            material_soft=gs.materials.MPM.Muscle(),
+        options=gs.entities.Hybrid(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.15,
+            ),
+            material=gs.materials.Hybrid(
+                material_rigid=gs.materials.Rigid(),
+                material_soft=gs.materials.MPM.Muscle(),
+            ),
         ),
     )
     scene.build()
@@ -238,56 +254,65 @@ def test_deformable_parallel(show_viewer):
     )
 
     plane = scene.add_entity(
-        morph=gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            needs_coup=True,
-            coup_friction=0.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Rigid(
+                needs_coup=True,
+                coup_friction=0.0,
+            ),
         ),
     )
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/cloth.obj",
-            scale=0.6,
-            pos=(0.0, 0.8, 0.3),
-            euler=(180.0, 0.0, 0.0),
-        ),
-        material=gs.materials.PBD.Cloth(),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.4, 0.8, 1.0),
+        options=gs.entities.PBD(
+            morph=gs.morphs.Mesh(
+                file="meshes/cloth.obj",
+                scale=0.6,
+                pos=(0.0, 0.8, 0.3),
+                euler=(180.0, 0.0, 0.0),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.4, 0.8, 1.0),
+            ),
+            material=gs.materials.PBD.Cloth(),
         ),
     )
     water = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.15, 0.15, 0.22),
-            size=(0.25, 0.25, 0.4),
-        ),
-        material=gs.materials.SPH.Liquid(),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.6, 1.0, 1.0),
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.15, 0.15, 0.22),
+                size=(0.25, 0.25, 0.4),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.6, 1.0, 1.0),
+            ),
         ),
     )
     mpm_cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.6, 0, 0.1),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.MPM.Elastic(
-            rho=200,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.9, 0.8, 0.2, 1.0),
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0.6, 0, 0.1),
+                size=(0.1, 0.1, 0.1),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.9, 0.8, 0.2, 1.0),
+            ),
+            material=gs.materials.MPM.Elastic(
+                rho=200,
+            ),
         ),
     )
     entity_fem = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.8, 0.8, 0.1),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=3.0e4,
-            nu=0.45,
-            rho=1000.0,
-            model="stable_neohookean",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(0.8, 0.8, 0.1),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=3.0e4,
+                nu=0.45,
+                rho=1000.0,
+                model="stable_neohookean",
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -357,11 +382,13 @@ def test_fem_mpm_coupling(precision, show_viewer, tol):
         show_viewer=show_viewer,
     )
     block = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.0675),
-            size=(0.1, 0.1, 0.035),
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.0675),
+                size=(0.1, 0.1, 0.035),
+            ),
+            material=gs.materials.MPM.Elastic(),
         ),
-        material=gs.materials.MPM.Elastic(),
     )
     # FIXME: Building should raise when the scene cannot meet the accuracy of the simulation. The explicit time step
     # must stay under about h / c, with h the smallest element size, c = sqrt((lambda + 2 * mu) / rho) the wave speed,
@@ -369,21 +396,25 @@ def test_fem_mpm_coupling(precision, show_viewer, tol):
     # a velocity noise of the order of t * E * eps / (rho * h) after a time t, with eps the machine epsilon, which must
     # stay under the tolerance. Meanwhile, single precision takes a softer material.
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.12),
-            size=(0.05, 0.05, 0.05),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e6 if precision == "64" else 1e5,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.12),
+                size=(0.05, 0.05, 0.05),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e6 if precision == "64" else 1e5,
+            ),
         ),
     )
     fem = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.4, 0.0, 0.5),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e6 if precision == "64" else 1e5,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(0.4, 0.0, 0.5),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e6 if precision == "64" else 1e5,
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -443,14 +474,20 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
     scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/wheel/fancy_wheel.urdf",
-            pos=(0.5, 0.25, 1.6),
-            euler=(0, 0, 0),
-            fixed=True,
-            convexify=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/wheel/fancy_wheel.urdf",
+                pos=(0.5, 0.25, 1.6),
+                euler=(0, 0, 0),
+                fixed=True,
+                convexify=False,
+            ),
         ),
     )
     emitter = scene.add_emitter(
@@ -486,7 +523,7 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
     ):
         scene = gs.Scene(coupler_options=gs.options.SAPCouplerOptions(), show_viewer=False)
         for morph in ground_morphs:
-            scene.add_entity(morph)
+            scene.add_entity(options=gs.entities.Rigid(morph=morph))
         with pytest.raises(gs.GenesisException, match="single fixed plane facing up"):
             scene.build()
 
@@ -500,13 +537,17 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     fixed_box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.5),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.5),
+                fixed=True,
+            ),
         ),
     )
     scene.build()
@@ -528,51 +569,62 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
         show_FPS=False,
     )
     scene.add_entity(
-        gs.morphs.Plane(
-            pos=(0.0, 0.0, PLANES_HEIGHT[0]),
-            batch_fixed_verts=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(0.0, 0.0, PLANES_HEIGHT[0]),
+                batch_fixed_verts=True,
+            ),
         ),
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.5, 0.5, 2 * BOX_HALFHEIGHT),
-            pos=(0.0, 0.0, PLANES_HEIGHT[0] + BOX_HALFHEIGHT),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.5, 0.5, 2 * BOX_HALFHEIGHT),
+                pos=(0.0, 0.0, PLANES_HEIGHT[0] + BOX_HALFHEIGHT),
+            ),
         ),
-        material=gs.materials.Rigid(),
     )
     # One box slides on the ground plane, and another one is pushed below the friction limit
     slider = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.2, 0.2, 0.1),
-            pos=(1.0, 0.0, PLANES_HEIGHT[0] + 0.05),
-        ),
-        material=gs.materials.Rigid(
-            coup_friction=MU,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.1),
+                pos=(1.0, 0.0, PLANES_HEIGHT[0] + 0.05),
+            ),
+            material=gs.materials.Rigid(
+                coup_friction=MU,
+            ),
         ),
     )
     pushed = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.2, 0.2, 0.1),
-            pos=(-1.0, 0.0, PLANES_HEIGHT[0] + 0.05),
-        ),
-        material=gs.materials.Rigid(
-            coup_friction=MU,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.1),
+                pos=(-1.0, 0.0, PLANES_HEIGHT[0] + 0.05),
+            ),
+            material=gs.materials.Rigid(
+                coup_friction=MU,
+            ),
         ),
     )
     asset_path = get_hf_dataset(pattern="heavy_three_joint_link.xml")
     robot_1 = scene.add_entity(
-        gs.morphs.MJCF(
-            file=f"{asset_path}/heavy_three_joint_link.xml",
-            pos=(-0.2, -0.26, PLANES_HEIGHT[0]),
-            scale=0.3,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=f"{asset_path}/heavy_three_joint_link.xml",
+                pos=(-0.2, -0.26, PLANES_HEIGHT[0]),
+                scale=0.3,
+            ),
         ),
     )
     robot_2 = scene.add_entity(
-        gs.morphs.MJCF(
-            file=f"{asset_path}/heavy_three_joint_link.xml",
-            pos=(0.17, -0.26, PLANES_HEIGHT[0] + 0.1),
-            euler=(0.0, 0.0, 90.0),
-            scale=0.3,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=f"{asset_path}/heavy_three_joint_link.xml",
+                pos=(0.17, -0.26, PLANES_HEIGHT[0] + 0.1),
+                euler=(0.0, 0.0, 90.0),
+                scale=0.3,
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -672,14 +724,18 @@ def test_sap_equality_constraints(show_viewer, xml_path, n_envs, is_batched, tol
         show_viewer=show_viewer,
     )
     ground = scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(0.0, 0.0, GROUND_HEIGHT),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(0.0, 0.0, GROUND_HEIGHT),
+            ),
         ),
     )
     entity = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=xml_path,
-            scale=SCALE,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+                scale=SCALE,
+            ),
         ),
     )
     scene.build(n_envs=n_envs)
@@ -835,44 +891,52 @@ def test_sap_rigid_floor_contact(xml_path, asset_tmp_path, show_viewer):
         show_FPS=False,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     # A slab in the first environment and a small cube in the second, each starting slightly sunk into the ground. The
     # second environment keeps the slab where it was last placed, sunk deep into the ground, which it must not touch.
     variants = scene.add_entity(
-        morph=(
-            gs.morphs.Box(
-                size=SLAB_SIZE,
-                pos=(0.0, 0.0, 0.5 * SLAB_SIZE[2] - 0.002),
+        options=gs.entities.Rigid(
+            morph=(
+                gs.morphs.Box(
+                    size=SLAB_SIZE,
+                    pos=(0.0, 0.0, 0.5 * SLAB_SIZE[2] - 0.002),
+                ),
+                gs.morphs.Box(
+                    size=CUBE_SIZE,
+                    pos=(0.0, 0.0, 0.5 * CUBE_SIZE[2] - 0.002),
+                ),
             ),
-            gs.morphs.Box(
-                size=CUBE_SIZE,
-                pos=(0.0, 0.0, 0.5 * CUBE_SIZE[2] - 0.002),
+            material=gs.materials.Rigid(
+                rho=RHO,
             ),
-        ),
-        material=gs.materials.Rigid(
-            rho=RHO,
         ),
     )
     # A small cube dropped from a few centimeters
     dropped_cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=CUBE_SIZE,
-            pos=(0.6, 0.0, 0.5 * CUBE_SIZE[2] + 0.048),
-        ),
-        material=gs.materials.Rigid(
-            rho=RHO,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=CUBE_SIZE,
+                pos=(0.6, 0.0, 0.5 * CUBE_SIZE[2] + 0.048),
+            ),
+            material=gs.materials.Rigid(
+                rho=RHO,
+            ),
         ),
     )
     # A small cube released on one of its edges, tilted by 20 degrees
     tilted_cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=CUBE_SIZE,
-            pos=(-0.6, 0.0, 0.5 * CUBE_SIZE[2] * (np.cos(np.radians(20.0)) + np.sin(np.radians(20.0)))),
-            euler=(0.0, 20.0, 0.0),
-        ),
-        material=gs.materials.Rigid(
-            rho=RHO,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=CUBE_SIZE,
+                pos=(-0.6, 0.0, 0.5 * CUBE_SIZE[2] * (np.cos(np.radians(20.0)) + np.sin(np.radians(20.0)))),
+                euler=(0.0, 20.0, 0.0),
+            ),
+            material=gs.materials.Rigid(
+                rho=RHO,
+            ),
         ),
     )
     # A small cube whose faces are split into 4 triangles, with 9 vertices on its bottom face instead of 4
@@ -881,35 +945,41 @@ def test_sap_rigid_floor_contact(xml_path, asset_tmp_path, show_viewer):
     refined_cube_path = str(asset_tmp_path / "refined_cube.obj")
     refined_cube_mesh.export(refined_cube_path)
     refined_cube = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=refined_cube_path,
-            pos=(0.0, -0.6, 0.5 * CUBE_SIZE[2]),
-            decimate=False,
-            convexify=False,
-        ),
-        material=gs.materials.Rigid(
-            rho=RHO,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=refined_cube_path,
+                pos=(0.0, -0.6, 0.5 * CUBE_SIZE[2]),
+                decimate=False,
+                convexify=False,
+            ),
+            material=gs.materials.Rigid(
+                rho=RHO,
+            ),
         ),
     )
     # A slab pushed sideways by half the force that would make it slide
     pushed_slab = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=SLAB_SIZE,
-            pos=(0.0, 0.8, 0.5 * SLAB_SIZE[2]),
-        ),
-        material=gs.materials.Rigid(
-            rho=RHO,
-            coup_friction=FRICTION_MU,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=SLAB_SIZE,
+                pos=(0.0, 0.8, 0.5 * SLAB_SIZE[2]),
+            ),
+            material=gs.materials.Rigid(
+                rho=RHO,
+                coup_friction=FRICTION_MU,
+            ),
         ),
     )
     # A cube resting flat on the ground, a stick hanging below it whose collision mask leaves out the ground
     masked_stick_cube = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=xml_path,
-            pos=(1.5, 1.5, 0.5 * CUBE_SIZE[2]),
-        ),
-        material=gs.materials.Rigid(
-            rho=RHO,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+                pos=(1.5, 1.5, 0.5 * CUBE_SIZE[2]),
+            ),
+            material=gs.materials.Rigid(
+                rho=RHO,
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -986,12 +1056,16 @@ def test_sap_long_kinematic_chain(xml_path, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     chain = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=xml_path,
-            pos=(0.0, 0.0, CHAIN_HALF_HEIGHT),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+                pos=(0.0, 0.0, CHAIN_HALF_HEIGHT),
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -1031,27 +1105,33 @@ def test_sap_fem_vs_robot(enable_lagged_friction, show_viewer):
         show_FPS=False,
     )
     scene.add_entity(
-        gs.morphs.Plane(
-            pos=(0.0, 0.0, PLANE_HEIGHT),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(0.0, 0.0, PLANE_HEIGHT),
+            ),
         ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, PLANE_HEIGHT + SPHERE_RADIUS),
-            radius=SPHERE_RADIUS,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.4,
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, PLANE_HEIGHT + SPHERE_RADIUS),
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                nu=0.4,
+                model="linear_corotated",
+            ),
         ),
     )
     asset_path = get_hf_dataset(pattern="cross.xml")
     robot = scene.add_entity(
-        gs.morphs.MJCF(
-            file=f"{asset_path}/cross.xml",
-            pos=(0.0, 0.0, PLANE_HEIGHT + 2 * SPHERE_RADIUS + 0.04),
-            scale=0.5,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=f"{asset_path}/cross.xml",
+                pos=(0.0, 0.0, PLANE_HEIGHT + 2 * SPHERE_RADIUS + 0.04),
+                scale=0.5,
+            ),
         ),
     )
     scene.build()
@@ -1108,20 +1188,26 @@ def test_sap_coupler_implicit_damping(integrator, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     # A resting FEM sphere keeps the SAP solve running, which the damped cube floating away from it goes through
     scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, 0.9 * SPHERE_RADIUS),
-            radius=SPHERE_RADIUS,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, 0.9 * SPHERE_RADIUS),
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.FEM.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(1.0, 0.0, 0.5),
-            size=(0.1, 0.1, 0.1),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(1.0, 0.0, 0.5),
+                size=(0.1, 0.1, 0.1),
+            ),
         ),
     )
     scene.build()

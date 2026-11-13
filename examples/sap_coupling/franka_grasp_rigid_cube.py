@@ -33,7 +33,9 @@ def main():
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     franka = scene.add_entity(
         options=gs.entities.Rigid(

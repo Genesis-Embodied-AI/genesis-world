@@ -17,11 +17,15 @@ scene = gs.Scene(
 )
 
 plane = scene.add_entity(
-    gs.morphs.Plane(),
+    options=gs.entities.Rigid(
+        morph=gs.morphs.Plane(),
+    ),
 )
 
 franka = scene.add_entity(
-    gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+    options=gs.entities.Rigid(
+        morph=gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+    ),
 )
 
 # create 20 parallel environments

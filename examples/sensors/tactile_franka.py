@@ -211,37 +211,47 @@ def main() -> None:
         show_viewer=args.vis,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     franka = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
         ),
     )
 
     cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
-            pos=(*CUBE_INIT_XY, OBJ_SIZE / 2),
-        ),
-        material=gs.materials.Rigid(
-            rho=OBJ_DENSITY,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.5, 1.0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
+                pos=(*CUBE_INIT_XY, OBJ_SIZE / 2),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.5, 1.0, 0.5),
+            ),
+            material=gs.materials.Rigid(
+                rho=OBJ_DENSITY,
+            ),
         ),
     )
 
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=OBJ_SIZE / 2,
-            pos=(*SPHERE_INIT_XY, OBJ_SIZE / 2),
-        ),
-        material=gs.materials.Rigid(
-            rho=OBJ_DENSITY,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.5, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=OBJ_SIZE / 2,
+                pos=(*SPHERE_INIT_XY, OBJ_SIZE / 2),
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.5, 0.5),
+            ),
+            material=gs.materials.Rigid(
+                rho=OBJ_DENSITY,
+            ),
         ),
     )
 

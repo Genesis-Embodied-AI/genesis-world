@@ -37,7 +37,9 @@ def main():
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     franka = scene.add_entity(
         options=gs.entities.Rigid(
@@ -51,15 +53,17 @@ def main():
         ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.02,
-            pos=(0.65, 0.0, 0.02),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.4,
-            friction_mu=1.0,
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                radius=0.02,
+                pos=(0.65, 0.0, 0.02),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                nu=0.4,
+                friction_mu=1.0,
+                model="linear_corotated",
+            ),
         ),
     )
 

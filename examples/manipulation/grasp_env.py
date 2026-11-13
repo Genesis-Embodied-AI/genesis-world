@@ -74,7 +74,9 @@ class GraspEnv:
         )
 
         self.scene.add_entity(
-            gs.morphs.Plane(),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Plane(),
+            ),
         )
 
         self.robot = Manipulator(
@@ -85,14 +87,16 @@ class GraspEnv:
         )
 
         self.object = self.scene.add_entity(
-            gs.morphs.Box(
-                size=env_cfg["box_size"],
-                fixed=env_cfg.get("box_fixed", True),
-                batch_fixed_verts=True,
-            ),
-            surface=gs.surfaces.Rough(
-                diffuse_texture=gs.textures.ColorTexture(
-                    color=(1.0, 0.0, 0.0),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=env_cfg["box_size"],
+                    fixed=env_cfg.get("box_fixed", True),
+                    batch_fixed_verts=True,
+                ),
+                surface=gs.surfaces.Rough(
+                    diffuse_texture=gs.textures.ColorTexture(
+                        color=(1.0, 0.0, 0.0),
+                    ),
                 ),
             ),
         )
@@ -402,7 +406,9 @@ class Manipulator:
             quat=(1.0, 0.0, 0.0, 0.0),
         )
         self._robot_entity: gs.Entity = scene.add_entity(
-            morph=morph,
+            options=gs.entities.Rigid(
+                morph=morph,
+            ),
         )
 
         self._gripper_open_dof = 0.04
