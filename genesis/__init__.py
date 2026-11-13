@@ -9,6 +9,7 @@ import weakref
 from collections.abc import Callable
 from contextlib import redirect_stdout
 from functools import partial
+from typing import Any
 from warnings import warn
 
 # Import quadrants while collecting its output without printing directly
@@ -53,6 +54,29 @@ use_zerocopy: ZeroCopyMode | None = None
 use_deterministic_algorithms: bool | None = None
 debug: bool | None = None
 EPS: float | None = None
+SEED: int | None = None
+# Dtypes bound by 'init' from its precision and backend.
+# FIXME: The quadrants stub types the call of a scalar dtype as returning None, so the scalar dtypes are Any until the
+# stub is fixed. This leaves every use of 'qd_float', 'qd_int' and 'qd_bool' unchecked.
+qd_float: Any
+np_float: type[np.floating]
+tc_float: torch.dtype
+qd_int: Any
+np_int: type[np.integer]
+tc_int: torch.dtype
+qd_bool: Any
+np_bool: type[np.generic]
+tc_bool: torch.dtype
+qd_vec2: qd.lang.matrix.VectorType
+qd_vec4: qd.lang.matrix.VectorType
+qd_vec6: qd.lang.matrix.VectorType
+qd_vec7: qd.lang.matrix.VectorType
+qd_vec18: qd.lang.matrix.VectorType
+qd_mat3: qd.lang.matrix.MatrixType
+qd_mat4: qd.lang.matrix.MatrixType
+qd_ivec2: qd.lang.matrix.VectorType
+qd_ivec3: qd.lang.matrix.VectorType
+qd_ivec4: qd.lang.matrix.VectorType
 
 
 ########################## init ##########################
@@ -258,9 +282,9 @@ def init(
     ):
         qd_init_environ["QD_ENABLE_HIP_MEMPOOL"] = "0"
 
+    global SEED
+    SEED = seed
     if seed is not None:
-        global SEED
-        SEED = seed
         set_random_seed(SEED)
         qd_init_kwargs.update(
             random_seed=seed,
