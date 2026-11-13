@@ -841,12 +841,11 @@ class Scene(RBC):
             The maximum number of particles the emitter holds at once, recycled once all are emitted. Each one costs
             memory and simulation time from the start, emitted or not. Default is 20000.
         surface : gs.surfaces.Surface | None, optional
-            The surface of the emitted particles, given along a material. Default is None.
+            The surface of the emitted particles. Defaults to ``gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))``.
+            Its ``vis_mode`` defaults to 'particle'.
         options : gs.entities.MPM | gs.entities.SPH | gs.entities.PBD | None, optional
-            The entity options of the emitted particles, which replace the material and the surface. Their class
-            decides the solver simulating them, ``gs.entities.PBD`` taking a Liquid or a Particle material. Their morph
-            is left None, since the emitter sets it. If their surface is None, use
-            ``gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))``, and its visualization mode defaults to 'particle'.
+            The entity options of the emitted particles, which replace the material and the surface. Their surface
+            defaults as ``surface`` does.
 
         Returns
         -------
