@@ -40,8 +40,6 @@ def main():
 
     scene.add_entity(gs.morphs.Plane())
 
-    # The vertex options fix the top cap of the blob and one vertex of the rim of the cylinder, at their initial
-    # positions from the first step on. Their selections hold in the frame of the morph, offset by its position alone.
     blob_pos = SCENE_POS + np.array([-0.3, -0.3, 0])
     blob_fixed_bounds = np.array([[-0.1, -0.1, 0.085], [0.1, 0.1, 0.1]])
     cylinder_pos = SCENE_POS + np.array([-0.3, 0.3, 0])
@@ -144,7 +142,6 @@ def main():
     debug_circle = None
     total_steps = int(args.seconds / args.dt)
 
-    # The fixed vertices of the blob in a translucent red box, and that of the cylinder as a red sphere
     scene.draw_debug_box(bounds=blob_pos + blob_fixed_bounds, color=(1, 0, 0, 0.3), wireframe=False)
     scene.draw_debug_spheres(poss=[cylinder_pos + cylinder_fixed_pos], radius=0.01, color=(1, 0, 0, 1))
 
