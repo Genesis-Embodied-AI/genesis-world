@@ -1,0 +1,21 @@
+examples/rigid/franka_cube.py
+  s_c62ec9da443b15::t_c6e851918b1de7 32,34-47
+examples/deformable/fem_hard_and_soft_constraint.py
+  s_c62ec9da443b15::t_c6e851918b1de7 69-70,84-87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c7df1a8b55f7ade1d6fcf02bd1a0317582bda8c7",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

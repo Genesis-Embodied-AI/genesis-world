@@ -1,0 +1,28 @@
+genesis/engine/entities/base_entity.py
+  s_c62ec9da443b15::t_d7b83fc4a197d8 124-126,128
+genesis/options/options.py
+  s_c62ec9da443b15::t_a2d380ebf958ef 3,29-30,39-40,115-124,126-135
+  s_c62ec9da443b15::t_1d74128fe1174c 125
+  s_c62ec9da443b15::t_ca83be4b89c49f 136
+genesis/engine/scene.py
+  s_c62ec9da443b15::t_a2d380ebf958ef 961
+  s_c62ec9da443b15::t_1d74128fe1174c 969
+  s_c62ec9da443b15::t_d7b83fc4a197d8 2,962-968
+  s_c62ec9da443b15::t_5f947a28e6fa93 970
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6d7d9aeb9e758548bcd3fea26171782543cfd9fa",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
