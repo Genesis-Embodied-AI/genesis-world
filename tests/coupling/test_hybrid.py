@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 import torch
 
+import igl
 import trimesh
 
 import genesis as gs
@@ -181,7 +182,8 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
 
 
 @pytest.mark.required
-def test_mesh_mpm_build(show_viewer):
+@pytest.mark.parametrize("model_name", ["box_link"])
+def test_build_rigid_and_soft_parts(xml_path, show_viewer):
     scene = gs.Scene(
         mpm_options=gs.options.MPMOptions(
             lower_bound=(-0.5, -0.5, -0.5),
@@ -200,7 +202,28 @@ def test_mesh_mpm_build(show_viewer):
             material_soft=gs.materials.MPM.Muscle(),
         ),
     )
+    box = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=xml_path,
+            pos=(0.3, 0.3, 0.0),
+            fixed=True,
+        ),
+        material=gs.materials.Hybrid(
+            material_rigid=gs.materials.Rigid(),
+            material_soft=gs.materials.MPM.Muscle(),
+        ),
+    )
     scene.build()
+
+    # The soft part built from a rigid link is a shell of the material thickness around it, leaving the link empty
+    geom = box.part_rigid.geoms[0]
+    sd, *_ = igl.signed_distance(
+        tensor_to_array(box.part_soft.get_particles_pos()),
+        tensor_to_array(geom.get_verts()),
+        geom.init_faces,
+        sign_type=igl.SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER,
+    )
+    assert ((sd > 0.0) & (sd < box.material.thickness)).all()
 
 
 @pytest.mark.debug(False)  # Disable debug for speedup

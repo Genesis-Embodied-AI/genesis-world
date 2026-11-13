@@ -269,16 +269,17 @@ def test_cloth_attach_rigid_link(show_viewer):
 
 
 @pytest.mark.required
-def test_force_field_reads_time_of_each_env(show_viewer, tol):
+def test_force_fields(show_viewer, tol):
     DT, SUBSTEPS, N_STEPS = 1e-2, 2, 10
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=DT,
             substeps=SUBSTEPS,
+            gravity=(0.0, 0.0, 0.0),
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.0, 1.0, 1.0),
-            camera_lookat=(0.0, 0.0, 0.4),
+            camera_lookat=(0.0, 0.5, 0.4),
         ),
         show_viewer=show_viewer,
     )
@@ -289,12 +290,32 @@ def test_force_field_reads_time_of_each_env(show_viewer, tol):
         ),
         material=gs.materials.PBD.Particle(),
     )
+    particles_vortex = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 1.0, 0.5),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.PBD.Particle(),
+    )
 
     @qd.func
     def acc_growing_with_time(pos, vel, t, i):
         return qd.Vector([t, 0.0, 0.0], dt=gs.qd_float)
 
-    scene.add_force_field(gs.force_fields.Custom(acc_growing_with_time))
+    custom = scene.add_force_field(gs.force_fields.Custom(acc_growing_with_time))
+    # A vortex about the x-axis through the second box, acting within 0.1m of its axis, far from the first box
+    vortex = scene.add_force_field(
+        gs.force_fields.Vortex(
+            direction=(1.0, 0.0, 0.0),
+            center=(0.0, 1.0, 0.5),
+            falloff_min=0.1,
+            falloff_max=0.1,
+        )
+    )
+    vortex.activate()
+    for direction in ((0.0, 0.0, 0.0), (np.inf, 0.0, 0.0)):
+        with pytest.raises(gs.GenesisException):
+            gs.force_fields.Vortex(direction=direction)
     scene.build(n_envs=2)
 
     # An environment reset mid-run restarts its clock, which the force fields read, while the other one carries on
@@ -306,9 +327,21 @@ def test_force_field_reads_time_of_each_env(show_viewer, tol):
     substep_dt = DT / SUBSTEPS
     vels_x_ana = [substep_dt**2 * n * (n - 1) / 2 for n in (N_STEPS * SUBSTEPS, 2 * N_STEPS * SUBSTEPS)]
     assert_allclose(particles_vel_0[..., 0], vels_x_ana[0], tol=tol)
+    # The vortex spins the second box counterclockwise about its axis, leaving the velocity along it untouched
+    vortex_vel = particles_vortex.get_particles_vel()
+    vortex_offset = particles_vortex.get_particles_pos() - torch.tensor((0.0, 1.0, 0.5), device=gs.device)
+    assert_allclose(vortex_vel[..., 0], vels_x_ana[0], tol=tol)
+    vortex_ang_mom = vortex_offset[..., 1] * vortex_vel[..., 2] - vortex_offset[..., 2] * vortex_vel[..., 1]
+    assert (vortex_ang_mom.sum(dim=-1) > 0.0).all()
     scene.reset(init_state, envs_idx=[1])
     for _ in range(N_STEPS):
         scene.step()
     particles_vel = particles.get_particles_vel()
     assert_allclose(particles_vel[1], particles_vel_0[0], tol=gs.EPS)
     assert_allclose(particles_vel[0, :, 0], vels_x_ana[1], tol=tol)
+
+    # A deactivated force field stops accelerating the particles
+    custom.deactivate()
+    for _ in range(N_STEPS):
+        scene.step()
+    assert_allclose(particles.get_particles_vel(), particles_vel, tol=tol)

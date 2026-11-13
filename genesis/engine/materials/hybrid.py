@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import StrictBool
 
-from genesis.typing import NonNegativeFloat, ValidFloat
+from genesis.typing import NonNegativeFloat, PositiveFloat, ValidFloat
 
 from .base import Material
 
@@ -41,7 +41,7 @@ class Hybrid(Material["HybridEntity"]):
     material_soft: Material = ...
     use_default_coupling: StrictBool = False
     damping: NonNegativeFloat = 0.0
-    thickness: ValidFloat = 0.05
+    thickness: PositiveFloat = 0.05
     soft_dv_coef: ValidFloat = 0.01
     func_instantiate_rigid_from_soft: Callable | None = None
     func_instantiate_soft_from_rigid: Callable | None = None

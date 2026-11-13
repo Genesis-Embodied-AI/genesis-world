@@ -5,6 +5,7 @@ from typing import NamedTuple
 import numpy as np
 import torch
 
+import networkx as nx
 import trimesh
 
 import genesis as gs
@@ -12,7 +13,6 @@ import genesis.utils.geom as gu
 import genesis.utils.urdf as uu
 from genesis.ext.urdfpy.urdf import URDF
 from genesis.utils.hybrid import (
-    check_graph,
     compute_graph_attribute,
     gel_graph_to_nx_graph,
     graph_to_tree,
@@ -473,10 +473,10 @@ def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, m
         )
         outer_verts = verts + inner_mesh.vertex_normals * material_hybrid.thickness
         outer_mesh = trimesh.Trimesh(vertices=outer_verts, faces=geom.init_faces)
-        # mesh = trimesh.boolean.difference([outer_mesh, inner_mesh]) # wrap around the rigid link
-        mesh = outer_mesh  # FIXME: hack to avoid `ValueError: No backends available for boolean operations!`
-
-        meshes.append(mesh)
+        # The soft part is the shell wrapped around the rigid link: the inner surface, turned inside out, bounds a cavity
+        # that the winding number of the particle samplers leaves empty.
+        inner_mesh_inverted = trimesh.Trimesh(vertices=verts, faces=geom.init_faces[:, ::-1])
+        meshes.append(trimesh.util.concatenate([outer_mesh, inner_mesh_inverted]))
         trans_local_to_global.append(trans)
         euler_local_to_global.append(euler)
 
@@ -506,7 +506,7 @@ def default_func_instantiate_rigid_from_soft(scene, mesh, morph, material_rigid,
 
     # convert to nxgraph
     graph_nx = gel_graph_to_nx_graph(graph_gel)
-    check_graph(graph_nx)
+    assert nx.is_connected(graph_nx)
 
     # compute graph attribute
     graph_pos = graph_gel.positions()
@@ -514,7 +514,7 @@ def default_func_instantiate_rigid_from_soft(scene, mesh, morph, material_rigid,
 
     # reduce nxgraph
     graph_nx_reduced = reduce_graph(graph_nx, straight_thresh=60)
-    check_graph(graph_nx_reduced)
+    assert nx.is_connected(graph_nx_reduced)
 
     # to URDF
     G = graph_nx_reduced

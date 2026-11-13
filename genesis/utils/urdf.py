@@ -303,7 +303,6 @@ def parse_urdf(morph, surface):
                     "quat": gu.R_to_quat(geom_prop.origin[:3, :3]),
                     "contype": 1 if geom_is_col else 0,
                     "conaffinity": 1 if geom_is_col else 0,
-                    "friction": gu.default_friction(),
                     "sol_params": gu.default_solver_params(),
                 }
                 link_g_infos.append(g_info)
@@ -521,11 +520,6 @@ def translate_inertia(I, m, dist):
     return I + translation_matrix
 
 
-def rotate_inertia(I, R):
-    """Rotate inertia tensor I by rotation matrix R."""
-    return R @ I @ R.T
-
-
 def principal_axes_rot(I, tol=1e-3):
     """Return rotation matrix R whose columns are the (unsorted) principal axes of inertia I."""
     I = 0.5 * (I + I.T)
@@ -625,25 +619,17 @@ def merge_inertia(link1, link2):
 
     m1 = link1.inertial.mass
     m2 = link2.inertial.mass
-
     com1, R1 = link1.inertial.origin[:3, 3], link1.inertial.origin[:3, :3]
     com2, R2 = link2.inertial.origin[:3, 3], link2.inertial.origin[:3, :3]
-
-    combined_mass = m1 + m2
-    if combined_mass > 0.0:
-        combined_com = (m1 * com1 + m2 * com2) / combined_mass
+    # The combined inertia is expressed in the frame of the combined center of mass, axes aligned with the link
+    inertia1 = R1 @ link1.inertial.inertia @ R1.T
+    inertia2 = R2 @ link2.inertial.inertia @ R2.T
+    if m1 + m2 > 0.0:
+        combined_mass, combined_com, combined_inertia = compose_inertial_properties(
+            m1, com1, inertia1, m2, com2, inertia2
+        )
     else:
-        combined_com = com1
-
-    # Rotate and translate inertia tensors to the new center of mass
-    inertia1_rotated = rotate_inertia(link1.inertial.inertia, R1)
-    inertia2_rotated = rotate_inertia(link2.inertial.inertia, R2)
-
-    inertia1_new = translate_inertia(inertia1_rotated, m1, combined_com - com1)
-    inertia2_new = translate_inertia(inertia2_rotated, m2, combined_com - com2)
-
-    # Combine the inertia tensors
-    combined_inertia = inertia1_new + inertia2_new
+        combined_mass, combined_com, combined_inertia = 0.0, com1, inertia1 + inertia2
 
     # Set the properties of the combined link
     link1.inertial.mass = combined_mass

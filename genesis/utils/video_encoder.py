@@ -45,9 +45,9 @@ ENCODER_QUEUE_TIMEOUT = 0.1
 
 
 @lru_cache(maxsize=None)
-def _probe_h264_codec(codec: str, width: int, height: int) -> bool:
+def _probe_h264_codec(codec: str, width: int, height: int, pix_fmt: str) -> bool:
     """
-    Test whether a codec can actually encode a single frame at the given resolution.
+    Test whether a codec can actually encode a single frame at the given resolution and pixel format.
 
     Some hardware encoders (e.g. NVENC) reject small resolutions, so the actual target resolution must be tested.
     """
@@ -61,8 +61,8 @@ def _probe_h264_codec(codec: str, width: int, height: int) -> bool:
         stream = container.add_stream(codec, rate=30)
         stream.width = width
         stream.height = height
-        stream.pix_fmt = "yuv420p"
-        frame = av.VideoFrame(width, height, "yuv420p")
+        stream.pix_fmt = pix_fmt
+        frame = av.VideoFrame(width, height, pix_fmt)
         for packet in stream.encode(frame):
             container.mux(packet)
         for packet in stream.encode(None):
@@ -103,6 +103,9 @@ class VideoEncoder:
         Bitrate of the video, in Mbit/s. The higher, the better the quality. Defaults to 1.0.
     codec_options : dict[str, str], optional
         Low-level options forwarded to ffmpeg. Defaults to latency-oriented settings for the selected codec.
+    pix_fmt : str, optional
+        Pixel format of the encoded video. Defaults to 'yuv420p', which every player reads but which subsamples the
+        colors. 'rgb24' with the 'libx264rgb' codec and the option 'qp' at '0' encodes the frames losslessly.
     is_threaded : bool, optional
         Whether to encode in a background thread, so that `write` only pays for handing the frame over. The caller
         must not mutate a frame after passing it to `write`, since it is consumed asynchronously. Defaults to False.
@@ -116,6 +119,7 @@ class VideoEncoder:
         codec="",
         bitrate=1.0,
         codec_options=None,
+        pix_fmt="yuv420p",
         is_threaded=False,
     ):
         self._filename = filename
@@ -124,6 +128,7 @@ class VideoEncoder:
         self._codec = codec
         self._bitrate = bitrate
         self._codec_options = codec_options
+        self._pix_fmt = pix_fmt
         self._is_threaded = is_threaded
 
         self._container = None
@@ -168,12 +173,15 @@ class VideoEncoder:
         codec = self._codec
         if not codec:
             for candidate in H264_CODEC_CANDIDATES:
-                if candidate in av.codecs_available and _probe_h264_codec(candidate, width_even, height_even):
+                if candidate in av.codecs_available and _probe_h264_codec(
+                    candidate, width_even, height_even, self._pix_fmt
+                ):
                     codec = candidate
                     break
             else:
                 gs.raise_exception(
-                    "No supported H.264 codec found. Please install libx264 or specify a codec explicitly."
+                    f"No supported H.264 codec found for pixel format '{self._pix_fmt}'. Please install libx264 or "
+                    "specify a codec explicitly."
                 )
         codec_options = self._codec_options or H264_CODEC_OPTIONS.get(codec, {})
 
@@ -189,7 +197,7 @@ class VideoEncoder:
         # that does not divide it evenly is preserved rather than rounded.
         self._stream = self._container.add_stream(codec, rate=Fraction(self._fps).limit_denominator(1000))
         self._stream.width, self._stream.height = (width_even, height_even)
-        self._stream.pix_fmt = "yuv420p"
+        self._stream.pix_fmt = self._pix_fmt
         self._stream.bit_rate = int(self._bitrate * (8 * 1024**2))
         self._stream.codec_context.options = codec_options
 

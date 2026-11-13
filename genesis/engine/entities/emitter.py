@@ -120,32 +120,16 @@ class Emitter(RBC):
 
         if droplet_length > 0.0:
             if droplet_shape == "circle":
-                positions = pu.cylinder_to_particles(
-                    p_size=p_size,
-                    radius=droplet_size / 2,
-                    height=droplet_length,
-                    sampler=self._entity.sampler,
-                )
+                shape, size = "cylinder", (droplet_size, droplet_size, droplet_length)
             elif droplet_shape == "sphere":  # sphere droplet ignores droplet_length
-                positions = pu.sphere_to_particles(
-                    p_size=p_size,
-                    radius=droplet_size / 2,
-                    sampler=self._entity.sampler,
-                )
+                shape, size = "sphere", (droplet_size, droplet_size, droplet_size)
             elif droplet_shape == "square":
-                positions = pu.box_to_particles(
-                    p_size=p_size,
-                    size=np.array([droplet_size, droplet_size, droplet_length]),
-                    sampler=self._entity.sampler,
-                )
+                shape, size = "box", (droplet_size, droplet_size, droplet_length)
             elif droplet_shape == "rectangle":
-                positions = pu.box_to_particles(
-                    p_size=p_size,
-                    size=np.array([droplet_size[0], droplet_size[1], droplet_length]),
-                    sampler=self._entity.sampler,
-                )
+                shape, size = "box", (droplet_size[0], droplet_size[1], droplet_length)
             else:
                 gs.raise_exception(f"Unsupported droplet shape '{droplet_shape}'")
+            positions = pu.primitive_to_particles(p_size=p_size, shape=shape, size=size, sampler=self._entity.sampler)
 
             positions = gu.transform_by_trans_R(
                 positions.astype(gs.np_float, copy=False),
@@ -211,11 +195,12 @@ class Emitter(RBC):
         if particle_size is None:
             particle_size = self._entity.particle_size
 
-        positions_ = pu.shell_to_particles(
+        positions_ = pu.primitive_to_particles(
             p_size=particle_size,
-            outer_radius=source_radius,
-            inner_radius=source_radius * 0.4,
+            shape="sphere",
+            size=(2.0 * source_radius, 2.0 * source_radius, 2.0 * source_radius),
             sampler=self._entity.sampler,
+            inner_radius=0.4 * source_radius,
         )
         positions = pos + positions_
 
