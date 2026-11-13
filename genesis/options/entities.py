@@ -224,8 +224,9 @@ class Vertex(_FrozenOptions):
     ----------
     is_fixed : bool, optional
         Whether the vertices stay at their initial positions, as a hard constraint the solver enforces at every
-        substep. It holds an entity in place by a few vertices, such as a soft pad clamped by one face. The IPC
-        coupler does not support it, so a Cloth material rejects it. Default is False.
+        substep. It holds an entity in place by a few vertices, such as a soft pad clamped by one face. The vertices are
+        vertex constraints from the build on, which ``FEMEntity.remove_vertex_constraints`` releases like any other. The
+        IPC coupler does not support it, so a Cloth material rejects it. Default is False.
     """
 
     is_fixed: StrictBool = False
@@ -246,7 +247,7 @@ class FEM(BaseEntity["FEMEntity"]):
         muscle.
     vertices : dict[gs.VertexIndex, gs.options.Vertex], optional
         The options of the vertices each key selects among the vertices of the volume mesh. Where several keys give
-        one vertex different values, the first key applies, with a warning. A Cloth material takes none. Default is no
+        one field of one vertex, the first key applies, with a warning. A Cloth material takes none. Default is no
         vertex options.
     """
 

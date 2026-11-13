@@ -1546,14 +1546,17 @@ class KinematicEntityDescription(EntityDescription):
                         for i_g in geom_index.resolve(geoms_name, 0, len(geoms_name)):
                             target = f"geom {i_g} of link '{link_name}'"
                             fields_options.append((link_geoms_fields[i_g], geom_options, target))
+            conflicts = []
             for fields, options, target in fields_options:
                 for name, value in options.model_dump(exclude={"geoms"}, exclude_unset=True, exclude_none=True).items():
                     if name in fields:
-                        gs.logger.warning(
-                            f"Two selections of equal specificity give '{name}' of {target}. The first one applies."
-                        )
+                        conflicts.append(f"'{name}' of {target}")
                     else:
                         fields[name] = value
+            if conflicts:
+                gs.logger.warning(
+                    f"Two selections of equal specificity give {', '.join(conflicts)}. The first one applies."
+                )
             for g_info, entity_geom_fields, link_geom_fields in zip(cg_infos, entity_geoms_fields, link_geoms_fields):
                 geom_fields = {**entity_geom_fields, **link_fields, **link_geom_fields}
                 if geom_fields:
