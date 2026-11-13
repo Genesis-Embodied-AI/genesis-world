@@ -1288,14 +1288,9 @@ def create_camera_frustum(camera: "Camera", color: Sequence[float]) -> trimesh.T
         ]
     )
 
-    # Define the faces of the frustum
+    # Define the side faces of the frustum, leaving it open at its near and far ends
     faces = np.array(
         [
-            # # near face
-            # [1, 2, 3, 4],
-            # # far face
-            # [5, 6, 7, 8],
-            # side face
             [2, 1, 5, 6],
             [3, 2, 6, 7],
             [4, 3, 7, 8],
@@ -1327,7 +1322,6 @@ def create_tets_mesh(n_tets=1, halfsize=1.0, quats=None, randomize_halfsize=True
             np.tile(np.random.uniform(0.3, 1.9, size=(n_tets * 4, 1)), [1, vert_per_tet // 4 * 3]).reshape(-1, 3)
             * halfsize
         )
-        # halfsize = np.random.uniform(0.2, 1.9, size=(n_tets * vert_per_tet, 3)) * halfsize
 
     vertices = (
         np.tile(
