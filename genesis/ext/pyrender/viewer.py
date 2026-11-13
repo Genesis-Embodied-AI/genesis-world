@@ -637,7 +637,9 @@ class Viewer(pyglet.window.Window):
             self.set_caption(self.viewer_flags["window_title"])
         else:
             self._video_filename = os.path.join(get_cache_dir(), "tmp_video.mp4")
-            self._video_recorder = VideoEncoder(self._video_filename, fps=self.viewer_flags["refresh_rate"])
+            self._video_recorder = VideoEncoder(
+                self._video_filename, fps=self.viewer_flags["refresh_rate"], is_threaded=True
+            )
             self._video_frame_shape = None
             # Sentinel so the first frame is always captured regardless of the current step counter.
             self._last_recorded_t = -1
