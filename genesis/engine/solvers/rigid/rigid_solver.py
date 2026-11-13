@@ -335,8 +335,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             is_backward=False,
         )
 
-        self._init_collider()
-        self._init_constraint_solver()
+        self.collider = Collider(self)
+        self.constraint_solver = ConstraintSolver(self)
         collider_info = self.collider.collider_info
         self.register_errors(
             self._errno,
@@ -1242,12 +1242,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.dyn_info,
                 self.rigid_config,
             )
-
-    def _init_collider(self):
-        self.collider = Collider(self)
-
-    def _init_constraint_solver(self):
-        self.constraint_solver = ConstraintSolver(self)
 
     @mutates(derived=True)
     def update_forward_pos(self):
