@@ -11,6 +11,7 @@ import numba as nb
 import trimesh
 
 import genesis as gs
+from genesis.utils.mesh import get_wall_thickness
 from genesis.utils.misc import unique_rows
 
 
@@ -22,9 +23,9 @@ MAX_ALPHA = 0.05
 MAX_CELLS_AXIS = 450
 PITCH_FEATURE_FRACTION = 0.4
 PITCH_RATIO = 1.5
-# Low percentile so a small rim region inside a bulkier asset still drives the pitch; the strict minimum is avoided so
+# Low quantile so a small rim region inside a bulkier asset still drives the pitch. The strict minimum is avoided so
 # degenerate / grazing / open-shell rays cannot pull the estimate to zero.
-FEATURE_SIZE_PERCENTILE = 10.0
+FEATURE_SIZE_QUANTILE = 0.1
 
 
 # ===============================================================================================================
@@ -1047,32 +1048,6 @@ def _sdf_field(verts: np.ndarray, faces: np.ndarray, alpha: float, pitch: float,
     return field, aabb_min
 
 
-def _estimate_feature_size(verts: np.ndarray, faces: np.ndarray) -> float:
-    """Return the `FEATURE_SIZE_PERCENTILE`-th percentile local solid thickness across the surface.
-
-    For each face we cast a ray from its centroid along the inward normal and measure the distance to the first
-    other-side hit; that distance is the local solid thickness (= the largest inscribed sphere touching the face). The
-    asset-wide percentile is the wrap's pitch driver. Falls back to `bbox_diag` if no rays land.
-    """
-    src = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-    bbox_diag = np.linalg.norm(src.extents)
-    if bbox_diag <= 0.0 or len(src.faces) == 0:
-        return bbox_diag
-    centroids = src.triangles_center
-    normals = src.face_normals
-    # Subsample - ray casting on the BVH is linear in ray count and a few thousand rays already saturates coverage.
-    if len(centroids) > 4000:
-        idx = np.random.default_rng(0).choice(len(centroids), 4000, replace=False)
-        centroids = centroids[idx]
-        normals = normals[idx]
-    origins = centroids - (bbox_diag * 1e-5) * normals
-    locs, ray_idx, _ = src.ray.intersects_location(origins, -normals, multiple_hits=False)
-    if len(locs) == 0:
-        return bbox_diag
-    distances = np.linalg.norm(locs - origins[ray_idx], axis=1)
-    return np.percentile(distances, FEATURE_SIZE_PERCENTILE)
-
-
 def _adaptive_params(verts: np.ndarray, faces: np.ndarray, aggressiveness: int):
     """Pick alpha / pitch / max_cost from the input's estimated feature size, with a bbox-derived compute floor.
 
@@ -1084,7 +1059,14 @@ def _adaptive_params(verts: np.ndarray, faces: np.ndarray, aggressiveness: int):
     aggressiveness collapses: the default (5) roughly halves the face count of the wrap relative to leaving detail in.
     """
     bbox_diag = np.linalg.norm(verts.max(axis=0) - verts.min(axis=0))
-    feature_size = _estimate_feature_size(verts, faces)
+    # The local thickness of the solid bounds the size of its features. It is counted per face rather than per area, so
+    # that a finely tessellated small detail drives the pitch and survives the wrap. The bounding box diagonal stands
+    # for it when every ray escapes an open surface through its holes.
+    feature_size = bbox_diag
+    if len(faces) > 0:
+        feature_size = min(
+            get_wall_thickness(verts, faces, quantile=FEATURE_SIZE_QUANTILE, weight_by_area=False), bbox_diag
+        )
     pitch_feature = max(MIN_PITCH_ABS, feature_size * PITCH_FEATURE_FRACTION)
     pitch_compute = bbox_diag / MAX_CELLS_AXIS
     # Cap the feature-driven pitch by the offset limit, but never below the compute floor. On a mesh large enough that
