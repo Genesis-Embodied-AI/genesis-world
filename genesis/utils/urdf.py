@@ -638,15 +638,6 @@ def merge_inertia(link1, link2):
     link1.inertial.inertia = combined_inertia
 
 
-def transform_inertial(inertial, transform):
-    if inertial is None:
-        return None
-
-    new_origin = transform @ inertial
-
-    return urdfpy.Inertial(origin=new_origin, mass=inertial.mass, inertia=inertial.inertia)
-
-
 def update_subtree(links, joints, root_name, transform):
     current_name = root_name
     current_idx = next((idx for idx, link in enumerate(links) if link.name == current_name), None)

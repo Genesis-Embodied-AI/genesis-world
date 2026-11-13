@@ -432,18 +432,6 @@ def augment_link_world_coords(part_rigid):
                 )
 
 
-def _visualize_muscle_group(positions, muscle_group):
-    import open3d as o3d
-
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(positions)
-    colors = np.zeros((positions.shape[0], 3))
-    for gii, group_id in enumerate(np.unique(muscle_group)):
-        colors[muscle_group == group_id] = np.random.uniform(0, 1, (3,))
-    pcd.colors = o3d.utility.Vector3dVector(colors)
-    o3d.visualization.draw([pcd])
-
-
 # ------------------------------------------------------------------------------------
 # ----------------------------- default instantiation --------------------------------
 # ------------------------------------------------------------------------------------

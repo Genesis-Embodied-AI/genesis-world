@@ -1565,39 +1565,6 @@ def tetrahedralize_mesh(mesh, tet_cfg):
     return verts, elems
 
 
-def visualize_tet(tet, mesh, show_surface=True, plot_cell_qual=False):
-    grid = tet.grid
-    if show_surface:
-        grid.plot(show_edges=True)
-    else:
-        # get cell centroids
-        cells = grid.cells.reshape(-1, 5)[:, 1:]
-        cell_center = grid.points[cells].mean(axis=1)
-
-        # extract cells below the 0 xy plane
-        cell_ind = (cell_center[:, 2] < 0.0).nonzero(as_tuple=False)
-        subgrid = grid.extract_cells(cell_ind)
-
-        # advanced plotting
-        if plot_cell_qual:
-            cell_qual = subgrid.compute_cell_quality()["CellQuality"]
-            subgrid.plot(
-                scalars=cell_qual, stitle="Quality", cmap="bwr", clim=[0, 1], flip_scalars=True, show_edges=True
-            )
-        else:
-            # Delaying import of 'pyvista' because it is an optional dependency
-            import pyvista as pv
-
-            faces = np.concatenate([np.full((mesh.faces.shape[0], 1), mesh.faces.shape[1]), mesh.faces], axis=1)
-            pv_data = pv.PolyData(mesh.vertices, faces)
-
-            plotter = pv.Plotter()
-            plotter.add_mesh(subgrid, "lightgrey", lighting=True, show_edges=True)
-            plotter.add_mesh(pv_data, "r", "wireframe")
-            plotter.add_legend([[" Input Mesh ", "r"], [" Tessellated Mesh ", "black"]])
-            plotter.show()
-
-
 def check_exr_compression(exr_path):
     exr_file = OpenEXR.InputFile(exr_path)
     exr_header = exr_file.header()

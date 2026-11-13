@@ -5,17 +5,10 @@ from itertools import combinations
 import numpy as np
 
 import networkx as nx
-from matplotlib.patches import FancyArrowPatch
 
 import genesis as gs
 
 from .cache import get_gel_cache_dir
-
-
-def load_hmesh(fpath: str):
-    from pygel3d import hmesh
-
-    return hmesh.load(fpath)
 
 
 def trimesh_to_gelmesh(tmesh):
@@ -139,91 +132,3 @@ def graph_to_tree(G):
         Gout.nodes[edge[1]].update(G.nodes[edge[1]])
 
     return Gout, src_node
-
-
-class Arrow3D(FancyArrowPatch):
-    def __init__(self, xs, ys, zs, *args, **kwargs):
-        FancyArrowPatch.__init__(self, (0, 0), (0, 0), *args, **kwargs)
-        self._verts3d = xs, ys, zs
-
-    def do_3d_projection(self, renderer=None):
-        # Importing mpl_toolkits is very slow and not used very often. Let's delay import.
-        from mpl_toolkits.mplot3d import proj3d
-
-        xs3d, ys3d, zs3d = self._verts3d
-        xs, ys, zs = proj3d.proj_transform(xs3d, ys3d, zs3d, self.axes.M)
-        self.set_positions((xs[0], ys[0]), (xs[1], ys[1]))
-
-        return np.min(zs)
-
-
-def plot_nxgraph(
-    G,
-    pos=None,
-    plot_arrow=True,
-    use_tick_labels=False,
-    show=True,
-    figax=None,
-    node_color=None,
-    node_size=100,
-    plot_node_num=True,
-):
-    # Importing matplotlib is very slow and not used very often. Let's delay import.
-    import matplotlib.pyplot as plt
-
-    if pos is None:
-        pos = nx.spring_layout(G, dim=3, seed=779)
-
-    node_xyz = np.array([pos[v] for v in sorted(G)])
-    edge_xyz = np.array([(pos[u], pos[v]) for u, v in G.edges()])
-
-    # Create the 3D figure
-    if figax is None:
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection="3d")
-    else:
-        fig, ax = figax
-
-    # Plot the nodes - alpha is scaled by "depth" automatically
-    scatter_kwargs = dict(s=node_size, ec="w")
-    if node_color is not None:
-        scatter_kwargs["c"] = node_color
-    ax.scatter(*node_xyz.T, **scatter_kwargs)
-
-    if plot_node_num:
-        for i, node in enumerate(sorted(G)):
-            ax.text(*node_xyz[i], f"{i}", color="red")
-
-    # Plot the edges
-    for vizedge in edge_xyz:
-        ax.plot(*vizedge.T, color="tab:gray")
-        if plot_arrow:
-            a = Arrow3D(
-                [vizedge[0, 0], vizedge[1, 0]],
-                [vizedge[0, 1], vizedge[1, 1]],
-                [vizedge[0, 2], vizedge[1, 2]],
-                mutation_scale=20,
-                lw=1.5,
-                arrowstyle="-|>",
-                color="tab:gray",
-            )
-            ax.add_artist(a)
-
-    def _format_axes(ax):
-        """Visualization options for the 3D axes."""
-        # Turn gridlines off
-        ax.grid(False)
-        # Suppress tick labels
-        if not use_tick_labels:
-            for dim in (ax.xaxis, ax.yaxis, ax.zaxis):
-                dim.set_ticks([])
-        ax.axis("equal")
-        # Set axes labels
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
-        ax.set_zlabel("z")
-
-    _format_axes(ax)
-    if show:
-        fig.tight_layout()
-        plt.show()

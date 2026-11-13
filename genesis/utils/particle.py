@@ -18,10 +18,6 @@ except (AttributeError, TypeError):
     malloc_trim = None
 
 
-def n_particles_vol(p_size=0.01, volume=1.0):
-    return max(1, round(volume / p_size**3))
-
-
 def trimesh_to_particles_simple(mesh, p_size, sampler):
     """
     Mesh to particles via `random` or `regular` sampler.
@@ -878,9 +874,3 @@ class FoamGenerator:
             self.bubble_decay,
         )
         return self.foams_pos
-
-
-def filter_surface(positions, particle_radius):
-    """Return whether each particle lies at the surface of the set, which a particle with few neighbors does."""
-    neighbors_start, _ = _find_neighbors(positions, positions, 4.0 * particle_radius)
-    return np.diff(neighbors_start) < 20

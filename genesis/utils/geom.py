@@ -61,11 +61,6 @@ def qd_j_cross_vec(vec):
 
 
 @qd.func
-def qd_k_cross_vec(vec):
-    return qd.Vector([-vec[1], vec[0], 0.0], dt=gs.qd_float)
-
-
-@qd.func
 def qd_vec_to_skew(vec):
     """Return the skew-symmetric matrix of a 3D vector, whose product with another vector is their cross product."""
     return qd.Matrix(
@@ -1493,10 +1488,6 @@ def axis_angle_to_quat(angle, axis):
         )
 
 
-def transform_by_xyz(pos, xyz):
-    return transform_by_quat(pos, xyz_to_quat(xyz))
-
-
 def transform_by_trans_quat(pos, trans, quat):
     return transform_by_quat(pos, quat) + trans
 
@@ -1939,12 +1930,6 @@ def slerp(q0, q1, t):
 # ------------------------------------------------------------------------------------
 
 
-def scale_to_T(scale):
-    T = np.eye(4, dtype=scale.dtype)
-    T[[0, 1, 2], [0, 1, 2]] = scale
-    return T
-
-
 @nb.jit(nopython=True, cache=True)
 def _np_z_up_to_R(z, up=None, out=None):
     B = z.shape[:-1]
@@ -2322,20 +2307,6 @@ def z_to_quat(v_a: np.ndarray) -> np.ndarray:
     return out
 
 
-def compute_camera_angle(camera_pos, camera_lookat):
-    camera_dir = np.asarray(camera_lookat) - np.asarray(camera_pos)
-
-    # rotation around vertical (y) axis
-    angle_x = np.arctan2(-camera_dir[0], -camera_dir[2])
-
-    # rotation w.r.t horizontal plane
-    angle_y = np.arctan2(camera_dir[1], np.linalg.norm([camera_dir[0], camera_dir[2]]))
-
-    angle_z = 0.0
-
-    return np.array([angle_x, angle_y, angle_z])
-
-
 def transform_inertia_by_T(inertia_tensor, T, mass):
     """
     Transform the inertia tensor to the new reference frame.
@@ -2515,14 +2486,6 @@ def zero_pos():
 
 def identity_quat():
     return np.array([1.0, 0.0, 0.0, 0.0], dtype=gs.np_float)
-
-
-def tc_zero_pos():
-    return torch.zeros(3, dtype=gs.tc_float, device=gs.device)
-
-
-def tc_identity_quat():
-    return torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=gs.tc_float, device=gs.device)
 
 
 def nowhere():

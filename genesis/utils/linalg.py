@@ -75,13 +75,6 @@ def mat_inverse(mat: qd.Tensor, L: qd.Tensor, U: qd.Tensor, y: qd.Tensor, res: q
 
 
 @qd.func
-def mat_add(A, B, n, m, i_b):
-    for i in range(n):
-        for k in range(m):
-            A[i, k, i_b] += B[i, k, i_b]
-
-
-@qd.func
 def mat_transpose(A: qd.Tensor, B: qd.Tensor, n, m, i_b):
     for i in range(n):
         for k in range(m):
@@ -92,10 +85,3 @@ def mat_transpose(A: qd.Tensor, B: qd.Tensor, n, m, i_b):
 def mat_add_eye(A: qd.Tensor, x, n, i_b):
     for i in range(n):
         A[i, i, i_b] += x
-
-
-@qd.func
-def mat_mask(A, mask, n, m, i_b):
-    for i in range(n):
-        for j in range(m):
-            A[i, j, i_b] *= mask[i]

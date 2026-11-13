@@ -3,13 +3,13 @@ import time
 
 import numpy as np
 
-from genesis.utils.emoji import get_clock
-
 
 class TimeElapser:
     """
     A tool that can be called with `with` statement, and starts a separate thread that continuously outputs logger message with elasped time.
     """
+
+    CLOCK_FACES = "🕐🕑🕒🕓🕔🕕🕖🕗🕘🕙🕚🕛"
 
     def __init__(self, logger, refresh_rate, end_msg):
         self.logger = logger
@@ -44,7 +44,7 @@ class TimeElapser:
         self.logger.raw("\x1b[1F" + self.start_msg + " ")
         t_start = time.perf_counter()
         t_elapsed = time.perf_counter() - t_start
-        self.logger.raw(f"~<{t_elapsed:.{self.n}f}s>~ {get_clock(t_elapsed)} ")
+        self.logger.raw(f"~<{t_elapsed:.{self.n}f}s>~ {self.CLOCK_FACES[int(10 * t_elapsed) % 12]} ")
         prev_width = len(f"{t_elapsed:.{self.n}f}s ") + 3
         while not self._stop.is_set():
             time.sleep(self.dt)
@@ -55,6 +55,6 @@ class TimeElapser:
                     self.logger.raw(self.start_msg + " ")
                 else:
                     self.logger.raw("\b" * prev_width)
-                self.logger.raw(f"~<{t_elapsed:.{self.n}f}s>~ {get_clock(t_elapsed)} ")
+                self.logger.raw(f"~<{t_elapsed:.{self.n}f}s>~ {self.CLOCK_FACES[int(10 * t_elapsed) % 12]} ")
                 prev_width = len(f"{t_elapsed:.{self.n}f}s ") + 3
         self.logger.raw("\b\b\b✅ " + self.end_msg)
