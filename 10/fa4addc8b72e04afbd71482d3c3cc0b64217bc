@@ -1,0 +1,55 @@
+examples/deformable/differentiable_push.py
+  s_4e532cc51f4368::t_f43873cfc9129e 118,140,143,146
+.github/workflows/generic.yml
+  s_4e532cc51f4368::t_f43873cfc9129e 139-145
+genesis/engine/entities/emitter.py
+  s_4e532cc51f4368::t_3c313a85950ba1 123,125,127,129,132,198,200-201,203
+genesis/engine/entities/hybrid_entity.py
+  s_4e532cc51f4368::t_d6de5dbb66f82a 8,489,497
+genesis/engine/entities/particle_entity.py
+  s_4e532cc51f4368::t_04b897dfabe9fd 228,254
+genesis/engine/entities/rigid_entity/description.py
+  s_4e532cc51f4368::t_7cae2225f587ff 57-61,1672-1674,1677
+genesis/engine/mesh.py
+  s_4e532cc51f4368::t_6e813e0920a6b0 640,860-872,874-886,888-911
+genesis/engine/scene.py
+  s_4e532cc51f4368::t_b22e2e48fc7f40 865-886,889-890
+genesis/logging/logger.py
+  s_4e532cc51f4368::t_9c66d1f5133b5c 34-35,37,77,80,83,86,89,92
+genesis/options/options.py
+  s_4e532cc51f4368::t_9b9fc64b456840 6,136
+genesis/repr_base.py
+  s_4e532cc51f4368::t_5057e085d0147f 3-5,72,111-129
+genesis/utils/element.py
+  s_4e532cc51f4368::t_0b501a4710b9fb 21-23
+genesis/utils/hybrid.py
+  s_4e532cc51f4368::t_57e4ab03526b2d 20,25-29,34-35,94,96,98-103
+genesis/utils/mesh.py
+  s_4e532cc51f4368::t_36b92e96e3db30 31,372-397,898-915,917,922
+genesis/utils/particle.py
+  s_4e532cc51f4368::t_312050f22079df 41-51,53,73-108,266,268,276,285-287,289-294,296-301,303,307-312,314-315
+genesis/utils/urdf.py
+  s_4e532cc51f4368::t_2c03d7a8298247 624-630,632
+genesis/utils/usd/usd_geometry.py
+  s_4e532cc51f4368::t_c7cfa2286dfb71 351,354,383-384
+tests/parsers/test_mesh.py
+  s_4e532cc51f4368::t_9724fef264aa15 17,1007
+tests/rigid/test_api.py
+  s_4e532cc51f4368::t_9bef0cc4998fde 1450-1452
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "10fa4addc8b72e04afbd71482d3c3cc0b64217bc",
+  "prompts": {},
+  "sessions": {
+    "s_4e532cc51f4368": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "70ed08a1-5a04-49fd-9697-c03270ba2dff",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
