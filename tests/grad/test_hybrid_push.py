@@ -276,10 +276,13 @@ def test_coupling_wrench_grad_matches_fd(use_implicit_solver, precision, show_vi
         ),
         show_viewer=show_viewer,
     )
+    # The box is thinner than the stencil of a particle, so it separates the block from the cells beyond it. The layout
+    # keeps the cells of the stencils of the block clear of the ties of this separation over the whole horizon, which
+    # the finite-difference perturbations of single precision would flip otherwise.
     block = scene.add_entity(
         morph=gs.morphs.Box(
-            lower=(-0.2, -0.05, -0.05),
-            upper=(-0.05, 0.05, 0.05),
+            lower=(-0.2, -0.03, -0.03),
+            upper=(-0.05, 0.07, 0.07),
         ),
         material=gs.materials.MPM.Elastic(
             E=5e4,
@@ -287,13 +290,13 @@ def test_coupling_wrench_grad_matches_fd(use_implicit_solver, precision, show_vi
     )
     box = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(0.0, 0.01, 0.0),
+            pos=(0.0, 0.03, 0.02),
             size=(0.08, 0.08, 0.08),
         ),
     )
     fem_block = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(0.15, 0.0, 0.0),
+            pos=(0.15, 0.02, 0.02),
             size=(0.1, 0.05, 0.05),
         ),
         material=gs.materials.FEM.Elastic(
@@ -303,7 +306,7 @@ def test_coupling_wrench_grad_matches_fd(use_implicit_solver, precision, show_vi
     scene.build(n_envs=2)
     # The trailing end of the block follows the box through springs, so the gradient also flows from the box pose to it
     block.set_particle_constraints(
-        block.get_particles_in_bbox((-0.2, -0.05, -0.05), (-0.15, 0.05, 0.05)), box.links[0].idx, stiffness=10.0
+        block.get_particles_in_bbox((-0.2, -0.03, -0.03), (-0.15, 0.07, 0.07)), box.links[0].idx, stiffness=10.0
     )
     # The FEM block follows the box too, its near end held at the box and its far end pulled toward it by springs
     fem_verts_x = tensor_to_array(fem_block.init_positions)[:, 0]
@@ -316,7 +319,7 @@ def test_coupling_wrench_grad_matches_fd(use_implicit_solver, precision, show_vi
         scene.reset()
         block.set_velocity((0.5, 0.0, 0.0))
         box.set_dofs_velocity(vel)
-        for _ in range(20):
+        for _ in range(10):
             scene.step()
         box_loss = (box.get_pos() ** 2).sum() + (box.get_quat()[..., 1:] ** 2).sum()
         return box_loss, (fem_block.get_verts_pos() ** 2).sum()

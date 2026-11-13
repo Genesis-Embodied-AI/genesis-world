@@ -148,6 +148,10 @@ class RigidGeomDescription(BaseRigidGeomDescription):
 
     'sdf' describes the grid sampling the signed distance field (SDF) of the geometry, resolved from its mesh, its
     type and its material (see 'SignedDistanceFieldDescription.from_geometry').
+
+    'source_verts' and 'source_faces' are the mesh a convex decomposition cut the geometry from, in the frame of the
+    geometry, None for a geometry kept whole. The couplings of the other solvers see it instead of the union of the
+    pieces, which fills the concave regions between them.
     """
 
     type: GEOM_TYPE
@@ -161,6 +165,8 @@ class RigidGeomDescription(BaseRigidGeomDescription):
     friction_torsional: float
     friction_rolling: float
     sol_params: np.ndarray
+    source_verts: np.ndarray | None = None
+    source_faces: np.ndarray | None = None
 
 
 @dataclass
@@ -1723,6 +1729,8 @@ class RigidEntityDescription(KinematicEntityDescription):
                     friction_rolling=friction_rolling,
                     sol_params=g_info.get("sol_params", gu.default_solver_params()),
                     sdf=SignedDistanceFieldDescription.from_geometry(g_info["mesh"], g_info["type"], self.material),
+                    source_verts=g_info.get("source_verts"),
+                    source_faces=g_info.get("source_faces"),
                 )
             )
         return cg_descs

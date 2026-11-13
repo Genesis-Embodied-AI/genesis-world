@@ -5,17 +5,20 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+import trimesh
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+import genesis.utils.mesh as mu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.abd.misc import func_add_external_wrench
-from genesis.engine.solvers.rigid.data import GEOMS, GeomsInfo, GeomsState, LinksState, RigidData, RigidInfo
+from genesis.engine.solvers.rigid.data import GeomsInfo, GeomsState, LinksState, RigidData, RigidInfo
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.grad.bridge import no_grad, register_custom_backward, reversed_with
@@ -61,8 +64,14 @@ TILES = Size("tiles")
 ENVS_GROUPS = Size("envs_groups")
 # The arrays of the sparse reset of the grid, which the backward pass leaves out (see MPMGrid)
 SPARSE_GRID_RESET = "sparse_grid_reset"
-# The arrays of the compatible particle-in-cell (CPIC) separation of the particles from the cells by the rigid geoms
+# The arrays of the compatible particle-in-cell (CPIC) separation of the particles from the cells by the thin rigid
+# links, the links holding a coupled geom thinner than the stencil of a particle (see MPMCPICInfo)
 CPIC = "cpic"
+# The arrays of the CPIC separation that the backward pass alone reads
+CPIC_GRAD = "cpic_grad"
+CPIC_LINKS = Size("cpic_links")
+CPIC_SOURCES = Size("cpic_sources")
+CPIC_PLANES = Size("cpic_planes")
 # The arrays of the deterministic transfer of the particles to the grid (see MPMConfig)
 DETERMINISTIC = "deterministic"
 # The arrays the backward pass alone reads
@@ -137,18 +146,27 @@ class MPMGrid(Data, kind=DataKind.SCRATCH, shape=(GRID_X, GRID_Y, GRID_Z, ENVS))
     dirty_count: qd.Tensor = field(int, shape=(1,), labels=SPARSE_GRID_RESET)
 
 
-class MPMParticlesCPIC(Data, kind=DataKind.STATE, shape=(PARTICLES, GEOMS, ENVS)):
+class MPMParticlesCPIC(Data, kind=DataKind.STATE):
     """
-    The separation of the material point method (MPM) particles from the cells of the grid by the thin rigid geoms
-    (CPIC).
+    The separation of the material point method (MPM) particles from the grid by the thin rigid links (CPIC).
 
-    `rigid_normal` is the normal of each rigid geom the particle last saw on its side, kept from one substep to the next
-    while the particle does not cross the geom. `cell_geom_idx` is the geom separating the particle from each cell of
-    its stencil, -1 for none, which the transfer to the grid finds and the integration of the particles reads.
+    `sources_normal` is the outward normal of each rigid source of the thin links that the particle last saw on its
+    side, and `links_normal` that of the source of each thin link nearest to the particle, both kept from one substep
+    to the next while the particle does not cross them (see MPMCPICInfo). They are expressed in the frame of their
+    link, so that a side kept while the link turns turns with it. `cell_source_idx` is the source separating the
+    particle from each cell of its stencil, an index of the sources of MPMCPICInfo and -1 for none, which the transfer
+    to the grid and the integration of the particles read. `is_sources_side_updated` tells whether the side of each
+    source was updated in the substep, with gradient alone. `penetrated_source_idx` is the source the particle lies
+    deepest inside of on the side it kept, -1 for none, which every cell of its stencil collides it with.
     """
 
-    rigid_normal: qd.Tensor = field((float, 3))
-    cell_geom_idx: qd.Tensor = field(int, shape=(PARTICLES, 3, 3, 3, ENVS), kind=DataKind.SCRATCH)
+    sources_normal: qd.Tensor = field((float, 3), shape=(PARTICLES, CPIC_SOURCES, ENVS), labels=CPIC)
+    links_normal: qd.Tensor = field((float, 3), shape=(PARTICLES, CPIC_LINKS, ENVS), labels=CPIC)
+    cell_source_idx: qd.Tensor = field(int, shape=(PARTICLES, 3, 3, 3, ENVS), kind=DataKind.SCRATCH, labels=CPIC)
+    is_sources_side_updated: qd.Tensor = field(
+        bool, shape=(PARTICLES, CPIC_SOURCES, ENVS), kind=DataKind.SCRATCH, labels=CPIC_GRAD
+    )
+    penetrated_source_idx: qd.Tensor = field(int, shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH, labels=CPIC)
 
 
 class MPMTiles(Data, kind=DataKind.SCRATCH, shape=(TILES * ENVS_GROUPS,)):
@@ -168,10 +186,39 @@ class MPMState(Data, kind=DataKind.STATE):
 
     particles: MPMParticles
     grid: MPMGrid
-    particles_cpic: MPMParticlesCPIC = field(labels=CPIC)
+    particles_cpic: MPMParticlesCPIC
     # The particles sorted by the lowest cell of their stencil, a slot of the hash grid hashing each cell
     hash_grid: SpatialHashGrid = field(kind=DataKind.SCRATCH)
     tiles: MPMTiles = field(labels=DETERMINISTIC)
+
+
+class MPMCPICInfo(Data, kind=DataKind.CONSTANT):
+    """
+    The thin rigid links, which separate the particles from the cells beyond them by compatible particle-in-cell (CPIC).
+
+    A link is thin when one of its rigid sources (see 'LegacyCoupler.rigid_mpm_sources') is thinner than the stencil of
+    a particle, through which the particle would exchange momentum with the cells on the other side. A cell lies on the
+    other side of a link from a particle when the outward normals of one of its sources point against each other there,
+    or those of the sources of the link nearest to each of them. Each source alone misses the seams between the
+    sources of a link, where both sides of the surface lie beyond the end of each, and the nearest source alone misses
+    the edges of the surface, where the nearest faces on both sides are orthogonal.
+    """
+
+    # The rigid sources of each thin link span links_source_start[i_cl] to links_source_start[i_cl + 1], each the geom
+    # whose pose it takes and the row of its SDF grid (see 'SDF')
+    links_source_start: qd.Tensor = field(int, shape=(CPIC_LINKS + 1,))
+    sources_geom_idx: qd.Tensor = field(int, shape=(CPIC_SOURCES,))
+    sources_sdf_row: qd.Tensor = field(int, shape=(CPIC_SOURCES,))
+    # The box of the mesh of each source in the frame of its geom
+    sources_lower: qd.Tensor = field((float, 3), shape=(CPIC_SOURCES,))
+    sources_upper: qd.Tensor = field((float, 3), shape=(CPIC_SOURCES,))
+    # The planes of the faces of each convex source span sources_plane_start[i_cs] to sources_plane_start[i_cs + 1] of
+    # planes, each its outward normal and its offset along it in the frame of its geom, none for a non-convex source. A
+    # point lies inside a convex source exactly when it lies behind all of its planes.
+    sources_plane_start: qd.Tensor = field(int, shape=(CPIC_SOURCES + 1,))
+    planes: qd.Tensor = field((float, 4), shape=(CPIC_PLANES,))
+    # The distance from a particle to the farthest cell of its stencil, beyond which a link separates it from no cell
+    reach: qd.Tensor = field(float, shape=())
 
 
 class MPMInfo(Data, kind=DataKind.CONSTANT):
@@ -179,6 +226,7 @@ class MPMInfo(Data, kind=DataKind.CONSTANT):
 
     particles: MPMParticlesInfo
     boundary: CubeBoundary
+    cpic: MPMCPICInfo = field(labels=CPIC)
     gravity: qd.Tensor = field((float, 3), shape=(ENVS,), kind=DataKind.INFO)
     substep_dt: qd.Tensor = field(float, shape=())
     # The size of a cell of the grid, which spans the cells from `grid_offset` on
@@ -220,7 +268,7 @@ class MPMConfig(Config):
     is_svd_needed: bool
     # Whether the grid is zeroed whole with its adjoint before every substep, instead of sparsely after it (see MPMGrid)
     requires_grad: bool
-    # Whether the rigid geoms separate the particles from the cells of the grid (see MPMParticlesCPIC)
+    # Whether thin rigid links separate the particles from the cells of the grid (see MPMCPICInfo)
     is_cpic: bool
     # Whether the transfer to the grid and the coupling forces sum in a fixed order across threads, with
     # `use_deterministic_algorithms` (see kernel_transfer_particles_to_grid and 'cfrc_external_sums' in LinksState)
@@ -238,7 +286,7 @@ class MPMData(Data):
     mpm_state: MPMState
     errno: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
 
-    def __init__(self, solver: "MPMSolver"):
+    def __init__(self, solver: "MPMSolver", n_cpic_links: int, n_cpic_sources: int, n_cpic_planes: int):
         grid_x, grid_y, grid_z = solver._grid_res.tolist()
         # See TILE_SIZE and ENVS_GROUP_SIZE in 'func_sort_particles'
         n_tiles = int(np.prod((solver._grid_res + 3) // 4))
@@ -255,11 +303,14 @@ class MPMData(Data):
                 particle_volume_scale=solver._particle_volume_scale,
                 stress_scale=-solver.substep_dt * solver._particle_volume * 4 * solver._inv_dx * solver._inv_dx,
                 EPS=gs.EPS,
+                # The farthest cell of the stencil lies 1.5 cells away along each axis
+                cpic=dict(reach=1.5 * np.sqrt(3.0) * solver._dx),
             )
             values = dict(mpm_info=info_values)
             unused = {
                 SPARSE_GRID_RESET: solver._requires_grad,
                 CPIC: not solver.mpm_config.is_cpic,
+                CPIC_GRAD: not (solver.mpm_config.is_cpic and solver._requires_grad),
                 DETERMINISTIC: not solver.mpm_config.is_deterministic,
                 GRAD: not solver._requires_grad,
                 MPMData.mpm_state.hash_grid: not solver.mpm_config.is_deterministic,
@@ -273,7 +324,9 @@ class MPMData(Data):
                 grid_x=grid_x,
                 grid_y=grid_y,
                 grid_z=grid_z,
-                geoms=solver._sim.rigid_solver.n_geoms_,
+                cpic_links=n_cpic_links,
+                cpic_sources=n_cpic_sources,
+                cpic_planes=n_cpic_planes,
                 # The slots of the hash grid hash the cells of the grid, one per particle
                 **hash_grid_sizes(max(solver._n_particles, 1)),
                 tiles=n_tiles,
@@ -361,6 +414,7 @@ class MPMMaterials:
 class MPMSolver(ParticleSolver):
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
+    is_differentiable = True
 
     material_cls = MPM.Base
 
@@ -372,9 +426,6 @@ class MPMSolver(ParticleSolver):
         super().__init__(scene, sim, options)
 
         self._grid_density = options.grid_density
-        self._enable_CPIC = options.enable_CPIC
-        # The rigid geoms separate the particles from the cells by their SDF (see MPMParticlesCPIC)
-        opt_in(SDFInfo, cond=lambda: self.is_active and self._enable_CPIC)
         # The grid and the particles sum their forces on the rigid links exactly when the order of the sums is fixed
         opt_in(
             RigidData.dyn_state.links.cfrc_external_sums,
@@ -418,10 +469,61 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
     def build(self) -> None:
         super().build()
 
-        if self.is_active and self._enable_CPIC and self._requires_grad:
-            gs.raise_exception(
-                "CPIC is not supported in differentiable mode yet. Submit a feature request if you need it."
-            )
+        # The links holding a rigid source thinner than the stencil of a particle separate the particles from the cells
+        # of their stencil (see MPMCPICInfo). A convex source is as thin as its narrowest extent across the planes of its
+        # faces, a closed non-convex one as its thinnest walls, a low quantile of the walls across its faces since a thin
+        # feature covering a small part of its surface leaks all the same, and an open surface bounds no volume at all.
+        # The mesh of a source is that a convex decomposition cut its geom from when it reads its row (see
+        # 'LegacyCoupler.rigid_mpm_sources'), and that of its geom otherwise, in the frame of the geom either way.
+        cpic_links_sources = []
+        # The planes of the faces of each source of the thin links, the coplanar faces merged, empty for a non-convex one
+        cpic_sources_planes = []
+        # The box of the mesh of each source of the thin links, in the frame of its geom
+        cpic_sources_bounds = []
+        coupler_options = self._scene.options.coupler
+        if (
+            self.is_active
+            and self._sim.rigid_solver.is_active
+            and isinstance(coupler_options, gs.options.LegacyCouplerOptions)
+            and coupler_options.rigid_mpm
+        ):
+            links_sources = {}
+            for geom, i_row in self._sim.coupler.rigid_mpm_sources:
+                if geom.type not in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN):
+                    links_sources.setdefault(geom.link.idx, []).append((geom, i_row))
+            for sources in links_sources.values():
+                is_thin = False
+                sources_planes, sources_bounds = [], []
+                for geom, i_row in sources:
+                    verts, faces = geom.init_verts, geom.init_faces
+                    if i_row != geom.idx:
+                        verts, faces = geom.desc.source_verts, geom.desc.source_faces
+                    tmesh = trimesh.Trimesh(verts, faces, process=False)
+                    sources_bounds.append((verts.min(axis=0), verts.max(axis=0)))
+                    planes = np.zeros((0, 4), dtype=gs.np_float)
+                    if tmesh.is_convex:
+                        # A face of no area has no plane, its area compared with the squared diagonal of the bounding
+                        # box to keep the small faces of a small mesh (see 'get_convex_width')
+                        faces_normal = np.cross(
+                            verts[faces[:, 1]] - verts[faces[:, 0]], verts[faces[:, 2]] - verts[faces[:, 0]]
+                        )
+                        faces_normal_norm = np.linalg.norm(faces_normal, axis=-1, keepdims=True)
+                        verts_extent = verts.max(axis=0) - verts.min(axis=0)
+                        is_valid = faces_normal_norm[:, 0] > gs.EPS * (verts_extent @ verts_extent)
+                        faces_normal = faces_normal[is_valid] / faces_normal_norm[is_valid]
+                        faces_offset = (faces_normal * verts[faces[is_valid, 0]]).sum(axis=-1, keepdims=True)
+                        planes = np.unique(np.round(np.concatenate([faces_normal, faces_offset], axis=-1), 9), axis=0)
+                        thickness = mu.get_convex_width(verts, faces)
+                    elif tmesh.is_watertight:
+                        thickness = mu.get_wall_thickness(verts, faces, quantile=0.02)
+                    else:
+                        thickness = 0.0
+                    is_thin = is_thin or thickness < 3.0 * self._dx
+                    sources_planes.append(planes)
+                if is_thin:
+                    cpic_links_sources.append(sources)
+                    cpic_sources_planes += sources_planes
+                    cpic_sources_bounds += sources_bounds
 
         # When no material reads U, S, V, the transfer to the grid takes J from the determinant of the advected
         # deformation gradient, which spares the singular value decomposition. The backward pass reverses it alone.
@@ -429,14 +531,37 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         self.mpm_config = MPMConfig(
             is_svd_needed=self._requires_grad or any([material.needs_svd for material in self._materials]),
             requires_grad=self._requires_grad,
-            is_cpic=self._enable_CPIC and self._sim.rigid_solver.is_active,
+            is_cpic=bool(cpic_links_sources),
             is_deterministic=requires_deterministic_accumulation(),
         )
         self._mpm_materials = MPMMaterials(tuple(self._materials))
 
-        self.data_manager = MPMData(self)
+        cpic_sources = [source for sources in cpic_links_sources for source in sources]
+        n_cpic_planes = sum([len(planes) for planes in cpic_sources_planes])
+        self.data_manager = MPMData(self, len(cpic_links_sources), len(cpic_sources), n_cpic_planes)
         self.mpm_state = self.data_manager.mpm_state
         self.mpm_info = self.data_manager.mpm_info
+        if self.mpm_config.is_cpic:
+            self.mpm_info.cpic.links_source_start.from_numpy(
+                np.cumsum([0, *[len(sources) for sources in cpic_links_sources]], dtype=gs.np_int)
+            )
+            self.mpm_info.cpic.sources_geom_idx.from_numpy(
+                np.array([geom.idx for geom, _ in cpic_sources], dtype=gs.np_int)
+            )
+            self.mpm_info.cpic.sources_sdf_row.from_numpy(
+                np.array([i_row for _, i_row in cpic_sources], dtype=gs.np_int)
+            )
+            self.mpm_info.cpic.sources_lower.from_numpy(
+                np.array([lower for lower, _ in cpic_sources_bounds], dtype=gs.np_float)
+            )
+            self.mpm_info.cpic.sources_upper.from_numpy(
+                np.array([upper for _, upper in cpic_sources_bounds], dtype=gs.np_float)
+            )
+            self.mpm_info.cpic.sources_plane_start.from_numpy(
+                np.cumsum([0, *[len(planes) for planes in cpic_sources_planes]], dtype=gs.np_int)
+            )
+            if n_cpic_planes > 0:
+                self.mpm_info.cpic.planes.from_numpy(np.concatenate(cpic_sources_planes).astype(gs.np_float))
         self.particle_constraints = MPMParticleConstraints(unused=True)
         # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
         self.register_errors(
@@ -529,6 +654,21 @@ Please decrease the simulation timestep or adjust the material parameters."""
     # ------------------------------------------------------------------------------------
 
     def substep_pre_coupling(self) -> None:
+        # The sides of the particles are updated on the rigid links the substep of the rigid solver just moved, where
+        # the particles then collide with them (see MPMCPICInfo)
+        if self.mpm_config.is_cpic:
+            rigid_solver = self._sim.rigid_solver
+            kernel_update_particles_sides(
+                self.mpm_state,
+                rigid_solver.dyn_state.geoms,
+                rigid_solver.dyn_state.links,
+                self.mpm_info,
+                rigid_solver.dyn_info.geoms,
+                rigid_solver.rigid_info,
+                rigid_solver.collider.sdf.sdf_info,
+                self.mpm_config,
+                rigid_solver.collider.collider_config,
+            )
         if self._requires_grad:
             kernel_reset_grid_and_grad(self.mpm_state)
             kernel_compute_F_tmp(self.mpm_state, self.mpm_info, compute_svd=False)
@@ -536,18 +676,8 @@ Please decrease the simulation timestep or adjust the material parameters."""
         else:
             # The sparse reset at the end of the previous substep leaves the grid zeroed for this one
             kernel_compute_F_tmp(self.mpm_state, self.mpm_info, self.mpm_config.is_svd_needed)
-        rigid_solver = self._sim.rigid_solver
         kernel_transfer_particles_to_grid(
-            self.mpm_state,
-            rigid_solver.dyn_state.geoms,
-            self.mpm_info,
-            rigid_solver.dyn_info.geoms,
-            rigid_solver.rigid_info,
-            rigid_solver.collider.sdf.sdf_info,
-            self.mpm_config,
-            rigid_solver.collider.collider_config,
-            self._mpm_materials,
-            is_backward=False,
+            self.mpm_state, self.mpm_info, self.mpm_config, self._mpm_materials, is_backward=False
         )
 
     def substep_post_coupling(self) -> None:
@@ -563,6 +693,18 @@ Please decrease the simulation timestep or adjust the material parameters."""
                 rigid_solver.rigid_info,
                 self.mpm_config,
             )
+            # The collisions of the particles with the thin rigid links follow the gather, which autodiff reverses
+            if self.mpm_config.is_cpic:
+                kernel_collide_particles_with_thin_links(
+                    self.mpm_state,
+                    rigid_solver.dyn_state.geoms,
+                    rigid_solver.dyn_state.links,
+                    self.mpm_info,
+                    rigid_solver.dyn_info.geoms,
+                    rigid_solver.rigid_info,
+                    rigid_solver.collider.sdf.sdf_info,
+                    rigid_solver.collider.collider_config,
+                )
             kernel_advect_particles(self.mpm_state, self.mpm_info, self._errno)
         else:
             kernel_integrate_particles(
@@ -599,10 +741,6 @@ Please decrease the simulation timestep or adjust the material parameters."""
     # ------------------------------------------------------------------------------------
     # ------------------------------------ gradient --------------------------------------
     # ------------------------------------------------------------------------------------
-
-    @property
-    def is_differentiable(self) -> bool:
-        return not self._enable_CPIC
 
     @property
     def data(self) -> Iterator[DataItem | ConfigItem]:
@@ -856,10 +994,6 @@ Please decrease the simulation timestep or adjust the material parameters."""
     def grid_offset(self) -> qd.Vector:
         return self._grid_offset
 
-    @property
-    def enable_CPIC(self) -> bool:
-        return self._enable_CPIC
-
 
 # ------------------------------------------------------------------------------------
 # ------------------------------------- kernels --------------------------------------
@@ -934,17 +1068,162 @@ def kernel_svd(mpm_state: MPMState, mpm_info: MPMInfo):
             mpm_state.particles.V[i_p, i_b] = V
 
 
-@reversed_with(is_backward=True)
-@qd.kernel
-def kernel_transfer_particles_to_grid(
+@no_grad
+@qd.kernel(fastcache=True)
+def kernel_update_particles_sides(
     mpm_state: MPMState,
     geoms_state: GeomsState,
+    links_state: LinksState,
     mpm_info: MPMInfo,
     geoms_info: GeomsInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
     mpm_config: qd.template(),
     collider_config: qd.template(),
+):
+    """
+    Update the side of the thin rigid links and of their sources that each active MPM particle lies on, and record the
+    source separating it from each cell of its stencil.
+
+    A side is the outward normal of a source, or of the source of the link nearest to the particle, kept while the
+    particle stays outside them and on the same side (see MPMCPICInfo). A particle that enters a source, or crosses it
+    within a substep, keeps the side it came from, and the source it lies deepest inside of is recorded. The sides, the
+    penetrations and the separations are discrete decisions of the substep, which carry no gradient: the reverse pass
+    reuses them as recorded, like a contact set. With gradient, the sides updated from the position of the particle are
+    flagged, for the collisions to take the gradient of the normal they read (see
+    kernel_collide_particles_with_thin_links).
+    """
+    for i_p, i_b in qd.ndrange(
+        *mpm_state.particles.pos.shape, axes=qd.static(eoa(mpm_state.particles_cpic.sources_normal))
+    ):
+        if mpm_state.particles.is_active[i_p, i_b]:
+            pos = mpm_state.particles.pos[i_p, i_b]
+            base, fx, w = func_quadratic_bspline_stencil(pos, mpm_info)
+            reach = mpm_info.cpic.reach[None]
+            for i_o in range(27):
+                mpm_state.particles_cpic.cell_source_idx[i_p, i_o // 9, i_o // 3 % 3, i_o % 3, i_b] = -1
+            i_cs_penetrated = -1
+            dist_penetrated = gs.qd_float(qd.math.inf)
+            for i_cl in range(mpm_state.particles_cpic.links_normal.shape[1]):
+                # The sides are kept in the frame of the link (see MPMParticlesCPIC)
+                i_cs_start = mpm_info.cpic.links_source_start[i_cl]
+                i_cs_end = mpm_info.cpic.links_source_start[i_cl + 1]
+                i_g_start = mpm_info.cpic.sources_geom_idx[i_cs_start]
+                i_l = geoms_info.link_idx[i_g_start]
+                link_quat = links_state.quat[i_l, i_b]
+                link_normal = gu.qd_transform_by_quat(mpm_state.particles_cpic.links_normal[i_p, i_cl, i_b], link_quat)
+                i_cs_nearest = -1
+                is_inside_link = False
+                is_near = False
+                # The particle comes first, whose position updates the sides, then the cells of its stencil, which the
+                # sides separate from it. One runtime loop over the points keeps a single inlined copy of the queries.
+                for i_q in range(28):
+                    i_o = qd.max(i_q - 1, 0)
+                    offset_cell = qd.Vector([i_o // 9, i_o // 3 % 3, i_o % 3])
+                    query_pos = pos
+                    is_queried = True
+                    if i_q > 0:
+                        query_pos = (base + offset_cell) * mpm_info.dx[None]
+                        is_queried = (
+                            is_near
+                            and mpm_state.particles_cpic.cell_source_idx[
+                                i_p, offset_cell[0], offset_cell[1], offset_cell[2], i_b
+                            ]
+                            == -1
+                        )
+                    if is_queried:
+                        i_cs_sep = -1
+                        normal_nearest = qd.Vector.zero(gs.qd_float, 3)
+                        dist_min = gs.qd_float(qd.math.inf)
+                        i_cs_nearest_query = -1
+                        for i_cs in range(i_cs_start, i_cs_end):
+                            i_g = mpm_info.cpic.sources_geom_idx[i_cs]
+                            i_row = mpm_info.cpic.sources_sdf_row[i_cs]
+                            dist = sdf.sdf_func_world_row(i_g, i_row, i_b, query_pos, geoms_state, geoms_info, sdf_info)
+                            normal = sdf.sdf_func_normal_world_row(
+                                i_g,
+                                i_row,
+                                i_b,
+                                query_pos,
+                                geoms_state,
+                                geoms_info,
+                                rigid_info,
+                                sdf_info,
+                                collider_config,
+                            )
+                            source_normal = gu.qd_transform_by_quat(
+                                mpm_state.particles_cpic.sources_normal[i_p, i_cs, i_b], link_quat
+                            )
+                            if i_q == 0:
+                                # The link separates the particle from cells of its stencil only within reach of the
+                                # box of one of its sources
+                                pos_local = gu.qd_inv_transform_by_trans_quat(
+                                    pos, geoms_state.pos[i_g, i_b], geoms_state.quat[i_g, i_b]
+                                )
+                                if (pos_local >= mpm_info.cpic.sources_lower[i_cs] - reach).all():
+                                    if (pos_local <= mpm_info.cpic.sources_upper[i_cs] + reach).all():
+                                        is_near = True
+                                # A convex source holds the particle exactly when it lies behind all the planes of its
+                                # faces, the sign of its SDF deciding for the other sources, whose SDF is only as
+                                # accurate as its cells
+                                i_plane_start = mpm_info.cpic.sources_plane_start[i_cs]
+                                i_plane_end = mpm_info.cpic.sources_plane_start[i_cs + 1]
+                                is_inside = dist < 0.0
+                                if i_plane_end > i_plane_start:
+                                    is_inside = True
+                                    for i_plane in range(i_plane_start, i_plane_end):
+                                        plane = mpm_info.cpic.planes[i_plane]
+                                        if pos_local.dot(qd.Vector([plane[0], plane[1], plane[2]])) > plane[3]:
+                                            is_inside = False
+                                if is_inside:
+                                    is_inside_link = True
+                                # Inside a source the normal turns around its medial axis, which the particle must not
+                                # follow, unless it has no side yet (a zero normal), as when it starts inside
+                                is_side_updated = (not is_inside or source_normal.norm_sqr() < 0.5) and normal.dot(
+                                    source_normal
+                                ) >= 0.0
+                                if is_side_updated:
+                                    mpm_state.particles_cpic.sources_normal[i_p, i_cs, i_b] = (
+                                        gu.qd_inv_transform_by_quat(normal, link_quat)
+                                    )
+                                if qd.static(mpm_config.requires_grad):
+                                    mpm_state.particles_cpic.is_sources_side_updated[i_p, i_cs, i_b] = is_side_updated
+                                if is_inside and not is_side_updated and dist < dist_penetrated:
+                                    dist_penetrated = dist
+                                    i_cs_penetrated = i_cs
+                            elif source_normal.dot(normal) < 0.0:
+                                i_cs_sep = i_cs
+                            if dist < dist_min:
+                                dist_min = dist
+                                normal_nearest = normal
+                                i_cs_nearest_query = i_cs
+                        if i_q == 0:
+                            i_cs_nearest = i_cs_nearest_query
+                            is_link_side_updated = (
+                                not is_inside_link or link_normal.norm_sqr() < 0.5
+                            ) and normal_nearest.dot(link_normal) >= 0.0
+                            if is_link_side_updated:
+                                link_normal = normal_nearest
+                                mpm_state.particles_cpic.links_normal[i_p, i_cl, i_b] = gu.qd_inv_transform_by_quat(
+                                    normal_nearest, link_quat
+                                )
+                        else:
+                            # Each cell is separated from the particle by the first thin link whose sides they lie on
+                            # differ (see MPMCPICInfo)
+                            if link_normal.dot(normal_nearest) < 0.0:
+                                i_cs_sep = i_cs_nearest
+                            mpm_state.particles_cpic.cell_source_idx[
+                                i_p, offset_cell[0], offset_cell[1], offset_cell[2], i_b
+                            ] = i_cs_sep
+            mpm_state.particles_cpic.penetrated_source_idx[i_p, i_b] = i_cs_penetrated
+
+
+@reversed_with(is_backward=True)
+@qd.kernel
+def kernel_transfer_particles_to_grid(
+    mpm_state: MPMState,
+    mpm_info: MPMInfo,
+    mpm_config: qd.template(),
     mpm_materials: qd.template(),
     is_backward: qd.template(),
 ):
@@ -1006,44 +1285,35 @@ def kernel_transfer_particles_to_grid(
             if qd.static(mpm_config.is_deterministic and not is_backward):
                 mpm_state.particles.affine[i_p, i_b] = affine
 
-            if qd.static(mpm_config.is_cpic or not mpm_config.is_deterministic or is_backward):
+            if qd.static(not mpm_config.is_deterministic or is_backward):
                 base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[i_p, i_b], mpm_info)
                 grid_offset = mpm_info.grid_offset[None]
                 for offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
-                    i_g_sep = -1
+                    # A cell separated from the particle by a thin rigid link gets nothing from it (see MPMCPICInfo)
+                    i_cs_sep = -1
                     if qd.static(mpm_config.is_cpic):
-                        # The cell is separated from the particle by the first geom whose sides they lie on differ
-                        cell_pos = (base + offset) * mpm_info.dx[None]
-                        for i_g in range(mpm_state.particles_cpic.rigid_normal.shape[1]):
-                            if i_g_sep == -1 and geoms_info.needs_coup[i_g]:
-                                sdf_normal_cell = sdf.sdf_func_normal_world(
-                                    i_g, i_b, cell_pos, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
-                                )
-                                if mpm_state.particles_cpic.rigid_normal[i_p, i_g, i_b].dot(sdf_normal_cell) < 0:
-                                    i_g_sep = i_g
-                        mpm_state.particles_cpic.cell_geom_idx[i_p, offset[0], offset[1], offset[2], i_b] = i_g_sep
-                    if qd.static(not mpm_config.is_deterministic or is_backward):
-                        if i_g_sep == -1:
-                            dpos = (offset.cast(gs.qd_float) - fx) * mpm_info.dx[None]
-                            weight = gs.qd_float(1.0)
-                            for d in qd.static(range(3)):
-                                weight *= w[offset[d], d]
-                            cell = base - grid_offset + offset
-                            qd.atomic_add(
-                                mpm_state.grid.vel_in[cell[0], cell[1], cell[2], i_b],
-                                weight * (mass * mpm_state.particles.vel[i_p, i_b] + affine @ dpos),
-                            )
-                            mass_contrib = weight * mass
-                            mass_prev = qd.atomic_add(mpm_state.grid.mass[cell[0], cell[1], cell[2], i_b], mass_contrib)
-                            # The masses are non-negative, so the first contribution of an env to a cell claims the cell
-                            # in the dirty flag shared by the envs, and the first env claiming it lists it (see MPMGrid)
-                            if qd.static(not mpm_config.requires_grad):
-                                if mass_prev <= 0.0 and mass_contrib > 0.0:
-                                    if qd.atomic_or(mpm_state.grid.dirty_flag[cell[0], cell[1], cell[2]], 1) == 0:
-                                        i_slot = qd.atomic_add(mpm_state.grid.dirty_count[0], 1)
-                                        grid_y, grid_z = mpm_state.grid.mass.shape[1], mpm_state.grid.mass.shape[2]
-                                        i_cell = (cell[0] * grid_y + cell[1]) * grid_z + cell[2]
-                                        mpm_state.grid.dirty_list[i_slot] = i_cell
+                        i_cs_sep = mpm_state.particles_cpic.cell_source_idx[i_p, offset[0], offset[1], offset[2], i_b]
+                    if i_cs_sep == -1:
+                        dpos = (offset.cast(gs.qd_float) - fx) * mpm_info.dx[None]
+                        weight = gs.qd_float(1.0)
+                        for d in qd.static(range(3)):
+                            weight *= w[offset[d], d]
+                        cell = base - grid_offset + offset
+                        qd.atomic_add(
+                            mpm_state.grid.vel_in[cell[0], cell[1], cell[2], i_b],
+                            weight * (mass * mpm_state.particles.vel[i_p, i_b] + affine @ dpos),
+                        )
+                        mass_contrib = weight * mass
+                        mass_prev = qd.atomic_add(mpm_state.grid.mass[cell[0], cell[1], cell[2], i_b], mass_contrib)
+                        # The masses are non-negative, so the first contribution of an env to a cell claims the cell
+                        # in the dirty flag shared by the envs, and the first env claiming it lists it (see MPMGrid)
+                        if qd.static(not mpm_config.requires_grad):
+                            if mass_prev <= 0.0 and mass_contrib > 0.0:
+                                if qd.atomic_or(mpm_state.grid.dirty_flag[cell[0], cell[1], cell[2]], 1) == 0:
+                                    i_slot = qd.atomic_add(mpm_state.grid.dirty_count[0], 1)
+                                    grid_y, grid_z = mpm_state.grid.mass.shape[1], mpm_state.grid.mass.shape[2]
+                                    i_cell = (cell[0] * grid_y + cell[1]) * grid_z + cell[2]
+                                    mpm_state.grid.dirty_list[i_slot] = i_cell
 
     if qd.static(mpm_config.is_deterministic and not is_backward):
         func_sort_particles(mpm_state, mpm_info, mpm_config)
@@ -1162,19 +1432,25 @@ def func_gather_particles(
                                 weight *= qd.select(
                                     offset[d] == 0, w[0, d], qd.select(offset[d] == 1, w[1, d], w[2, d])
                                 )
+                            # A cell separated from the particle exchanges nothing with it (see MPMCPICInfo)
+                            is_separated = False
+                            if qd.static(mpm_config.is_cpic):
+                                i_cs_sep = mpm_state.particles_cpic.cell_source_idx[
+                                    i_p, offset[0], offset[1], offset[2], i_b
+                                ]
+                                is_separated = i_cs_sep != -1
                             if qd.static(is_g2p_backward):
-                                dpos = offset.cast(gs.qd_float) - fx
-                                momentum += weight * (
-                                    mpm_state.particles.vel_tmp.grad[i_p, i_b]
-                                    + 4 * mpm_info.inv_dx[None] * (mpm_state.particles.C_next.grad[i_p, i_b] @ dpos)
-                                )
-                            else:
-                                is_separated = False
+                                # Any cell of a particle inside a thin source gave it nothing either
                                 if qd.static(mpm_config.is_cpic):
-                                    i_g_sep = mpm_state.particles_cpic.cell_geom_idx[
-                                        i_p, offset[0], offset[1], offset[2], i_b
-                                    ]
-                                    is_separated = i_g_sep != -1
+                                    if mpm_state.particles_cpic.penetrated_source_idx[i_p, i_b] != -1:
+                                        is_separated = True
+                                if not is_separated:
+                                    dpos = offset.cast(gs.qd_float) - fx
+                                    momentum += weight * (
+                                        mpm_state.particles.vel_tmp.grad[i_p, i_b]
+                                        + 4 * mpm_info.inv_dx[None] * (mpm_state.particles.C_next.grad[i_p, i_b] @ dpos)
+                                    )
+                            else:
                                 if not is_separated:
                                     mass = mpm_info.particles.mass[i_p]
                                     dpos = (offset.cast(gs.qd_float) - fx) * mpm_info.dx[None]
@@ -1281,6 +1557,50 @@ def func_add_particle_vel(i_p: int, i_b: int, vel: qd.types.vector(3), mpm_state
 
 
 @qd.func
+def func_collide_particle_with_thin_link(
+    i_p: int,
+    i_b: int,
+    i_g: int,
+    weight: float,
+    vel: qd.types.vector(3),
+    normal: qd.types.vector(3),
+    mpm_state: MPMState,
+    links_state: LinksState,
+    mpm_info: MPMInfo,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    is_exact: qd.template(),
+):
+    """
+    Return the velocity of the collision of an active particle with a thin rigid geom on behalf of a cell of its
+    stencil, and push the link of the geom by its reaction.
+
+    `weight` is the weight of the cell in the stencil, which scales the mass of the particle the collision exchanges,
+    `vel` the velocity that collides, and `normal` the outward normal of the geom on the side of the particle. `is_exact`
+    selects how the reaction adds to the external wrench of the link (see func_add_external_wrench).
+    """
+    i_l = geoms_info.link_idx[i_g]
+    pos = mpm_state.particles.pos[i_p, i_b]
+    vel, force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
+        i_g,
+        i_b,
+        pos,
+        vel,
+        mass=mpm_info.particles.mass[i_p] * weight / mpm_info.particle_volume_scale[None],
+        normal_rigid=normal,
+        influence=1.0,
+        links_state=links_state,
+        geoms_info=geoms_info,
+        rigid_info=rigid_info,
+    )
+    if is_colliding:
+        func_add_external_wrench(
+            i_l, i_b, pos, force, torque=qd.Vector.zero(gs.qd_float, 3), links_state=links_state, is_exact=is_exact
+        )
+    return vel
+
+
+@qd.func
 def func_gather_grid_velocity(
     i_p: int,
     i_b: int,
@@ -1290,18 +1610,23 @@ def func_gather_grid_velocity(
     geoms_info: GeomsInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
+    is_collisions: qd.template(),
 ):
     """
     Return the velocity and the affine velocity field an active particle gathers from the cells of its stencil.
 
-    Under compatible particle-in-cell (CPIC), a cell separated from the particle by a rigid geom gives it the velocity
-    of the collision of the particle with the geom instead, whose reaction pushes the link of the geom (see
-    func_add_external_wrench).
+    Under compatible particle-in-cell (CPIC), a cell separated from the particle by a thin rigid source gives it the
+    velocity of the collision of the particle with the source instead, and every cell gives a particle inside a thin
+    source the velocity of the collision of the cell with the source, so that it moves no deeper. The collisions are
+    gathered with `is_collisions`, the cells giving nothing otherwise (see kernel_collide_particles_with_thin_links).
     """
     inv_dx = mpm_info.inv_dx[None]
     base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[i_p, i_b], mpm_info)
     vel = qd.Vector.zero(gs.qd_float, 3)
     C = qd.Matrix.zero(gs.qd_float, 3, 3)
+    i_cs_penetrated = -1
+    if qd.static(mpm_config.is_cpic):
+        i_cs_penetrated = mpm_state.particles_cpic.penetrated_source_idx[i_p, i_b]
     # A runtime loop over the cells of the stencil keeps a single inlined copy of the collision with the rigid geoms
     for i_o in range(27):
         offset = qd.Vector([i_o // 9, i_o // 3 % 3, i_o % 3])
@@ -1313,29 +1638,31 @@ def func_gather_grid_velocity(
             weight *= qd.select(offset[d] == 0, w[0, d], qd.select(offset[d] == 1, w[1, d], w[2, d]))
 
         if qd.static(mpm_config.is_cpic):
-            i_g_sep = mpm_state.particles_cpic.cell_geom_idx[i_p, offset[0], offset[1], offset[2], i_b]
-            if i_g_sep != -1:
-                pos = mpm_state.particles.pos[i_p, i_b]
-                grid_vel, force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
-                    i_g_sep,
-                    i_b,
-                    pos,
-                    mpm_state.particles.vel[i_p, i_b],
-                    mass=mpm_info.particles.mass[i_p] * weight / mpm_info.particle_volume_scale[None],
-                    normal_rigid=mpm_state.particles_cpic.rigid_normal[i_p, i_g_sep, i_b],
-                    influence=1.0,
-                    links_state=links_state,
-                    geoms_info=geoms_info,
-                    rigid_info=rigid_info,
-                )
-                if is_colliding:
-                    func_add_external_wrench(
-                        geoms_info.link_idx[i_g_sep],
+            i_cs = mpm_state.particles_cpic.cell_source_idx[i_p, offset[0], offset[1], offset[2], i_b]
+            vel_colliding = mpm_state.particles.vel[i_p, i_b]
+            if i_cs == -1 and i_cs_penetrated != -1:
+                i_cs = i_cs_penetrated
+                vel_colliding = grid_vel
+            if i_cs != -1:
+                grid_vel = qd.Vector.zero(gs.qd_float, 3)
+                if qd.static(is_collisions):
+                    i_g = mpm_info.cpic.sources_geom_idx[i_cs]
+                    i_l = geoms_info.link_idx[i_g]
+                    normal = gu.qd_transform_by_quat(
+                        mpm_state.particles_cpic.sources_normal[i_p, i_cs, i_b], links_state.quat[i_l, i_b]
+                    )
+                    grid_vel = func_collide_particle_with_thin_link(
+                        i_p,
                         i_b,
-                        pos,
-                        force,
-                        torque=qd.Vector.zero(gs.qd_float, 3),
-                        links_state=links_state,
+                        i_g,
+                        weight,
+                        vel_colliding,
+                        normal,
+                        mpm_state,
+                        links_state,
+                        mpm_info,
+                        geoms_info,
+                        rigid_info,
                         is_exact=mpm_config.is_deterministic,
                     )
 
@@ -1380,7 +1707,7 @@ def kernel_integrate_particles(
     for i_p, i_b in qd.ndrange(*mpm_state.particles.pos.shape, axes=qd.static(eoa(mpm_state.particles.is_active))):
         if mpm_state.particles.is_active[i_p, i_b]:
             vel, C = func_gather_grid_velocity(
-                i_p, i_b, mpm_state, links_state, mpm_info, geoms_info, rigid_info, mpm_config
+                i_p, i_b, mpm_state, links_state, mpm_info, geoms_info, rigid_info, mpm_config, is_collisions=True
             )
             mpm_state.particles.C_next[i_p, i_b] = C
             func_advect_particle(i_p, i_b, vel, mpm_state, mpm_info, errno)
@@ -1428,6 +1755,13 @@ def kernel_transfer_grid_to_particles_grad(
                 weight = gs.qd_float(1.0)
                 for d in qd.static(range(3)):
                     weight *= w[offset[d], d]
+                # A cell separated from the particle, or any cell of a particle inside a thin source, gave it nothing
+                # (see kernel_collide_particles_with_thin_links)
+                if qd.static(mpm_config.is_cpic):
+                    i_cs = mpm_state.particles_cpic.cell_source_idx[i_p, offset[0], offset[1], offset[2], i_b]
+                    if i_cs != -1 or mpm_state.particles_cpic.penetrated_source_idx[i_p, i_b] != -1:
+                        weight = 0.0
+                        grid_vel = qd.Vector.zero(gs.qd_float, 3)
                 weight_grad = qd.Vector(
                     [
                         dw[offset[0], 0] * w[offset[1], 1] * w[offset[2], 2],
@@ -1480,7 +1814,7 @@ def kernel_transfer_grid_to_particles(
     for i_p, i_b in qd.ndrange(*mpm_state.particles.pos.shape, axes=qd.static(eoa(mpm_state.particles.is_active))):
         if mpm_state.particles.is_active[i_p, i_b]:
             vel, C = func_gather_grid_velocity(
-                i_p, i_b, mpm_state, links_state, mpm_info, geoms_info, rigid_info, mpm_config
+                i_p, i_b, mpm_state, links_state, mpm_info, geoms_info, rigid_info, mpm_config, is_collisions=False
             )
             mpm_state.particles.vel_tmp[i_p, i_b] = vel
             mpm_state.particles.C_next[i_p, i_b] = C
@@ -1488,6 +1822,86 @@ def kernel_transfer_grid_to_particles(
             mpm_state.particles.C_next[i_p, i_b] = mpm_state.particles.C[i_p, i_b]
             mpm_state.particles.F_next[i_p, i_b] = mpm_state.particles.F[i_p, i_b]
             mpm_state.particles.Jp_next[i_p, i_b] = mpm_state.particles.Jp[i_p, i_b]
+
+
+@qd.kernel(fastcache=True)
+def kernel_collide_particles_with_thin_links(
+    mpm_state: MPMState,
+    geoms_state: GeomsState,
+    links_state: LinksState,
+    mpm_info: MPMInfo,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+    collider_config: qd.template(),
+):
+    """
+    Add the collisions of the active particles with the thin rigid links separating them from cells of their stencil to
+    the velocity and the affine velocity field they gathered from the other cells (see kernel_transfer_grid_to_particles).
+
+    The separations stay as recorded by the side update of the substep, at which autodiff reverses this kernel. A side
+    updated in the substep is the normal of the geom at the particle, which is evaluated again here for its gradient
+    with respect to the particle and the link, the other sides being kept in the frame of their link.
+    """
+    # FIXME: quadrants#1106, quadrants#1107 - autodiff reverses a runtime loop over the cells wrongly, so each thread
+    # handles one cell of the stencil of a particle, at the cost of recomputing the stencil weights for each cell.
+    for i_po, i_b in qd.ndrange(
+        27 * mpm_state.particles.pos.shape[0],
+        mpm_state.particles.pos.shape[1],
+        axes=qd.static(eoa(mpm_state.particles.is_active)),
+    ):
+        i_p = i_po // 27
+        offset = qd.Vector([i_po // 9 % 3, i_po // 3 % 3, i_po % 3])
+        if mpm_state.particles.is_active[i_p, i_b]:
+            i_cs = mpm_state.particles_cpic.cell_source_idx[i_p, offset[0], offset[1], offset[2], i_b]
+            i_cs_penetrated = mpm_state.particles_cpic.penetrated_source_idx[i_p, i_b]
+            base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[i_p, i_b], mpm_info)
+            vel_colliding = mpm_state.particles.vel[i_p, i_b]
+            if i_cs == -1 and i_cs_penetrated != -1:
+                i_cs = i_cs_penetrated
+                cell = base - mpm_info.grid_offset[None] + offset
+                vel_colliding = mpm_state.grid.vel_out[cell[0], cell[1], cell[2], i_b]
+            if i_cs != -1:
+                weight = gs.qd_float(1.0)
+                for d in qd.static(range(3)):
+                    weight *= qd.select(offset[d] == 0, w[0, d], qd.select(offset[d] == 1, w[1, d], w[2, d]))
+                i_g = mpm_info.cpic.sources_geom_idx[i_cs]
+                i_row = mpm_info.cpic.sources_sdf_row[i_cs]
+                i_l = geoms_info.link_idx[i_g]
+                normal = gu.qd_transform_by_quat(
+                    mpm_state.particles_cpic.sources_normal[i_p, i_cs, i_b], links_state.quat[i_l, i_b]
+                )
+                if mpm_state.particles_cpic.is_sources_side_updated[i_p, i_cs, i_b]:
+                    normal = sdf.sdf_func_normal_world_row(
+                        i_g,
+                        i_row,
+                        i_b,
+                        mpm_state.particles.pos[i_p, i_b],
+                        geoms_state,
+                        geoms_info,
+                        rigid_info,
+                        sdf_info,
+                        collider_config,
+                    )
+                vel = func_collide_particle_with_thin_link(
+                    i_p,
+                    i_b,
+                    i_g,
+                    weight,
+                    vel_colliding,
+                    normal,
+                    mpm_state,
+                    links_state,
+                    mpm_info,
+                    geoms_info,
+                    rigid_info,
+                    is_exact=False,
+                )
+                dpos = offset.cast(gs.qd_float) - fx
+                qd.atomic_add(mpm_state.particles.vel_tmp[i_p, i_b], weight * vel)
+                qd.atomic_add(
+                    mpm_state.particles.C_next[i_p, i_b], 4 * mpm_info.inv_dx[None] * weight * vel.outer_product(dpos)
+                )
 
 
 @qd.kernel(fastcache=True)

@@ -73,6 +73,10 @@ if TYPE_CHECKING:
 PBD_PARTICLES = Size("pbd_particles")
 # The arrays of the coupling of the rigid geoms with the PBD particles, which a scene without it leaves out
 RIGID_PBD = "rigid_pbd"
+# The rigid sources the MPM grid collides with (see 'LegacyCoupler.rigid_mpm_sources'), which a scene without the
+# coupling of the rigid geoms with the MPM particles leaves out
+RIGID_MPM = "rigid_mpm"
+RIGID_MPM_SOURCES = Size("rigid_mpm_sources")
 
 
 # The segments of the surfaces of the FEM entities and of the rigid geoms, which a scene without their coupling with
@@ -240,6 +244,10 @@ class LegacyCouplerInfo(Data, kind=DataKind.CONSTANT):
     mpm_sph_stencil_size: qd.Tensor = field(int, shape=())
     mpm_pbd_stencil_size: qd.Tensor = field(int, shape=())
     EPS: qd.Tensor = field(float, shape=())
+    # The geom of each rigid source the MPM grid collides with, whose pose, type and coupling coefficients it takes, and
+    # the row of the SDF grid it reads (see 'LegacyCoupler.rigid_mpm_sources')
+    rigid_mpm_sources_geom_idx: qd.Tensor = field(int, shape=(RIGID_MPM_SOURCES,), labels=RIGID_MPM)
+    rigid_mpm_sources_sdf_row: qd.Tensor = field(int, shape=(RIGID_MPM_SOURCES,), labels=RIGID_MPM)
 
 
 class LegacyCouplerConfig(Config):
@@ -354,8 +362,10 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         self.legacy_coupler_config: LegacyCouplerConfig | None = None
         self.sph_boundaries: SPHBoundaries | None = None
 
-        # The MPM and PBD particles and the FEM vertices collide with the rigid geoms through their SDF
+        # The MPM and PBD particles and the FEM vertices collide with the rigid geoms through their SDF, the MPM
+        # particles with the meshes the coupled geoms were decomposed from (see 'rigid_mpm_sources')
         opt_in(SDFInfo, cond=lambda: any([self.rigid_couplings[i] for i in (0, 2, 3)]))
+        opt_in(SDFInfo.geoms_source_row, cond=lambda: self.rigid_couplings[0])
         # The surfaces of the FEM entities and of the rigid geoms are moving boundaries of the SPH liquid
         opt_in(SPHState.boundary, cond=lambda: self.has_fem_sph or bool(self.rigid_sph_geoms))
         # The SPH liquid sums its forces on the rigid links exactly when the order of the sums is fixed
@@ -407,6 +417,27 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     if geom.needs_coup and not (geom.type == gs.GEOM_TYPE.PLANE and is_plane_beyond_domain):
                         rigid_sph_geoms.append(geom)
         return rigid_sph_geoms
+
+    @property
+    def rigid_mpm_sources(self) -> list[tuple["RigidGeom", int]]:
+        """The rigid sources the MPM particles collide with, each a geom and the row of the SDF grid it reads.
+
+        A coupled geom is a source on its own row, except the pieces of a convex decomposition: the first piece of a
+        link is a source on the row of the mesh they were cut from (see 'SDF'), which the others add nothing to. The
+        source takes its pose, type and coupling coefficients from its geom, which shares the frame of that mesh.
+        """
+        if not self.rigid_couplings[0]:
+            return []
+        geoms_source_row = qd_to_numpy(self.rigid_solver.collider.sdf.sdf_info.geoms_source_row, transpose=True)
+        sources = []
+        sources_link_row = set()
+        for geom in self.rigid_solver.geoms:
+            if geom.needs_coup:
+                i_row = geom.idx if geoms_source_row[geom.idx] < 0 else int(geoms_source_row[geom.idx])
+                if (geom.link.idx, i_row) not in sources_link_row:
+                    sources_link_row.add((geom.link.idx, i_row))
+                    sources.append((geom, i_row))
+        return sources
 
     @property
     def rigid_couplings(self) -> tuple[bool, bool, bool, bool]:
@@ -462,7 +493,9 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             mpm_sph_stencil_size = int(np.floor(self.mpm_solver.dx / self.sph_solver.hash_grid_cell_size) + 2)
         if has_mpm_pbd:
             mpm_pbd_stencil_size = int(np.floor(self.mpm_solver.dx / self.pbd_solver.hash_grid_cell_size) + 2)
+        rigid_mpm_sources = self.rigid_mpm_sources
         self.legacy_coupler_info = LegacyCouplerInfo(
+            sizes=dict(rigid_mpm_sources=len(rigid_mpm_sources)),
             values=dict(
                 influence_min=0.1,
                 velocity_tol=1e-6,
@@ -472,10 +505,18 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 mpm_sph_stencil_size=mpm_sph_stencil_size,
                 mpm_pbd_stencil_size=mpm_pbd_stencil_size,
                 EPS=gs.EPS,
-            )
+            ),
+            unused=dict(rigid_mpm=not has_rigid_mpm),
         )
+        if rigid_mpm_sources:
+            self.legacy_coupler_info.rigid_mpm_sources_geom_idx.from_numpy(
+                np.array([geom.idx for geom, _ in rigid_mpm_sources], dtype=gs.np_int)
+            )
+            self.legacy_coupler_info.rigid_mpm_sources_sdf_row.from_numpy(
+                np.array([i_row for _, i_row in rigid_mpm_sources], dtype=gs.np_int)
+            )
 
-        if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
+        if self.mpm_solver.is_active and self.mpm_solver.mpm_config.is_cpic:
             kernel_reset_mpm_rigid_normal(self.sim.scene._sanitize_envs_idx(None), self.mpm_solver.mpm_state)
 
     def _build_sph_boundaries(self, rigid_sph_geoms: list["RigidGeom"]) -> tuple[bool, bool]:
@@ -984,17 +1025,6 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 self.legacy_coupler_config,
             )
 
-        # preprocess for MPM CPIC
-        if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
-            kernel_mpm_surface_to_particle(
-                self.mpm_solver.mpm_state,
-                self.rigid_solver.dyn_state.geoms,
-                self.rigid_solver.dyn_info.geoms,
-                self.rigid_solver.rigid_info,
-                self.rigid_solver.collider.sdf.sdf_info,
-                self.rigid_solver.collider.collider_config,
-            )
-
     def couple(self) -> None:
         # MPM <-> all others
         if self.mpm_solver.is_active:
@@ -1105,18 +1135,21 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
 @qd.kernel(fastcache=True)
 def kernel_reset_mpm_rigid_normal(envs_idx: qd.types.ndarray(), mpm_state: MPMState):
     for i_p, i_b_ in qd.ndrange(
-        mpm_state.particles_cpic.rigid_normal.shape[0],
+        mpm_state.particles_cpic.sources_normal.shape[0],
         envs_idx.shape[0],
-        axes=qd.static(eoa(mpm_state.particles_cpic.rigid_normal)),
+        axes=qd.static(eoa(mpm_state.particles_cpic.sources_normal)),
     ):
         i_b = envs_idx[i_b_]
-        for i_g in range(mpm_state.particles_cpic.rigid_normal.shape[1]):
-            mpm_state.particles_cpic.rigid_normal[i_p, i_g, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        for i_cs in range(mpm_state.particles_cpic.sources_normal.shape[1]):
+            mpm_state.particles_cpic.sources_normal[i_p, i_cs, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        for i_cl in range(mpm_state.particles_cpic.links_normal.shape[1]):
+            mpm_state.particles_cpic.links_normal[i_p, i_cl, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.func
 def func_rigid_geom_influence(
     i_g: int,
+    i_row: int,
     i_b: int,
     pos_world: qd.types.vector(3),
     geoms_state: GeomsState,
@@ -1130,10 +1163,10 @@ def func_rigid_geom_influence(
     """
     Return the signed distance of a point to a rigid geom, the influence of the geom there, and its normal there.
 
-    With `skip_weak_normal`, the normal is left zero where the influence is too weak to matter (see
-    'LegacyCouplerInfo'), which spares its evaluation.
+    The grid of the geom is read from row `i_row` of the SDF info (see 'SDF'). With `skip_weak_normal`, the normal is
+    left zero where the influence is too weak to matter (see 'LegacyCouplerInfo'), which spares its evaluation.
     """
-    signed_dist = sdf.sdf_func_world(i_g, i_b, pos_world, geoms_state, geoms_info, sdf_info)
+    signed_dist = sdf.sdf_func_world_row(i_g, i_row, i_b, pos_world, geoms_state, geoms_info, sdf_info)
 
     # bigger coup_softness implies that the coupling influence extends further away from the object.
     softness = qd.max(legacy_coupler_info.softness_min[None], geoms_info.coup_softness[i_g])
@@ -1144,8 +1177,8 @@ def func_rigid_geom_influence(
     if qd.static(skip_weak_normal):
         is_normal_needed = influence > legacy_coupler_info.influence_min[None]
     if is_normal_needed:
-        normal_rigid = sdf.sdf_func_normal_world(
-            i_g, i_b, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
+        normal_rigid = sdf.sdf_func_normal_world_row(
+            i_g, i_row, i_b, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
         )
     return signed_dist, influence, normal_rigid
 
@@ -1169,39 +1202,42 @@ def func_point_vel_after_collisions_with_rigid_geoms(
     is_backward: qd.template(),
 ):
     """
-    Return the velocity of a cell of the MPM grid of the given mass once it collided with every rigid geom that couples.
+    Return the velocity of a cell of the MPM grid of the given mass once it collided with every rigid source.
 
-    The momentum change of each collision pushes the link of the geom (see func_add_external_wrench), exactly with
-    `is_deterministic` (see MPMConfig), except in the variant autodiff reverses (`is_backward`).
+    The momentum change of each collision pushes the link of the geom of the source (see func_add_external_wrench),
+    exactly with `is_deterministic` (see MPMConfig), except in the variant autodiff reverses (`is_backward`).
     """
-    for i_g in range(geoms_info.needs_coup.shape[0]):
-        if geoms_info.needs_coup[i_g]:
-            _, influence, normal_rigid = func_rigid_geom_influence(
-                i_g,
-                i_b,
-                pos_world,
-                geoms_state,
-                geoms_info,
-                rigid_info,
-                sdf_info,
-                legacy_coupler_info,
-                collider_config,
-                skip_weak_normal=True,
+    for i_s in range(legacy_coupler_info.rigid_mpm_sources_geom_idx.shape[0]):
+        i_g = legacy_coupler_info.rigid_mpm_sources_geom_idx[i_s]
+        i_row = legacy_coupler_info.rigid_mpm_sources_sdf_row[i_s]
+        _, influence, normal_rigid = func_rigid_geom_influence(
+            i_g,
+            i_row,
+            i_b,
+            pos_world,
+            geoms_state,
+            geoms_info,
+            rigid_info,
+            sdf_info,
+            legacy_coupler_info,
+            collider_config,
+            skip_weak_normal=True,
+        )
+        if influence > legacy_coupler_info.influence_min[None]:
+            vel, force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
+                i_g, i_b, pos_world, vel, mass, normal_rigid, influence, links_state, geoms_info, rigid_info
             )
-            if influence > legacy_coupler_info.influence_min[None]:
-                vel, force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
-                    i_g, i_b, pos_world, vel, mass, normal_rigid, influence, links_state, geoms_info, rigid_info
+            if is_colliding:
+                i_l = geoms_info.link_idx[i_g]
+                func_add_external_wrench(
+                    i_l,
+                    i_b,
+                    pos_world,
+                    force,
+                    torque=qd.Vector.zero(gs.qd_float, 3),
+                    links_state=links_state,
+                    is_exact=mpm_config.is_deterministic and not is_backward,
                 )
-                if is_colliding:
-                    func_add_external_wrench(
-                        geoms_info.link_idx[i_g],
-                        i_b,
-                        pos_world,
-                        force,
-                        torque=qd.Vector.zero(gs.qd_float, 3),
-                        links_state=links_state,
-                        is_exact=mpm_config.is_deterministic and not is_backward,
-                    )
     return vel
 
 
@@ -1349,37 +1385,6 @@ def kernel_mpm_grid_op(
 
 
 @qd.kernel(fastcache=True)
-def kernel_mpm_surface_to_particle(
-    mpm_state: MPMState,
-    geoms_state: GeomsState,
-    geoms_info: GeomsInfo,
-    rigid_info: RigidInfo,
-    sdf_info: SDFInfo,
-    collider_config: qd.template(),
-):
-    """Update the normal of the rigid geoms each active MPM particle sees, as long as it stays on the same side."""
-    for i_p, i_b in qd.ndrange(
-        *mpm_state.particles.pos.shape, axes=qd.static(eoa(mpm_state.particles_cpic.rigid_normal))
-    ):
-        if mpm_state.particles.is_active[i_p, i_b]:
-            for i_g in range(mpm_state.particles_cpic.rigid_normal.shape[1]):
-                if geoms_info.needs_coup[i_g]:
-                    sdf_normal = sdf.sdf_func_normal_world(
-                        i_g,
-                        i_b,
-                        mpm_state.particles.pos[i_p, i_b],
-                        geoms_state,
-                        geoms_info,
-                        rigid_info,
-                        sdf_info,
-                        collider_config,
-                    )
-                    # The normal is updated as long as the particle stays on the same side of the geom
-                    if sdf_normal.dot(mpm_state.particles_cpic.rigid_normal[i_p, i_g, i_b]) >= 0:
-                        mpm_state.particles_cpic.rigid_normal[i_p, i_g, i_b] = sdf_normal
-
-
-@qd.kernel(fastcache=True)
 def kernel_fem_surface_force(
     fem_state: FEMState,
     mpm_state: MPMState,
@@ -1418,6 +1423,7 @@ def kernel_fem_surface_force(
             for i_g in range(geoms_info.needs_coup.shape[0]):
                 if geoms_info.needs_coup[i_g]:
                     _, influence, normal_rigid = func_rigid_geom_influence(
+                        i_g,
                         i_g,
                         i_b,
                         pos,

@@ -65,7 +65,12 @@ class LegacyCouplerOptions(BaseCouplerOptions):
     Parameters
     ----------
     rigid_mpm : bool, optional
-        Whether to enable coupling between rigid and MPM solvers. Defaults to True.
+        Whether to enable coupling between rigid and MPM solvers. Defaults to True. The particles collide with the mesh
+        a convex decomposition cut a rigid geom from rather than with its pieces, whose hulls fill the concave regions
+        between them, at the cost of the memory of one more signed distance field per decomposed mesh. The rigid
+        contacts keep the pieces. The rigid links holding a coupled geom thinner than three cells of the MPM grid also
+        keep the particles from exchanging momentum with the cells on their other side, which stops liquid from leaking
+        through thin walls at the cost of extra work for the particles near them.
     rigid_sph : bool, optional
         Whether to enable coupling between rigid and SPH solvers. Defaults to True. The liquid sampled inside a coupled
         rigid body, or within half a particle size of its surface, is removed when the scene is built, with a warning.
@@ -686,8 +691,6 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
         Particle diameter in meters. If not given, we will compute `particle_size` based on `grid_density`, where `particle_size` will be linearly proportional to the grid cell size. A reference value is `particle_size = 0.01` for `grid_density = 64`. Defaults to None.
     grid_density : float, optional
         Number of grid cells per meter. Defaults to 64.
-    enable_CPIC : bool, optional
-        Whether to enable CPIC (Compatible Particle-in-Cell) to support coupling with thin objects. Defaults to False.
     lower_bound : tuple, shape (3,), optional
         Lower bound of the simulation domain. Defaults to (-1.0, -1.0, 0.0).
     upper_bound : tuple, shape (3,), optional
@@ -700,7 +703,6 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
 
     particle_size: PositiveFloat | None = None  # in meters. Will be computed automatically if it's None.
     grid_density: PositiveFloat = 64
-    enable_CPIC: StrictBool = False
 
     # These will later be converted to discrete grid bound. The actual grid boundary could be slightly tighter.
     lower_bound: Vec3FType = (-1.0, -1.0, 0.0)
