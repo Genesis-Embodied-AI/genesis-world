@@ -1652,7 +1652,7 @@ class RigidEntity(KinematicEntity):
         self._equality_start = 0
         self._free_verts_idx_local = torch.tensor([], dtype=gs.tc_int, device=gs.device)
         self._fixed_verts_idx_local = torch.tensor([], dtype=gs.tc_int, device=gs.device)
-        self._visualize_contact: bool = desc.visualize_contact
+        self._visualize_contact: bool = desc.options.visualize_contact
 
         self._batch_fixed_verts: bool = desc.morphs[0].batch_fixed_verts
 

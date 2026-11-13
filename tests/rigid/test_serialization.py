@@ -547,22 +547,6 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
             archive.writestr(name, content)
     gs.Scene.load(exported)
 
-    # A file exported before entity options existed holds none, and its entities take the options of their material.
-    manifest = deepcopy(original)
-    for entity in manifest["held"]["scene"]["entities"]:
-        del entity["options"]
-    for name in [name for name in manifest["schema"] if name.startswith("entities.")]:
-        del manifest["schema"][name]
-    manifest["schema"]["RigidEntityDescription"].remove("options")
-    members[MANIFEST_NAME] = json.dumps(manifest).encode()
-    with zipfile.ZipFile(exported, "w") as archive:
-        for name, content in members.items():
-            archive.writestr(name, content)
-    scene = gs.Scene.load(exported)
-    for entity, entity_authored in zip(scene.entities, checkpoint_scene.entities):
-        assert type(entity.options) is type(entity_authored.options)
-        assert entity.material == entity_authored.material
-
     # A file states a layout under each class name it holds. Anything else standing there is rejected before it is
     # read.
     manifest = deepcopy(original)

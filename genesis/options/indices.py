@@ -57,12 +57,6 @@ class LinkIndex(Options):
         """Select the links of the given names and every link below them in the kinematic tree, such as a gripper."""
         return cls(subtree_roots=names)
 
-    def matches(self, link_path: tuple[str, ...]) -> bool:
-        """Whether the selection holds a link, given the names from the root of its tree down to it (see 'resolve')."""
-        if self.names is not None:
-            return any(fnmatchcase(link_path[-1], name) for name in self.names)
-        return any(fnmatchcase(link_name, name) for link_name in link_path for name in self.subtree_roots)
-
     def resolve(self, links_path: list[tuple[str, ...]]) -> np.ndarray:
         """Return the indices of the selected links, raising on a name matching no link.
 
@@ -76,7 +70,13 @@ class LinkIndex(Options):
                 f"No link matches {unknown_names}. Existing links: {links_name}. A link the asset parser merges into "
                 "its parent keeps its name with the 'links_to_keep' option of the morph."
             )
-        return np.flatnonzero([self.matches(link_path) for link_path in links_path]).astype(gs.np_int, copy=False)
+        # A subtree holds every link whose path from the root of its tree passes through one of its roots
+        links_name_checked = [(link_path[-1],) if self.names is not None else link_path for link_path in links_path]
+        is_selected = [
+            any(fnmatchcase(link_name, name) for link_name in link_names for name in names)
+            for link_names in links_name_checked
+        ]
+        return np.flatnonzero(is_selected).astype(gs.np_int, copy=False)
 
 
 class _OrdinalIndex(Options):
@@ -140,28 +140,23 @@ class _NamedOrdinalIndex(_OrdinalIndex):
         """Select the geoms of the given names, each an exact geom name or a glob pattern."""
         return cls(names=names)
 
-    def matches(self, geom_name: str) -> bool:
-        """Whether a selection by name holds the geom of a given name."""
-        return any(fnmatchcase(geom_name, name) for name in self.names)
+    def resolve(self, geoms_name: list[str]) -> np.ndarray:
+        """Return the ordinals of the selected geoms, given the names of every geom.
 
-    def resolve(self, geoms_name: list[str], geoms_start: int, n_geoms: int) -> np.ndarray:
-        """Return the ordinals of the selected geoms among the geoms of a link, given their names.
-
-        An ordinal counts the 'n_geoms' collision geoms of the whole entity, of which the geoms of the link start at
-        'geoms_start'. A selection may match no geom of a link, so that it combines with a selection of several links.
-        An ordinal out of range raises.
+        A selection by name may match no geom, so that it combines with other selectors, while an ordinal out of range
+        raises.
         """
         if self.names is None:
-            ordinals = self._resolve_ordinals(n_geoms, "geom")
-            is_in_link = (ordinals >= geoms_start) & (ordinals < geoms_start + len(geoms_name))
-            return ordinals[is_in_link] - geoms_start
-        return np.flatnonzero([self.matches(geom_name) for geom_name in geoms_name]).astype(gs.np_int, copy=False)
+            return self._resolve_ordinals(len(geoms_name), "geom")
+        is_selected = [any(fnmatchcase(geom_name, name) for name in self.names) for geom_name in geoms_name]
+        return np.flatnonzero(is_selected).astype(gs.np_int, copy=False)
 
 
 class GeomIndex(_NamedOrdinalIndex):
     """Select collision geoms by their ordinal in the asset or by name.
 
-    An ordinal counts the collision geoms of the whole entity, link after link in the order of the asset. Post-processing splits a geom into convex pieces and fuses geoms with identical properties, which renumbers them,
+    An ordinal counts the collision geoms of the whole entity, link after link in the order of the asset.
+    Post-processing splits a geom into convex pieces and fuses geoms with identical properties, which renumbers them,
     so the ordinal counts the collision geoms as the asset states them, and selecting one selects every piece it is
     split into. A name is matched against the names the asset gives its geoms, as an exact name or a glob pattern (see
     ``LinkIndex``). MJCF states the name of a geom and URDF states none, while USD names a geom by its full prim path,

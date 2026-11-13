@@ -612,8 +612,6 @@ def postprocess_collision_geoms(
     for g_info in g_infos:
         mesh = g_info["mesh"]
         geom_type = g_info.get("type")
-        friction = g_info.get("friction")
-        density = g_info.get("density")
         sol_params = g_info.get("sol_params")
         key_parts += [
             np.ascontiguousarray(mesh.verts),
@@ -621,10 +619,11 @@ def postprocess_collision_geoms(
             -1 if geom_type is None else int(geom_type),
             int(g_info.get("contype", 0)),
             int(g_info.get("conaffinity", 0)),
-            float("nan") if friction is None else float(friction),
-            float("nan") if density is None else float(density),
+            *(
+                float("nan") if g_info.get(name) is None else float(g_info[name])
+                for name in ("friction", "friction_torsional", "friction_rolling", "density", "rho")
+            ),
             np.zeros(0) if sol_params is None else np.ascontiguousarray(sol_params, dtype=np.float64),
-            g_info.get("geom_options"),
             np.ascontiguousarray(g_info.get("pos", gu.zero_pos()), dtype=np.float64),
             np.ascontiguousarray(g_info.get("quat", gu.identity_quat()), dtype=np.float64),
         ]
@@ -790,15 +789,19 @@ def _postprocess_collision_geoms_impl(
                     first_g_info = g_infos[fusion_group[0]]
                     if (
                         first_g_info["type"] not in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN)
-                        and all(
-                            first_g_info.get(name) == g_info.get(name)
-                            for name in ("contype", "conaffinity", "geom_options")
-                        )
+                        and all(first_g_info.get(name) == g_info.get(name) for name in ("contype", "conaffinity"))
                         and all(
                             np.allclose(first_g_info.get(name, np.nan), g_info.get(name, np.nan), equal_nan=True)
-                            # A fused mesh carries a single density, so geoms with different authored densities must
-                            # stay separate for the density-weighted link inertial to survive fusion.
-                            for name in ("friction", "sol_params", "density")
+                            # A fused mesh carries a single density, so geoms with different densities must stay
+                            # separate for the density-weighted link inertial to survive fusion.
+                            for name in (
+                                "friction",
+                                "friction_torsional",
+                                "friction_rolling",
+                                "sol_params",
+                                "density",
+                                "rho",
+                            )
                         )
                     ):
                         fusion_group.append(i)

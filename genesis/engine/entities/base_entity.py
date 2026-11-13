@@ -18,14 +18,10 @@ if TYPE_CHECKING:
 
 @dataclass
 class EntityDescription:
-    """Base class of what one entity of a scene is created from, whatever the solver simulating it.
-
-    A file exported before entity options existed holds the material alone, from which each kind of description derives
-    the options.
-    """
+    """Base class of what one entity of a scene is created from, whatever the solver simulating it."""
 
     material: Material
-    options: gs.entities.BaseEntity | None = field(default=None, kw_only=True)
+    options: gs.entities.BaseEntity = field(kw_only=True)
 
 
 class Entity(RBC):

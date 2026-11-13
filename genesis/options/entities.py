@@ -1,7 +1,7 @@
 """Typed options an entity is constructed from, each class deciding the kind of entity and the solver simulating it."""
 
 import copy
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from types import TracebackType
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, Self, TypeVar
 
@@ -47,6 +47,32 @@ def get_entity_options_cls(material: Material) -> type["BaseEntity"] | None:
         if options_cls is not None:
             return options_cls
     return None
+
+
+def get_entity_options(
+    morph: Morph | Iterable[Morph] | None = None,
+    material: Material | None = None,
+    surface: Surface | None = None,
+    visualize_contact: bool | None = None,
+    vis_mode: str | None = None,
+    name: str | None = None,
+) -> "BaseEntity":
+    """Return the entity options that the individual arguments of ``Scene.add_entity`` stand for.
+
+    The material decides the class of the options (see ``get_entity_options_cls``), ``gs.entities.Rigid`` if None. Each
+    argument given fills the field of the options it stands for, 'vis_mode' filling that of a copy of the surface, and
+    the options refuse an argument their class has no field for.
+    """
+    options_cls = Rigid if material is None else get_entity_options_cls(material)
+    if options_cls is None:
+        gs.raise_exception(f"No entity options admit material {type(material).__name__}.")
+    # Heterogeneous morphs may come as any iterable of morphs
+    if isinstance(morph, Iterable) and not isinstance(morph, Morph):
+        morph = tuple(morph)
+    if vis_mode is not None:
+        surface = (gs.surfaces.Default() if surface is None else surface).model_copy(update={"vis_mode": vis_mode})
+    fields = {"morph": morph, "material": material, "surface": surface, "visualize_contact": visualize_contact}
+    return options_cls(**{field: value for field, value in {**fields, "name": name}.items() if value is not None})
 
 
 class _FrozenOptions(Options):
@@ -350,12 +376,20 @@ class FEM(BaseEntity["FEMEntity"]):
     material: materials.FEM.Base
     settings: tuple[Setting, ...] = ()
 
-    # A field validator, since a model validator failing on an assignment leaves the assigned value in place
+    # Field validators, since a model validator failing on an assignment leaves the assigned value in place. Each field
+    # checks the other one as it stands, so that assigning either keeps a Cloth material free of settings.
+    @field_validator("material", "settings")
+    @classmethod
+    def _check_cloth_settings(cls, value: Any, info: ValidationInfo) -> Any:
+        material = value if info.field_name == "material" else info.data.get("material")
+        settings = value if info.field_name == "settings" else info.data.get("settings")
+        if isinstance(material, materials.FEM.Cloth) and settings:
+            gs.raise_exception("gs.entities.FEM cannot honour settings of vertices for a Cloth material.")
+        return value
+
     @field_validator("settings")
     @classmethod
-    def _check_settings(cls, settings: tuple[Setting, ...], info: ValidationInfo) -> tuple[Setting, ...]:
-        if isinstance(info.data.get("material"), materials.FEM.Cloth) and settings:
-            gs.raise_exception("gs.entities.FEM cannot honour settings of vertices for a Cloth material.")
+    def _check_settings(cls, settings: tuple[Setting, ...]) -> tuple[Setting, ...]:
         for setting in settings:
             if not all(isinstance(selector, VertexIndex) for group in setting.selectors for selector in group):
                 gs.raise_exception("gs.entities.FEM selects parts with gs.VertexIndex alone.")

@@ -43,7 +43,7 @@ from genesis.options import (
     ViewerOptions,
     VisOptions,
 )
-from genesis.options.entities import EntityT, get_entity_options_cls
+from genesis.options.entities import EntityT, get_entity_options
 from genesis.options.morphs import Morph
 from genesis.options.recorders import RecorderOptions, TrajectoryFile
 from genesis.options.renderers import RendererOptions
@@ -393,32 +393,9 @@ class Scene(RBC):
             The created entity, of the kind its options class decides.
         """
         if options is None:
-            if morph is None:
-                gs.raise_exception("Entity construction requires a morph.")
-            # Heterogeneous morphs may come as any iterable of morphs
-            if isinstance(morph, collections.abc.Iterable) and not isinstance(morph, Morph):
-                morph = tuple(morph)
-            if vis_mode is not None:
-                surface = (gs.surfaces.Default() if surface is None else surface).model_copy(
-                    update={"vis_mode": vis_mode}
-                )
-            if material is None:
-                material = gs.materials.Rigid()
-            options_cls = get_entity_options_cls(material)
-            if options_cls is None:
-                gs.raise_exception(f"No entity options admit material {type(material).__name__}.")
-            entity_fields = {"morph": morph, "material": material, "surface": surface, "name": name}
-            if visualize_contact:
-                if options_cls is not gs.entities.Rigid:
-                    gs.raise_exception(f"gs.entities.{options_cls.__name__} has no contacts to visualize.")
-                entity_fields["visualize_contact"] = visualize_contact
-            options = options_cls(**entity_fields)
+            options = get_entity_options(morph, material, surface, visualize_contact, vis_mode, name)
         elif any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode, name)):
             gs.raise_exception("Pass either entity options or individual entity arguments, never both.")
-        if type(options) is gs.entities.BaseEntity:
-            gs.raise_exception(
-                "gs.entities.BaseEntity selects no entity family. Use one of its subclasses, such as gs.entities.Rigid."
-            )
         if options.morph is None:
             gs.raise_exception("Entity construction requires a morph.")
         # The entity holds a read-only copy, so that later edits of the options leave it as it is
@@ -468,9 +445,7 @@ class Scene(RBC):
                 f"Expected one of: {list(vis_modes)}."
             )
 
-        entity = self._sim._add_entity(morph, surface, name, options)
-
-        return entity
+        return self._sim._add_entity(morph, surface, name, options)
 
     @overload
     def add_stage(self, *, options: gs.entities.Kinematic) -> list[KinematicEntity]: ...
@@ -538,33 +513,29 @@ class Scene(RBC):
         entities : list[genesis.Entity]
             The created entities.
         """
-        if options is not None:
-            if any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode)):
-                gs.raise_exception("Pass either entity options or individual entity arguments, never both.")
-            if not isinstance(options, (gs.entities.Rigid, gs.entities.Kinematic)):
-                gs.raise_exception(
-                    f"A stage holds rigid or kinematic entities, which gs.entities.{type(options).__name__} cannot "
-                    "construct."
-                )
-            if options.name is not None:
-                gs.raise_exception("A stage adds several entities, so its options take no name.")
-            if isinstance(options, gs.entities.Rigid) and options.settings:
-                gs.raise_exception("A stage adds entities of different links, so its options select no part.")
-            morph = options.morph
-        if not isinstance(morph, gs.morphs.USD):
-            gs.raise_exception(f"Unsupported morph: {morph}.")
+        if options is None:
+            options = get_entity_options(morph, material, surface, visualize_contact, vis_mode)
+        elif any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode)):
+            gs.raise_exception("Pass either entity options or individual entity arguments, never both.")
+        if not isinstance(options, (gs.entities.Rigid, gs.entities.Kinematic)):
+            gs.raise_exception(
+                f"A stage holds rigid or kinematic entities, which gs.entities.{type(options).__name__} cannot "
+                "construct."
+            )
+        if options.name is not None:
+            gs.raise_exception("A stage adds several entities, so its options take no name.")
+        if isinstance(options, gs.entities.Rigid) and options.settings:
+            gs.raise_exception("A stage adds entities of different links, so its options select no part.")
+        if not isinstance(options.morph, gs.morphs.USD):
+            gs.raise_exception(f"Unsupported morph: {options.morph}.")
         from genesis.utils.usd import parse_usd_stage
 
         # One `gs.morphs.USD` per entity of the stage, added while the stage it was split from stays open.
-        with parse_usd_stage(morph) as entity_morphs:
-            entities = []
-            for entity_morph in entity_morphs:
-                if options is None:
-                    entity = self.add_entity(entity_morph, material, surface, visualize_contact, vis_mode)
-                else:
-                    entity = self.add_entity(options=options.model_copy(update={"morph": entity_morph}))
-                entities.append(entity)
-        return entities
+        with parse_usd_stage(options.morph) as entity_morphs:
+            return [
+                self.add_entity(options=options.model_copy(update={"morph": entity_morph}))
+                for entity_morph in entity_morphs
+            ]
 
     @gs.assert_unbuilt
     def add_mesh_light(
@@ -860,10 +831,7 @@ class Scene(RBC):
         if options is None:
             if material is None:
                 gs.raise_exception("An emitter requires a material or entity options.")
-            options_cls = get_entity_options_cls(material)
-            if options_cls is None:
-                gs.raise_exception(f"No entity options admit material {type(material).__name__}.")
-            options = options_cls(material=material, surface=surface)
+            options = get_entity_options(material=material, surface=surface)
         elif material is not None or surface is not None:
             gs.raise_exception("Pass either entity options or a material and a surface, never both.")
         if not isinstance(options, (gs.entities.MPM, gs.entities.SPH)) and not (
@@ -962,6 +930,9 @@ class Scene(RBC):
                 # A copy without validation, which keeps every field held, defaults included
                 entity._options = BaseModel.model_copy(entity._options, update={"morph": morph, "surface": surface})
                 entity._options._is_read_only = True
+                # The description records the options the entity holds, which a rebuild compares against
+                if entity.desc is not None:
+                    entity.desc.options = entity._options
 
             # reset state
             self._reset()
