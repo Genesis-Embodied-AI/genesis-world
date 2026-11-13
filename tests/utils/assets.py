@@ -1,3 +1,4 @@
+import fnmatch
 import os
 import re
 import subprocess
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from httpcore import TimeoutException as HTTPTimeoutException
 from httpx import HTTPError as HTTPXError
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from huggingface_hub.errors import LocalEntryNotFoundError
 from PIL import Image, UnidentifiedImageError
 from requests.exceptions import HTTPError
@@ -22,13 +23,22 @@ REPOSITY_URL = "Genesis-Embodied-AI/Genesis"
 DEFAULT_BRANCH_NAME = "main"
 
 HUGGINGFACE_ASSETS_REVISION = "deffbe1685e5ce6aa289efdd541f762f1eb3353f"
-HUGGINGFACE_SNAPSHOT_REVISION = "a0118fd85edd46e7476dc93aba1fc5b2751f6c12"
 
 MESH_EXTENSIONS = (".mtl", *MESH_FORMATS, *GLTF_FORMATS, *USD_FORMATS)
 IMAGE_EXTENSIONS = (".png", ".jpg")
 
 # Get repository "root" path (actually test dir is good enough)
 TEST_DIR = os.path.dirname(os.path.dirname(__file__))
+
+# Each line of the lock pins a file of the snapshots repository to its own commit, so that pull requests regenerating
+# different snapshots edit different lines and merge without conflict.
+SNAPSHOTS_LOCK_PATH = os.path.join(TEST_DIR, "snapshots.lock")
+
+
+@cache
+def get_snapshots_revision():
+    with open(SNAPSHOTS_LOCK_PATH, encoding="utf-8") as f:
+        return dict(line.split() for line in f if line.strip())
 
 
 @cache
@@ -110,24 +120,37 @@ def get_hf_dataset(
 ):
     assert num_retry >= 1
 
-    if repo_name == "assets":
-        revision = HUGGINGFACE_ASSETS_REVISION
-    elif repo_name == "snapshots":
-        revision = HUGGINGFACE_SNAPSHOT_REVISION
-    else:
+    if repo_name == "snapshots":
+        snapshots_revision = get_snapshots_revision()
+        assert local_dir is not None
+        snapshot_paths = [path for path in snapshots_revision if fnmatch.fnmatchcase(path, pattern)]
+        if not snapshot_paths:
+            raise ValueError(f"No snapshot in '{SNAPSHOTS_LOCK_PATH}' matches '{pattern}'.")
+    elif repo_name != "assets":
         raise ValueError(f"Unsupported repository '{repo_name}'")
 
     for i in range(num_retry):
         try:
             # Try downloading the assets
-            asset_path = snapshot_download(
-                repo_type="dataset",
-                repo_id=f"Genesis-Intelligence/{repo_name}",
-                revision=revision,
-                allow_patterns=pattern,
-                max_workers=1,
-                local_dir=local_dir,
-            )
+            if repo_name == "snapshots":
+                for path in snapshot_paths:
+                    hf_hub_download(
+                        repo_type="dataset",
+                        repo_id=f"Genesis-Intelligence/{repo_name}",
+                        filename=path,
+                        revision=snapshots_revision[path],
+                        local_dir=local_dir,
+                    )
+                asset_path = local_dir
+            else:
+                asset_path = snapshot_download(
+                    repo_type="dataset",
+                    repo_id=f"Genesis-Intelligence/{repo_name}",
+                    revision=HUGGINGFACE_ASSETS_REVISION,
+                    allow_patterns=pattern,
+                    max_workers=1,
+                    local_dir=local_dir,
+                )
 
             # Make sure that download was successful
             has_files = False
