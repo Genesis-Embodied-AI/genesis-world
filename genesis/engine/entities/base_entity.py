@@ -1,4 +1,3 @@
-import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -122,14 +121,11 @@ class Entity(RBC):
     def options(self) -> gs.entities.BaseEntity:
         """The options this entity was constructed from.
 
-        The options are immutable, and the morph and the surface they hold are copies, so editing them leaves the entity
-        as it is.
+        Until the scene is built, they hold the morph and the surface given to the scene, which the resolution of the
+        entity fills with its defaults. Once it is built, they hold copies of them, so editing them leaves the entity as
+        it is.
         """
-        # FIXME: Freeze the morph once at add time. Blocked by a Kinematic entity sharing the morph of a Rigid one: it
-        # needs the 'convexify=True' the Rigid resolution writes there, since its non-convex mesh exhausts the memory.
-        return self._options.model_copy(
-            update={"morph": copy.deepcopy(self._options.morph), "surface": copy.deepcopy(self._options.surface)}
-        )
+        return self._options
 
     @property
     def material(self) -> Material:

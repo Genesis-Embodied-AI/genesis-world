@@ -1,4 +1,5 @@
 import collections.abc
+import copy
 import dataclasses
 import gc
 import hashlib
@@ -956,6 +957,16 @@ class Scene(RBC):
 
             with namespace(self._namespace):
                 self._sim.build()
+
+            # The entities stop sharing their morph and surface with the caller, which may edit them after build
+            for entity in self._sim.entities:
+                entity._options = entity._options.model_copy(
+                    update={
+                        "morph": copy.deepcopy(entity._options.morph),
+                        "surface": copy.deepcopy(entity._options.surface),
+                    }
+                )
+                entity._options._make_read_only()
 
             # reset state
             self._reset()

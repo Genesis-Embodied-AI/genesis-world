@@ -1,6 +1,6 @@
 from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, PrivateAttr, ValidationError
 
 import genesis as gs
 import genesis.utils.repr as ru
@@ -26,6 +26,8 @@ class Options(RBC, BaseModel):
 
     model_config = ConfigDict(strict=True, extra="forbid", validate_default=True)
 
+    _is_read_only: bool = PrivateAttr(default=False)
+
     def __init__(self, /, **data: Any) -> None:
         # format pydantic error message to be more informative yet concise
         try:
@@ -34,6 +36,8 @@ class Options(RBC, BaseModel):
             self._validation_error(e)
 
     def __setattr__(self, name: str, value) -> None:
+        if self._is_read_only and name in type(self).model_fields:
+            gs.raise_exception(f"{type(self).__name__} is read-only. Set '{name}' on a copy of it instead.")
         try:
             super().__setattr__(name, value)
         except ValidationError as e:
@@ -107,6 +111,28 @@ class Options(RBC, BaseModel):
             trace_msg = " ".join(traces)
 
         gs.raise_exception_from(trace_msg, None)
+
+    def __copy__(self) -> Self:
+        options = super().__copy__()
+        options._is_read_only = False
+        return options
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
+        options = super().__deepcopy__(memo)
+        options._is_read_only = False
+        return options
+
+    def _make_read_only(self) -> None:
+        """Make these options and the options they hold read-only, their copies staying writable."""
+        options_stack = [self]
+        while options_stack:
+            options = options_stack.pop()
+            options._is_read_only = True
+            for name in type(options).model_fields:
+                value = getattr(options, name)
+                options_stack.extend(
+                    item for item in (value if isinstance(value, tuple) else (value,)) if isinstance(item, Options)
+                )
 
     def model_copy_from(self, other: BaseModel, override: bool = False) -> Self:
         # 'dict(self)' keeps a nested option object intact, where 'model_dump' recurses it into a plain dict. The
