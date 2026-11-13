@@ -215,9 +215,8 @@ class InteractiveScene:
         Args:
             scene_kwargs: Keyword arguments forwarded to ``gs.Scene(...)`` (sim_options, viewer_options, etc.).
             entities_kwargs: Mapping from entity name to a kwargs dict forwarded to ``scene.add_entity``
-                (morph, material, surface, visualize_contact, vis_mode). A dict holding ``options`` constructs the
-                entity from those entity options, its ``morph`` replacing theirs. The dict key becomes the entity's
-                name.
+                (morph, material, surface, visualize_contact, vis_mode), keyed by the name of the entity. A dict
+                holding ``options`` constructs the entity from those entity options, its ``morph`` replacing theirs.
             sensors_kwargs: Iterable of ``SensorOptions`` instances forwarded to ``scene.add_sensor``.
         """
         if InteractiveFeature.REBUILD not in self.supported_features:
