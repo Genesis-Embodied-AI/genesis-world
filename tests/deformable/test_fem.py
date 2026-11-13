@@ -271,7 +271,6 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
         ),
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
-            enable_vertex_constraints=True,
         ),
         coupler_options=coupler_type(**coupler_kwargs),
         viewer_options=gs.options.ViewerOptions(
@@ -571,7 +570,6 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
             damping=DAMPING,
             damping_alpha=DAMPING,
             damping_beta=DAMPING_BETA,
-            enable_vertex_constraints=True,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, 0.6, HEIGHT + 0.5),
@@ -942,6 +940,63 @@ def test_soft_constraint(asset_tmp_path, show_viewer):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("coupler_type", [gs.options.LegacyCouplerOptions, gs.options.SAPCouplerOptions])
+def test_stiffness_damping_spares_rigid_motion(coupler_type, precision, show_viewer):
+    DT = 0.01
+    N_STEPS = 10
+    BLOCK_SIZE = (0.1, 0.05, 0.05)
+    # Towed along the normal of its pinned face in the first environment, and along that face in the second one
+    TOW_SPEED = 0.1
+    TOW_VELOCITY = ((TOW_SPEED, 0.0, 0.0), (0.0, 0.0, TOW_SPEED))
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        fem_options=gs.options.FEMOptions(
+            use_implicit_solver=True,
+            # The mass damping slows down any moving body, where the stiffness damping acts on the strain rate alone
+            damping_alpha=0.0,
+        ),
+        coupler_options=coupler_type(),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.3, -0.3, 0.2),
+            camera_lookat=(0.05, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=BLOCK_SIZE,
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1e5,
+            model="linear_corotated",
+        ),
+    )
+    scene.build(n_envs=2)
+
+    # A block moving at the speed of its towed rear face translates rigidly. Damping that motion would hold its free
+    # vertices behind the face by damping_beta times the speed.
+    tow_velocity = torch.tensor(TOW_VELOCITY, dtype=gs.tc_float, device=gs.device)
+    verts_x = block.init_positions[:, 0]
+    towed_verts_idx = torch.nonzero(verts_x < verts_x.min() + gs.EPS)[:, 0]
+    block.set_velocity(tow_velocity)
+    block.set_vertex_constraints(towed_verts_idx)
+    # The SAP solve, the looser of the two, stops at a residual of its default relative tolerance times the momentum,
+    # which leaves the velocity off by that tolerance times the speed, and the positions by that times the time step at
+    # every step.
+    sap_rtol = 1e-4 if precision == "64" else 1e-3
+    atol = N_STEPS * DT * sap_rtol * TOW_SPEED
+    for i_step in range(1, N_STEPS + 1):
+        verts_pos_ref = block.init_positions + i_step * DT * tow_velocity[:, None]
+        block.update_constraint_targets(towed_verts_idx, verts_pos_ref[:, towed_verts_idx])
+        scene.step()
+        assert_allclose(block.get_verts_pos(), verts_pos_ref, atol=atol)
+
+
+@pytest.mark.required
 def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show_viewer):
     SPHERE_RADIUS = 0.1
     BOX_SIZE = 0.015
@@ -963,7 +1018,6 @@ def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show
         ),
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
-            enable_vertex_constraints=True,
         ),
         # The capacity holds the contacts of the scene but not the pairs of tets of the sphere neighbouring each other
         # at rest, which the contact search must skip.
@@ -1290,6 +1344,7 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(xml_path, tol, show_
     MOTION_SPEED = 0.005
     VERTICES_IDX = [4, 6]
     SLIDER_FORCE = 0.01
+    SAP_RTOL = 1e-8
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -1299,9 +1354,11 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(xml_path, tol, show_
         ),
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
-            enable_vertex_constraints=True,
         ),
-        coupler_options=gs.options.SAPCouplerOptions(),
+        # The sliders check the exact velocities of the joint equality, which the solve resolves to its tolerance
+        coupler_options=gs.options.SAPCouplerOptions(
+            sap_convergence_rtol=SAP_RTOL,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, 0.6, HEIGHT + 0.5),
             camera_lookat=(0.0, 0.0, HEIGHT),

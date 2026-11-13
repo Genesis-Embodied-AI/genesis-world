@@ -36,7 +36,6 @@ def main():
         ),
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
-            enable_vertex_constraints=True,
         ),
         coupler_options=gs.options.SAPCouplerOptions(),
         viewer_options=gs.options.ViewerOptions(
