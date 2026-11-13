@@ -11,8 +11,8 @@ def _normalize_direction(direction):
     if direction.shape != (3,):
         gs.raise_exception("direction must have shape (3,)")
     direction_norm = np.linalg.norm(direction)
-    if direction_norm < gs.EPS:
-        gs.raise_exception("direction must be non-zero")
+    if not (np.isfinite(direction_norm) and direction_norm >= gs.EPS):
+        gs.raise_exception("direction must be finite and non-zero")
     return direction / direction_norm
 
 

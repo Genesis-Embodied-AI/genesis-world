@@ -313,8 +313,9 @@ def test_force_fields(show_viewer, tol):
         )
     )
     vortex.activate()
-    with pytest.raises(gs.GenesisException):
-        gs.force_fields.Vortex(direction=(0.0, 0.0, 0.0))
+    for direction in ((0.0, 0.0, 0.0), (np.inf, 0.0, 0.0)):
+        with pytest.raises(gs.GenesisException):
+            gs.force_fields.Vortex(direction=direction)
     scene.build(n_envs=2)
 
     # An environment reset mid-run restarts its clock, which the force fields read, while the other one carries on
