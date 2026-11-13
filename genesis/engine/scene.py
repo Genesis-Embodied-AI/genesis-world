@@ -954,55 +954,55 @@ class Scene(BuildableMixin, RBC):
         # A failed build destroys the scene, so that it never stays half built
         is_done = False
         try:
-            with gs.logger.timer(f"Building scene ~~~<{self._uid}>~~~..."):
-                self.env_spacing = env_spacing
-                self.n_envs_per_row = n_envs_per_row
-                self._center_envs_at_origin = center_envs_at_origin
+            gs.logger.info(f"Building scene ~~~<{self._uid}>~~~...")
+            self.env_spacing = env_spacing
+            self.n_envs_per_row = n_envs_per_row
+            self._center_envs_at_origin = center_envs_at_origin
 
-                # A scene without parallel environments lays out one
-                n_envs_ = max(1, n_envs)
-                if self.n_envs_per_row is None:
-                    self.n_envs_per_row = math.ceil(math.sqrt(n_envs_))
+            # A scene without parallel environments lays out one
+            n_envs_ = max(1, n_envs)
+            if self.n_envs_per_row is None:
+                self.n_envs_per_row = math.ceil(math.sqrt(n_envs_))
 
-                # compute offset values for visualizing each env
-                if not isinstance(env_spacing, (list, tuple)) or len(env_spacing) != 2:
-                    gs.raise_exception("`env_spacing` should be a tuple of length 2.")
-                self._layout = EnvironmentLayout(n_envs, tuple(env_spacing), self.n_envs_per_row, center_envs_at_origin)
-                offset_x = (np.arange(n_envs_) // self.n_envs_per_row) * self.env_spacing[0]
-                offset_y = (np.arange(n_envs_) % self.n_envs_per_row) * self.env_spacing[1]
-                offset_z = np.zeros((n_envs_,))
-                self.envs_offset = np.stack((offset_x, offset_y, offset_z), axis=-1, dtype=gs.np_float)
+            # compute offset values for visualizing each env
+            if not isinstance(env_spacing, (list, tuple)) or len(env_spacing) != 2:
+                gs.raise_exception("`env_spacing` should be a tuple of length 2.")
+            self._layout = EnvironmentLayout(n_envs, tuple(env_spacing), self.n_envs_per_row, center_envs_at_origin)
+            offset_x = (np.arange(n_envs_) // self.n_envs_per_row) * self.env_spacing[0]
+            offset_y = (np.arange(n_envs_) % self.n_envs_per_row) * self.env_spacing[1]
+            offset_z = np.zeros((n_envs_,))
+            self.envs_offset = np.stack((offset_x, offset_y, offset_z), axis=-1, dtype=gs.np_float)
 
-                # move to center
-                if center_envs_at_origin:
-                    center = (np.max(self.envs_offset, axis=0) + np.min(self.envs_offset, axis=0)) / 2.0
-                    self.envs_offset -= center
+            # move to center
+            if center_envs_at_origin:
+                center = (np.max(self.envs_offset, axis=0) + np.min(self.envs_offset, axis=0)) / 2.0
+                self.envs_offset -= center
 
-                with namespace(self._namespace):
-                    self._sim.build(n_envs)
-                self._render_context = self._sim.render_context.register(
-                    self, rendered_envs_idx=self.options.vis.rendered_envs_idx, n_envs=self._sim.n_envs
+            with namespace(self._namespace):
+                self._sim.build(n_envs)
+            self._render_context = self._sim.render_context.register(
+                self, rendered_envs_idx=self.options.vis.rendered_envs_idx, n_envs=self._sim.n_envs
+            )
+
+            # reset state
+            self._reset()
+
+            gs.logger.info("Compiling simulation kernels...")
+            self._sim.step()
+            try:
+                self._sim.check_errno()
+            except gs.GenesisException as e:
+                gs.logger.warning(
+                    "The initial state is invalid. Register a valid one with 'scene.reset(state)', or overwrite it "
+                    "manually following 'scene.build' and every call to 'scene.reset()', otherwise stepping will "
+                    f"fail with: {e}"
                 )
-
-                # reset state
-                self._reset()
-
-            with gs.logger.timer("Compiling simulation kernels..."):
-                self._sim.step()
-                try:
-                    self._sim.check_errno()
-                except gs.GenesisException as e:
-                    gs.logger.warning(
-                        "The initial state is invalid. Register a valid one with 'scene.reset(state)', or overwrite it "
-                        "manually following 'scene.build' and every call to 'scene.reset()', otherwise stepping will "
-                        f"fail with: {e}"
-                    )
-                self._sim.reset(self._init_state)
-                self._restart()
+            self._sim.reset(self._init_state)
+            self._restart()
 
             # visualizer
-            with gs.logger.timer("Building visualizer..."):
-                self._visualizer.build()
+            gs.logger.info("Building visualizer...")
+            self._visualizer.build()
 
             # recorders, which lay out the phases a step times once (see 'StepTimer.add_phases')
             self._sim.step_timer.add_phases("recorders", "rendering", "video")
