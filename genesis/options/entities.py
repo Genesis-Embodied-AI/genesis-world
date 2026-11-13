@@ -244,8 +244,9 @@ class FEM(BaseEntity["FEMEntity"]):
         The material of the entity, one of ``gs.materials.FEM.Elastic``, ``Cloth`` or ``Muscle``, which makes it a
         muscle.
     vertices : dict[gs.VertexIndex, gs.options.Vertex], optional
-        The options of the vertices each key selects among the vertices of the volume mesh. A Cloth material takes
-        none. Default is no vertex options.
+        The options of the vertices each key selects among the vertices of the volume mesh. Where several keys give
+        one vertex different values, the first key applies, with a warning. A Cloth material takes none. Default is no
+        vertex options.
     """
 
     _solver_options_cls = FEMOptions

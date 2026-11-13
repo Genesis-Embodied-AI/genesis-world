@@ -359,15 +359,19 @@ class FEMEntity(Entity):
             gs.raise_exception("Entity has zero vertices.")
 
         # The vertex options select vertices as the morph states them, relative to its position before its rotation.
-        # Two selections giving 'is_fixed' of one vertex stand at equal specificity, so neither can win.
         verts_pos_morph = verts - self._morph.pos
         verts_is_fixed = {}
+        conflict_verts_idx = set()
         for vertex_index, vertex_options in self._options.vertices.items():
             if "is_fixed" in vertex_options.model_fields_set:
                 for i_v in vertex_index.resolve(verts_pos_morph):
-                    if i_v in verts_is_fixed:
-                        gs.raise_exception(f"Two selections of equal specificity give 'is_fixed' of vertex {i_v}.")
-                    verts_is_fixed[i_v] = vertex_options.is_fixed
+                    if verts_is_fixed.setdefault(i_v, vertex_options.is_fixed) != vertex_options.is_fixed:
+                        conflict_verts_idx.add(i_v)
+        if conflict_verts_idx:
+            gs.logger.warning(
+                f"Vertex options of entity '{self.name}' give different values of 'is_fixed' to vertices "
+                f"{sorted(map(int, conflict_verts_idx))}. The first of those options in 'vertices' applies."
+            )
         self._fixed_verts_idx_local = np.array(
             sorted(i_v for i_v, is_fixed in verts_is_fixed.items() if is_fixed), dtype=gs.np_int
         )
