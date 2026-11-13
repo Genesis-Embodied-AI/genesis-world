@@ -857,58 +857,58 @@ def _get_sdf_grid(
                 "very long time (>10min) and require large RAM allocation (>20Gb). Please either enable convexify "
                 "or decimation. (see FileMorph options)"
             )
-        with gs.logger.timer(f"Preprocessing SDF of mesh ~<{gsd_path}>~."):
-            lower = verts.min(axis=0)
-            upper = verts.max(axis=0)
-            center = (upper + lower) / 2.0
+        gs.logger.info(f"Preprocessing SDF of mesh ~<{gsd_path}>~.")
+        lower = verts.min(axis=0)
+        upper = verts.max(axis=0)
+        center = (upper + lower) / 2.0
 
-            # The grid spans 'res - 1' cells from the center of its lower node to the center of its upper one
-            grid_size = (n_nodes - 1) * cell_size
-            voxel_lower = center - grid_size / 2.0
-            voxel_upper = center + grid_size / 2.0
-            X, Y, Z = np.meshgrid(
-                *(np.linspace(voxel_lower[i], voxel_upper[i], n_nodes[i]) for i in range(3)), indexing="ij"
+        # The grid spans 'res - 1' cells from the center of its lower node to the center of its upper one
+        grid_size = (n_nodes - 1) * cell_size
+        voxel_lower = center - grid_size / 2.0
+        voxel_upper = center + grid_size / 2.0
+        X, Y, Z = np.meshgrid(
+            *(np.linspace(voxel_lower[i], voxel_upper[i], n_nodes[i]) for i in range(3)), indexing="ij"
+        )
+        query_points = np.stack([X, Y, Z], axis=-1).reshape((-1, 3))
+
+        # See compute_sdf_data in genesis/utils/mesh.py for the sign computation
+        signed_distance, sdf_closest_faces, closest_points, _ = igl.signed_distance(
+            query_points, sdf_verts, sdf_faces, sign_type=igl.SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER
+        )
+        sdf_value = signed_distance.astype(gs.np_float, copy=False).reshape(n_nodes)
+
+        # The closest vertex belongs to the mesh itself, whose closest faces are those of the signed distance when
+        # it is measured against that mesh
+        closest_faces = sdf_closest_faces
+        if not (np.array_equal(sdf_verts, verts) and np.array_equal(sdf_faces, faces)):
+            # Unsigned, since the closest faces alone are read
+            _, closest_faces, *_ = igl.signed_distance(
+                query_points, verts, faces, sign_type=igl.SIGNED_DISTANCE_TYPE_UNSIGNED
             )
-            query_points = np.stack([X, Y, Z], axis=-1).reshape((-1, 3))
+        verts_idx = faces[closest_faces]
+        verts_dist = np.linalg.norm(verts[verts_idx] - query_points[:, None, :], axis=-1)
+        sdf_closest_verts_idx = verts_idx[np.arange(len(query_points)), np.argmin(verts_dist, axis=-1)]
 
-            # See compute_sdf_data in genesis/utils/mesh.py for the sign computation
-            signed_distance, sdf_closest_faces, closest_points, _ = igl.signed_distance(
-                query_points, sdf_verts, sdf_faces, sign_type=igl.SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER
+        T_mesh_to_centered = np.eye(4)
+        T_mesh_to_centered[:3, 3] = -center
+        T_centered_to_sdf = np.eye(4)
+        T_centered_to_sdf[:3, :3] *= (n_nodes - 1) / grid_size
+        T_centered_to_sdf[:3, 3] = (n_nodes - 1) / 2
+        T_mesh_to_sdf = T_centered_to_sdf @ T_mesh_to_centered
+
+        # The gradient of a signed distance is the unit vector from the closest point of the surface, oriented by
+        # the side of the node, and the normal of the closest face on the surface itself. On the medial axis, where
+        # the field has a kink, it is the gradient on the side of the closest face found.
+        sdf_grad = np.zeros((*n_nodes, 3), dtype=gs.np_float)
+        if sdf.has_grad:
+            offset = query_points - closest_points
+            dist = np.linalg.norm(offset, axis=-1, keepdims=True)
+            grad = np.where(
+                dist > gs.EPS,
+                np.sign(signed_distance)[:, None] * offset / np.maximum(dist, gs.EPS),
+                sdf_tmesh.face_normals[sdf_closest_faces],
             )
-            sdf_value = signed_distance.astype(gs.np_float, copy=False).reshape(n_nodes)
-
-            # The closest vertex belongs to the mesh itself, whose closest faces are those of the signed distance when
-            # it is measured against that mesh
-            closest_faces = sdf_closest_faces
-            if not (np.array_equal(sdf_verts, verts) and np.array_equal(sdf_faces, faces)):
-                # Unsigned, since the closest faces alone are read
-                _, closest_faces, *_ = igl.signed_distance(
-                    query_points, verts, faces, sign_type=igl.SIGNED_DISTANCE_TYPE_UNSIGNED
-                )
-            verts_idx = faces[closest_faces]
-            verts_dist = np.linalg.norm(verts[verts_idx] - query_points[:, None, :], axis=-1)
-            sdf_closest_verts_idx = verts_idx[np.arange(len(query_points)), np.argmin(verts_dist, axis=-1)]
-
-            T_mesh_to_centered = np.eye(4)
-            T_mesh_to_centered[:3, 3] = -center
-            T_centered_to_sdf = np.eye(4)
-            T_centered_to_sdf[:3, :3] *= (n_nodes - 1) / grid_size
-            T_centered_to_sdf[:3, 3] = (n_nodes - 1) / 2
-            T_mesh_to_sdf = T_centered_to_sdf @ T_mesh_to_centered
-
-            # The gradient of a signed distance is the unit vector from the closest point of the surface, oriented by
-            # the side of the node, and the normal of the closest face on the surface itself. On the medial axis, where
-            # the field has a kink, it is the gradient on the side of the closest face found.
-            sdf_grad = np.zeros((*n_nodes, 3), dtype=gs.np_float)
-            if sdf.has_grad:
-                offset = query_points - closest_points
-                dist = np.linalg.norm(offset, axis=-1, keepdims=True)
-                grad = np.where(
-                    dist > gs.EPS,
-                    np.sign(signed_distance)[:, None] * offset / np.maximum(dist, gs.EPS),
-                    sdf_tmesh.face_normals[sdf_closest_faces],
-                )
-                sdf_grad[:] = grad.reshape((*n_nodes, 3))
+            sdf_grad[:] = grad.reshape((*n_nodes, 3))
 
         sdf_grid = SDFGrid(
             sdf_value, sdf_grad, sdf_closest_verts_idx.reshape(n_nodes), np.max(sdf_value), T_mesh_to_sdf

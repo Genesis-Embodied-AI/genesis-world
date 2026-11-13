@@ -18,9 +18,9 @@ def mesh_to_elements(mesh, tet_cfg=dict()):
         gs.logger.debug("Tetrahedra file (`.tet`) found in cache.")
         return elements
 
-    with gs.logger.timer(f"Tetrahedralization with configuration {tet_cfg} and generating `.tet` file:"):
-        elements = mu.tetrahedralize_mesh(mesh, tet_cfg)
-        cache.save(elements)
+    gs.logger.info(f"Tetrahedralization with configuration {tet_cfg} and generating `.tet` file...")
+    elements = mu.tetrahedralize_mesh(mesh, tet_cfg)
+    cache.save(elements)
     return elements
 
 

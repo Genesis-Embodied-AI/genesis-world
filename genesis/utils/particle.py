@@ -38,19 +38,19 @@ def trimesh_to_particles_simple(mesh, p_size, sampler):
             np.random.set_state(random_state_end)
         return positions
 
-    with gs.logger.timer(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file:"):
-        # sample a cube first
-        box_size = mesh.bounds[1] - mesh.bounds[0]
-        box_center = (mesh.bounds[1] + mesh.bounds[0]) / 2
-        positions = _box_to_particles(p_size=p_size, pos=box_center, size=box_size, sampler=sampler)
-        # reject out-of-boundary particles
-        # See compute_sdf_data in genesis/utils/mesh.py for the sign computation
-        sd, *_ = igl.signed_distance(
-            positions, mesh.vertices, mesh.faces, sign_type=igl.SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER
-        )
-        positions = positions[sd < 0.0]
+    gs.logger.info(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file...")
+    # sample a cube first
+    box_size = mesh.bounds[1] - mesh.bounds[0]
+    box_center = (mesh.bounds[1] + mesh.bounds[0]) / 2
+    positions = _box_to_particles(p_size=p_size, pos=box_center, size=box_size, sampler=sampler)
+    # reject out-of-boundary particles
+    # See compute_sdf_data in genesis/utils/mesh.py for the sign computation
+    sd, *_ = igl.signed_distance(
+        positions, mesh.vertices, mesh.faces, sign_type=igl.SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER
+    )
+    positions = positions[sd < 0.0]
 
-        cache.save((positions, np.random.get_state() if sampler == "random" else None))
+    cache.save((positions, np.random.get_state() if sampler == "random" else None))
 
     return positions
 
@@ -70,42 +70,42 @@ def trimesh_to_particles_pbs(mesh, p_size, sampler, pos=(0, 0, 0)):
     if positions is not None:
         gs.logger.debug("Sampled particles file (`.ptc`) found in cache.")
     else:
-        with gs.logger.timer(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file:"):
-            sdf_res = int(sampler.split("-")[-1])
-            # This method samples denser particles than the 'random' and 'regular' samplers at the same radius
-            radius = 1.104 * p_size / 2
+        gs.logger.info(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file...")
+        sdf_res = int(sampler.split("-")[-1])
+        # This method samples denser particles than the 'random' and 'regular' samplers at the same radius
+        radius = 1.104 * p_size / 2
 
-            # Signed distance field, positive inside, over the bounding box of the mesh padded by the support radius
-            origin = mesh.bounds[0] - 4.0 * radius
-            cell_size = (mesh.bounds[1] + 4.0 * radius - origin) / sdf_res
-            nodes = origin + cell_size * np.stack(np.meshgrid(*[np.arange(sdf_res + 1)] * 3, indexing="ij"), axis=-1)
-            sdf, *_ = igl.signed_distance(nodes.reshape((-1, 3)), mesh.vertices, mesh.faces)
-            sdf = -sdf.reshape((sdf_res + 1,) * 3)
+        # Signed distance field, positive inside, over the bounding box of the mesh padded by the support radius
+        origin = mesh.bounds[0] - 4.0 * radius
+        cell_size = (mesh.bounds[1] + 4.0 * radius - origin) / sdf_res
+        nodes = origin + cell_size * np.stack(np.meshgrid(*[np.arange(sdf_res + 1)] * 3, indexing="ij"), axis=-1)
+        sdf, *_ = igl.signed_distance(nodes.reshape((-1, 3)), mesh.vertices, mesh.faces)
+        sdf = -sdf.reshape((sdf_res + 1,) * 3)
 
-            # The particles are seeded slightly closer than their final spacing, on layers of rows offset by a radius
-            # every other row, then relaxed towards a uniform density
-            seed_radius = 0.95 * radius
-            spacing = np.array([2.0 * seed_radius, np.sqrt(3.0) * seed_radius, 2.0 * seed_radius])
-            lattice_x, lattice_y, lattice_z = [
-                np.arange(mesh.bounds[0][k], mesh.bounds[1][k] + 0.5 * spacing[k], spacing[k]) for k in range(3)
-            ]
-            lattice_x, lattice_y, lattice_z = [
-                lattice_x[lattice_x <= mesh.bounds[1][0]],
-                lattice_y[lattice_y <= mesh.bounds[1][1]],
-                lattice_z[lattice_z <= mesh.bounds[1][2]],
-            ]
-            grid_z, grid_y, grid_x = np.meshgrid(lattice_z, np.arange(len(lattice_y)), lattice_x, indexing="ij")
-            is_row_odd = grid_y % 2 == 1
-            positions = np.stack(
-                (
-                    grid_x + is_row_odd * seed_radius,
-                    lattice_y[grid_y] + seed_radius,
-                    grid_z + ~is_row_odd * seed_radius,
-                ),
-                axis=-1,
-            ).reshape((-1, 3))
-            positions = _relax_volume_sampling(positions, sdf, origin, cell_size, radius, n_steps=100)
-            cache.save(positions)
+        # The particles are seeded slightly closer than their final spacing, on layers of rows offset by a radius
+        # every other row, then relaxed towards a uniform density
+        seed_radius = 0.95 * radius
+        spacing = np.array([2.0 * seed_radius, np.sqrt(3.0) * seed_radius, 2.0 * seed_radius])
+        lattice_x, lattice_y, lattice_z = [
+            np.arange(mesh.bounds[0][k], mesh.bounds[1][k] + 0.5 * spacing[k], spacing[k]) for k in range(3)
+        ]
+        lattice_x, lattice_y, lattice_z = [
+            lattice_x[lattice_x <= mesh.bounds[1][0]],
+            lattice_y[lattice_y <= mesh.bounds[1][1]],
+            lattice_z[lattice_z <= mesh.bounds[1][2]],
+        ]
+        grid_z, grid_y, grid_x = np.meshgrid(lattice_z, np.arange(len(lattice_y)), lattice_x, indexing="ij")
+        is_row_odd = grid_y % 2 == 1
+        positions = np.stack(
+            (
+                grid_x + is_row_odd * seed_radius,
+                lattice_y[grid_y] + seed_radius,
+                grid_z + ~is_row_odd * seed_radius,
+            ),
+            axis=-1,
+        ).reshape((-1, 3))
+        positions = _relax_volume_sampling(positions, sdf, origin, cell_size, radius, n_steps=100)
+        cache.save(positions)
 
     return positions + pos
 

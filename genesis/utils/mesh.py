@@ -531,32 +531,32 @@ def convex_decompose(mesh, coacd_options):
             is_cached_loaded = True
 
     if not is_cached_loaded:
-        with gs.logger.timer("Running convex decomposition."):
-            mesh = coacd.Mesh(mesh.vertices, mesh.faces)
-            args = coacd_options
-            result = coacd.run_coacd(
-                mesh,
-                threshold=args.threshold,
-                max_convex_hull=args.max_convex_hull,
-                preprocess_mode=args.preprocess_mode,
-                preprocess_resolution=args.preprocess_resolution,
-                resolution=args.resolution,
-                mcts_nodes=args.mcts_nodes,
-                mcts_iterations=args.mcts_iterations,
-                mcts_max_depth=args.mcts_max_depth,
-                pca=args.pca,
-                merge=args.merge,
-                decimate=args.decimate,
-                max_ch_vertex=args.max_ch_vertex,
-                extrude=args.extrude,
-                extrude_margin=args.extrude_margin,
-                apx_mode=args.apx_mode,
-                seed=args.seed,
-            )
-            mesh_parts = []
-            for vs, fs in result:
-                mesh_parts.append(trimesh.Trimesh(vs, fs))
-            cache.save({"mesh_parts": mesh_parts, "mesh_scale": mesh_scale})
+        gs.logger.info("Running convex decomposition.")
+        mesh = coacd.Mesh(mesh.vertices, mesh.faces)
+        args = coacd_options
+        result = coacd.run_coacd(
+            mesh,
+            threshold=args.threshold,
+            max_convex_hull=args.max_convex_hull,
+            preprocess_mode=args.preprocess_mode,
+            preprocess_resolution=args.preprocess_resolution,
+            resolution=args.resolution,
+            mcts_nodes=args.mcts_nodes,
+            mcts_iterations=args.mcts_iterations,
+            mcts_max_depth=args.mcts_max_depth,
+            pca=args.pca,
+            merge=args.merge,
+            decimate=args.decimate,
+            max_ch_vertex=args.max_ch_vertex,
+            extrude=args.extrude,
+            extrude_margin=args.extrude_margin,
+            apx_mode=args.apx_mode,
+            seed=args.seed,
+        )
+        mesh_parts = []
+        for vs, fs in result:
+            mesh_parts.append(trimesh.Trimesh(vs, fs))
+        cache.save({"mesh_parts": mesh_parts, "mesh_scale": mesh_scale})
 
     return mesh_parts
 
