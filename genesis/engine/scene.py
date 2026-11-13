@@ -372,8 +372,7 @@ class Scene(RBC):
             inertia, link frames (e.g. a different 'scale', or a different pose for a fixed base) and joint parameters
             may differ.
         material : gs.materials.Material | None, optional
-            The material of the entity. If None, use ``gs.materials.Rigid()``. It will be deprecated in favour of
-            ``options``.
+            The material of the entity. If None, use ``gs.materials.Rigid()``.
         surface : gs.surfaces.Surface | None, optional
             The surface of the entity. If None, use ``gs.surfaces.Default()``.
         visualize_contact : bool | None, optional
@@ -426,8 +425,8 @@ class Scene(RBC):
         morph = options.morph
         material = options.material
         name = options.name
-        # The entity resolves the defaults of its surface on a copy of its own, since a surface may be shared by other
-        # entities and options. The morph resolves in place, as some shared morphs rely on (see 'Entity.options').
+        # The surface resolves on a copy, since other entities may share it. The morph resolves in place, as shared
+        # morphs rely on (see 'Entity.options').
         surface = gs.surfaces.Default() if options.surface is None else options.surface.model_copy()
 
         # some morph should not smooth surface normal
@@ -520,8 +519,7 @@ class Scene(RBC):
         morph : gs.morphs.USD | None, optional
             The stage to add to the scene.
         material : gs.materials.Material | None, optional
-            The material of the stage. If None, use ``gs.materials.Rigid()`` for all morphs. It will be deprecated in
-            favour of ``options``.
+            The material of the stage. If None, use ``gs.materials.Rigid()`` for all morphs.
         surface : gs.surfaces.Surface | None, optional
             The surface of the stage. If None, use ``gs.surfaces.Default()`` for all morphs.
         visualize_contact : bool | None, optional
@@ -839,8 +837,7 @@ class Scene(RBC):
         ----------
         material : gs.materials.Material | None, optional
             The material of the fluid to be emitted. Must be an instance of `gs.materials.MPM.Base`,
-            `gs.materials.SPH.Base`, `gs.materials.PBD.Particle` or `gs.materials.PBD.Liquid`. It will be deprecated
-            in favour of ``options``.
+            `gs.materials.SPH.Base`, `gs.materials.PBD.Particle` or `gs.materials.PBD.Liquid`.
         max_particles : int, optional
             The maximum number of particles the emitter holds at once, recycled once all are emitted. Each one costs
             memory and simulation time from the start, emitted or not. Default is 20000.
@@ -958,8 +955,7 @@ class Scene(RBC):
             with namespace(self._namespace):
                 self._sim.build()
 
-            # The entities stop sharing their morph and surface with the caller, which may edit them after build. The
-            # material stays shared, since the solvers keep the material they were given.
+            # Detach the morph and the surface from the caller. The material stays shared, since the solvers hold it.
             for entity in self._sim.entities:
                 morph, surface = copy.deepcopy((entity._options.morph, entity._options.surface))
                 for options in (*(morph if isinstance(morph, tuple) else (morph,)), surface):

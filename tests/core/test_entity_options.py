@@ -135,9 +135,7 @@ def test_selection_precedence(tmp_path, caplog, show_viewer, tol, two_box_free_m
         )
         for i, friction in enumerate((0.5, 1.5))
     ]
-    # A geom selection counts and names the collision geoms of a link as the asset states them, so the convex pieces of
-    # a decomposed mesh all take the options of the mesh. A name, a mask, a slice and, for the entity, a glob each
-    # select their geoms.
+    # The convex pieces of a decomposed mesh all take the options of the mesh
     mixed_geoms_body = scene.add_entity(
         options=gs.entities.Rigid(
             morph=gs.morphs.MJCF(
@@ -173,8 +171,7 @@ def test_selection_precedence(tmp_path, caplog, show_viewer, tol, two_box_free_m
                     },
                 ),
             },
-            # The caps take the rolling friction of the entity, while the slice of their link overrides their torsional
-            # one. An ordinal of the entity counts its collision geoms over every link, so the fifth one is the capsule.
+            # An ordinal of the entity counts its collision geoms over every link, so the fifth one is the capsule
             geoms={
                 gs.GeomIndex.named("*_cap"): gs.options.Geom(
                     friction_torsional=0.05,
@@ -321,23 +318,18 @@ def test_selection_precedence(tmp_path, caplog, show_viewer, tol, two_box_free_m
     assert_allclose(arm.get_link("arm1").geoms[0].get_friction(), 0.5, tol=gs.EPS)
     assert_allclose(arm.get_link("arm2").geoms[0].get_friction(), 1.5, tol=gs.EPS)
     assert_allclose(overlapping_box.geoms[0].get_friction(), 2.0, tol=gs.EPS)
-    # The subtree under 'arm1' holds 'arm2' as well
     for geom in arm.geoms:
         assert_allclose(geom.get_friction_torsional(), 0.02, tol=gs.EPS)
         assert_allclose(geom.get_friction_rolling(), 0.003, tol=gs.EPS)
     for sphere, friction in zip(spheres, (0.5, 1.5)):
         for geom in sphere.geoms:
             assert_allclose(geom.get_friction(), friction, tol=gs.EPS)
-    # The frame of the body sits at the centroid of its two boxes, 0.2 m on either side, and its center of mass towards
-    # the denser one
+    # The frame of the body sits at the centroid of its two boxes, 0.2 m on either side
     boxes_mass, boxes_x = np.array([8000.0, 1000.0]) * 0.2**3, np.array([-0.2, 0.2])
     com_x = boxes_mass @ boxes_x / boxes_mass.sum()
     inertia_yy = boxes_mass @ ((boxes_x - com_x) ** 2 + 2.0 * 0.2**2 / 12.0)
     assert_allclose(dense_body.get_dofs_velocity()[..., 4], com_x * PUSH_FORCE / inertia_yy * N_STEPS * DT, tol=5e-2)
-    # The pieces of the decomposed torus take the options of its name, the box those of the mask and of the slice, and
-    # the sphere those of the slice over the friction of the entity, both caps taking the glob of the entity. The
-    # capsule of the child link takes the name its subtree selection gives and the ordinal of the entity. The ring,
-    # given no options, keeps the friction of the entity, its pieces fusing with none of the torus.
+    # The ring, given no options, keeps the friction of the entity, its pieces fusing with none of the torus
     meshes_friction = torch.stack(
         [geom.get_friction() for geom in mixed_geoms_body.geoms if geom.type == gs.GEOM_TYPE.MESH]
     )

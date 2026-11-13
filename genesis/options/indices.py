@@ -26,8 +26,7 @@ BArrayType = Annotated[tuple[StrictBool, ...], Field(min_length=1, strict=False)
 class _Selection(Options):
     """A selection keying the options set on part of an entity.
 
-    A selection dumps to a tuple of (field, value) pairs in Python mode, so that the dump of the options it keys holds
-    it as a key, since a dict is unhashable and any mapping is dumped as one.
+    A selection dumps to a tuple of (field, value) pairs, so that it stays hashable as a key in the dump of the options.
     """
 
     @model_serializer(mode="wrap")

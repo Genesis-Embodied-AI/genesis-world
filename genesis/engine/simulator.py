@@ -160,11 +160,9 @@ class Simulator(RBC):
         if desc is not None:
             options = desc.options
         if isinstance(options, gs.entities.Hybrid):
-            # A hybrid entity has no solver of its own, since its parts are entities of their own. The hybrid entity
-            # adds its parts to the scene itself.
+            # A hybrid entity adds its parts to the scene itself, as entities of their own
             entity = HybridEntity(self.n_entities, self.scene, morph, surface, options, name)
         else:
-            # The options decide the solver, by naming the class of the options configuring it
             for solver in self._solvers:
                 if isinstance(solver._options, options._solver_options_cls):
                     break

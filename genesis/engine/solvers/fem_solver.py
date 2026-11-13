@@ -805,7 +805,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     continue
                 array.from_numpy(values.astype(gs.np_float if array.dtype == gs.qd_float else gs.np_int, copy=False))
 
-            # The vertices the vertex options fix take slots on top of those left to the constraints set at runtime
+            # The vertices fixed by vertex options take slots on top of 'max_vertex_constraints'
             self._max_vertex_constraints = self._options.max_vertex_constraints + sum(
                 entity._fixed_verts_idx_local.size for entity in self._entities
             )
@@ -816,7 +816,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             )
             kernel_clear_vertex_constraints(self.vertex_constraints)
 
-            # The vertices the vertex options fix are held at their initial positions from the first substep on
             for entity in self._entities:
                 if entity._fixed_verts_idx_local.size > 0:
                     self._set_vertex_constraints(entity._fixed_verts_idx_local + entity._v_start)

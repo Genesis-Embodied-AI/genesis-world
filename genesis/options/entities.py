@@ -47,8 +47,7 @@ def get_entity_options_cls(material: Material) -> type["BaseEntity"] | None:
 
 
 class _FrozenOptions(Options):
-    # Assigning to a field of options skips their validators, so the entity options and the options they nest are
-    # immutable, which keeps what their validators checked true
+    # Frozen, since assigning a field skips the validators
     model_config = ConfigDict(frozen=True)
 
     def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
@@ -67,9 +66,7 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
     """Options an entity is constructed from, as passed to ``Scene.add_entity(options=...)``.
 
     A concrete subclass decides the kind of entity and the solver simulating it, and declares the materials it admits.
-    The options are immutable: derive a variant with ``model_copy(update=...)``. The entity is built from the morph
-    and the surface they hold, whose unset defaults it fills in, as when they are passed to ``Scene.add_entity``
-    directly.
+    The options are immutable: derive a variant with ``model_copy(update=...)``.
 
     Parameters
     ----------
@@ -83,8 +80,7 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
         The name of the entity, unique within the scene. If None, a name is generated from the morph.
     """
 
-    # The class of the scene options configuring the solver that simulates the entity, or None for an entity simulated
-    # by no solver of its own, such as a hybrid entity, whose parts are entities of their own
+    # Options class of the solver simulating the entity, None for a hybrid entity, whose parts are entities of their own
     _solver_options_cls: ClassVar[type[Options] | None] = None
 
     # Checked by instance alone, since validation would run the validators of 'Morph' on the sequence of morphs
@@ -134,10 +130,8 @@ class Geom(_GeomFields):
     ----------
     rho : float | None, optional
         The density (kg/m^3). It estimates the mass and the inertia of a link the asset states none for, or of every
-        moving link under the 'recompute_inertia' option of the morph. The frame of an aligned body stays where the
-        densities of the asset put it, so the body is then simulated as unaligned. The IPC coupler rejects it, since it
-        simulates an entity at the density of its material. If None, the geoms take the density of their link.
-        Default is None.
+        moving link under the 'recompute_inertia' option of the morph. An aligned body is then simulated unaligned.
+        The IPC coupler rejects it. If None, the geoms take the density of their link. Default is None.
     friction : float | None, optional
         The sliding friction coefficient of the contacts of the geoms (see ``gs.materials.Rigid.friction``). If None,
         the geoms take that of their link. Default is None.
@@ -182,8 +176,8 @@ class Rigid(BaseEntity["RigidEntity"]):
     links : dict[gs.LinkIndex, gs.options.Link], optional
         The options of the links each key selects, which override the material of the entity. A link the asset parser
         merges into its parent has no name of its own, so keep it with the 'links_to_keep' option of the morph to
-        select it. Two keys selecting one link stand at equal specificity whatever the number of links they name, so
-        where both give one field, the first key applies, with a warning. Default is no link options.
+        select it. Where two keys give one field of one link, the first key applies, with a warning. Default is no link
+        options.
     geoms : dict[gs.GeomIndex, gs.options.Geom], optional
         The options of the collision geoms each key selects among the collision geoms of the whole entity, by ordinal
         (see ``gs.GeomIndex.at``) or by name in any of its links, raising if it selects no geom. They override the
@@ -208,7 +202,7 @@ class Kinematic(BaseEntity["KinematicEntity"]):
     Parameters
     ----------
     material : gs.materials.Kinematic, optional
-        The material of the entity, which a rigid material cannot stand for. Defaults to ``gs.materials.Kinematic()``.
+        The material of the entity. Defaults to ``gs.materials.Kinematic()``.
     """
 
     _solver_options_cls = KinematicOptions
@@ -242,8 +236,7 @@ class FEM(BaseEntity["FEMEntity"]):
     Parameters
     ----------
     material : gs.materials.FEM.Base
-        The material of the entity, one of ``gs.materials.FEM.Elastic``, ``Cloth`` or ``Muscle``, which makes it a
-        muscle.
+        The material of the entity, one of ``gs.materials.FEM.Elastic``, ``Cloth`` or ``Muscle``.
     vertices : dict[gs.VertexIndex, gs.options.Vertex], optional
         The options of the vertices each key selects among the vertices of the volume mesh. Where several keys give
         one field of one vertex, the first key applies, with a warning. A Cloth material takes none. Default is no

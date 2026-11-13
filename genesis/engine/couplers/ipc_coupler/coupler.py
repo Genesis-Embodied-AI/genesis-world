@@ -281,7 +281,6 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     )
             gs.logger.debug(f"Rigid entity {i_e}: coupling type '{coup_type.name.lower()}'")
 
-            # IPC takes the density and friction of the material, so per-link and per-geom values do not reach it
             entity_options = entity.options
             links_options = entity_options.links.values()
             geoms_options = [

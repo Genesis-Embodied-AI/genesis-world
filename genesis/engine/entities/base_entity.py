@@ -20,10 +20,8 @@ if TYPE_CHECKING:
 class EntityDescription:
     """Base class of what one entity of a scene is created from, whatever the solver simulating it.
 
-    A scene names every entity it holds as one of these, so a kind of entity described later stands there too. The
-    material the entity is simulated under is what every description holds, beside the options the entity was
-    constructed from. A file exported before entity options existed holds none, and each kind of description then
-    derives them from what it holds.
+    A file exported before entity options existed holds the material alone, from which each kind of description derives
+    the options.
     """
 
     material: Material
@@ -128,7 +126,7 @@ class Entity(RBC):
 
     @property
     def material(self) -> Material:
-        """The material of the entity, which its options hold."""
+        """The material of the entity."""
         return self._options.material
 
     @property
