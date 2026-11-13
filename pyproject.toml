@@ -103,8 +103,9 @@ dev = [
     "mujoco>=3.10.0,<3.11.0",
     # Used by the locomotion environments to batch observations
     "tensordict",
-    # Used internally by 'MPLPlotter'. Its snapshots are rendered with matplotlib 3.11, which rasterizes text
-    # differently from 3.10
+    # Used internally by 'MPLPlotter'
+    # * 3.7.0: introduces Button blitting and 'outside' keyword legend location
+    # * 3.11.0: changes text rasterization, which the 'MPLPlotter' snapshots are rendered with
     "matplotlib>=3.11.0",
     # Used for ground truth validation in unit tests
     "scipy",
