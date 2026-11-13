@@ -258,7 +258,7 @@ with lazy_imports():
 
     import genesis as gs
 
-    from .utils.assets import get_hf_dataset
+    from .utils.assets import get_hf_dataset, update_snapshots_lock
     from .utils.simulators import build_genesis_sim, build_mujoco_sim
 
 
@@ -305,6 +305,11 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
             "The 'benchmarks' marker is exclusive and cannot be combined with other markers; "
             "run benchmarks with '-m benchmarks' alone."
         )
+
+    # Update the lock before collection, so that the selected tests download the snapshots it now pins
+    snapshots_revision = config.getoption("--snapshot-update-lock")
+    if snapshots_revision is not None:
+        update_snapshots_lock(snapshots_revision)
 
     # Only launch memory monitor from the main process, not from xdist workers
     mem_filepath = config.getoption("--mem-monitoring-filepath")
@@ -782,6 +787,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     if IS_INTERACTIVE_VIEWER_AVAILABLE:
         parser.addoption("--vis", action="store_true", default=False, help="Enable interactive viewer.")
     parser.addoption("--dev", action="store_true", default=False, help="Enable genesis debug mode.")
+    parser.addoption(
+        "--snapshot-update-lock",
+        type=str,
+        default=None,
+        metavar="SHA",
+        help=(
+            "Pin every snapshot that this commit of the snapshots dataset adds or changes in 'tests/snapshots.lock', "
+            "drop the snapshots it deletes, then run the selected tests against the updated lock."
+        ),
+    )
     parser.addoption(
         "--failure-artifacts-dir",
         type=str,

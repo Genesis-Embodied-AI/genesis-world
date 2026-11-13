@@ -11,7 +11,7 @@ from pathlib import Path
 
 from httpcore import TimeoutException as HTTPTimeoutException
 from httpx import HTTPError as HTTPXError
-from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub import HfApi, RepoFile, hf_hub_download, snapshot_download
 from huggingface_hub.errors import LocalEntryNotFoundError
 from PIL import Image, UnidentifiedImageError
 from requests.exceptions import HTTPError
@@ -39,6 +39,47 @@ SNAPSHOTS_LOCK_PATH = os.path.join(TEST_DIR, "snapshots.lock")
 def get_snapshots_revision():
     with open(SNAPSHOTS_LOCK_PATH, encoding="utf-8") as f:
         return dict(line.split() for line in f)
+
+
+def update_snapshots_lock(revision):
+    """Pin every snapshot that a commit of the snapshots repository changes to that commit.
+
+    The revision is a commit hash of the 'main' branch of the repository, or a unique prefix of one. A snapshot that the
+    commit adds gets a new line in the lock, and a snapshot that it deletes loses its line. A snapshot changed by an
+    earlier commit keeps its pin, so pass each commit of a series of pushes in turn, from oldest to newest.
+    """
+    api = HfApi()
+    commits_id = [
+        commit.commit_id for commit in api.list_repo_commits("Genesis-Intelligence/snapshots", repo_type="dataset")
+    ]
+    commits_id_match = [commit_id for commit_id in commits_id if commit_id.startswith(revision)]
+    if len(commits_id_match) != 1:
+        raise ValueError(f"'{revision}' matches no single commit of the 'main' branch of the snapshots repository.")
+    commit_id = commits_id_match[0]
+    i_commit = commits_id.index(commit_id)
+
+    tree, tree_parent = (
+        {
+            path_info.path: path_info.blob_id
+            for path_info in api.list_repo_tree(
+                "Genesis-Intelligence/snapshots", repo_type="dataset", recursive=True, revision=tree_revision
+            )
+            if isinstance(path_info, RepoFile) and "/__snapshots__/" in path_info.path
+        }
+        for tree_revision in commits_id[i_commit : i_commit + 2]
+    )
+
+    snapshots_revision = dict(get_snapshots_revision())
+    for path in tree_parent.keys() - tree.keys():
+        print(f"Unpinning deleted snapshot '{path}'.")
+        snapshots_revision.pop(path, None)
+    for path, blob_id in tree.items():
+        if tree_parent.get(path) != blob_id:
+            print(f"Pinning snapshot '{path}' to '{commit_id}'.")
+            snapshots_revision[path] = commit_id
+    with open(SNAPSHOTS_LOCK_PATH, "w", encoding="utf-8") as f:
+        f.writelines(sorted(f"{path} {path_revision}\n" for path, path_revision in snapshots_revision.items()))
+    get_snapshots_revision.cache_clear()
 
 
 @cache
