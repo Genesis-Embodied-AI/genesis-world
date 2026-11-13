@@ -1,0 +1,65 @@
+genesis/engine/materials/base.py
+  s_ba9e702b72d5c4::t_c3fbcba02601ec 1,6,16-18,24-29,31-51
+tests/core/test_entity_options.py
+  s_ba9e702b72d5c4::t_3df0f7a3ea3e83 64-68,96-143
+  s_ba9e702b72d5c4::t_301d2065d540e1 54,56-63,69-83
+  s_ba9e702b72d5c4::t_eee975d942f353 144-145
+tests/sensors/test_raycaster.py
+  s_ba9e702b72d5c4::t_e5084449121ecf 282-283,324,334-338
+genesis/engine/materials/rigid.py
+  s_ba9e702b72d5c4::t_748213157d49bc 1-2,45-52,55-70,90-97,124-137
+genesis/engine/sensors/raycaster.py
+  s_ba9e702b72d5c4::t_8689a1039cd306 33-34,142-143
+genesis/options/__init__.py
+  s_ba9e702b72d5c4::t_b50c8eeb1b1c94 33-34
+  s_ba9e702b72d5c4::t_07278e6d2e853e 1
+.github/contributing/ARCHITECTURE.md
+  s_ba9e702b72d5c4::t_0794f6097ab6f2 85,122
+genesis/engine/couplers/ipc_coupler/utils.py
+  s_ba9e702b72d5c4::t_8689a1039cd306 32
+genesis/engine/materials/kinematic.py
+  s_ba9e702b72d5c4::t_c3fbcba02601ec 1,19,21-23
+genesis/engine/couplers/ipc_coupler/coupler.py
+  s_ba9e702b72d5c4::t_21c286168c9196 258,263-264,266,268-269,465-466,558,740-741,754-755
+genesis/engine/entities/rigid_entity/rigid_geom.py
+  s_ba9e702b72d5c4::t_d583521afb29c0 65-68
+genesis/options/entities.py
+  s_ba9e702b72d5c4::t_f3eacd5b06d6a6 12-13,50-76,80-90,149,190-270,304-310,316-317,328,348-352,360-382,402-406,416-420,422-423
+  s_ba9e702b72d5c4::t_07278e6d2e853e 290,396-397
+  s_ba9e702b72d5c4::t_8d89583048003c 77-79
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_ba9e702b72d5c4::t_b1a6a151ba3822 1776,2467,2648
+  s_ba9e702b72d5c4::t_8d89583048003c 2369-2374,2400-2405,2463-2466,2644-2647
+  s_ba9e702b72d5c4::t_1285e1aaa1bc5e 1711,1773,1859,2671,2693,2716,2740,3390
+tests/ipc/test_api.py
+  s_ba9e702b72d5c4::t_66d45deb58e52e 341-343
+genesis/engine/entities/hybrid_entity.py
+  s_ba9e702b72d5c4::t_f87bc65cd394cb 90-102
+genesis/engine/entities/rigid_entity/description.py
+  s_ba9e702b72d5c4::t_a881898f202360 86-89,91-93,96,109-110,121,1989
+  s_ba9e702b72d5c4::t_677aa2f279396c 27,90,97-99
+  s_ba9e702b72d5c4::t_b9c6d468f987ee 253,276-277,1499-1523,1545,1606-1608,2117,2125-2126
+genesis/vis/viewer_plugins/raycast.py
+  s_ba9e702b72d5c4::t_8d89583048003c 59
+  s_ba9e702b72d5c4::t_8689a1039cd306 37-39,144-145
+genesis/engine/solvers/kinematic_solver.py
+  s_ba9e702b72d5c4::t_d583521afb29c0 813-816
+genesis/engine/solvers/rigid/collider/collider.py
+  s_ba9e702b72d5c4::t_d583521afb29c0 458,463
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "17fc8ed020081ae5bb5f03f1022dc8cb0b00bde2",
+  "prompts": {},
+  "sessions": {
+    "s_ba9e702b72d5c4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "494dea4c-0e95-5885-a94a-756d1b3a7b49",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
