@@ -101,12 +101,14 @@ def get_glb_image(glb, image_index, images, image_type=None):
     glb_image = glb.images[image_index]
     image_path = None
     if glb_image.bufferView is None and not glb_image.uri.startswith("data:"):
-        image_path = os.path.join(os.path.dirname(glb.path), unquote(glb_image.uri))
+        image_path = os.path.realpath(os.path.join(os.path.dirname(glb.path), unquote(glb_image.uri)))
     if images is None:
         return _decode_glb_image(glb, glb_image, image_path, image_type)
-    # An image stored in a file of its own changes along with that file, whatever the glTF file does
-    image_mtime = None if image_path is None else os.path.getmtime(image_path)
-    key = (glb.path, os.path.getmtime(glb.path), image_index, image_type, image_mtime)
+    # An image stored in a file of its own is keyed on that file alone, so that the glTF files sharing it decode it once
+    if image_path is None:
+        key = (glb.path, os.path.getmtime(glb.path), image_index, image_type)
+    else:
+        key = (image_path, os.path.getmtime(image_path), image_type)
     image_array = _GLB_IMAGES_CACHE.find(key)
     if image_array is None:
         image_array = _decode_glb_image(glb, glb_image, image_path, image_type)
@@ -340,7 +342,12 @@ def parse_glb_tree(glb, node_index):
     return mesh_list
 
 
-def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
+def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface, images_owner=None):
+    """Parse the meshes of a glTF file, each mesh owning the decoded images of its material.
+
+    'images_owner' is an object that owns every decoded image as well, so that later parses decode none of them again
+    for as long as it lives, whether or not the meshes do.
+    """
     glb = pygltflib.GLTF2().load(path)
     assert glb is not None
     glb.path = path
@@ -458,4 +465,8 @@ def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
         material_idx = group_idx if group_by_material else group_idx[1]
         for key, image_array in materials_images.get(material_idx, {}).items():
             _GLB_IMAGES_CACHE.own(mesh, key, image_array)
+    if images_owner is not None:
+        for material_images in materials_images.values():
+            for key, image_array in material_images.items():
+                _GLB_IMAGES_CACHE.own(images_owner, key, image_array)
     return meshes

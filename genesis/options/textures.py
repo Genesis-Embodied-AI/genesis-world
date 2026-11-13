@@ -212,7 +212,8 @@ class ImageTexture(Texture, SerializationMixin):
         # independently would miss a per-channel factor that masks the only nonzero channels (e.g. a green texture
         # scaled by a red-only factor).
         channels = self.image_array.shape[-1] if self.image_array.ndim == 3 else 1
-        channel_peaks = self.image_array.reshape(-1, channels).max(axis=0)
+        # Reducing over the rows first runs over contiguous memory, much faster than a strided reduction per channel
+        channel_peaks = self.image_array.max(axis=0).reshape(-1, channels).max(axis=0)
         return all(factor < gs.EPS or peak == 0 for factor, peak in zip(self.image_color, channel_peaks))
 
     @computed_field
@@ -237,7 +238,9 @@ class ImageTexture(Texture, SerializationMixin):
     def check_dim(self, dim: int) -> Texture | None:
         if self.image_array is not None:
             if self.channel > dim:
-                self.image_array, res_array = self.image_array[:, :, :dim], self.image_array[:, :, dim]
+                # Both parts are copied to contiguous memory once, so that hashing them never copies them again
+                res_array = np.ascontiguousarray(self.image_array[:, :, dim])
+                self.image_array = np.ascontiguousarray(self.image_array[:, :, :dim])
                 self.image_color, res_color = self.image_color[:dim], self.image_color[dim:]
                 return ImageTexture(image_array=res_array, image_color=res_color, encoding="linear").check_simplify()
         return None
@@ -245,8 +248,9 @@ class ImageTexture(Texture, SerializationMixin):
     def check_simplify(self) -> "ImageTexture | ColorTexture":
         if self.image_array is None:
             return self
-        max_color = np.max(self.image_array, axis=(0, 1))
-        min_color = np.min(self.image_array, axis=(0, 1))
+        # Reducing over the rows first runs over contiguous memory (see 'is_black')
+        max_color = self.image_array.max(axis=0).max(axis=0)
+        min_color = self.image_array.min(axis=0).min(axis=0)
         if np.all(min_color == max_color):
             return ColorTexture(color=max_color.reshape(-1) / 255.0 * self.image_color)
         return self
