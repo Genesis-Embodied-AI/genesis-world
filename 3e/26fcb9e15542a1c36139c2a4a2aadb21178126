@@ -1,0 +1,25 @@
+tests/sensors/test_api.py
+  s_c62ec9da443b15::t_cc57de7caf2ba5 620
+examples/sensors/depth_camera_custom_vverts.py
+  s_c62ec9da443b15::t_cc57de7caf2ba5 106,121
+tests/sensors/test_raycaster.py
+  s_c62ec9da443b15::t_cc57de7caf2ba5 97,108,337,351
+genesis/options/sensors/raycaster.py
+  s_c62ec9da443b15::t_cc57de7caf2ba5 105,109,113,129-130,212,230,237,239-242,245
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3e26fcb9e15542a1c36139c2a4a2aadb21178126",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

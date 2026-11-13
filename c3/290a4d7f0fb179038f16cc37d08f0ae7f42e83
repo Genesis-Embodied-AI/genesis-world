@@ -1,0 +1,36 @@
+genesis/options/textures.py
+  s_cb7eb107261d79::t_03197ac53919cb 82-83,155-156,584,591-592,656,658,660,675-677,701,743
+genesis/engine/scene.py
+  s_cb7eb107261d79::t_03197ac53919cb 956-957
+genesis/engine/texture.py
+  s_cb7eb107261d79::t_03197ac53919cb 111-113,115-117,154
+  s_cb7eb107261d79::t_2d2201eb0f7278 26,28,149-150
+genesis/engine/entities/rigid_entity/description.py
+  s_cb7eb107261d79::t_03197ac53919cb 1589-1590
+genesis/vis/rasterizer_context.py
+  s_cb7eb107261d79::t_b5898fe4ca6b4e 47-52
+genesis/ext/pyrender/jit_render.py
+  s_cb7eb107261d79::t_03197ac53919cb 540-542,872-873
+genesis/ext/pyrender/texture.py
+  s_cb7eb107261d79::t_03197ac53919cb 68
+tests/rendering/test_offscreen.py
+  s_cb7eb107261d79::t_b5898fe4ca6b4e 205-206
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_cb7eb107261d79::t_03197ac53919cb 1254-1255
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c3290a4d7f0fb179038f16cc37d08f0ae7f42e83",
+  "prompts": {},
+  "sessions": {
+    "s_cb7eb107261d79": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a5f65f2f-b2b8-475d-9a26-7ce185646312",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+genesis/options/indices.py
+  s_cb7eb107261d79::t_2d2201eb0f7278 161-162
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1af932c32b7d5b14d86da5f1cd564604503a7375",
+  "prompts": {},
+  "sessions": {
+    "s_cb7eb107261d79": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a5f65f2f-b2b8-475d-9a26-7ce185646312",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
