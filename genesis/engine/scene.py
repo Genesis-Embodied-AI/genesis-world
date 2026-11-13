@@ -958,15 +958,14 @@ class Scene(RBC):
             with namespace(self._namespace):
                 self._sim.build()
 
-            # The entities stop sharing their morph and surface with the caller, which may edit them after build
+            # The entities stop sharing their morph and surface with the caller, which may edit them after build. The
+            # material stays shared, since the solvers keep the material they were given.
             for entity in self._sim.entities:
-                entity._options = entity._options.model_copy(
-                    update={
-                        "morph": copy.deepcopy(entity._options.morph),
-                        "surface": copy.deepcopy(entity._options.surface),
-                    }
-                )
-                entity._options._make_read_only()
+                morph, surface = copy.deepcopy((entity._options.morph, entity._options.surface))
+                for options in (*(morph if isinstance(morph, tuple) else (morph,)), surface):
+                    if options is not None:
+                        options._make_read_only()
+                entity._options = entity._options.model_copy(update={"morph": morph, "surface": surface})
 
             # reset state
             self._reset()

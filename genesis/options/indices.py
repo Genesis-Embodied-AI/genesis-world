@@ -79,8 +79,8 @@ class LinkIndex(_Selection):
     def subtree(cls, *names: str) -> Self:
         """Select the links of the given names and every link below them in the kinematic tree, such as a gripper.
 
-        A selection of links stands at one specificity whatever its kind, so a subtree and a link inside it giving
-        one field of one link raise an error.
+        A selection of links stands at one specificity whatever its kind, so of a subtree and a link inside it giving
+        one field of one link, the first one applies, with a warning.
         """
         return cls(subtree_roots=names)
 

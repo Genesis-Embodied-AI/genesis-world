@@ -121,9 +121,8 @@ class Entity(RBC):
     def options(self) -> gs.entities.BaseEntity:
         """The options this entity was constructed from.
 
-        Until the scene is built, they hold the morph and the surface given to the scene, which the resolution of the
-        entity fills with its defaults. Once it is built, they hold copies of them, so editing them leaves the entity as
-        it is.
+        Until the scene is built, they hold the morph and the surface given to the scene, the resolution of the entity
+        writing its defaults into the morph. Once it is built, they hold read-only copies of them.
         """
         return self._options
 
