@@ -1091,11 +1091,6 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             or self.legacy_coupler_config.has_fem_sph
         )
 
-    @property
-    def active_solvers(self):
-        """All the active solvers managed by the scene's simulator."""
-        return self.sim.active_solvers
-
 
 # ------------------------------------------------------------------------------------
 # ------------------------------------- kernels --------------------------------------

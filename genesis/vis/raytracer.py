@@ -40,7 +40,6 @@ class EnvironmentSphere:
         self.file_path = os.path.join(gs.utils.get_assets_dir(), file_path)
 
     def add_to_render(self, renderer):
-        self._renderer = renderer
         if self.surface is None:
             return
         env_sphere = mu.load_trimesh(self.file_path)
@@ -50,14 +49,10 @@ class EnvironmentSphere:
         env_uvs = env_sphere.visual.uv
         env_uvs[:, 1] = 1.0 - env_uvs[:, 1]
         env_transform = gu.trans_quat_to_T(np.array(self.pos), np.array(self.quat))
-        # self.verts = env_vertices
 
         renderer.add_surface(self.name, self.surface)
         renderer.add_rigid(self.name, env_vertices, env_faces, env_normals, env_uvs)
         renderer.update_rigid(self.name, env_transform)
-
-    def update_pose(self, transform):
-        self._renderer.update_rigid(self.name, transform)
 
 
 class ShapeLight:
@@ -235,12 +230,6 @@ class Raytracer:
         )
 
         self.visualizer.update_visual_states()
-
-        # state_limit = 0
-        # for camera in self._cameras:
-        #     state_limit_cam = int(camera.res[0] * camera.res[1] * self.spp)
-        #     state_limit = max(state_limit, state_limit_cam)
-        # state_limit = min(state_limit, self.state_limit)
 
         self.env_sphere.add_to_render(self)
         for light in self.lights:

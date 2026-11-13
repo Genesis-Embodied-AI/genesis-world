@@ -105,11 +105,6 @@ class DroneEntity(RigidEntity):
         return self._n_propellers
 
     @property
-    def COM_link_idx(self):
-        """The index of the center-of-mass (COM) link of the drone."""
-        return self._COM_link_idx
-
-    @property
     def propellers_idx(self):
         """The indices of the drone's propeller links."""
         return self._propellers_link_idx

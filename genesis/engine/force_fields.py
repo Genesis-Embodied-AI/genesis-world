@@ -346,10 +346,6 @@ class Vortex(ForceField):
         return self._direction
 
     @property
-    def radius(self):
-        return self._radius
-
-    @property
     def center(self):
         return self._center
 

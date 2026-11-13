@@ -453,7 +453,6 @@ def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, m
 
         # can also do link.init_verts here and it seems to have more indices than geom.init_verts (but there is no idx_offset_vert)
         verts = geom.init_verts
-        assert hasattr(geom, "init_normals")
         inner_mesh = trimesh.Trimesh(
             vertices=verts,  # NOTE: scale is already applied here
             faces=geom.init_faces,
@@ -467,11 +466,6 @@ def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, m
         meshes.append(trimesh.util.concatenate([outer_mesh, inner_mesh_inverted]))
         trans_local_to_global.append(trans)
         euler_local_to_global.append(euler)
-
-    rm_cross_link_overlap_mesh = False
-    if rm_cross_link_overlap_mesh:
-        for i, mesh in enumerate(meshes[:-1]):  # remove cross-link overlapping area
-            meshes[i] = trimesh.boolean.difference([mesh] + meshes[i + 1 :])
 
     part_soft = scene.add_entity(
         material=material_soft,
@@ -554,7 +548,7 @@ def default_func_instantiate_rigid_soft_association_from_soft(part_rigid, part_s
     geom_idcs = []
     trans_local_to_global = []
     quat_local_to_global = []
-    for i, link in enumerate(part_rigid.links):
+    for link in part_rigid.links:
         geom = link.geoms[0]
         link_end_x_pos = (
             gu.transform_by_trans_quat(np.zeros((3,)), trans=geom.init_pos * 2, quat=geom.init_quat) + link.init_x_pos
