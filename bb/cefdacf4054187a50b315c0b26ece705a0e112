@@ -1,0 +1,40 @@
+genesis/assets/urdf/plane/generate_checker.py
+  s_4e532cc51f4368::t_a86025974732f9 1-20
+genesis/engine/couplers/sap_coupler.py
+  s_4e532cc51f4368::t_a86025974732f9 1954-1961
+genesis/utils/linalg.py
+  s_4e532cc51f4368::t_a86025974732f9 1-101
+genesis/vis/raytracer.py
+  s_4e532cc51f4368::t_a86025974732f9 43,53,59-61,239-243
+  s_4e532cc51f4368::t_cdf930f37b147f 244
+genesis/engine/entities/rigid_entity/drone_entity.py
+  s_4e532cc51f4368::t_a86025974732f9 108-111
+  s_4e532cc51f4368::t_ed7a58805ce647 107
+genesis/engine/couplers/legacy_coupler.py
+  s_4e532cc51f4368::t_a86025974732f9 1094-1098
+genesis/engine/entities/rigid_entity/rigid_geom.py
+  s_4e532cc51f4368::t_a86025974732f9 78-81,471-476
+  s_4e532cc51f4368::t_fe126e87266df7 477
+pyproject.toml
+  s_4e532cc51f4368::t_a86025974732f9 29
+genesis/engine/entities/hybrid_entity.py
+  s_4e532cc51f4368::t_a86025974732f9 468,475-479,483-487,569
+genesis/engine/force_fields.py
+  s_4e532cc51f4368::t_99d2d19fc7bde8 348-351
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bbcefdacf4054187a50b315c0b26ece705a0e112",
+  "prompts": {},
+  "sessions": {
+    "s_4e532cc51f4368": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "70ed08a1-5a04-49fd-9697-c03270ba2dff",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
