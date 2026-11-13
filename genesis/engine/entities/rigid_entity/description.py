@@ -1520,10 +1520,9 @@ class KinematicEntityDescription(EntityDescription):
             if morph.visualization and not is_col:
                 vg_infos.append(g_info)
 
-        # The options are set before post-processing, so that geoms of different options never fuse. They rank from
-        # the geom options of the entity, to the link options, to the geom options of the link. Of two selections of
-        # one rank, the first one applies. A selection may match no geom of this link, as long as it matches one of the
-        # entity.
+        # Set before post-processing, so that geoms of different options never fuse. Precedence rises from the entity
+        # geom options to the link options to the link geom options, and the first of two selections of one rank wins.
+        # A selection may match no geom of this link, as long as it matches one of the entity.
         geoms_name = [g_info["mesh"].metadata.get("name", "") for g_info in cg_infos]
         resolution.geoms_name += geoms_name
         geoms_start = resolution.geoms_start
