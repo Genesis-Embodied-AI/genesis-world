@@ -29,8 +29,6 @@ def main():
     plane = scene.add_entity(
         gs.morphs.Plane(),
     )
-    # The collision geoms of each finger link are the finger mesh, then the five fingertip pads (see panda.xml).
-    # Geoms 1 to 5 select the pads, which grip the cube with a higher friction.
     franka = scene.add_entity(
         options=gs.entities.Rigid(
             morph=gs.morphs.MJCF(
@@ -39,6 +37,7 @@ def main():
             links={
                 gs.LinkIndex.named("left_finger", "right_finger"): gs.options.Link(
                     geoms={
+                        # Geom 0 of each finger is the finger mesh, and 1 to 5 are the fingertip_pad_collision_* classes
                         gs.GeomIndex.at(slice(1, 6)): gs.options.Geom(
                             friction=1.5,
                         ),
