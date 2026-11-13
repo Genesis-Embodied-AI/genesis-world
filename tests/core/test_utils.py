@@ -659,7 +659,6 @@ def test_mesh_inertial_properties():
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("backend", [None])
 def test_mesh_wall_thickness():
     WALL = 5e-4
     FIN = 2e-3
@@ -683,6 +682,13 @@ def test_mesh_wall_thickness():
     slab_fin = trimesh.util.concatenate((slab, fin))
     assert_allclose(mu.get_wall_thickness(slab_fin.vertices, slab_fin.faces, quantile=0.02), FIN, rtol=TOL_DOUBLE)
     assert_allclose(mu.get_wall_thickness(slab_fin.vertices, slab_fin.faces, quantile=0.25), 0.2, rtol=TOL_DOUBLE)
+
+    # The width of a convex box is its smallest extent at any scale, and a box squashed flat or onto a segment has none
+    box = trimesh.creation.box(extents=(1.0, 2.0, 0.2))
+    for scale in (1e-9, 1.0, 1e3):
+        assert_allclose(mu.get_convex_width(scale * box.vertices, box.faces), scale * 0.2, rtol=TOL_DOUBLE)
+    for axes_scale in ((1.0, 1.0, 0.0), (1.0, 0.0, 0.0)):
+        assert_equal(mu.get_convex_width(axes_scale * box.vertices, box.faces), 0.0)
 
 
 @pytest.mark.required
