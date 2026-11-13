@@ -155,7 +155,6 @@ class Link(_GeomFields):
 
     The density and the friction coefficients given explicitly apply to every collision geom of the selected links,
     overriding those of the entity material and of the geom options of the entity. If None, the links keep those.
-    Parameters follow ``gs.options.Geom``, plus the following.
 
     Parameters
     ----------
@@ -171,7 +170,7 @@ class Rigid(BaseEntity["RigidEntity"]):
     """Options of a rigid entity, which the rigid solver simulates with contacts, joints and constraints.
 
     Use it for every entity whose motion follows from physics. Its links collide, so every geom adds to the cost of
-    collision detection and constraint solving. Parameters follow ``gs.entities.BaseEntity``, plus the following.
+    collision detection and constraint solving.
 
     Parameters
     ----------
@@ -204,7 +203,7 @@ class Kinematic(BaseEntity["KinematicEntity"]):
     """Options of a kinematic entity, which follows the poses it is given and takes no part in physics.
 
     Use it for a ghost or a reference motion: forward kinematics is all it costs, while it collides with nothing and
-    nothing pushes it. Parameters follow ``gs.entities.BaseEntity``, plus the following.
+    nothing pushes it.
 
     Parameters
     ----------
@@ -238,7 +237,7 @@ class FEM(BaseEntity["FEMEntity"]):
     Use it for a solid whose deformation matters, such as a soft gripper pad or a rubber block. Every element of the
     volume mesh adds to the cost of each substep, so a coarse mesh simulates faster while a fine one resolves the
     deformation more accurately. A Cloth material simulates a shell on the surface mesh instead, under the IPC
-    coupler alone. Parameters follow ``gs.entities.BaseEntity``, plus the following.
+    coupler alone.
 
     Parameters
     ----------
@@ -273,8 +272,7 @@ class MPM(_EmittableParticles["MPMEntity"]):
     """Options of a particle entity, which the material point method (MPM) solver simulates on a background grid.
 
     Use it for a continuum that deforms without bound, tears or flows, such as sand, snow, dough or a liquid. Its
-    accuracy and cost both follow the particle size and the grid resolution of the solver. Parameters follow
-    ``gs.entities.BaseEntity``, plus the following.
+    accuracy and cost both follow the particle size and the grid resolution of the solver.
 
     Parameters
     ----------
@@ -292,8 +290,7 @@ class SPH(_EmittableParticles["SPHEntity"]):
     """Options of a liquid entity, which the smoothed particle hydrodynamics (SPH) solver simulates as particles.
 
     Use it for a liquid whose free surface and splashes matter. Each particle interacts with its neighbors, so the cost
-    grows with the particle count that the particle size of the solver sets. Parameters follow
-    ``gs.entities.BaseEntity``, plus the following.
+    grows with the particle count that the particle size of the solver sets.
 
     Parameters
     ----------
@@ -314,7 +311,7 @@ class PBD(_EmittableParticles["PBDBaseEntity"]):
     higher cost. A Cloth material makes a sheet, such as a towel or a flag, remeshed to the particle size of the
     solver. An Elastic material makes a soft solid on a volume mesh. A Liquid material makes a liquid of incompressible
     particles, each interacting with its neighbors so that the cost grows with the particle count. A Particle material
-    makes free particles. Parameters follow ``gs.entities.BaseEntity``, plus the following.
+    makes free particles.
 
     Parameters
     ----------
@@ -332,8 +329,7 @@ class Hybrid(BaseEntity["HybridEntity"]):
 
     Use it for a soft robot actuated through its joints. The scene adds the rigid skeleton and the soft skin as two
     entities of their own, so the entity costs as much as both of them together. The morph is a URDF, whose links the
-    skin is grown around, or a mesh, whose skeleton is extracted from the skin. Parameters follow
-    ``gs.entities.BaseEntity``, plus the following.
+    skin is grown around, or a mesh, whose skeleton is extracted from the skin.
 
     Parameters
     ----------
