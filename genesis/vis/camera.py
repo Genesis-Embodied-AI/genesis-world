@@ -161,7 +161,9 @@ class Camera(RBC):
                 self._is_batched = False
                 self._raytracer.add_camera(self)
             else:
-                self._is_batched = self._visualizer.scene.n_envs > 0 and self._visualizer._context.split_envs
+                self._is_batched = (
+                    self._visualizer.scene.n_envs > 0 and self._visualizer._context.split_envs and self._env_idx is None
+                )
             if self._visualizer.scene.n_envs > 0:
                 if self._env_idx is None:
                     if not self._is_batched:
@@ -423,8 +425,8 @@ class Camera(RBC):
 
         Note
         ----
-        If `split_envs` in `VisOptions` is set to True, each component will return a stack of images, with the
-        number of images equal to `len(rendered_envs_idx)`.
+        If `split_envs` in `VisOptions` is set to True, an unbound camera returns a stack of images, with the
+        number of images equal to `len(rendered_envs_idx)`. A bound camera returns one image of its environment.
 
         Parameters
         ----------
