@@ -1,0 +1,21 @@
+genesis/engine/force_fields.py
+  s_4e532cc51f4368::t_025a1a319347fc 9-18,75,113,116,171,270,274-275,305,308,323-325,327-328,433-434,438-440,446-447,479,482,484
+tests/particles/test_pbd.py
+  s_4e532cc51f4368::t_6711a0793a3344 272,278,282,293-299,305-317,329-334,341-346
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "49486dd7a7968a70e887cfd2787857c416e3cd81",
+  "prompts": {},
+  "sessions": {
+    "s_4e532cc51f4368": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "70ed08a1-5a04-49fd-9697-c03270ba2dff",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
