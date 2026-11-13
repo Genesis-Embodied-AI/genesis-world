@@ -1406,10 +1406,15 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # TODO: support batching
         self._kernel_detect_collision()
 
-        n_collision = qd_to_numpy(self.collider.collider_state.n_contacts)[env_idx]
+        collider_state = self.collider.collider_state
+        n_collision = qd_to_numpy(collider_state.n_contacts, env_idx, keepdim=False, transpose=True)
         collision_pairs = np.empty((n_collision, 2), dtype=np.int32)
-        collision_pairs[:, 0] = qd_to_numpy(self.collider.collider_state.contact_data.geom_a)[:n_collision, env_idx]
-        collision_pairs[:, 1] = qd_to_numpy(self.collider.collider_state.contact_data.geom_b)[:n_collision, env_idx]
+        collision_pairs[:, 0] = qd_to_numpy(
+            collider_state.contact_data.geom_a, env_idx, slice(0, n_collision), keepdim=False, transpose=True
+        )
+        collision_pairs[:, 1] = qd_to_numpy(
+            collider_state.contact_data.geom_b, env_idx, slice(0, n_collision), keepdim=False, transpose=True
+        )
 
         return collision_pairs
 
