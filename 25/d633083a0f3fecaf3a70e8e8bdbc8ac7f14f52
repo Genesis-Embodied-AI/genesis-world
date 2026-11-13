@@ -1,0 +1,21 @@
+genesis/options/sensors/camera.py
+  s_c62ec9da443b15::t_c272c4cb758868 68
+genesis/options/sensors/raycaster.py
+  s_c62ec9da443b15::t_c272c4cb758868 212-213,230,240
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "25d633083a0f3fecaf3a70e8e8bdbc8ac7f14f52",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
