@@ -1,0 +1,39 @@
+genesis/engine/scene.py
+  s_4e532cc51f4368::t_b3cc8f9a6ca516 865-886,889-890
+genesis/utils/element.py
+  s_4e532cc51f4368::t_b3cc8f9a6ca516 21-23
+genesis/engine/mesh.py
+  s_4e532cc51f4368::t_b3cc8f9a6ca516 860-872,874-886,888-911
+genesis/logging/logger.py
+  s_4e532cc51f4368::t_b3cc8f9a6ca516 34-35,37,77,80,83,86,89,92
+genesis/utils/hybrid.py
+  s_4e532cc51f4368::t_b3cc8f9a6ca516 34-35
+genesis/utils/mesh.py
+  s_4e532cc51f4368::t_b3cc8f9a6ca516 530-555
+genesis/utils/particle.py
+  s_4e532cc51f4368::t_b3cc8f9a6ca516 41-53,73-108
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "030df9a76207489cedd43dbf6e9c50440d43a34a",
+  "prompts": {},
+  "sessions": {
+    "s_4e532cc51f4368": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "70ed08a1-5a04-49fd-9697-c03270ba2dff",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_dd630a9a6426d2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "684ee9e2-8edd-4b04-a303-b7729b36ad6f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
