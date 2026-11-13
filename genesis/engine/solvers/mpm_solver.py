@@ -628,6 +628,7 @@ class MPMMaterials:
         S: qd.types.matrix(3, 3),
         V: qd.types.matrix(3, 3),
         Jp: float,
+        eps: float,
     ):
         """
         Return the deformation gradient, its singular values and the plastic volume ratio once plasticity applies.
@@ -639,7 +640,7 @@ class MPMMaterials:
         Jp_new = gs.qd_float(1.0)
         for j_mat in qd.static(range(len(self.materials))):
             if i_mat == j_mat:
-                F_new, S_new, Jp_new = self.materials[j_mat].update_F_S_Jp(J, F_tmp, U, S, V, Jp)
+                F_new, S_new, Jp_new = self.materials[j_mat].update_F_S_Jp(J, F_tmp, U, S, V, Jp, eps)
         return F_new, S_new, Jp_new
 
     @qd.func
@@ -791,11 +792,11 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         self.register_errors(
             self.data_manager.errno,
             {
-                MPMErrorCode.INVALID_VELOCITY_NAN: (
+                MPMErrorCode.INVALID_VELOCITY_NAN: lambda: (
                     """Invalid MPM particle velocities causing 'nan' or 'inf'.
 Please decrease the simulation timestep or adjust the material parameters."""
                 ),
-                MPMErrorCode.OVERFLOW_GRID_RANGE: (
+                MPMErrorCode.OVERFLOW_GRID_RANGE: lambda: (
                     "MPM particles have positions that are not finite, or left the range the sparse grid of the "
                     "implicit solver indexes."
                 ),
@@ -1455,6 +1456,7 @@ def kernel_transfer_particles_to_grid(
                 mpm_state.particles.S[i_p, i_b],
                 mpm_state.particles.V[i_p, i_b],
                 mpm_state.particles.Jp[i_p, i_b],
+                mpm_info.EPS[None],
             )
             mpm_state.particles.F_next[i_p, i_b] = F_new
             mpm_state.particles.Jp_next[i_p, i_b] = Jp_new
@@ -1835,7 +1837,7 @@ def func_advect_particle(
     mpm_state.particles.pos_next[i_p, i_b] = pos
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_integrate_particles(
     mpm_state: MPMState,
     links_state: LinksState,
@@ -1865,7 +1867,7 @@ def kernel_integrate_particles(
             mpm_state.particles.Jp_next[i_p, i_b] = mpm_state.particles.Jp[i_p, i_b]
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_transfer_grid_to_particles_grad(
     mpm_state: MPMState,
     links_state: LinksState,
@@ -1936,7 +1938,7 @@ def kernel_transfer_grid_to_particles_grad(
 # The gather is reversed by hand, which reduces the adjoint of the cells of the grid in a fixed order where autodiff
 # would add it with atomic additions. The backward takes the arguments of the launch.
 @register_custom_backward(kernel_transfer_grid_to_particles_grad)
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_transfer_grid_to_particles(
     mpm_state: MPMState,
     links_state: LinksState,
@@ -2682,6 +2684,7 @@ def func_plastic_return_map(
     yield_stress: float,
     sand_alpha: float,
     liquid_J_min: float,
+    eps: float,
 ):
     """Return the deformation gradient and the plastic state of a particle after the return map of its material (see
     'MPMPlasticity')."""
@@ -2695,13 +2698,13 @@ def func_plastic_return_map(
         sigma_new = sigma
         is_yielding = True
         if plasticity == MPMPlasticity.VON_MISES:
-            sigma_new, is_yielding = func_von_mises_return_map(sigma, mu, yield_stress)
+            sigma_new, is_yielding = func_von_mises_return_map(sigma, mu, yield_stress, eps)
         elif plasticity == MPMPlasticity.CLAMP:
             sigma_new = func_clamp_return_map(sigma, yield_lower, yield_higher)
         elif plasticity == MPMPlasticity.SNOW:
             sigma_new, Jp_new = func_snow_return_map(sigma, Jp, yield_lower, yield_higher)
         else:
-            sigma_new, Jp_new = func_sand_return_map(sigma, Jp, mu, lam, sand_alpha)
+            sigma_new, Jp_new = func_sand_return_map(sigma, Jp, mu, lam, sand_alpha, eps)
         if is_yielding:
             F_new = U @ func_diagonal_matrix(sigma_new) @ V.transpose()
     return F_new, Jp_new
@@ -3281,6 +3284,7 @@ def kernel_mpm_g2p(
                 mpm_info.materials.yield_stress[i_mat],
                 mpm_info.materials.sand_alpha[i_mat],
                 mpm_info.liquid_J_min[None],
+                mpm_info.EPS[None],
             )
             if not qd_isfinite(vel):
                 qd.atomic_or(errno[i_b], MPMErrorCode.INVALID_VELOCITY_NAN)

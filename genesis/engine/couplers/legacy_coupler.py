@@ -48,10 +48,11 @@ from genesis.utils.geom import (
     func_hash_wrap_cell,
     hash_grid_sizes,
     qd_inv_transform_by_trans_quat,
+    qd_quat_to_R,
     qd_transform_by_quat,
     qd_transform_by_trans_quat,
 )
-from genesis.utils.misc import get_gpu_core_count, qd_to_numpy, tensor_to_array
+from genesis.utils.misc import get_gpu_core_count, qd_from_torch, qd_to_numpy, tensor_to_array
 from genesis.utils.raycast_qd import triangle_face_normal
 from genesis.utils.sdf import SDFInfo
 from genesis.utils.simt import (
@@ -78,8 +79,16 @@ RIGID_PBD = "rigid_pbd"
 # the SPH liquid leaves out
 FEM_SPH = "fem_sph"
 RIGID_SPH = "rigid_sph"
+# The segments of the fixed rigid geoms other than the planes, which a scene without such geoms coupled with the SPH
+# liquid leaves out
+FIXED_SPH = "fixed_sph"
 FEM_SEGMENTS = Size("fem_segments")
 RIGID_SEGMENTS = Size("rigid_segments")
+FIXED_TRIS = Size("fixed_tris")
+FIXED_CELLS_TRIS = Size("fixed_cells_tris")
+FIXED_GEOMS = Size("fixed_geoms")
+FIXED_CELLS = Size("fixed_cells")
+FIXED_SPARSE_CELLS = Size("fixed_sparse_cells")
 RIGID_LINKS = Size("rigid_links")
 RIGID_GEOMS = Size("rigid_geoms")
 # The points of the quadrature of a segment (see func_segment_volume)
@@ -123,13 +132,13 @@ class SPHBoundaries(Data, kind=DataKind.SCRATCH):
     )
     # The FEM segments of each surface triangle span tris_segment_start[i_s] to tris_segment_start[i_s + 1]
     tris_segment_start: qd.Tensor = field(int, shape=(SURFACES + 1,), kind=DataKind.CONSTANT, labels=FEM_SPH)
-    # The geom of each rigid segment, and its corners in the frame of the geom
+    # The geom of each rigid segment, and its corners in the frame of the geom, the fixed geoms aside but the planes
     rigid_segments_geom_idx: qd.Tensor = field(int, shape=(RIGID_SEGMENTS,), kind=DataKind.CONSTANT, labels=RIGID_SPH)
     rigid_segments_corners: qd.Tensor = field(
         (float, (3, 3)), shape=(RIGID_SEGMENTS,), kind=DataKind.CONSTANT, labels=RIGID_SPH
     )
     # Whether each geom takes part in each environment, the variants of a heterogeneous entity being active in some alone
-    geoms_is_active: qd.Tensor = field(bool, shape=(RIGID_GEOMS, ENVS), kind=DataKind.CONSTANT, labels=RIGID_SPH)
+    geoms_is_active: qd.Tensor = field(bool, shape=(RIGID_GEOMS, ENVS), kind=DataKind.CONSTANT)
     # Whether liquid lies around each segment over the substep
     segments_is_wet: qd.Tensor = field(bool, shape=(PARTICLES, ENVS), labels=RIGID_SPH)
     # The rest density of the densest liquid of the scene (see 'links_added_mass')
@@ -148,6 +157,50 @@ class SPHBoundaries(Data, kind=DataKind.SCRATCH):
     segments_extent_max: qd.Tensor = field(float, shape=(ENVS,))
     # The boundary each segment belongs to: its rigid geom, or its FEM entity numbered after the rigid geoms
     segments_boundary_idx: qd.Tensor = field(int, shape=(PARTICLES,), kind=DataKind.CONSTANT)
+    # The triangles of the fixed rigid geoms other than the planes, in the frame of their geom, which a particle reaches
+    # wherever the geom stands through the grid of the frame of the geom, whatever the environment (see
+    # func_boundary_source_cells). Each triangle splits into segments along a grid, 65536 times whether it fans out of
+    # its first corner, plus 256 times its number of rows plus its number of parts across them (see
+    # func_boundary_source_segment), which the kernels compute within the reach of each particle alone.
+    fixed_tris_corners: qd.Tensor = field(
+        (float, (3, 3)), shape=(FIXED_TRIS,), kind=DataKind.CONSTANT, labels=FIXED_SPH
+    )
+    fixed_tris_split: qd.Tensor = field(int, shape=(FIXED_TRIS,), kind=DataKind.CONSTANT, labels=FIXED_SPH)
+    # The triangles of the fixed geoms registered in every cell of the grid of their geom that their box overlaps,
+    # sorted by geom and by cell, each the index of its triangle times 32 plus the offset of the cell from the lowest
+    # cell of the box along the axes in base 3 (see func_boundary_source_window)
+    fixed_cells_tri_idx: qd.Tensor = field(int, shape=(FIXED_CELLS_TRIS,), kind=DataKind.CONSTANT, labels=FIXED_SPH)
+    # The index of each fixed geom among the rigid geoms, the lower corner of its grid, the number of cells of the grid
+    # along each axis and the largest extent of its segments
+    fixed_geoms_idx: qd.Tensor = field(int, shape=(FIXED_GEOMS,), kind=DataKind.CONSTANT, labels=FIXED_SPH)
+    fixed_geoms_grid_lower: qd.Tensor = field(
+        (float, 3), shape=(FIXED_GEOMS,), kind=DataKind.CONSTANT, labels=FIXED_SPH
+    )
+    fixed_geoms_grid_res: qd.Tensor = field((int, 3), shape=(FIXED_GEOMS,), kind=DataKind.CONSTANT, labels=FIXED_SPH)
+    fixed_geoms_extent_max: qd.Tensor = field(float, shape=(FIXED_GEOMS,), kind=DataKind.CONSTANT, labels=FIXED_SPH)
+    # The width of the cells of the grids of the fixed geoms
+    fixed_cell_size: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT, labels=FIXED_SPH)
+    # The ratio of the Gram determinant of the edges of a fixed triangle to the product of their squared lengths below
+    # which the triangle is too thin for the coordinates along its edges to resolve a point
+    fixed_tris_det_rtol: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT, labels=FIXED_SPH)
+    # The cells of the fixed geoms, those of each geom spanning fixed_geoms_cell_start[i_fg] to
+    # fixed_geoms_cell_start[i_fg + 1] in ascending order of their index in its grid, every cell of the grid of a dense
+    # geom and those holding triangles of the others, whose indices in the grid of their geom are
+    # fixed_sparse_cells_grid_idx[i_c + fixed_geoms_sparse_cell_offset[i_fg]]. The triangles of each cell span
+    # fixed_cells_tri_start[i_c] to fixed_cells_tri_start[i_c + 1].
+    fixed_geoms_cell_start: qd.Tensor = field(int, shape=(FIXED_GEOMS + 1,), kind=DataKind.CONSTANT, labels=FIXED_SPH)
+    fixed_geoms_is_dense: qd.Tensor = field(bool, shape=(FIXED_GEOMS,), kind=DataKind.CONSTANT, labels=FIXED_SPH)
+    fixed_geoms_sparse_cell_offset: qd.Tensor = field(
+        int, shape=(FIXED_GEOMS,), kind=DataKind.CONSTANT, labels=FIXED_SPH
+    )
+    fixed_sparse_cells_grid_idx: qd.Tensor = field(
+        int, shape=(FIXED_SPARSE_CELLS,), kind=DataKind.CONSTANT, labels=FIXED_SPH
+    )
+    fixed_cells_tri_start: qd.Tensor = field(int, shape=(FIXED_CELLS + 1,), kind=DataKind.CONSTANT, labels=FIXED_SPH)
+    # The fixed geoms whose box, widened by the support radius, overlaps the domain in each environment over the
+    # substep, the first fixed_envs_n_geoms[i_b] of them in ascending order (see kernel_select_sph_fixed_geoms)
+    fixed_envs_geoms: qd.Tensor = field(int, shape=(FIXED_GEOMS, ENVS), labels=FIXED_SPH)
+    fixed_envs_n_geoms: qd.Tensor = field(int, shape=(ENVS,), labels=FIXED_SPH)
 
 
 class LegacyCouplerState(Data, kind=DataKind.STATE):
@@ -186,6 +239,7 @@ class LegacyCouplerInfo(Data, kind=DataKind.CONSTANT):
     softness_min: qd.Tensor = field(float, shape=())
     mpm_sph_stencil_size: qd.Tensor = field(int, shape=())
     mpm_pbd_stencil_size: qd.Tensor = field(int, shape=())
+    EPS: qd.Tensor = field(float, shape=())
 
 
 class LegacyCouplerConfig(Config):
@@ -193,6 +247,8 @@ class LegacyCouplerConfig(Config):
 
     has_rigid_mpm: bool
     has_rigid_sph: bool
+    # Whether fixed rigid geoms other than the planes bound the SPH liquid (see 'fixed_tris_corners')
+    has_fixed_rigid_sph: bool
     has_rigid_pbd: bool
     has_rigid_fem: bool
     has_mpm_sph: bool
@@ -210,33 +266,17 @@ class LegacyCouplerConfig(Config):
     enable_cooperative_segments: bool
 
 
-def split_triangles(
-    tris_verts_pos: np.ndarray,
-    size: float,
-    tris_verts_pos_world: np.ndarray | None = None,
-    bounds: tuple[np.ndarray, np.ndarray] | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
+def split_triangles(tris_verts_pos: np.ndarray, size: float) -> tuple[np.ndarray, np.ndarray]:
     """
     Split triangles by halving the longest edge of their parts until all the edges of the parts fit within a size.
 
     Return the triangle of each part and the barycentric coordinates of its corners in the triangle, the parts sorted by
     triangle.
-
-    With `bounds`, the lower and upper corners of a box, the parts lying beyond one face of the box by more than a size,
-    their vertices taken in `tris_verts_pos_world`, are dropped as they are split, which keeps the parts of a large
-    triangle crossing the box to those near the box.
     """
     n_tris = len(tris_verts_pos)
     parts_tri_idx, parts_bary = np.arange(n_tris), np.tile(np.eye(3), (n_tris, 1, 1))
     kept_parts = [(parts_tri_idx[:0], parts_bary[:0])]
     while len(parts_tri_idx) > 0:
-        if bounds is not None:
-            parts_verts_pos_world = parts_bary @ tris_verts_pos_world[parts_tri_idx]
-            is_away = (parts_verts_pos_world < bounds[0] - size).all(axis=1) | (
-                parts_verts_pos_world > bounds[1] + size
-            ).all(axis=1)
-            is_near = ~is_away.any(axis=-1)
-            parts_tri_idx, parts_bary = parts_tri_idx[is_near], parts_bary[is_near]
         parts_verts_pos = parts_bary @ tris_verts_pos[parts_tri_idx]
         parts_edges = np.linalg.norm(parts_verts_pos - np.roll(parts_verts_pos, -1, axis=1), axis=-1)
         is_split = parts_edges.max(axis=-1) > size
@@ -408,11 +448,12 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                         f"MPMOptions(use_implicit_solver=False), or LegacyCouplerOptions({option}=False)."
                     )
             has_rigid_mpm = False
-        has_rigid_sph = self._build_sph_boundaries(self.rigid_sph_geoms)
+        has_rigid_sph, has_fixed_rigid_sph = self._build_sph_boundaries(self.rigid_sph_geoms)
         n_segments = self.sph_boundaries.segments_impulse.shape[0] if has_rigid_sph or self.has_fem_sph else 0
         self.legacy_coupler_config = LegacyCouplerConfig(
             has_rigid_mpm=has_rigid_mpm,
             has_rigid_sph=has_rigid_sph,
+            has_fixed_rigid_sph=has_fixed_rigid_sph,
             has_rigid_pbd=has_rigid_pbd,
             has_rigid_fem=has_rigid_fem,
             has_mpm_sph=has_mpm_sph,
@@ -451,18 +492,24 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 softness_min=1e-10,
                 mpm_sph_stencil_size=mpm_sph_stencil_size,
                 mpm_pbd_stencil_size=mpm_pbd_stencil_size,
+                EPS=gs.EPS,
             )
         )
 
         if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
             kernel_reset_mpm_rigid_normal(self.sim.scene._sanitize_envs_idx(None), self.mpm_solver.mpm_state)
 
-    def _build_sph_boundaries(self, rigid_sph_geoms: list["RigidGeom"]) -> bool:
-        """Build the segments of the moving boundaries of the SPH liquid, and return whether rigid geoms hold any."""
-        has_fem_sph, has_rigid_sph = self.has_fem_sph, bool(rigid_sph_geoms)
-        if not (has_fem_sph or has_rigid_sph):
+    def _build_sph_boundaries(self, rigid_sph_geoms: list["RigidGeom"]) -> tuple[bool, bool]:
+        """
+        Build the segments of the moving boundaries of the SPH liquid.
+
+        Return whether rigid geoms hold any, the fixed geoms other than the planes aside, and whether these fixed geoms
+        hold any.
+        """
+        has_fem_sph = self.has_fem_sph
+        if not (has_fem_sph or rigid_sph_geoms):
             self.sph_boundaries = SPHBoundaries(unused=True)
-            return False
+            return False, False
 
         fem_tris_verts_pos = np.zeros((0, 3, 3), dtype=gs.np_float)
         if has_fem_sph:
@@ -496,43 +543,167 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 geoms_is_active[geom.idx] = tensor_to_array(geom.active_envs_mask)
         geoms_pos = qd_to_numpy(self.rigid_solver.dyn_state.geoms.pos, transpose=True)[0]
         geoms_quat = qd_to_numpy(self.rigid_solver.dyn_state.geoms.quat, transpose=True)[0]
-        rigid_tris_verts_pos_world = gu.transform_by_trans_quat(
-            rigid_tris_verts_pos, geoms_pos[rigid_tris_geom_idx, None], geoms_quat[rigid_tris_geom_idx, None]
-        )
-        # The fixed geoms, a terrain far larger than the domain among them, keep their segments within the domain alone,
-        # where the walls of the domain do not already bound the liquid. The planes take their segments apart.
+        # The fixed geoms other than the planes may stand anywhere in each environment, so their triangles stay in the
+        # frame of their geom (see 'fixed_tris_corners'). The planes take their segments apart.
+        particle_size = self.sph_solver.particle_size
         rigid_tris_is_plane = np.repeat(
-            [geom.type == gs.GEOM_TYPE.PLANE for geom in geoms], [len(geom.init_faces) for geom in geoms]
+            np.array([geom.type == gs.GEOM_TYPE.PLANE for geom in geoms], dtype=bool),
+            [len(geom.init_faces) for geom in geoms],
         )
-        segments_parts = []
-        for is_fixed in (False, True):
-            (tris_idx,) = np.nonzero((rigid_tris_is_fixed == is_fixed) & ~rigid_tris_is_plane)
-            tri_idx, corners_bary = split_triangles(
-                rigid_tris_verts_pos[tris_idx],
-                self.sph_solver.particle_size,
-                rigid_tris_verts_pos_world[tris_idx],
-                (self.sph_solver.boundary_lower, self.sph_solver.boundary_upper) if is_fixed else None,
+        (tris_idx,) = np.nonzero(~rigid_tris_is_fixed & ~rigid_tris_is_plane)
+        tri_idx, corners_bary = split_triangles(rigid_tris_verts_pos[tris_idx], particle_size)
+        segments_tri_idx = tris_idx[tri_idx]
+        segments_geom_idx_parts = [rigid_tris_geom_idx[segments_tri_idx]]
+        segments_corners_parts = [np.einsum("nci,nij->ncj", corners_bary, rigid_tris_verts_pos[segments_tri_idx])]
+
+        # Each fixed triangle splits into segments along a grid whose edges fit within the particle size, regular or
+        # fanning out of the corner opposite its shortest edge, whichever gives fewer segments (see
+        # func_boundary_source_segment), the triangles too large for 16 x 16 segments being halved down to it first.
+        # Each part of a triangle is registered in every cell of the grid of its geom that its box overlaps, the cells
+        # half as wide as the largest part, so that a part spans at most 3 cells along each axis.
+        n_split_max = 16
+        (tris_idx,) = np.nonzero(rigid_tris_is_fixed & ~rigid_tris_is_plane)
+        tri_idx, corners_bary = split_triangles(rigid_tris_verts_pos[tris_idx], n_split_max * particle_size)
+        fixed_tris_corners = np.einsum("nci,nij->ncj", corners_bary, rigid_tris_verts_pos[tris_idx[tri_idx]])
+        # The corners turn so that the first one faces the shortest edge, the winding kept
+        fixed_tris_edges = np.linalg.norm(fixed_tris_corners - np.roll(fixed_tris_corners, -1, axis=1), axis=-1)
+        corners_order = (fixed_tris_edges.argmin(axis=-1)[:, None] + 2 + np.arange(3)) % 3
+        fixed_tris_corners = np.take_along_axis(fixed_tris_corners, corners_order[..., None], axis=1)
+        fixed_tris_edges = np.linalg.norm(fixed_tris_corners - np.roll(fixed_tris_corners, -1, axis=1), axis=-1)
+        n_regular = np.clip(np.ceil(fixed_tris_edges.max(axis=-1) / particle_size), 1, n_split_max).astype(gs.np_int)
+        # The longest edge of the parts of each fan: along the rays, across them, and the diagonals of the cells beyond
+        # the first row, the longest at the extreme cells
+        fan_n_rays, fan_n_across = [
+            n.reshape(-1)
+            for n in np.meshgrid(np.arange(1, n_split_max + 1), np.arange(1, n_split_max + 1), indexing="ij")
+        ]
+        fixed_tris_split = 256 * n_regular
+        # A fan holds at least as many parts across as its opposite edge needs, times twice as many rows as its rays
+        # need, so that only the triangles whose regular grid holds more parts look for a fan, the thin ones
+        fan_n_parts_min = np.ceil(fixed_tris_edges[:, 1] / particle_size) * (
+            2 * np.ceil(np.maximum(fixed_tris_edges[:, 0], fixed_tris_edges[:, 2]) / particle_size) - 1
+        )
+        (tris_thin_idx,) = np.nonzero(fan_n_parts_min < n_regular**2)
+        for chunk in np.array_split(tris_thin_idx, max(1, len(tris_thin_idx) // 16384)):
+            corners = fixed_tris_corners[chunk, None]
+            ray_0, opposite = corners[..., 1, :] - corners[..., 0, :], corners[..., 2, :] - corners[..., 1, :]
+            parts_edge_max = np.maximum(
+                np.maximum(fixed_tris_edges[chunk, None, 0], fixed_tris_edges[chunk, None, 2]) / fan_n_rays,
+                fixed_tris_edges[chunk, None, 1] / fan_n_across,
             )
-            segments_parts.append((tris_idx[tri_idx], corners_bary))
-        rigid_segments_tri_idx, rigid_segments_corners_bary = [
-            np.concatenate(arrays) for arrays in zip(*segments_parts)
-        ]
-        segments_centroid_world = np.einsum(
-            "ni,nij->nj", rigid_segments_corners_bary.mean(axis=1), rigid_tris_verts_pos_world[rigid_segments_tri_idx]
+            for s_end in (2.0 / fan_n_rays, np.ones(len(fan_n_rays))):
+                for t_start in (np.zeros(len(fan_n_across)), 1.0 - 1.0 / fan_n_across):
+                    diagonal = (ray_0 + t_start[..., None] * opposite) / fan_n_rays[..., None] + (
+                        s_end[..., None] / fan_n_across[..., None]
+                    ) * opposite
+                    is_beyond_first_row = fan_n_rays > 1
+                    parts_edge_max = np.where(
+                        is_beyond_first_row,
+                        np.maximum(parts_edge_max, np.linalg.norm(diagonal, axis=-1)),
+                        parts_edge_max,
+                    )
+            fan_n_parts = np.where(
+                parts_edge_max <= particle_size * (1.0 + 1e-6),
+                fan_n_across * (2 * fan_n_rays - 1),
+                np.inf,
+            )
+            i_fan = fan_n_parts.argmin(axis=-1)
+            is_fan = fan_n_parts[np.arange(len(chunk)), i_fan] < n_regular[chunk] ** 2
+            fixed_tris_split[chunk] = np.where(
+                is_fan, 65536 + 256 * fan_n_rays[i_fan] + fan_n_across[i_fan], 256 * n_regular[chunk]
+            )
+        # The regular grid takes its coordinates along the edges from the corner facing the longest edge instead, at
+        # the widest angle, whose grid cells are the least skewed, so that the window of the segments within the reach
+        # of a particle holds the fewest beyond it (see func_boundary_source_window)
+        is_regular = fixed_tris_split < 65536
+        fixed_tris_corners[is_regular] = np.take_along_axis(
+            fixed_tris_corners[is_regular],
+            ((fixed_tris_edges[is_regular].argmax(axis=-1)[:, None] + 2 + np.arange(3)) % 3)[..., None],
+            axis=1,
         )
-        is_in_domain = (
-            (segments_centroid_world > self.sph_solver.boundary_lower)
-            & (segments_centroid_world < self.sph_solver.boundary_upper)
-        ).all(axis=-1)
-        is_kept = is_in_domain | ~rigid_tris_is_fixed[rigid_segments_tri_idx]
-        rigid_segments_tri_idx, rigid_segments_corners_bary = (
-            rigid_segments_tri_idx[is_kept],
-            rigid_segments_corners_bary[is_kept],
+        fixed_geoms_idx, fixed_tris_fixed_geom_idx = np.unique(
+            rigid_tris_geom_idx[tris_idx[tri_idx]], return_inverse=True
         )
-        segments_geom_idx_parts = [rigid_tris_geom_idx[rigid_segments_tri_idx]]
-        segments_corners_parts = [
-            np.einsum("nci,nij->ncj", rigid_segments_corners_bary, rigid_tris_verts_pos[rigid_segments_tri_idx])
+        fixed_tris_fixed_geom_idx = fixed_tris_fixed_geom_idx.reshape(-1)
+        fixed_cell_size = 0.5 * n_split_max * particle_size
+        fixed_geoms_grid_lower = np.full((len(fixed_geoms_idx), 3), np.inf)
+        fixed_geoms_grid_upper = np.full((len(fixed_geoms_idx), 3), -np.inf)
+        np.minimum.at(fixed_geoms_grid_lower, fixed_tris_fixed_geom_idx, fixed_tris_corners.min(axis=1))
+        np.maximum.at(fixed_geoms_grid_upper, fixed_tris_fixed_geom_idx, fixed_tris_corners.max(axis=1))
+        fixed_geoms_grid_res = (
+            np.floor((fixed_geoms_grid_upper - fixed_geoms_grid_lower) / fixed_cell_size).astype(gs.np_int) + 1
+        )
+        if max([math.prod(grid_res) for grid_res in fixed_geoms_grid_res.tolist()], default=0) >= 2**31:
+            gs.raise_exception(
+                "A fixed rigid geom coupled with the SPH liquid spans more cells of its grid than an index holds."
+            )
+        if len(fixed_tris_corners) >= 2**26:
+            gs.raise_exception(
+                "The fixed rigid geoms coupled with the SPH liquid hold more triangles than an index holds."
+            )
+        # The segments lie within two thirds of their longest edge, at most the particle size, from their centroid
+        fixed_geoms_extent_max = np.full(len(fixed_geoms_idx), 2.0 / 3.0 * particle_size)
+        tris_grid_lower = fixed_geoms_grid_lower[fixed_tris_fixed_geom_idx]
+        tris_grid_res = fixed_geoms_grid_res[fixed_tris_fixed_geom_idx]
+        tris_cell_lo = np.floor((fixed_tris_corners.min(axis=1) - tris_grid_lower) / fixed_cell_size).astype(gs.np_int)
+        tris_cell_hi = np.minimum(
+            np.floor((fixed_tris_corners.max(axis=1) - tris_grid_lower) / fixed_cell_size).astype(gs.np_int),
+            tris_grid_res - 1,
+        )
+        regs_geom_idx_parts, regs_grid_idx_parts, regs_tri_idx_parts = [], [], []
+        for offset in np.stack(np.meshgrid(*[np.arange(3)] * 3, indexing="ij"), axis=-1).reshape(-1, 3):
+            regs_cell = tris_cell_lo + offset
+            (regs_tri_idx,) = np.nonzero((regs_cell <= tris_cell_hi).all(axis=-1))
+            regs_cell = regs_cell[regs_tri_idx]
+            regs_grid_res = tris_grid_res[regs_tri_idx]
+            regs_grid_idx = regs_cell[:, 0] * regs_grid_res[:, 1] + regs_cell[:, 1]
+            regs_grid_idx_parts.append(regs_grid_idx * regs_grid_res[:, 2] + regs_cell[:, 2])
+            regs_geom_idx_parts.append(fixed_tris_fixed_geom_idx[regs_tri_idx])
+            # The offset of the cell from the lowest cell of the box of the triangle goes with the triangle, so that
+            # the kernels find the lowest cell without recomputing it
+            regs_tri_idx_parts.append((32 * regs_tri_idx + 9 * offset[0] + 3 * offset[1] + offset[2]).astype(gs.np_int))
+        regs_geom_idx, regs_grid_idx, regs_tri_idx = [
+            np.concatenate([np.zeros(0, dtype=gs.np_int), *parts])
+            for parts in (regs_geom_idx_parts, regs_grid_idx_parts, regs_tri_idx_parts)
         ]
+        regs_order = np.lexsort((regs_grid_idx, regs_geom_idx))
+        regs_geom_idx, regs_grid_idx, fixed_cells_tri_idx = [
+            array[regs_order] for array in (regs_geom_idx, regs_grid_idx, regs_tri_idx)
+        ]
+        cells_reg_start = np.flatnonzero(
+            (np.diff(regs_geom_idx, prepend=-1) != 0) | (np.diff(regs_grid_idx, prepend=-1) != 0)
+        )
+        cells_n_tris = np.diff(cells_reg_start, append=len(regs_order))
+        cells_fixed_geom_idx, cells_grid_idx = regs_geom_idx[cells_reg_start], regs_grid_idx[cells_reg_start]
+        # A geom whose grid holds at most 8 cells per cell holding parts keeps every cell of its grid, which a particle
+        # finds at once, while the others keep the cells holding parts alone, found by bisection
+        geoms_n_cells = np.bincount(cells_fixed_geom_idx, minlength=len(fixed_geoms_idx))
+        fixed_geoms_is_dense = fixed_geoms_grid_res.prod(axis=-1) <= 8 * geoms_n_cells
+        geoms_cells_n_tris, geoms_sparse_cells_grid_idx = [], []
+        for i_fg, is_dense in enumerate(fixed_geoms_is_dense):
+            is_geom_cell = cells_fixed_geom_idx == i_fg
+            if is_dense:
+                n_grid_cells = fixed_geoms_grid_res[i_fg].prod()
+                geoms_cells_n_tris.append(
+                    np.bincount(
+                        cells_grid_idx[is_geom_cell], weights=cells_n_tris[is_geom_cell], minlength=n_grid_cells
+                    ).astype(gs.np_int)
+                )
+                geoms_sparse_cells_grid_idx.append(cells_grid_idx[:0])
+            else:
+                geoms_cells_n_tris.append(cells_n_tris[is_geom_cell])
+                geoms_sparse_cells_grid_idx.append(cells_grid_idx[is_geom_cell])
+        geoms_n_cells = np.array([len(n_tris) for n_tris in geoms_cells_n_tris])
+        fixed_geoms_cell_start = np.concatenate([[0], np.cumsum(geoms_n_cells)])
+        geoms_n_sparse_cells = np.array([len(grid_idx) for grid_idx in geoms_sparse_cells_grid_idx])
+        fixed_geoms_sparse_cell_offset = (
+            np.cumsum(geoms_n_sparse_cells) - geoms_n_sparse_cells - fixed_geoms_cell_start[:-1]
+        )
+        fixed_sparse_cells_grid_idx = np.concatenate([np.zeros(0, dtype=gs.np_int), *geoms_sparse_cells_grid_idx])
+        fixed_cells_tri_start = np.concatenate(
+            [[0], np.cumsum(np.concatenate([np.zeros(0, dtype=gs.np_int), *geoms_cells_n_tris]))]
+        )
+
         # A plane bounds the half-space behind it, which the walls of the domain cut, their ghost particles standing for
         # the liquid beyond them (see func_wall_volume). The segments of the plane cover the boundary of the solid behind
         # it within the domain, so that the kernel volume of the walls and that of the plane add up without overlap: the
@@ -609,7 +780,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 segments_geom_idx_parts.append(np.full(len(tri_idx), geom.idx, dtype=gs.np_int))
         rigid_segments_geom_idx = np.concatenate(segments_geom_idx_parts)
         rigid_segments_corners = np.concatenate(segments_corners_parts)
-        has_rigid_sph = has_rigid_sph and len(rigid_segments_geom_idx) > 0
+        has_rigid_sph, has_fixed_rigid_sph = len(rigid_segments_geom_idx) > 0, len(fixed_geoms_idx) > 0
 
         # Radon's 7-point rule on the triangle, exact up to degree 5
         sqrt_15 = math.sqrt(15.0)
@@ -639,6 +810,11 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 fem_segments=len(fem_segments_tri_idx),
                 surfaces=len(fem_tris_verts_pos),
                 rigid_segments=len(rigid_segments_geom_idx),
+                fixed_tris=len(fixed_tris_corners),
+                fixed_cells_tris=len(fixed_cells_tri_idx),
+                fixed_geoms=len(fixed_geoms_idx),
+                fixed_cells=len(fixed_cells_tri_start) - 1,
+                fixed_sparse_cells=len(fixed_sparse_cells_grid_idx),
                 rigid_links=self.rigid_solver.n_links,
                 rigid_geoms=self.rigid_solver.n_geoms,
                 exact_sum_slots=self.rigid_solver.n_links,
@@ -647,6 +823,8 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             ),
             values=dict(
                 hash_grid=dict(cell_size=self.sph_solver.hash_grid_cell_size, grid_res=self.sph_solver.hash_grid_res),
+                fixed_cell_size=fixed_cell_size,
+                fixed_tris_det_rtol=1e-12,
                 rho_rest=max([entity.material.rho for entity in self.sph_solver.entities]),
             ),
             env_first={
@@ -657,9 +835,15 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     SPHBoundaries.geoms_is_active,
                     SPHBoundaries.segments_is_wet,
                     SPHBoundaries.links_added_mass,
+                    SPHBoundaries.fixed_envs_geoms,
                 ): False
             },
-            unused=dict(fem_sph=not has_fem_sph, rigid_sph=not has_rigid_sph),
+            unused={
+                FEM_SPH: not has_fem_sph,
+                RIGID_SPH: not has_rigid_sph,
+                FIXED_SPH: not has_fixed_rigid_sph,
+                SPHBoundaries.geoms_is_active: not (has_rigid_sph or has_fixed_rigid_sph),
+            },
         )
         self.sph_boundaries.quad_bary.from_numpy(quad_bary)
         fem_tris_entity_idx = np.repeat(
@@ -672,7 +856,9 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 rigid_segments_geom_idx,
             ]
         )
-        self.sph_boundaries.segments_boundary_idx.from_numpy(segments_boundary_idx.astype(gs.np_int))
+        # The fixed geoms may bound the liquid alone, their segments lying apart (see 'fixed_tris_corners')
+        if len(segments_boundary_idx) > 0:
+            self.sph_boundaries.segments_boundary_idx.from_numpy(segments_boundary_idx.astype(gs.np_int))
         self.sph_boundaries.quad_weight.from_numpy(quad_weight)
         if has_fem_sph:
             self.sph_boundaries.fem_segments_tri_idx.from_numpy(fem_segments_tri_idx.astype(gs.np_int))
@@ -685,6 +871,30 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             self.sph_boundaries.links_added_mass_sums.bins_unit.from_numpy(
                 2.0 ** np.array([-40.0, -8.0, 24.0], dtype=gs.np_float)
             )
+        if has_fixed_rigid_sph:
+            # FIXME: quadrants#1100 - from_numpy holds as much memory as it uploads on a unified-memory GPU, so these
+            # arrays, scaling with the area of the fixed geoms, go through their zero-copy view.
+            for array, values in (
+                (self.sph_boundaries.fixed_tris_corners, fixed_tris_corners),
+                (self.sph_boundaries.fixed_tris_split, fixed_tris_split),
+                (self.sph_boundaries.fixed_cells_tri_idx, fixed_cells_tri_idx),
+                (self.sph_boundaries.fixed_geoms_idx, fixed_geoms_idx),
+                (self.sph_boundaries.fixed_geoms_grid_lower, fixed_geoms_grid_lower),
+                (self.sph_boundaries.fixed_geoms_grid_res, fixed_geoms_grid_res),
+                (self.sph_boundaries.fixed_geoms_extent_max, fixed_geoms_extent_max),
+                (self.sph_boundaries.fixed_geoms_is_dense, fixed_geoms_is_dense),
+                (self.sph_boundaries.fixed_geoms_cell_start, fixed_geoms_cell_start),
+                (self.sph_boundaries.fixed_geoms_sparse_cell_offset, fixed_geoms_sparse_cell_offset),
+                (self.sph_boundaries.fixed_cells_tri_start, fixed_cells_tri_start),
+            ):
+                qd_from_torch(array, torch.from_numpy(values))
+            if len(fixed_sparse_cells_grid_idx) > 0:
+                qd_from_torch(
+                    self.sph_boundaries.fixed_sparse_cells_grid_idx, torch.from_numpy(fixed_sparse_cells_grid_idx)
+                )
+            if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+                torch.mps.synchronize()
+        if has_rigid_sph or has_fixed_rigid_sph:
             self.sph_boundaries.geoms_is_active.from_numpy(geoms_is_active)
 
         # The liquid sampled inside a coupled body, or closer to its surface than the half particle size at which liquid
@@ -739,7 +949,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             particles_is_active = qd_to_numpy(self.sph_solver.sph_state.particles.is_active)
             particles_is_active[is_inside] = False
             self.sph_solver.sph_state.particles.is_active.from_numpy(particles_is_active)
-        return has_rigid_sph
+        return has_rigid_sph, has_fixed_rigid_sph
 
     def reset(self, envs_idx=None) -> None:
         # The MPM particles keep the rigid normals they saw in their state, which 'set_state' writes back before the
@@ -770,7 +980,18 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
     # ------------------------------------------------------------------------------------
 
     def preprocess(self) -> None:
-        if self.legacy_coupler_config.has_fem_sph or self.legacy_coupler_config.has_rigid_sph:
+        if (
+            self.legacy_coupler_config.has_fem_sph
+            or self.legacy_coupler_config.has_rigid_sph
+            or self.legacy_coupler_config.has_fixed_rigid_sph
+        ):
+            if self.legacy_coupler_config.has_fixed_rigid_sph:
+                kernel_select_sph_fixed_geoms(
+                    self.rigid_solver.dyn_state.geoms,
+                    self.sph_boundaries,
+                    self.sph_solver.sph_info,
+                    self.legacy_coupler_info,
+                )
             kernel_place_sph_boundary_segments(
                 self.fem_solver.fem_state,
                 self.sph_solver.sph_state,
@@ -780,6 +1001,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 self.fem_solver.fem_info,
                 self.sph_solver.sph_info,
                 self.rigid_solver.dyn_info.geoms,
+                self.legacy_coupler_info,
                 self.legacy_coupler_config,
             )
 
@@ -819,9 +1041,14 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             )
 
         # SPH <-> FEM and Rigid, ahead of the FEM vertices taking their share
-        if self.legacy_coupler_config.has_fem_sph or self.legacy_coupler_config.has_rigid_sph:
+        if (
+            self.legacy_coupler_config.has_fem_sph
+            or self.legacy_coupler_config.has_rigid_sph
+            or self.legacy_coupler_config.has_fixed_rigid_sph
+        ):
             kernel_sph_boundaries_impulse(
                 self.sph_solver.sph_state,
+                self.rigid_solver.dyn_state.geoms,
                 self.rigid_solver.dyn_state.links,
                 self.sph_boundaries,
                 self.sph_solver.sph_info,
@@ -896,7 +1123,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
 # ------------------------------------------------------------------------------------
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_reset_mpm_rigid_normal(envs_idx: qd.types.ndarray(), mpm_state: MPMState):
     for i_p, i_b_ in qd.ndrange(
         mpm_state.particles_cpic.rigid_normal.shape[0],
@@ -1142,7 +1369,7 @@ def kernel_mpm_grid_op(
             mpm_state.grid.vel_out[i_x, i_y, i_z, i_b] = vel_mpm
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_mpm_surface_to_particle(
     mpm_state: MPMState,
     geoms_state: GeomsState,
@@ -1173,7 +1400,7 @@ def kernel_mpm_surface_to_particle(
                         mpm_state.particles_cpic.rigid_normal[i_p, i_g, i_b] = sdf_normal
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_fem_surface_force(
     fem_state: FEMState,
     mpm_state: MPMState,
@@ -1386,7 +1613,7 @@ def func_pbd_collide_with_rigid_geom(
     return new_pos, new_vel
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_pbd_rigid_collide(
     pbd_state: PBDState,
     geoms_state: GeomsState,
@@ -1426,7 +1653,7 @@ def kernel_pbd_rigid_collide(
                     pbd_state.particles_reordered.vel[i_p, i_b] = vel
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_attach_pbd_to_rigid_link(
     particles_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
@@ -1449,7 +1676,7 @@ def kernel_attach_pbd_to_rigid_link(
         legacy_coupler_state.pbd_attach_local_pos[i_p, i_b] = local_pos
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_detach_pbd_from_rigid_link(
     particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), legacy_coupler_state: LegacyCouplerState
 ):
@@ -1463,7 +1690,7 @@ def kernel_detach_pbd_from_rigid_link(
         legacy_coupler_state.pbd_attach_local_pos[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_pbd_rigid_solve_animate_particles_by_link(
     pbd_state: PBDState,
     links_state: LinksState,
@@ -1497,7 +1724,377 @@ def kernel_pbd_rigid_solve_animate_particles_by_link(
             pbd_state.particles_reordered.vel[i_r, i_b] = corrective_vel + target_world_vel
 
 
-@qd.kernel
+@qd.func
+def func_boundary_source_cells(
+    i_src: int,
+    i_b: int,
+    pos: qd.types.vector(3),
+    geoms_state: GeomsState,
+    sph_boundaries: SPHBoundaries,
+    support_radius: float,
+    legacy_coupler_config: qd.template(),
+    eps: float,
+):
+    """
+    Return the frame of a source of boundary segments, a point in it, and the first cell and number of cells along each
+    axis of the source within the reach of the point.
+
+    Source 0 is the hash grid of the segments placed in the world frame every substep, and source 1 + i_k the grid of
+    the k-th fixed geom near the domain in the environment in its own frame (see 'fixed_tris_corners' and
+    'fixed_envs_geoms'), which a point reaches where it lies within the support radius plus the largest extent of its
+    segments from the cells of the grid.
+    """
+    pos_src = pos
+    rot = qd.Matrix.identity(gs.qd_float, 3)
+    cell_base = qd.Vector.zero(gs.qd_int, 3)
+    n_cells = qd.Vector.zero(gs.qd_int, 3)
+    if i_src == 0:
+        # The segments overlapping the support radius of the point have their centroid within it plus their extent
+        reach = support_radius + sph_boundaries.segments_extent_max[i_b]
+        cell_lo = func_hash_pos_to_grid(pos - reach, sph_boundaries.hash_grid)
+        cell_hi = func_hash_pos_to_grid(pos + reach, sph_boundaries.hash_grid)
+        cell_base = func_hash_wrap_cell(cell_lo, sph_boundaries.hash_grid)
+        n_cells = qd.min(cell_hi - cell_lo + 1, sph_boundaries.hash_grid.grid_res[None])
+    if qd.static(legacy_coupler_config.has_fixed_rigid_sph):
+        if i_src > 0:
+            i_fg = sph_boundaries.fixed_envs_geoms[i_src - 1, i_b]
+            i_g = sph_boundaries.fixed_geoms_idx[i_fg]
+            if sph_boundaries.geoms_is_active[i_g, i_b]:
+                geom_quat = geoms_state.quat[i_g, i_b]
+                pos_src = qd_inv_transform_by_trans_quat(pos, geoms_state.pos[i_g, i_b], geom_quat)
+                rot = qd_quat_to_R(geom_quat, eps)
+                reach = support_radius + sph_boundaries.fixed_geoms_extent_max[i_fg]
+                cell_size = sph_boundaries.fixed_cell_size[None]
+                grid_lower = sph_boundaries.fixed_geoms_grid_lower[i_fg]
+                cell_lo = qd.max(qd.floor((pos_src - reach - grid_lower) / cell_size, gs.qd_int), 0)
+                cell_hi = qd.min(
+                    qd.floor((pos_src + reach - grid_lower) / cell_size, gs.qd_int),
+                    sph_boundaries.fixed_geoms_grid_res[i_fg] - 1,
+                )
+                cell_base = cell_lo
+                n_cells = qd.max(cell_hi - cell_lo + 1, 0)
+    return pos_src, rot, cell_base, n_cells
+
+
+@qd.func
+def func_boundary_source_cell(
+    i_src: int,
+    i_b: int,
+    cell: qd.types.vector(3, qd.i32),
+    sph_boundaries: SPHBoundaries,
+    legacy_coupler_config: qd.template(),
+):
+    """
+    Return the first sorted index and the number of the items of a cell of a source of boundary segments.
+
+    The cell of a fixed geom is found at its index in the grid of a dense geom, and by bisection over the indices in
+    its grid of the cells holding triangles otherwise. The items of the hash grid of the world frame are segments,
+    those of a fixed geom triangles (see func_boundary_source_window).
+    """
+    item_start = 0
+    n_items = 0
+    if i_src == 0:
+        i_slot = func_hash_cell_to_slot(cell, sph_boundaries.hash_grid)
+        item_start = sph_boundaries.hash_grid.slot_start[i_slot, i_b]
+        n_items = sph_boundaries.hash_grid.slot_size[i_slot, i_b]
+    if qd.static(legacy_coupler_config.has_fixed_rigid_sph):
+        if i_src > 0:
+            i_fg = sph_boundaries.fixed_envs_geoms[i_src - 1, i_b]
+            grid_res = sph_boundaries.fixed_geoms_grid_res[i_fg]
+            i_grid = (cell[0] * grid_res[1] + cell[1]) * grid_res[2] + cell[2]
+            i_c = sph_boundaries.fixed_geoms_cell_start[i_fg] + i_grid
+            is_found = True
+            if not sph_boundaries.fixed_geoms_is_dense[i_fg]:
+                i_lo = sph_boundaries.fixed_geoms_cell_start[i_fg]
+                i_end = sph_boundaries.fixed_geoms_cell_start[i_fg + 1]
+                i_hi = i_end
+                sparse_offset = sph_boundaries.fixed_geoms_sparse_cell_offset[i_fg]
+                # 31 halvings cover any number of cells an index holds
+                for _ in range(31):
+                    if i_lo < i_hi:
+                        i_mid = (i_lo + i_hi) // 2
+                        if sph_boundaries.fixed_sparse_cells_grid_idx[i_mid + sparse_offset] < i_grid:
+                            i_lo = i_mid + 1
+                        else:
+                            i_hi = i_mid
+                i_c = i_lo
+                is_found = False
+                if i_lo < i_end:
+                    is_found = sph_boundaries.fixed_sparse_cells_grid_idx[i_lo + sparse_offset] == i_grid
+            if is_found:
+                item_start = sph_boundaries.fixed_cells_tri_start[i_c]
+                n_items = sph_boundaries.fixed_cells_tri_start[i_c + 1] - item_start
+    return item_start, n_items
+
+
+@qd.func
+def func_boundary_source_window(
+    i_src: int,
+    i_b: int,
+    i_q: int,
+    cell: qd.types.vector(3, qd.i32),
+    cell_base: qd.types.vector(3, qd.i32),
+    pos: qd.types.vector(3),
+    sph_boundaries: SPHBoundaries,
+    legacy_coupler_config: qd.template(),
+    support_radius: float,
+):
+    """
+    Return the window of the segments of an item of a source of boundary segments that a point may reach.
+
+    The caller gets the number of rows of the window, the window, the corners of the triangle of the item and the
+    coordinates of the point along its edges. An item of the hash grid of the world frame is a single segment, a window
+    of one row and one column. An item of a fixed geom is a triangle registered in every cell its box overlaps, which
+    only the lowest of the cells reached by the point among them takes. The window holds the item, its first row and
+    number of rows, its first column and number of columns, the split of its grid, negated where
+    func_boundary_window_row narrows the columns of each row, and its fixed geom. The rows and columns of the grid of
+    the triangle are those that the reach of the point overlaps.
+    """
+    n_rows = 0
+    window = qd.Vector([-1, 0, 1, 0, 1, 0, -1], dt=qd.i32)
+    tri_corners = qd.Matrix.zero(gs.qd_float, 3, 3)
+    coords = qd.Vector.zero(gs.qd_float, 6)
+    if i_src == 0:
+        n_rows = 1
+        window[0] = sph_boundaries.hash_grid.particles_idx[i_q, i_b]
+    if qd.static(legacy_coupler_config.has_fixed_rigid_sph):
+        if i_src > 0:
+            i_fg = sph_boundaries.fixed_envs_geoms[i_src - 1, i_b]
+            tri_reg = sph_boundaries.fixed_cells_tri_idx[i_q]
+            i_t = tri_reg // 32
+            offset_code = tri_reg % 32
+            tri_cell_lo = cell - qd.Vector([offset_code // 9, offset_code // 3 % 3, offset_code % 3], dt=qd.i32)
+            owner = qd.max(tri_cell_lo, cell_base)
+            if (owner == cell).all():
+                tri_corners = sph_boundaries.fixed_tris_corners[i_t]
+                corner_0 = qd.Vector([tri_corners[0, 0], tri_corners[0, 1], tri_corners[0, 2]])
+                corner_1 = qd.Vector([tri_corners[1, 0], tri_corners[1, 1], tri_corners[1, 2]])
+                corner_2 = qd.Vector([tri_corners[2, 0], tri_corners[2, 1], tri_corners[2, 2]])
+                window[0] = i_t
+                split = sph_boundaries.fixed_tris_split[i_t]
+                window[5] = split
+                window[6] = i_fg
+                is_fan = split >= 65536
+                n_rays = split // 256 % 256
+                n_across = split % 256
+                # The coordinates of the point along the edges from the first corner, and the change of each per unit
+                # displacement in the plane of the triangle
+                edge_1, edge_2, offset = corner_1 - corner_0, corner_2 - corner_0, pos - corner_0
+                g_11, g_12, g_22 = edge_1.dot(edge_1), edge_1.dot(edge_2), edge_2.dot(edge_2)
+                # A triangle too thin for its coordinates to resolve the point takes its whole grid
+                det = g_11 * g_22 - g_12 * g_12
+                is_degenerate = det <= sph_boundaries.fixed_tris_det_rtol[None] * g_11 * g_22
+                det = qd.select(is_degenerate, 1.0, det)
+                u = (g_22 * offset.dot(edge_1) - g_12 * offset.dot(edge_2)) / det
+                v = (g_11 * offset.dot(edge_2) - g_12 * offset.dot(edge_1)) / det
+                reach = support_radius + sph_boundaries.fixed_geoms_extent_max[i_fg]
+                du = reach * qd.sqrt(g_22 / det)
+                dv = reach * qd.sqrt(g_11 / det)
+                ds = reach * qd.sqrt(qd.max(g_11 + g_22 - 2.0 * g_12, 0.0) / det)
+                # The rows span the first coordinate of the regular grid and the distance along the rays of the fan,
+                # the columns the second coordinate of the regular grid and every ray of the fan
+                coord_row, d_row = u, du
+                if is_fan:
+                    coord_row, d_row = u + v, ds
+                row_lo = qd.max(qd.floor((coord_row - d_row) * n_rays, qd.i32), 0)
+                row_hi = qd.min(qd.floor((coord_row + d_row) * n_rays, qd.i32), n_rays - 1)
+                col_lo = qd.max(qd.floor((v - dv) * n_rays, qd.i32), 0)
+                col_hi = qd.min(qd.floor((v + dv) * n_rays, qd.i32), n_rays - 1)
+                if is_fan:
+                    col_lo = 0
+                    col_hi = n_across - 1
+                if is_degenerate:
+                    row_lo, row_hi = 0, n_rays - 1
+                    col_lo, col_hi = 0, qd.select(is_fan, n_across, n_rays) - 1
+                if row_lo <= row_hi and col_lo <= col_hi:
+                    window[1] = row_lo
+                    window[2] = row_hi - row_lo + 1
+                    window[3] = col_lo
+                    window[4] = col_hi - col_lo + 1
+                    n_rows = window[2]
+                    # A regular grid narrows the columns of each row to the reach (see func_boundary_window_row)
+                    if not (is_fan or is_degenerate):
+                        coords = qd.Vector([u, v, g_11, g_12, g_22, reach * reach])
+                        window[5] = -split
+    return n_rows, window, tri_corners, coords
+
+
+@qd.func
+def func_boundary_window_row(i_row: int, window: qd.types.vector(7, qd.i32), coords: qd.types.vector(6)):
+    """
+    Return the first column and the number of columns of a row of the window of the grid of a triangle (see
+    func_boundary_source_window).
+
+    The columns of a row of a regular grid narrow to those whose cells meet the ellipse of the points of the plane of the
+    triangle within the reach of the point, in the coordinates along the edges of the triangle from its first corner,
+    and to the triangle. The other windows take every column of every row.
+    """
+    col_lo = window[3]
+    n_cols = window[4]
+    if window[5] < 0:
+        n_rays = -window[5] // 256 % 256
+        u, v, g_11, g_12, g_22, reach_sqr = coords[0], coords[1], coords[2], coords[3], coords[4], coords[5]
+        det = g_11 * g_22 - g_12 * g_12
+        # The offsets of the row along the first coordinate, within the extent of the ellipse along it
+        du_max = qd.sqrt(reach_sqr * g_22 / det)
+        du_lo = qd.min(qd.max(i_row / n_rays - u, -du_max), du_max)
+        du_hi = qd.min(qd.max((i_row + 1) / n_rays - u, -du_max), du_max)
+        # The ellipse spans the second coordinate between (-g_12 du -+ sqrt(g_22 reach^2 - det du^2)) / g_22 at an
+        # offset du along the first, whose extremes over the row lie at its ends or at -+g_12 reach / sqrt(det g_11)
+        du_ext = g_12 * qd.sqrt(reach_sqr / (det * g_11))
+        du_top = qd.min(qd.max(-du_ext, du_lo), du_hi)
+        du_bottom = qd.min(qd.max(du_ext, du_lo), du_hi)
+        dv_top = (-g_12 * du_top + qd.sqrt(qd.max(g_22 * reach_sqr - det * du_top * du_top, 0.0))) / g_22
+        dv_bottom = (-g_12 * du_bottom - qd.sqrt(qd.max(g_22 * reach_sqr - det * du_bottom * du_bottom, 0.0))) / g_22
+        col_lo = qd.max(qd.floor((v + dv_bottom) * n_rays, qd.i32), 0)
+        col_hi = qd.min(qd.floor((v + dv_top) * n_rays, qd.i32), n_rays - 1 - i_row)
+        n_cols = qd.max(col_hi - col_lo + 1, 0)
+    return col_lo, n_cols
+
+
+@qd.func
+def func_boundary_source_segment(
+    i_src: int,
+    i_b: int,
+    i_row: int,
+    i_col: int,
+    is_down: bool,
+    window: qd.types.vector(7, qd.i32),
+    pos: qd.types.vector(3),
+    tri_corners: qd.types.matrix(3, 3),
+    sph_boundaries: SPHBoundaries,
+    legacy_coupler_config: qd.template(),
+    support_radius: float,
+    eps: float,
+):
+    """
+    Return whether a segment of a window may lie within the support radius of a point, with its shape and velocity.
+
+    Its corners, normal, area, extent and velocity are in the frame of its source, and the boundary of the segment comes
+    last. The fixed geoms stand still. The regular grid of a triangle splits it into n x n parts along the lines
+    parallel to its edges, two per cell of its rows and columns along its second and third corners. The fan splits it
+    along the lines parallel to the edge opposite its first corner and the rays from that corner, a single part per
+    column next to the corner and two per cell beyond. A segment of a fixed geom whose centroid lies beyond the reach of
+    the point, or which falls outside of its triangle, is rejected before its shape is computed (see
+    func_boundary_source_window).
+    """
+    is_near = True
+    corners = qd.Matrix.zero(gs.qd_float, 3, 3)
+    normal = qd.Vector.zero(gs.qd_float, 3)
+    area = gs.qd_float(0.0)
+    extent = gs.qd_float(0.0)
+    vel = qd.Vector.zero(gs.qd_float, 3)
+    i_bd = -1
+    if i_src == 0:
+        i_sg = window[0]
+        corners = sph_boundaries.segments.corners[i_sg, i_b]
+        normal = sph_boundaries.segments.normal[i_sg, i_b]
+        area = sph_boundaries.segments.area[i_sg, i_b]
+        extent = sph_boundaries.segments.extent[i_sg, i_b]
+        vel = sph_boundaries.segments.vel[i_sg, i_b]
+        i_bd = sph_boundaries.segments_boundary_idx[i_sg]
+    if qd.static(legacy_coupler_config.has_fixed_rigid_sph):
+        if i_src > 0:
+            split = qd.abs(window[5])
+            n_rays = split // 256 % 256
+            n_across = split % 256
+            corners_grid = qd.Matrix.zero(gs.qd_float, 3, 2)
+            if split < 65536:
+                # The upward part of the cell of row i_row and column i_col of the regular grid, then the downward one
+                is_near = i_row + i_col <= n_rays - 1 - qd.select(is_down, 1, 0)
+                corners_grid = qd.Matrix([[i_row, i_col], [i_row + 1, i_col], [i_row, i_col + 1]], dt=gs.qd_float)
+                if is_down:
+                    corners_grid = qd.Matrix(
+                        [[i_row + 1, i_col], [i_row + 1, i_col + 1], [i_row, i_col + 1]], dt=gs.qd_float
+                    )
+                corners_grid = corners_grid / n_rays
+            else:
+                # The fan holds a single part per column next to its first corner, then two per cell, taken along the
+                # rays at s and across them at t
+                is_near = i_row > 0 or not is_down
+                corners_st = qd.Matrix([[0, 0], [1, i_col], [1, i_col + 1]], dt=gs.qd_float)
+                if i_row > 0:
+                    corners_st = qd.Matrix([[i_row, i_col], [i_row + 1, i_col], [i_row + 1, i_col + 1]], dt=gs.qd_float)
+                    if is_down:
+                        corners_st = qd.Matrix(
+                            [[i_row, i_col], [i_row + 1, i_col + 1], [i_row, i_col + 1]], dt=gs.qd_float
+                        )
+                for i_c in qd.static(range(3)):
+                    s_c = corners_st[i_c, 0] / n_rays
+                    t_c = corners_st[i_c, 1] / n_across
+                    corners_grid[i_c, 0] = s_c * (1.0 - t_c)
+                    corners_grid[i_c, 1] = s_c * t_c
+            tri_origin = qd.Vector([tri_corners[0, 0], tri_corners[0, 1], tri_corners[0, 2]])
+            tri_edges = qd.Matrix.zero(gs.qd_float, 2, 3)
+            for i_d in qd.static(range(3)):
+                tri_edges[0, i_d] = tri_corners[1, i_d] - tri_corners[0, i_d]
+                tri_edges[1, i_d] = tri_corners[2, i_d] - tri_corners[0, i_d]
+            i_fg = window[6]
+            i_bd = sph_boundaries.fixed_geoms_idx[i_fg]
+            centroid_grid = qd.Vector(
+                [
+                    (corners_grid[0, 0] + corners_grid[1, 0] + corners_grid[2, 0]) / 3.0,
+                    (corners_grid[0, 1] + corners_grid[1, 1] + corners_grid[2, 1]) / 3.0,
+                ]
+            )
+            centroid = tri_origin + tri_edges.transpose() @ centroid_grid
+            if is_near:
+                is_near = (centroid - pos).norm() < support_radius + sph_boundaries.fixed_geoms_extent_max[i_fg]
+            if is_near:
+                corners = corners_grid @ tri_edges
+                for i_c in qd.static(range(3)):
+                    for i_d in qd.static(range(3)):
+                        corners[i_c, i_d] = corners[i_c, i_d] + tri_origin[i_d]
+                corner_0 = qd.Vector([corners[0, 0], corners[0, 1], corners[0, 2]])
+                corner_1 = qd.Vector([corners[1, 0], corners[1, 1], corners[1, 2]])
+                corner_2 = qd.Vector([corners[2, 0], corners[2, 1], corners[2, 2]])
+                area_normal = 0.5 * (corner_1 - corner_0).cross(corner_2 - corner_0)
+                area = area_normal.norm()
+                normal = area_normal / qd.max(area, eps)
+                extent = qd.sqrt(
+                    qd.max(
+                        (corner_0 - centroid).norm_sqr(),
+                        (corner_1 - centroid).norm_sqr(),
+                        (corner_2 - centroid).norm_sqr(),
+                    )
+                )
+    return is_near, corners, normal, area, extent, vel, i_bd
+
+
+@qd.kernel(fastcache=True)
+def kernel_select_sph_fixed_geoms(
+    geoms_state: GeomsState, sph_boundaries: SPHBoundaries, sph_info: SPHInfo, legacy_coupler_info: LegacyCouplerInfo
+):
+    """
+    List the fixed rigid geoms whose box, widened by the support radius and the largest extent of their segments,
+    overlaps the domain of the SPH liquid in each environment, in ascending order.
+
+    The box of a geom spans its grid in its own frame, taken to the world frame as the box bounding it.
+    """
+    n_fixed_geoms, n_envs = sph_boundaries.fixed_envs_geoms.shape
+    cell_size = sph_boundaries.fixed_cell_size[None]
+    lower, upper = sph_info.boundary.lower[None], sph_info.boundary.upper[None]
+    for i_b in range(n_envs):
+        n_geoms = 0
+        for i_fg in range(n_fixed_geoms):
+            i_g = sph_boundaries.fixed_geoms_idx[i_fg]
+            if sph_boundaries.geoms_is_active[i_g, i_b]:
+                margin = sph_info.support_radius[None] + sph_boundaries.fixed_geoms_extent_max[i_fg]
+                half_size = 0.5 * sph_boundaries.fixed_geoms_grid_res[i_fg] * cell_size + margin
+                center_local = (
+                    sph_boundaries.fixed_geoms_grid_lower[i_fg]
+                    + 0.5 * sph_boundaries.fixed_geoms_grid_res[i_fg] * cell_size
+                )
+                rot = qd_quat_to_R(geoms_state.quat[i_g, i_b], legacy_coupler_info.EPS[None])
+                center = rot @ center_local + geoms_state.pos[i_g, i_b]
+                half_size_world = qd.abs(rot) @ half_size
+                if (center + half_size_world - lower).min() > 0.0 and (upper - center + half_size_world).min() > 0.0:
+                    sph_boundaries.fixed_envs_geoms[n_geoms, i_b] = i_fg
+                    n_geoms = n_geoms + 1
+        sph_boundaries.fixed_envs_n_geoms[i_b] = n_geoms
+
+
+@qd.kernel(fastcache=True)
 def kernel_place_sph_boundary_segments(
     fem_state: FEMState,
     sph_state: SPHState,
@@ -1507,6 +2104,7 @@ def kernel_place_sph_boundary_segments(
     fem_info: FEMInfo,
     sph_info: SPHInfo,
     geoms_info: GeomsInfo,
+    legacy_coupler_info: LegacyCouplerInfo,
     legacy_coupler_config: qd.template(),
 ):
     """
@@ -1528,6 +2126,9 @@ def kernel_place_sph_boundary_segments(
         corners = qd.Matrix.zero(gs.qd_float, 3, 3)
         vel = qd.Vector.zero(gs.qd_float, 3)
         is_active = True
+        # The single slot of the segments of fixed geoms bounding the liquid alone holds no segment
+        if qd.static(not (legacy_coupler_config.has_fem_sph or legacy_coupler_config.has_rigid_sph)):
+            is_active = False
         if qd.static(legacy_coupler_config.has_fem_sph):
             if i_sg < n_fem_segments:
                 i_t = sph_boundaries.fem_segments_tri_idx[i_sg]
@@ -1571,7 +2172,7 @@ def kernel_place_sph_boundary_segments(
                 i_l = geoms_info.link_idx[i_g]
                 vel = func_vel_at_point(i_l, i_b, centroid, links_state)
         sph_boundaries.segments.corners[i_sg, i_b] = corners
-        sph_boundaries.segments.normal[i_sg, i_b] = area_normal / qd.max(area, gs.EPS)
+        sph_boundaries.segments.normal[i_sg, i_b] = area_normal / qd.max(area, legacy_coupler_info.EPS[None])
         sph_boundaries.segments.centroid[i_sg, i_b] = centroid
         sph_boundaries.segments.vel[i_sg, i_b] = vel
         sph_boundaries.segments.area[i_sg, i_b] = area
@@ -1593,6 +2194,7 @@ def kernel_place_sph_boundary_segments(
     # particle together, striding the segments of each cell around it, then sum their shares along a fixed tree.
     N_LANES = qd.static(32 if legacy_coupler_config.enable_cooperative_particles else 1)
     support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
+    eps = legacy_coupler_info.EPS[None]
     n_particles, n_envs = sph_state.particles.pos.shape
     # The environments run fastest, as the arrays keep them innermost
     for i_t in range(n_envs * n_particles * N_LANES):
@@ -1604,47 +2206,102 @@ def kernel_place_sph_boundary_segments(
         moment = qd.Matrix.zero(gs.qd_float, 3, 3)
         vel_flux = gs.qd_float(0.0)
         surface_dist = gs.qd_float(1e9)
-        # The lowest and highest boundary of the segments around the particle
-        boundary_lo = sph_boundaries.segments_boundary_idx.shape[0]
+        # The lowest and highest boundary of the segments around the particle, none to start with
+        boundary_lo = 2147483647
         boundary_hi = -1
         if sph_state.particles.is_active[i_p, i_b]:
             pos = sph_state.particles.pos[i_p, i_b]
-            # The segments overlapping the support radius of the particle have their centroid within it plus their extent
-            reach = support_radius + sph_boundaries.segments_extent_max[i_b]
-            cell_lo = func_hash_pos_to_grid(pos - reach, sph_boundaries.hash_grid)
-            cell_hi = func_hash_pos_to_grid(pos + reach, sph_boundaries.hash_grid)
-            base = func_hash_wrap_cell(cell_lo, sph_boundaries.hash_grid)
-            n_cells = qd.min(cell_hi - cell_lo + 1, sph_boundaries.hash_grid.grid_res[None])
-            for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
-                i_slot = func_hash_cell_to_slot(base + offset, sph_boundaries.hash_grid)
-                slot_start = sph_boundaries.hash_grid.slot_start[i_slot, i_b]
-                slot_size = sph_boundaries.hash_grid.slot_size[i_slot, i_b]
-                for i_q_ in range((slot_size + N_LANES - 1) // N_LANES):
-                    i_q = i_q_ * N_LANES + i_lane
-                    if i_q < slot_size:
-                        i_sg = sph_boundaries.hash_grid.particles_idx[slot_start + i_q, i_b]
-                        seg_volume, seg_volume_grad, seg_moment = func_segment_volume(
-                            pos,
-                            sph_boundaries.segments.corners[i_sg, i_b],
-                            sph_boundaries.segments.normal[i_sg, i_b],
-                            sph_boundaries.segments.area[i_sg, i_b],
-                            sph_boundaries.segments.extent[i_sg, i_b],
-                            sph_boundaries.quad_bary,
-                            sph_boundaries.quad_weight,
-                            support_radius,
-                            kernel_norm,
-                        )
-                        volume = volume + seg_volume
-                        volume_grad = volume_grad + seg_volume_grad
-                        moment = moment + seg_moment
-                        vel_flux = vel_flux + sph_boundaries.segments.vel[i_sg, i_b].dot(seg_volume_grad)
-                        surface_dist = qd.min(
-                            surface_dist, func_segment_dist(pos, sph_boundaries.segments.corners[i_sg, i_b])
-                        )
-                        if seg_volume_grad.norm_sqr() > 0.0:
-                            i_bd = sph_boundaries.segments_boundary_idx[i_sg]
-                            boundary_lo = qd.min(boundary_lo, i_bd)
-                            boundary_hi = qd.max(boundary_hi, i_bd)
+            # The segments of each source are summed in its frame, then taken to the world frame: the hash grid of the
+            # segments placed in the world frame, then the grid of each fixed geom near the domain
+            n_sources = 1
+            if qd.static(legacy_coupler_config.has_fixed_rigid_sph):
+                n_sources = 1 + sph_boundaries.fixed_envs_n_geoms[i_b]
+            for i_src in range(n_sources):
+                pos_src, rot, cell_base, n_cells = func_boundary_source_cells(
+                    i_src, i_b, pos, geoms_state, sph_boundaries, support_radius, legacy_coupler_config, eps
+                )
+                src_volume = gs.qd_float(0.0)
+                src_volume_grad = qd.Vector.zero(gs.qd_float, 3)
+                src_moment = qd.Matrix.zero(gs.qd_float, 3, 3)
+                for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
+                    item_start, n_items = func_boundary_source_cell(
+                        i_src, i_b, cell_base + offset, sph_boundaries, legacy_coupler_config
+                    )
+                    # The lanes stride the segments of the world frame, and the segments of the window of each
+                    # triangle of a fixed geom, as a triangle holds many. They take the window as a whole, its columns
+                    # left as wide in every row, as a row holds too few segments for them.
+                    n_item_lanes = qd.select(i_src == 0, N_LANES, 1)
+                    n_part_lanes = N_LANES // n_item_lanes
+                    for i_q_ in range((n_items + n_item_lanes - 1) // n_item_lanes):
+                        i_q = i_q_ * n_item_lanes + qd.select(i_src == 0, i_lane, 0)
+                        if i_q < n_items:
+                            i_item = item_start + i_q
+                            cell = cell_base + offset
+                            n_rows, window, tri_corners, coords = func_boundary_source_window(
+                                i_src,
+                                i_b,
+                                i_item,
+                                cell,
+                                cell_base,
+                                pos_src,
+                                sph_boundaries,
+                                legacy_coupler_config,
+                                support_radius,
+                            )
+                            n_row_iters = n_rows
+                            if qd.static(N_LANES > 1):
+                                n_row_iters = qd.min(n_rows, 1)
+                            for i_row_ in range(n_row_iters):
+                                i_row = window[1] + i_row_
+                                col_lo, n_cols = window[3], window[4]
+                                n_parts = qd.select(i_src == 0, 1, 2 * n_rows * n_cols)
+                                if qd.static(N_LANES == 1):
+                                    col_lo, n_cols = func_boundary_window_row(i_row, window, coords)
+                                    n_parts = qd.select(i_src == 0, 1, 2 * n_cols)
+                                for i_part_ in range((n_parts + n_part_lanes - 1) // n_part_lanes):
+                                    i_part = i_part_ * n_part_lanes + qd.select(i_src == 0, 0, i_lane)
+                                    i_part_row, i_part_col = i_row, col_lo + i_part // 2
+                                    if qd.static(N_LANES > 1):
+                                        i_part_row = i_row + i_part // 2 // n_cols
+                                        i_part_col = col_lo + i_part // 2 % n_cols
+                                    is_down = i_part % 2 == 1
+                                    is_near, corners, normal, area, extent, vel, i_bd = func_boundary_source_segment(
+                                        i_src,
+                                        i_b,
+                                        i_part_row,
+                                        i_part_col,
+                                        is_down,
+                                        window,
+                                        pos_src,
+                                        tri_corners,
+                                        sph_boundaries,
+                                        legacy_coupler_config,
+                                        support_radius,
+                                        eps,
+                                    )
+                                    if is_near and i_part < n_parts:
+                                        seg_volume, seg_volume_grad, seg_moment = func_segment_volume(
+                                            pos_src,
+                                            corners,
+                                            normal,
+                                            area,
+                                            extent,
+                                            sph_boundaries.quad_bary,
+                                            sph_boundaries.quad_weight,
+                                            support_radius,
+                                            kernel_norm,
+                                        )
+                                        src_volume = src_volume + seg_volume
+                                        src_volume_grad = src_volume_grad + seg_volume_grad
+                                        src_moment = src_moment + seg_moment
+                                        vel_flux = vel_flux + vel.dot(seg_volume_grad)
+                                        surface_dist = qd.min(surface_dist, func_segment_dist(pos_src, corners, eps))
+                                        if seg_volume_grad.norm_sqr() > 0.0:
+                                            boundary_lo = qd.min(boundary_lo, i_bd)
+                                            boundary_hi = qd.max(boundary_hi, i_bd)
+                volume = volume + src_volume
+                volume_grad = volume_grad + rot @ src_volume_grad
+                moment = moment + rot @ src_moment @ rot.transpose()
         if qd.static(N_LANES > 1):
             # The lanes sum scalars alone
             volume = qd_block_sum(volume)
@@ -1676,6 +2333,29 @@ def kernel_place_sph_boundary_segments(
 
 
 @qd.func
+def func_boundary_slot(i_bd: int, boundaries_idx: qd.types.vector(4, qd.i32), n_boundaries: int):
+    """
+    Return the slot of a boundary among those around a particle, with the boundaries and their number updated.
+
+    A new boundary takes the next free slot, and the boundaries beyond the last slot share it, marked -2.
+    """
+    N_BOUNDARIES = qd.static(boundaries_idx.n)
+    i_k = -1
+    for i_s in qd.static(range(N_BOUNDARIES)):
+        if boundaries_idx[i_s] == i_bd:
+            i_k = i_s
+    if i_k < 0:
+        if n_boundaries < N_BOUNDARIES:
+            i_k = n_boundaries
+            boundaries_idx[i_k] = i_bd
+            n_boundaries = n_boundaries + 1
+        else:
+            i_k = N_BOUNDARIES - 1
+            boundaries_idx[i_k] = -2
+    return i_k, boundaries_idx, n_boundaries
+
+
+@qd.func
 def func_project_on_bounds(
     vel_free: qd.types.vector(3),
     normals: qd.types.matrix(4, 3),
@@ -1688,13 +2368,17 @@ def func_project_on_bounds(
     Return the velocity nearest to a free velocity that meets at most 4 lower bounds on its components along normals,
     with the indices of the bounds met as equalities and their multipliers.
 
-    Where no velocity meets all the bounds, as for a particle squeezed between two approaching boundaries, the bounds are
-    all lowered by the least common slack that lets a velocity meet them, which violates each of the opposing bounds by
-    the same amount. By duality, that slack is the largest weighted mean of the bounds over the non-negative weights
-    that sum to one and cancel the weighted sum of their normals. The nearest velocity then meets as equalities the
-    first set of at most 3 bounds whose multipliers are non-negative and whose solution meets all the others, the
-    solution of a strictly convex problem being unique.
+    Where no velocity meets all the bounds within sqrt(3) times the largest bound in magnitude, the speed that three
+    bounds at right angles call for, the bounds are all lowered by the least common slack that lets such a velocity
+    meet them. This covers a particle squeezed between two approaching boundaries, whose nearly opposite normals would
+    call for a speed growing without limit as they turn opposite, and violates each of the opposing bounds by the same
+    amount. By duality, a velocity meeting the bounds is at least as fast as the mean of the bounds over the length of
+    the mean of their normals, for any non-negative weights summing to one. The slack is the largest excess of the mean
+    of the bounds over the speed limit times that length, at the weights cancelling the normals of each subset best.
+    The nearest velocity then meets as equalities the first set of at most 3 bounds whose multipliers are non-negative
+    and whose solution meets all the others, the solution of a strictly convex problem being unique.
     """
+    speed_max = qd.sqrt(3.0) * qd.abs(bounds).max()
     slack = gs.qd_float(0.0)
     for i_mask in range(16):
         # The subsets of at least 2 of the bounds, as the columns of the normals and a row of ones, unused ones padded
@@ -1714,9 +2398,12 @@ def func_project_on_bounds(
                     gram[i_k, i_k] = 1.0
             if gram.determinant() > legacy_coupler_info.normals_independence_min[None]:
                 weights = gram.inverse() @ rhs
-                residual = (mixing @ weights - qd.Vector([0.0, 0.0, 0.0, 1.0], dt=gs.qd_float)).norm()
-                if weights.min() >= 0.0 and residual < legacy_coupler_info.normals_independence_min[None]:
-                    slack = qd.max(slack, weights.dot(bounds))
+                weights_sum = weights.sum()
+                if weights.min() >= 0.0 and weights_sum > 0.0:
+                    weights = weights / weights_sum
+                    normals_mean = mixing @ weights
+                    normals_mean_norm = qd.Vector([normals_mean[0], normals_mean[1], normals_mean[2]]).norm()
+                    slack = qd.max(slack, weights.dot(bounds) - speed_max * normals_mean_norm)
     bounds_relaxed = bounds - slack * qd.Vector([1.0, 1.0, 1.0, 1.0], dt=gs.qd_float)
 
     vel = vel_free
@@ -1770,9 +2457,10 @@ def func_project_on_bounds(
     return vel, set_best, lambdas_best
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_sph_boundaries_impulse(
     sph_state: SPHState,
+    geoms_state: GeomsState,
     links_state: LinksState,
     sph_boundaries: SPHBoundaries,
     sph_info: SPHInfo,
@@ -1802,6 +2490,7 @@ def kernel_sph_boundaries_impulse(
     # from moving further in.
     N_BOUNDARIES = qd.static(4)
     support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
+    eps = legacy_coupler_info.EPS[None]
     for i_r, i_b in qd.ndrange(
         *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.vel))
     ):
@@ -1831,49 +2520,80 @@ def kernel_sph_boundaries_impulse(
                     vel_fluxes = qd.Vector.zero(gs.qd_float, N_BOUNDARIES)
                     surface_dists = qd.Vector([1e9] * N_BOUNDARIES, dt=gs.qd_float)
                     n_boundaries = 0
-                    reach = support_radius + sph_boundaries.segments_extent_max[i_b]
-                    cell_lo = func_hash_pos_to_grid(pos - reach, sph_boundaries.hash_grid)
-                    cell_hi = func_hash_pos_to_grid(pos + reach, sph_boundaries.hash_grid)
-                    base = func_hash_wrap_cell(cell_lo, sph_boundaries.hash_grid)
-                    n_cells = qd.min(cell_hi - cell_lo + 1, sph_boundaries.hash_grid.grid_res[None])
-                    for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
-                        i_slot = func_hash_cell_to_slot(base + offset, sph_boundaries.hash_grid)
-                        slot_start = sph_boundaries.hash_grid.slot_start[i_slot, i_b]
-                        for i_q in range(sph_boundaries.hash_grid.slot_size[i_slot, i_b]):
-                            i_sg = sph_boundaries.hash_grid.particles_idx[slot_start + i_q, i_b]
-                            corners = sph_boundaries.segments.corners[i_sg, i_b]
-                            seg_volume, seg_volume_grad, _ = func_segment_volume(
-                                pos,
-                                corners,
-                                sph_boundaries.segments.normal[i_sg, i_b],
-                                sph_boundaries.segments.area[i_sg, i_b],
-                                sph_boundaries.segments.extent[i_sg, i_b],
-                                sph_boundaries.quad_bary,
-                                sph_boundaries.quad_weight,
-                                support_radius,
-                                kernel_norm,
+                    n_sources = 1
+                    if qd.static(legacy_coupler_config.has_fixed_rigid_sph):
+                        n_sources = 1 + sph_boundaries.fixed_envs_n_geoms[i_b]
+                    for i_src in range(n_sources):
+                        pos_src, rot, cell_base, n_cells = func_boundary_source_cells(
+                            i_src, i_b, pos, geoms_state, sph_boundaries, support_radius, legacy_coupler_config, eps
+                        )
+                        for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
+                            item_start, n_items = func_boundary_source_cell(
+                                i_src, i_b, cell_base + offset, sph_boundaries, legacy_coupler_config
                             )
-                            if seg_volume_grad.norm_sqr() > 0.0:
-                                i_bd = sph_boundaries.segments_boundary_idx[i_sg]
-                                i_k = -1
-                                for i_s in qd.static(range(N_BOUNDARIES)):
-                                    if boundaries_idx[i_s] == i_bd:
-                                        i_k = i_s
-                                if i_k < 0:
-                                    if n_boundaries < N_BOUNDARIES:
-                                        i_k = n_boundaries
-                                        boundaries_idx[i_k] = i_bd
-                                        n_boundaries = n_boundaries + 1
-                                    else:
-                                        i_k = N_BOUNDARIES - 1
-                                        boundaries_idx[i_k] = -2
-                                volumes[i_k] = volumes[i_k] + seg_volume
-                                for i_d in qd.static(range(3)):
-                                    volume_grads[i_k, i_d] = volume_grads[i_k, i_d] + seg_volume_grad[i_d]
-                                vel_fluxes[i_k] = vel_fluxes[i_k] + sph_boundaries.segments.vel[i_sg, i_b].dot(
-                                    seg_volume_grad
+                            for i_q in range(n_items):
+                                i_item = item_start + i_q
+                                cell = cell_base + offset
+                                n_rows, window, tri_corners, coords = func_boundary_source_window(
+                                    i_src,
+                                    i_b,
+                                    i_item,
+                                    cell,
+                                    cell_base,
+                                    pos_src,
+                                    sph_boundaries,
+                                    legacy_coupler_config,
+                                    support_radius,
                                 )
-                                surface_dists[i_k] = qd.min(surface_dists[i_k], func_segment_dist(pos, corners))
+                                for i_row_ in range(n_rows):
+                                    i_row = window[1] + i_row_
+                                    col_lo, n_cols = func_boundary_window_row(i_row, window, coords)
+                                    n_parts = qd.select(i_src == 0, 1, 2 * n_cols)
+                                    for i_part in range(n_parts):
+                                        i_col = col_lo + i_part // 2
+                                        is_down = i_part % 2 == 1
+                                        is_near, corners, normal, area, extent, vel, i_bd = (
+                                            func_boundary_source_segment(
+                                                i_src,
+                                                i_b,
+                                                i_row,
+                                                i_col,
+                                                is_down,
+                                                window,
+                                                pos_src,
+                                                tri_corners,
+                                                sph_boundaries,
+                                                legacy_coupler_config,
+                                                support_radius,
+                                                eps,
+                                            )
+                                        )
+                                        if is_near:
+                                            seg_volume, seg_volume_grad, _ = func_segment_volume(
+                                                pos_src,
+                                                corners,
+                                                normal,
+                                                area,
+                                                extent,
+                                                sph_boundaries.quad_bary,
+                                                sph_boundaries.quad_weight,
+                                                support_radius,
+                                                kernel_norm,
+                                            )
+                                            if seg_volume_grad.norm_sqr() > 0.0:
+                                                i_k, boundaries_idx, n_boundaries = func_boundary_slot(
+                                                    i_bd, boundaries_idx, n_boundaries
+                                                )
+                                                volumes[i_k] = volumes[i_k] + seg_volume
+                                                seg_volume_grad_world = rot @ seg_volume_grad
+                                                for i_d in qd.static(range(3)):
+                                                    volume_grads[i_k, i_d] = (
+                                                        volume_grads[i_k, i_d] + seg_volume_grad_world[i_d]
+                                                    )
+                                                vel_fluxes[i_k] = vel_fluxes[i_k] + vel.dot(seg_volume_grad)
+                                                surface_dists[i_k] = qd.min(
+                                                    surface_dists[i_k], func_segment_dist(pos_src, corners, eps)
+                                                )
                     # The divergence theorem counts the kernel at the particle itself out of the volume of a solid
                     # that encloses it, which turns it negative
                     for i_s in qd.static(range(N_BOUNDARIES)):

@@ -75,6 +75,7 @@ class ClosestTriangle:
         self,
         i_t: int,
         i_q: int,
+        i_n: int,
         node_min: qd.types.vector(3),
         node_max: qd.types.vector(3),
         query,

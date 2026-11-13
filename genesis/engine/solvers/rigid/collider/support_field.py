@@ -123,7 +123,7 @@ class SupportField:
         )
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def _kernel_init_support(
     support_cell_start: qd.types.ndarray(),
     support_list_start: qd.types.ndarray(),

@@ -269,7 +269,6 @@ def test_coupling_wrench_grad_matches_fd(use_implicit_solver, precision, show_vi
         ),
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=use_implicit_solver,
-            enable_vertex_constraints=use_implicit_solver,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, -0.6, 0.4),

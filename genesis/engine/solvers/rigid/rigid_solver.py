@@ -343,32 +343,32 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.register_errors(
             self._errno,
             {
-                RigidErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
+                RigidErrorCode.OVERFLOW_CANDIDATE_CONTACTS: lambda: (
                     "Exceeding max number of broad phase candidate contact pairs "
-                    f"({collider_info.max_collision_pairs_broad[None]}). Please increase the value of RigidSolver's "
-                    "option 'multiplier_collision_broad_phase'."
+                    f"({collider_info.max_collision_pairs_broad[None]}). Please increase the value of "
+                    f"{type(self).__name__}'s option 'multiplier_collision_broad_phase'."
                 ),
-                RigidErrorCode.OVERFLOW_COLLISION_PAIRS: (
+                RigidErrorCode.OVERFLOW_COLLISION_PAIRS: lambda: (
                     f"Exceeding max number of candidate contact points ({collider_info.max_candidate_contacts[None]}). "
-                    "Please increase the value of RigidSolver's option 'max_collision_pairs'."
+                    f"Please increase the value of {type(self).__name__}'s option 'max_collision_pairs'."
                 ),
-                RigidErrorCode.OVERFLOW_CONTACTS: (
+                RigidErrorCode.OVERFLOW_CONTACTS: lambda: (
                     f"Exceeding max number of post-pruning contact points ({collider_info.max_contacts[None]}) "
-                    "supported by the constraint solver. Please increase the value of RigidSolver's option "
-                    "'max_contacts'."
+                    "supported by the constraint solver. Please increase the value of "
+                    f"{type(self).__name__}'s option 'max_contacts'."
                 ),
-                RigidErrorCode.UNSUPPORTED_COLLISION_PAIR: (
+                RigidErrorCode.UNSUPPORTED_COLLISION_PAIR: lambda: (
                     "Collision between a non-convex geom and a terrain is not supported. Set 'convexify=True' or "
                     "filter this pair out via 'contype'/'conaffinity'."
                 ),
-                RigidErrorCode.INVALID_CONTACT_NAN: (
+                RigidErrorCode.INVALID_CONTACT_NAN: lambda: (
                     "Collision detection reported a contact whose position, normal or penetration is not finite. This "
                     "is a solver-internal error, please report it."
                 ),
-                RigidErrorCode.INVALID_FORCE_NAN: (
+                RigidErrorCode.INVALID_FORCE_NAN: lambda: (
                     "Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep."
                 ),
-                RigidErrorCode.INVALID_ACC_NAN: (
+                RigidErrorCode.INVALID_ACC_NAN: lambda: (
                     "Invalid accelerations causing 'nan' or 'inf'. Please decrease Rigid simulation timestep, or check "
                     "the controls given to the dofs."
                 ),
@@ -1749,32 +1749,20 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             else:
                 data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
                 target = data[:, link.q_start : link.q_start + 3]
-            if isinstance(envs_idx, torch.Tensor) and envs_idx.dtype == torch.bool:
-                if pos.ndim == 2 and len(pos) not in (1, len(target)):
-                    # A fresh source view is needed because masked_scatter_ may reshape it in-place. Metal
-                    # mis-scatters a stride-0 broadcast mask, so it must be materialized to a dense mask there.
-                    envs_mask = envs_idx[:, None]
-                    if gs.backend == gs.metal:
-                        envs_mask = envs_mask.expand_as(target).contiguous()
-                    target.masked_scatter_(envs_mask, pos.view_as(pos))
-                else:
-                    pos = broadcast_tensor(pos, gs.tc_float, target.shape)
-                    torch.where(envs_idx[:, None], pos, target, out=target)
-            else:
-                # Fixed links with at least one geom and non-batched vertices cannot take env-specific positions
-                if link.is_fixed and link.geoms and not link.entity._batch_fixed_verts:
-                    pos = torch.as_tensor(pos, dtype=gs.tc_float, device=gs.device)
-                    same_pos = pos.ndim < 2 or len(pos) == 1 or (torch.diff(pos, dim=0).abs() < gs.EPS).all()
-                    set_all_envs = envs_idx is None or torch.equal(
-                        torch.sort(self._scene._sanitize_envs_idx(envs_idx)).values, self._scene._envs_idx
+            # Fixed links with at least one geom and non-batched vertices cannot take env-specific positions
+            if link.is_fixed and link.geoms and not link.entity._batch_fixed_verts:
+                pos = torch.as_tensor(pos, dtype=gs.tc_float, device=gs.device)
+                same_pos = pos.ndim < 2 or len(pos) == 1 or (torch.diff(pos, dim=0).abs() < gs.EPS).all()
+                set_all_envs = envs_idx is None or torch.equal(
+                    torch.sort(self._scene._sanitize_envs_idx(envs_idx)).values, self._scene._envs_idx
+                )
+                if not (set_all_envs and same_pos):
+                    gs.raise_exception(
+                        "Specifying env-specific pos for fixed links with at least one geometry requires "
+                        "setting morph option 'batch_fixed_verts=True'."
                     )
-                    if not (set_all_envs and same_pos):
-                        gs.raise_exception(
-                            "Specifying env-specific pos for fixed links with at least one geometry requires "
-                            "setting morph option 'batch_fixed_verts=True'."
-                        )
-                mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
-                assign_indexed_tensor(target, mask, pos)
+            mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
+            assign_indexed_tensor(target, mask, pos)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -1887,31 +1875,19 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             else:
                 data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
                 target = data[:, link.q_start + 3 : link.q_start + 7]
-            if isinstance(envs_idx, torch.Tensor) and envs_idx.dtype == torch.bool:
-                if quat.ndim == 2 and len(quat) not in (1, len(target)):
-                    # A fresh source view is needed because masked_scatter_ may reshape it in-place. Metal
-                    # mis-scatters a stride-0 broadcast mask, so it must be materialized to a dense mask there.
-                    envs_mask = envs_idx[:, None]
-                    if gs.backend == gs.metal:
-                        envs_mask = envs_mask.expand_as(target).contiguous()
-                    target.masked_scatter_(envs_mask, quat.view_as(quat))
-                else:
-                    quat = broadcast_tensor(quat, gs.tc_float, target.shape)
-                    torch.where(envs_idx[:, None], quat, target, out=target)
-            else:
-                # Fixed links with at least one geom and non-batched vertices cannot take env-specific orientations
-                if link.is_fixed and link.geoms and not link.entity._batch_fixed_verts:
-                    quat = torch.as_tensor(quat, dtype=gs.tc_float, device=gs.device)
-                    same_quat = quat.ndim < 2 or len(quat) == 1 or (torch.diff(quat, dim=0).abs() < gs.EPS).all()
-                    set_all_envs = envs_idx is None or torch.equal(
-                        torch.sort(self._scene._sanitize_envs_idx(envs_idx)).values, self._scene._envs_idx
+            # Fixed links with at least one geom and non-batched vertices cannot take env-specific orientations
+            if link.is_fixed and link.geoms and not link.entity._batch_fixed_verts:
+                quat = torch.as_tensor(quat, dtype=gs.tc_float, device=gs.device)
+                same_quat = quat.ndim < 2 or len(quat) == 1 or (torch.diff(quat, dim=0).abs() < gs.EPS).all()
+                set_all_envs = envs_idx is None or torch.equal(
+                    torch.sort(self._scene._sanitize_envs_idx(envs_idx)).values, self._scene._envs_idx
+                )
+                if not (set_all_envs and same_quat):
+                    gs.raise_exception(
+                        "Impossible to set env-specific quat for fixed links with at least one geometry."
                     )
-                    if not (set_all_envs and same_quat):
-                        gs.raise_exception(
-                            "Impossible to set env-specific quat for fixed links with at least one geometry."
-                        )
-                mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
-                assign_indexed_tensor(target, mask, quat)
+            mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
+            assign_indexed_tensor(target, mask, quat)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -2174,28 +2150,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         if gs.use_zerocopy:
             data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
-            qs_mask = indices_to_mask(qs_idx)
-            if (
-                (not qs_mask or isinstance(qs_mask[0], slice))
-                and isinstance(envs_idx, torch.Tensor)
-                and envs_idx.dtype == torch.bool
-            ):
-                qs_data = data[(slice(None), *qs_mask)]
-                if qpos.ndim == 2 and len(qpos) not in (1, len(qs_data)):
-                    # A fresh source view is needed because masked_scatter_ may reshape it in-place. Metal mis-scatters
-                    # a stride-0 broadcast mask, so it must be materialized to a dense full-shape mask there.
-                    envs_mask = envs_idx[:, None]
-                    if gs.backend == gs.metal:
-                        envs_mask = envs_mask.expand_as(qs_data).contiguous()
-                    qs_data.masked_scatter_(envs_mask, qpos.view_as(qpos))
-                else:
-                    qpos = broadcast_tensor(qpos, gs.tc_float, qs_data.shape)
-                    torch.where(envs_idx[:, None], qpos, qs_data, out=qs_data)
-            else:
-                mask = (0, *qs_mask) if self.n_envs == 0 else indices_to_mask(envs_idx, *qs_mask, boolean_mask=False)
-                assign_indexed_tensor(data, mask, qpos)
-                if mask and isinstance(mask[0], torch.Tensor):
-                    envs_idx = mask[0].reshape((-1,))
+            mask = (0, *indices_to_mask(qs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, qs_idx)
+            assign_indexed_tensor(data, mask, qpos)
+            if mask and isinstance(mask[0], torch.Tensor):
+                envs_idx = mask[0].reshape((-1,))
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -3095,7 +3053,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             link2_idx,
             anchor_link_idx=link1_idx,
             anchor_pos=np.zeros(3, dtype=gs.np_float),
-            eq_data_tail=(1.0,),
+            eq_data_tail=torch.ones(1, dtype=gs.tc_float, device=gs.device),
             envs_idx=envs_idx,
         )
 
@@ -3146,6 +3104,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         """
         if self._requires_grad:
             gs.raise_exception("Screw constraints are not supported yet when requires_grad is True.")
+        if limit is not None or frictionloss > 0.0:
+            from genesis.engine.couplers import SAPCoupler
+
+            if isinstance(self.sim.coupler, SAPCoupler):
+                gs.raise_exception(
+                    f"{type(self.sim.coupler).__name__} does not support the travel limit and the dry friction of a "
+                    "screw constraint yet."
+                )
         axis = np.asarray(axis, dtype=gs.np_float)
         axis_norm = np.linalg.norm(axis)
         anchor_pos = np.zeros(3, dtype=gs.np_float) if pos is None else np.asarray(pos, dtype=gs.np_float)
@@ -3175,14 +3141,28 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             pitch_norm = np.hypot(1.0, pitch / (2.0 * np.pi))
             pitch_cos, pitch_sin = 1.0 / pitch_norm, pitch / (2.0 * np.pi) / pitch_norm
 
+        # The axis and its point are given in the authored link frames, which the morph offset and the inertial
+        # alignment move away from the internal ones the constraint is solved in (see '_offset_world_shift'). The
+        # offsets follow the sorted unique envs that 'add_dynamic_constraint' fills.
+        envs_idx_unique = torch.unique(self._scene._sanitize_envs_idx(envs_idx))
         anchor_link_idx = link2_idx if pos is None else link1_idx
+        anchor_offset_pos = _select_links_offset(self._links_offset_pos, anchor_link_idx, envs_idx_unique)[..., 0, :]
+        anchor_offset_quat = _select_links_offset(self._links_offset_quat, anchor_link_idx, envs_idx_unique)[..., 0, :]
+        link1_offset_quat = _select_links_offset(self._links_offset_quat, link1_idx, envs_idx_unique)[..., 0, :]
+        anchor_pos = gu.inv_transform_by_trans_quat(
+            torch.as_tensor(anchor_pos, dtype=gs.tc_float, device=gs.device), anchor_offset_pos, anchor_offset_quat
+        )
+        axis = gu.inv_transform_by_quat(
+            torch.as_tensor(axis / axis_norm, dtype=gs.tc_float, device=gs.device), link1_offset_quat
+        )
+        pitch_params = torch.tensor((pitch_cos, pitch_sin, *limit, frictionloss), dtype=gs.tc_float, device=gs.device)
         self.constraint_solver.add_dynamic_constraint(
             gs.EQUALITY_TYPE.SCREW,
             link1_idx,
             link2_idx,
             anchor_link_idx,
             anchor_pos,
-            eq_data_tail=(*(axis / axis_norm), pitch_cos, pitch_sin, *limit, frictionloss),
+            eq_data_tail=torch.cat((axis, pitch_params.expand(*axis.shape[:-1], 5)), dim=-1),
             envs_idx=envs_idx,
         )
 

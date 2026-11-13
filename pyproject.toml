@@ -105,7 +105,8 @@ dev = [
     "tensordict",
     # Used internally by 'MPLPlotter'
     # * 3.7.0: introduces Button blitting and 'outside' keyword legend location
-    "matplotlib>=3.7.0",
+    # * 3.11.0: changes text rasterization, which the 'MPLPlotter' snapshots are rendered with
+    "matplotlib>=3.11.0",
     # Used for ground truth validation in unit tests
     "scipy",
     # The ImGui overlay snapshots are rendered with imgui-bundle 1.93.0, which draws tab corners differently from 1.92

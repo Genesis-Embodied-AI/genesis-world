@@ -45,8 +45,8 @@ class Sand(Base):
         self.update_stress = self._update_stress_sand
 
     @qd.func
-    def _update_F_S_Jp_sand(self, J, F_tmp, U, S, V, Jp):
-        sigma_new, Jp_new = func_sand_return_map(func_diagonal(S), Jp, self.mu, self.lam, self.alpha)
+    def _update_F_S_Jp_sand(self, J, F_tmp, U, S, V, Jp, eps):
+        sigma_new, Jp_new = func_sand_return_map(func_diagonal(S), Jp, self.mu, self.lam, self.alpha, eps)
         S_new = func_diagonal_matrix(sigma_new)
         F_new = U @ S_new @ V.transpose()
         return F_new, S_new, Jp_new
@@ -65,7 +65,7 @@ class Sand(Base):
 
 
 @qd.func
-def func_sand_return_map(sigma: qd.types.vector(3), Jp: float, mu: float, lam: float, alpha: float):
+def func_sand_return_map(sigma: qd.types.vector(3), Jp: float, mu: float, lam: float, alpha: float, eps: float):
     """
     Return the singular values of the deformation gradient of sand after its Drucker-Prager return map, and its volume
     correction.
@@ -77,7 +77,7 @@ def func_sand_return_map(sigma: qd.types.vector(3), Jp: float, mu: float, lam: f
     epsilon = qd.log(qd.max(qd.abs(sigma), 1e-4))
     trace = epsilon.sum() + Jp
     epsilon_hat = epsilon - trace / 3.0
-    epsilon_hat_norm = epsilon_hat.norm(gs.EPS)
+    epsilon_hat_norm = epsilon_hat.norm(eps)
     sigma_new = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
     Jp_new = trace
     if trace < 0.0:

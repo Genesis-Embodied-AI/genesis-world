@@ -86,9 +86,9 @@ class SignedDistanceFieldDescription:
         """Resolve the grid sampling the signed distance field (SDF) of a geometry, at the resolution its material asks.
 
         The grid extends past the bounding box of the geometry by a margin along each axis. Its cells have the size the
-        material asks, refined further for a closed non-convex geometry to fit 2 across its thinnest walls, and clipped
-        along each axis to the minimum and maximum resolutions of the material. A terrain carries no gradient, since it
-        derives its gradient from its height field instead.
+        material asks, refined further to fit 2 across the width of a convex geometry or the thinnest walls of a closed
+        non-convex one, and clipped along each axis to the minimum and maximum resolutions of the material. A terrain
+        carries no gradient, since it derives its gradient from its height field instead.
         """
         # The vertices are a trimesh array subclass, which the grid parameters derived from them would carry into an
         # exported description
@@ -100,18 +100,26 @@ class SignedDistanceFieldDescription:
         # leave primitive-vs-mesh contacts noisy whenever the smallest dimension of the primitive is below it.
         cell_size_lower = grid_size / (material.sdf_max_res - 1)
         cell_size_upper = grid_size / max(material.sdf_min_res - 1, 2)
-        # A convex geom has no thin wall to tunnel through, so it keeps the target. A non-convex geom tunnels when the
+        # A thin convex geom, such as a piece of the convex decomposition of a thin shell, fits 2 cells across its
+        # width, so that the queries near its faces resolve the side they lie on. A non-convex geom tunnels when the
         # cell is coarser than its thinnest wall (its area-weighted p25 thickness), on all three axes: the certified
         # penetration bounds that hold shell contacts apart need lattice points near the contact in every direction,
-        # so a wall is finely sampled along its tangent axes too (see get_wall_thickness). The probe needs a closed
-        # surface, since inward rays escape an open mesh through its holes, and the mesh it probes stands for this
-        # collision mesh, so both share their watertightness.
+        # so a wall is finely sampled along its tangent axes too. For example, the thin vertical wall of a mug extends
+        # along the vertical axis although the only wall facing that axis is its thick bottom, so no axis can be
+        # coarsened to the thickness of the walls facing it. The probe needs a closed surface, since inward rays escape
+        # an open mesh through its holes, and the mesh it probes stands for this collision mesh, so both share their
+        # watertightness.
         sdf_tmesh = mesh.metadata.get("sdf_mesh", mesh.trimesh)
         cell_size_target = material.sdf_cell_size
-        if not mesh.is_convex:
+        if mesh.is_convex:
+            convex_width = mu.get_convex_width(
+                np.ascontiguousarray(sdf_tmesh.vertices), np.ascontiguousarray(sdf_tmesh.faces)
+            )
+            cell_size_target = min(cell_size_target, convex_width / 2.0)
+        else:
             if mesh.is_watertight:
                 wall_thickness = mu.get_wall_thickness(
-                    np.ascontiguousarray(sdf_tmesh.vertices), np.ascontiguousarray(sdf_tmesh.faces)
+                    np.ascontiguousarray(sdf_tmesh.vertices), np.ascontiguousarray(sdf_tmesh.faces), quantile=0.25
                 )
                 cell_size_target = min(cell_size_target, wall_thickness / 2.0)
             else:
@@ -1221,9 +1229,13 @@ class KinematicEntityDescription(EntityDescription):
         variant, each against its own inertia and geoms. This delivers the 'align' option's promise (a COM-centered,
         principal-axis frame, which also conditions the constraint solve) for mesh and fixed-child bodies, not just
         primitives, while keeping a heterogeneous entity bit-identical to its variants' separate entities.
+
+        Returns the transform taking the coordinates of the authored frame of each link the primary variant anchors to
+        its anchored frame, keyed by link name.
         """
         links = self.links
         variants = self.variants
+        links_alignment_inv = {}
         for i_root, root in enumerate(links):
             if root.parent_idx != -1 or not root.is_aligned:
                 continue
@@ -1311,6 +1323,8 @@ class KinematicEntityDescription(EntityDescription):
                     pos, quat = gu.inv_transform_pos_quat_by_trans_quat(link_pos, link_quat, com_root, principal_quat)
                     pos, quat = gu.inv_transform_pos_quat_by_trans_quat(pos, quat, link_pos, link_quat)
                     alignment_inv_in_link[i_l] = (pos, quat)
+                    if i_v == 0:
+                        links_alignment_inv[links[i_l].name] = (pos, quat)
                     link_desc = variant_links[i_l]
                     geoms = list(link_desc.vgeoms)
                     if isinstance(link_desc, (RigidLinkDescription, RigidVariantLinkDescription)):
@@ -1360,6 +1374,8 @@ class KinematicEntityDescription(EntityDescription):
         # Only the estimates and the anchors need the inertial info. The alignment now lives in the persistent
         # geometry, offset and init_qpos.
         resolution.links_inertial_info.clear()
+
+        return links_alignment_inv
 
     def _resolve_link(self, l_info, j_infos, g_infos, morph, resolution: Resolution):
         """Describe one link from what a parse states about it, and add that description to the entity's own.
@@ -1652,6 +1668,27 @@ class RigidEntityDescription(KinematicEntityDescription):
 
         # Add equality constraints sequentially
         self.equalities.extend(description_from_info(RigidEqualityDescription, e_info) for e_info in eqs_info)
+
+    def _align_free_roots(self, resolution: Resolution):
+        links_alignment_inv = super()._align_free_roots(resolution)
+
+        # The anchors and the relative orientation of a connect or a weld are stated in the authored frames of its
+        # links, which the anchoring moves (see 'func_equality_links' for the data layout).
+        transform_identity = (gu.zero_pos(), gu.identity_quat())
+        for eq_desc in self.equalities:
+            if eq_desc.type == EQUALITY_TYPE.JOINT:
+                continue
+            (pos1, quat1), (pos2, quat2) = [
+                links_alignment_inv.get(name, transform_identity) for name in eq_desc.objs_name
+            ]
+            data = eq_desc.data
+            if eq_desc.type == EQUALITY_TYPE.CONNECT:
+                data[:3] = gu.transform_by_trans_quat(data[:3], pos1, quat1)
+                data[3:6] = gu.transform_by_trans_quat(data[3:6], pos2, quat2)
+            else:
+                data[:3] = gu.transform_by_trans_quat(data[:3], pos2, quat2)
+                data[3:6] = gu.transform_by_trans_quat(data[3:6], pos1, quat1)
+                data[6:10] = gu.transform_quat_by_quat(gu.transform_quat_by_quat(gu.inv_quat(quat2), data[6:10]), quat1)
 
     def _describe_geoms(self, cg_infos):
         """Resolve what a parse stated about each collision geom into the description the geom is built from.

@@ -1,4 +1,4 @@
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from enum import IntFlag
 from typing import TYPE_CHECKING, NamedTuple, overload
 
@@ -139,10 +139,10 @@ class ErrnoMixin:
     Mixed into every solver, and into the couplers whose kernels flag errors of their own.
     """
 
-    # The error flags the kernels write, the message raised for each, and the flags accumulated from them and from the
-    # backward pass since the last reset of each env (see 'register_errors').
+    # The error flags the kernels write, the report building the message raised for each, and the flags accumulated
+    # from them and from the backward pass since the last reset of each env (see 'register_errors').
     _errno: "qd.Tensor | None" = None
-    _error_messages: dict[int, str] = {}
+    _error_reports: dict[int, Callable[[], str]] = {}
     _errno_latched: torch.Tensor | None = None
     # The page-locked host copy of '_errno_latched' a non-blocking check reads, and the event recorded once it landed
     # (see 'check_errno').
@@ -158,20 +158,21 @@ class ErrnoMixin:
             self._errno_host = torch.zeros((n_envs,), dtype=gs.tc_int, pin_memory=True)
             self._errno_event = torch.cuda.Event()
 
-    def register_errors(self, errno: qd.Tensor, messages: dict[int, str]) -> None:
+    def register_errors(self, errno: qd.Tensor, reports: dict[int, Callable[[], str]]) -> None:
         """
-        Declare the error flags the kernels of the component write per env, one bit per error, and the message of each.
+        Declare the error flags the kernels of the component write per env, one bit per error, and the report of each.
 
-        `errno` is an array of the component, which the mixin references. 'check_errno' raises the message of the first
-        flagged error, in the order of `messages`. It reads `_errno_latched`, the union of every flag `errno` held since
-        the last reset of each env, which no restore of the state rewinds (see 'update_errno'), so a component clears
-        the flags of some envs through 'clear_errno'. The flags of the backward pass come after those of `messages`, as
-        'StepOperation.backward' sets them.
+        `errno` is an array of the component, which the mixin references. 'check_errno' raises the message returned by
+        the report of the first flagged error, in the order of `reports`. A report runs when its error raises, so that
+        its message can name what the flags alone cannot tell apart, such as the environment past a capacity. The check
+        reads `_errno_latched`, the union of every flag `errno` held since the last reset of each env, which no restore
+        of the state rewinds (see 'update_errno'), so a component clears the flags of some envs through 'clear_errno'.
+        The flags of the backward pass come after those of `reports`, as 'StepOperation.backward' sets them.
         """
         # Each error owns its bit, those of the backward pass included
-        assert not messages.keys() & self._error_messages.keys(), f"{type(self).__name__} reuses a reserved error bit."
+        assert not reports.keys() & self._error_reports.keys(), f"{type(self).__name__} reuses a reserved error bit."
         self._errno = errno
-        self._error_messages = {**messages, **self._error_messages}
+        self._error_reports = {**reports, **self._error_reports}
 
     def update_errno(self) -> None:
         """
@@ -224,7 +225,7 @@ class ErrnoMixin:
         between two calls. A blocking check raises what no copy has reported yet with the context of the last one.
         `context` says where the check runs, ahead of the message.
         """
-        if not self._error_messages:
+        if not self._error_reports:
             return
         if not blocking and self._errno_host is not None:
             self._errno_event.synchronize()
@@ -244,8 +245,9 @@ class ErrnoMixin:
             self._errno_host_context = None
         if not errno:
             return
-        for code, message in self._error_messages.items():
+        for code, report in self._error_reports.items():
             if errno & code:
+                message = report()
                 gs.raise_exception(message if context is None else f"{context}: {message}")
 
 
@@ -405,10 +407,13 @@ class CheckpointMixin:
             # in this process, which spares checking them against the scene
             items_mask = {}
             if envs_idx is not None:
-                envs_mask = indices_to_mask(envs_idx)
+                # The saved arrays are written back whole through a mask of the selected environments, which spares
+                # reading their count back from the device (see 'assign_indexed_tensor').
+                envs_mask = torch.zeros((self.sim._B,), dtype=torch.bool, device=gs.device)
+                assign_indexed_tensor(envs_mask, indices_to_mask(envs_idx), value=True)
                 for item in self._boundary_items.items:
                     if isinstance(item, ArrayItem):
-                        items_mask[item.name] = (*[slice(None)] * (len(item.array.shape) - 1), *envs_mask)
+                        items_mask[item.name] = (*[slice(None)] * (len(item.array.shape) - 1), envs_mask)
             if self._boundary_items.views:
                 # The writes wait for the last kernel to be done with the arrays (see qd_to_torch)
                 if gs.backend == gs.metal:
@@ -418,10 +423,7 @@ class CheckpointMixin:
                     torch._foreach_copy_(self._boundary_items.views, values)
                 else:
                     for item, view, value in zip(self._boundary_items.items_viewed, self._boundary_items.views, values):
-                        # Torch writes no unsigned 64-bit integer by index, so such an array is written as its signed bits
-                        if view.dtype == torch.uint64:
-                            view, value = view.view(torch.int64), value.view(torch.int64)
-                        assign_indexed_tensor(view, items_mask[item.name], value[items_mask[item.name]])
+                        assign_indexed_tensor(view, items_mask[item.name], value)
             items = self._boundary_items.items_copied
             arrays = {item.name: checkpoint.arrays[item.name] for item in items}
             if envs_idx is not None:
@@ -429,7 +431,7 @@ class CheckpointMixin:
                 for item in items:
                     if isinstance(item, ArrayItem):
                         array = data_to_array(item.array, to_torch=True, copy=True)
-                        assign_indexed_tensor(array, items_mask[item.name], arrays[item.name][items_mask[item.name]])
+                        assign_indexed_tensor(array, items_mask[item.name], arrays[item.name])
                         arrays[item.name] = array
         else:
             items = [item for item in self.data if not isinstance(item, ConfigItem) and item.kind in checkpoint.kinds]
@@ -517,9 +519,7 @@ class GravityMixin:
         if gs.use_zerocopy:
             envs_mask = indices_to_mask(envs_idx)
             gravity_t = qd_to_torch(self._gravity, transpose=True, copy=False)
-            assign_indexed_tensor(
-                gravity_t, envs_mask, broadcast_tensor(gravity, gs.tc_float, gravity_t[envs_mask].shape)
-            )
+            assign_indexed_tensor(gravity_t, envs_mask, gravity)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
             return
@@ -681,9 +681,9 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
         self._B = self._sim._B
         self.build_errno(self._B)
         if self._requires_grad:
-            self._error_messages = {
-                **self._error_messages,
-                BackwardErrorCode.INVALID_GRAD_NAN: (
+            self._error_reports = {
+                **self._error_reports,
+                BackwardErrorCode.INVALID_GRAD_NAN: lambda: (
                     "The backward pass produced a 'nan' or 'inf' gradient of the state. The rollout is likely too stiff "
                     "to differentiate over this horizon: shorten it, or decrease the simulation timestep."
                 ),
@@ -804,7 +804,7 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
                 mask = (0, *indices_to_mask(idx))
             else:
                 mask = indices_to_mask(envs_idx, idx, pair_rows=True)
-            assign_indexed_tensor(view, mask, broadcast_tensor(values, view.dtype, view[mask].shape))
+            assign_indexed_tensor(view, mask, values)
             return
         values, idx, envs_idx = self._sanitize_io_variables(
             values,
@@ -884,7 +884,7 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
         return repr_str
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_set_gravity(tensor: qd.types.ndarray(), envs_idx: qd.types.ndarray(), gravity: qd.Tensor):
     # The qd.Tensor annotation accepts both forms the buffer is allocated in: a field, for a solver whose kernels
     # reach gravity through the solver itself, and an ndarray for every other one (see _build_gravity).
@@ -980,7 +980,7 @@ def kernel_get_info(items_idx: qd.types.ndarray(), values: qd.types.ndarray(), i
 
 
 @no_grad
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_set_time(
     i_substep: int, steps: qd.types.ndarray(), sim_state: SimulatorState, substeps: int, substep_dt: float
 ):

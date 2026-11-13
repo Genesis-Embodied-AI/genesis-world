@@ -11,12 +11,36 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
-from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidErrorCode, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, EqualitiesInfo, RigidErrorCode, RigidInfo
 from genesis.utils.data import eoa
 
 from .contact import func_collider_clear_env, func_is_link_pair_hibernated
 from .data import ColliderInfo, ColliderState
 from .utils import func_is_geom_boxes_overlap
+
+
+@qd.func
+def func_is_link_pair_bound(
+    i_la: int,
+    i_lb: int,
+    i_b: int,
+    constraint_state: ConstraintState,
+    equalities_info: EqualitiesInfo,
+    rigid_info: RigidInfo,
+):
+    """Return whether a dynamic weld or screw constraint holds two links in an environment.
+
+    The geometries of two links held that way may overlap by design (a nut on its bolt), so that they do not collide.
+    """
+    is_bound = False
+    for i_eq in range(rigid_info.n_equalities[None], constraint_state.qd_n_equalities[i_b]):
+        eq_type = equalities_info.eq_type[i_eq, i_b]
+        if eq_type == gs.EQUALITY_TYPE.WELD or eq_type == gs.EQUALITY_TYPE.SCREW:
+            i_leqa = equalities_info.eq_obj1id[i_eq, i_b]
+            i_leqb = equalities_info.eq_obj2id[i_eq, i_b]
+            if (i_leqa == i_la and i_leqb == i_lb) or (i_leqa == i_lb and i_leqb == i_la):
+                is_bound = True
+    return is_bound
 
 
 @qd.func
@@ -32,18 +56,10 @@ def func_check_links_collision_valid(
 ):
     """Check whether the geoms of two links of a valid link pair may collide in an environment at this step.
 
-    The link pair is dropped when a dynamic weld or screw constraint holds the two links, whose geometries may overlap
-    by design (a nut on its bolt), and with hibernation when both links stand still.
+    The link pair is dropped when a dynamic weld or screw constraint holds the two links (see func_is_link_pair_bound),
+    and with hibernation when both links stand still.
     """
-    is_valid = True
-
-    for i_eq in range(rigid_info.n_equalities[None], constraint_state.qd_n_equalities[i_b]):
-        eq_type = dyn_info.equalities.eq_type[i_eq, i_b]
-        if eq_type == gs.EQUALITY_TYPE.WELD or eq_type == gs.EQUALITY_TYPE.SCREW:
-            i_leqa = dyn_info.equalities.eq_obj1id[i_eq, i_b]
-            i_leqb = dyn_info.equalities.eq_obj2id[i_eq, i_b]
-            if (i_leqa == i_la and i_leqb == i_lb) or (i_leqa == i_lb and i_leqb == i_la):
-                is_valid = False
+    is_valid = not func_is_link_pair_bound(i_la, i_lb, i_b, constraint_state, dyn_info.equalities, rigid_info)
 
     # A pair standing still keeps its contacts from the last awake solve (see func_collider_clear_env), and an awake
     # link striking either one is the only motion that reaches them.

@@ -54,7 +54,7 @@ class Snow(ElastoPlastic):
         self.update_stress = self._update_stress_snow
 
     @qd.func
-    def _update_F_S_Jp_snow(self, J, F_tmp, U, S, V, Jp):
+    def _update_F_S_Jp_snow(self, J, F_tmp, U, S, V, Jp, eps):
         sigma_new, Jp_new = func_snow_return_map(func_diagonal(S), Jp, self.yield_lower, self.yield_higher)
         S_new = func_diagonal_matrix(sigma_new)
         F_new = U @ S_new @ V.transpose()

@@ -155,6 +155,9 @@ class SPHState(Data, kind=DataKind.STATE):
     hash_grid: SpatialHashGrid
     # The error flags of each env, which no kernel of the solver raises (see 'ErrnoMixin.register_errors')
     errno: qd.Tensor = field(int, shape=(ENVS,))
+    # Whether each sorted particle lies within the reach of the walls or of the moving boundaries over the substep, which
+    # weigh the stiffness of its neighbors (see func_solver_iteration)
+    particles_is_near_boundary_reordered: qd.Tensor = field(bool, shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH)
 
 
 class SPHInfo(Data, kind=DataKind.CONSTANT):
@@ -314,9 +317,8 @@ class SPHSolver(ParticleSolver):
                 # full Jacobi update leaves the mode alternating from one particle to the next undamped, and overshoots
                 # once the liquid compresses abruptly. Half the update cancels that mode, the others still converging.
                 jacobi_relaxation=0.5,
-                # FIXME: A larger share saves more density iterations, but turns a thin slab unstable from three quarters
-                # on, for a reason not found yet: the excess of the carried-over pressure over hydrostatics neither drifts
-                # nor scatters more between neighbors than at half the share.
+                # A larger share saves density iterations, but leaves undamped a breathing mode of the pressure that the
+                # average density error barely sees, which the loss of the other half damps.
                 warm_start_scale=0.5,
                 factor_eps=1e-6,
                 n_neighbors_min=20,
@@ -334,10 +336,11 @@ class SPHSolver(ParticleSolver):
 
             # Compute stable timestep for the given particle properties (mu) and support radius and print warning
             # if the current timestep is larger than the stable timestep. This formula is derived from
-            # 'func_task_compute_non_pressure_forces', which computes the acceleration due to non-pressure forces.
+            # 'func_task_compute_non_pressure_forces', which computes the acceleration due to non-pressure forces. The
+            # timestep is compared through its product with the viscosity, which is zero for an inviscid liquid.
             mu_max = max([entity.material.mu for entity in self._entities])
-            stable_dt = self._stable_dt_coef * viscosity_eps / mu_max
-            if self.substep_dt > stable_dt:
+            if self.substep_dt * mu_max > self._stable_dt_coef * viscosity_eps:
+                stable_dt = self._stable_dt_coef * viscosity_eps / mu_max
                 gs.logger.warning(
                     f"""Current timestep ({self.substep_dt:.4g}) is larger than the stable timestep ({stable_dt:.4g}) for SPH
 solver. Please consider reducing the timestep, liquid viscosity (mu), or increasing the particle size."""
@@ -403,8 +406,7 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
         if not self.is_active:
             return
         kernel_reorder_particles(self.sph_state)
-        kernel_compute_rho(self.sph_state, self.sph_info, self.sph_config)
-        kernel_compute_dfsph_factor(self.sph_state, self.sph_info, self.sph_config)
+        kernel_compute_rho_and_dfsph_factor(self.sph_state, self.sph_info, self.sph_config)
         self._solve_incompressibility(solve_density=False)
         kernel_compute_non_pressure_forces(
             self._sim.sim_state, self.sph_state, self.sph_info, self.sph_config, self._force_fields
@@ -564,18 +566,18 @@ def func_segment_volume(
 
 
 @qd.func
-def func_segment_dist(pos: qd.types.vector(3), corners: qd.types.matrix(3, 3)):
+def func_segment_dist(pos: qd.types.vector(3), corners: qd.types.matrix(3, 3), eps: float):
     """Return the distance from a point to a triangle."""
     corner_0 = qd.Vector([corners[0, 0], corners[0, 1], corners[0, 2]])
     corner_1 = qd.Vector([corners[1, 0], corners[1, 1], corners[1, 2]])
     corner_2 = qd.Vector([corners[2, 0], corners[2, 1], corners[2, 2]])
     area_normal = (corner_1 - corner_0).cross(corner_2 - corner_0)
-    normal = area_normal / qd.max(area_normal.norm(), gs.EPS)
+    normal = area_normal / qd.max(area_normal.norm(), eps)
     pos_proj = pos - (pos - corner_0).dot(normal) * normal
     # The projection lies inside the triangle where it is on the inner side of its three edges, a degenerate triangle
     # having no inside
     is_inside = (
-        area_normal.norm() > gs.EPS
+        area_normal.norm() > eps
         and (corner_1 - corner_0).cross(pos_proj - corner_0).dot(normal) >= 0.0
         and (corner_2 - corner_1).cross(pos_proj - corner_1).dot(normal) >= 0.0
         and (corner_0 - corner_2).cross(pos_proj - corner_2).dot(normal) >= 0.0
@@ -729,12 +731,26 @@ def func_for_all_neighbors(
     lane `i_lane` taking every `n_lanes`-th neighbor of each cell, and their shares of `ret` sum up after.
     """
     pos_i = sph_state.particles_reordered.pos[i_p, i_b]
-    base = func_hash_wrap_cell(func_hash_pos_to_grid(pos_i, sph_state.hash_grid) - 1, sph_state.hash_grid)
+    cell_i = func_hash_pos_to_grid(pos_i, sph_state.hash_grid)
+    base = func_hash_wrap_cell(cell_i - 1, sph_state.hash_grid)
     n_cells = func_hash_n_cells(3, sph_state.hash_grid)
+    # The distance from the particle to the lower and upper faces of its cell, along each axis
+    cell_size = sph_state.hash_grid.cell_size[None]
+    dist_lower = pos_i - cell_i * cell_size
+    dist_upper = cell_size - dist_lower
+    support_radius_sqr = sph_info.support_radius[None] ** 2
     for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
-        i_s = func_hash_cell_to_slot(base + offset, sph_state.hash_grid)
-        slot_start = sph_state.hash_grid.slot_start[i_s, i_b]
-        slot_size = sph_state.hash_grid.slot_size[i_s, i_b]
+        # The cells beyond the support radius of the particle are skipped. Along an axis whose run of cells wraps into
+        # fewer than three slots, every cell counts as touching the particle.
+        dist_cell = qd.select(
+            n_cells < 3, 0.0, qd.select(offset == 0, dist_lower, qd.select(offset == 2, dist_upper, 0.0))
+        )
+        slot_size = 0
+        slot_start = 0
+        if dist_cell.norm_sqr() < support_radius_sqr:
+            i_s = func_hash_cell_to_slot(base + offset, sph_state.hash_grid)
+            slot_start = sph_state.hash_grid.slot_start[i_s, i_b]
+            slot_size = sph_state.hash_grid.slot_size[i_s, i_b]
         for j_p_ in range((slot_size + n_lanes - 1) // n_lanes):
             j_p = slot_start + j_p_ * n_lanes + i_lane
             if j_p < slot_start + slot_size:
@@ -783,51 +799,6 @@ def kernel_copy_from_reordered(sph_state: SPHState):
 
 
 @qd.func
-def func_task_compute_rho(i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo):
-    offset_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
-    support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
-    ret.density = ret.density + sph_info.particle_volume[None] * func_cubic_kernel(
-        offset_ij.norm(), support_radius, kernel_norm
-    )
-    ret.normal = ret.normal + sph_info.particle_volume[None] * func_cubic_kernel_derivative(
-        offset_ij, support_radius, kernel_norm, sph_info.kernel_dist_min[None]
-    )
-
-
-@qd.kernel(fastcache=True)
-def kernel_compute_rho(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template()):
-    """Compute the density and the color gradient of the sorted particles from their neighbours and the walls."""
-    # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_neighbors)
-    N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
-    n_particles, n_envs = sph_state.particles_reordered.pos.shape
-    # The environments run fastest, as the arrays keep them innermost
-    for i_t in range(n_envs * n_particles * N_LANES):
-        i_lane = i_t % N_LANES
-        i_b = i_t // N_LANES % n_envs
-        i_p = i_t // (N_LANES * n_envs)
-        is_active = sph_state.particles_reordered.is_active[i_p, i_b]
-        ret = qd.Struct(density=gs.qd_float(0.0), normal=qd.Vector.zero(gs.qd_float, 3))
-        if is_active:
-            func_for_all_neighbors(i_p, i_b, i_lane, ret, sph_state, sph_info, func_task_compute_rho, n_lanes=N_LANES)
-        if qd.static(N_LANES > 1):
-            ret.density = qd_block_sum(ret.density, sph_config.log2_neighbor_lanes)
-            for i_d in qd.static(range(3)):
-                ret.normal[i_d] = qd_block_sum(ret.normal[i_d], sph_config.log2_neighbor_lanes)
-        wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(
-            i_p, i_b, i_lane, sph_state, sph_info, sph_config, sph_config.log2_neighbor_lanes, is_active
-        )
-        if is_active and i_lane == 0:
-            # Base density using the kernel at distance 0
-            support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
-            rho = sph_info.particle_volume[None] * func_cubic_kernel(0.0, support_radius, kernel_norm)
-            i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
-            sph_state.particles_reordered.rho[i_p, i_b] = (rho + wall_volume + ret.density) * sph_info.particles.rho[
-                i_o
-            ]
-            sph_state.particles_normal_reordered[i_p, i_b] = wall_volume_grad + ret.normal
-
-
-@qd.func
 def func_task_compute_non_pressure_forces(
     i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
 ):
@@ -849,14 +820,16 @@ def func_task_compute_non_pressure_forces(
         curvature = -vol_j * (normal_j.normalized() - normal_i.normalized()).dot(grad_ij)
         ret.acc += ret.surface_tension_i * curvature / sph_state.particles_reordered.rho[i_p, i_b] * normal_i
 
-    # Viscosity, normalized by twice the dimension plus two
+    # Viscosity, normalized by twice the dimension plus two. The pair takes the mean of the viscosities and of the
+    # densities of both particles, so that the forces between them cancel and the viscosity conserves momentum.
     viscosity_coef = 2 * (3 + 2)
     vel_ij = (sph_state.particles_reordered.vel[i_p, i_b] - sph_state.particles_reordered.vel[j_p, i_b]).dot(offset_ij)
-    rho_j = sph_state.particles_reordered.rho[j_p, i_b]
+    mu_ij = 0.5 * (ret.mu_i + sph_info.particles.mu[j_o])
+    rho_ij = 0.5 * (ret.rho_i + sph_state.particles_reordered.rho[j_p, i_b])
     ret.acc += (
         viscosity_coef
-        * ret.mu_i
-        * (mass_j / rho_j)
+        * mu_ij
+        * (mass_j / rho_ij)
         * vel_ij
         / (dist**2 + sph_info.viscosity_eps[None])
         * func_cubic_kernel_derivative(
@@ -889,6 +862,7 @@ def kernel_compute_non_pressure_forces(
             acc=qd.Vector.zero(gs.qd_float, 3),
             surface_tension_i=sph_info.particles.surface_tension[i_o],
             mu_i=sph_info.particles.mu[i_o],
+            rho_i=sph_state.particles_reordered.rho[i_p, i_b],
         )
         if is_active:
             func_for_all_neighbors(
@@ -914,8 +888,16 @@ def kernel_advect_position(sph_state: SPHState, sph_info: SPHInfo):
         *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.pos))
     ):
         if sph_state.particles_reordered.is_active[i_p, i_b]:
+            pos = sph_state.particles_reordered.pos[i_p, i_b]
+            # A particle reaching a wall stops approaching it, as it does the moving boundaries (see
+            # kernel_sph_boundaries_impulse). The density solve holds the liquid off the wall only where the particle has
+            # enough neighbors, which a particle carried ahead of the liquid lacks.
+            approach_dist = 0.25 * sph_info.particle_size[None]
+            is_near_lower = pos - sph_info.boundary.lower[None] < approach_dist
+            is_near_upper = sph_info.boundary.upper[None] - pos < approach_dist
             vel = sph_state.particles_reordered.vel[i_p, i_b]
-            pos = sph_state.particles_reordered.pos[i_p, i_b] + sph_info.substep_dt[None] * vel
+            vel = qd.select(is_near_lower, qd.max(vel, 0.0), qd.select(is_near_upper, qd.min(vel, 0.0), vel))
+            pos = pos + sph_info.substep_dt[None] * vel
             pos, vel = func_impose_cube_boundary(pos, vel, sph_info.boundary)
             sph_state.particles_reordered.pos[i_p, i_b] = pos
             sph_state.particles_reordered.vel[i_p, i_b] = vel
@@ -927,24 +909,28 @@ def kernel_advect_position(sph_state: SPHState, sph_info: SPHInfo):
 
 
 @qd.func
-def func_task_compute_dfsph_factor(
-    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
-):
+def func_task_compute_rho(i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo):
     offset_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
-    grad_j = -sph_info.particle_volume[None] * func_cubic_kernel_derivative(
-        offset_ij, sph_info.support_radius[None], sph_info.kernel_norm[None], sph_info.kernel_dist_min[None]
-    )
-    ret.grad_sqr_sum = ret.grad_sqr_sum + grad_j.norm_sqr()
-    ret.grad_p = ret.grad_p - grad_j
+    support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
+    particle_volume = sph_info.particle_volume[None]
+    kernel_grad = func_cubic_kernel_derivative(offset_ij, support_radius, kernel_norm, sph_info.kernel_dist_min[None])
+    vel_ij = sph_state.particles_reordered.vel[i_p, i_b] - sph_state.particles_reordered.vel[j_p, i_b]
+    ret.density = ret.density + particle_volume * func_cubic_kernel(offset_ij.norm(), support_radius, kernel_norm)
+    ret.normal = ret.normal + particle_volume * kernel_grad
+    ret.grad_sqr_sum = ret.grad_sqr_sum + (particle_volume * kernel_grad).norm_sqr()
+    ret.drho = ret.drho + particle_volume * vel_ij.dot(kernel_grad)
+    ret.n_neighbors += 1
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_dfsph_factor(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template()):
+def kernel_compute_rho_and_dfsph_factor(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template()):
     """
-    Compute the factor of the divergence and density solves of the sorted particles.
+    Compute the density, the color gradient and the factor of the divergence and density solves of the sorted particles.
 
-    These are the solves of divergence-free smoothed particle hydrodynamics (DFSPH). Every environment takes part in the
-    divergence solve that follows (see func_update_convergence).
+    These are the solves of divergence-free smoothed particle hydrodynamics (DFSPH). The walk over the neighbors also
+    yields the error that the divergence solve cancels for the velocities as they stand, so that the solve checks its
+    convergence before its first iteration (see kernel_solve_incompressibility). Every environment takes part in that
+    solve.
     """
     for i_b in range(sph_state.particles_reordered.pos.shape[1]):
         sph_state.envs_solve.is_solving[i_b] = True
@@ -959,31 +945,58 @@ def kernel_compute_dfsph_factor(sph_state: SPHState, sph_info: SPHInfo, sph_conf
         i_b = i_t // N_LANES % n_envs
         i_p = i_t // (N_LANES * n_envs)
         is_active = sph_state.particles_reordered.is_active[i_p, i_b]
-        ret = qd.Struct(grad_p=qd.Vector.zero(gs.qd_float, 3), grad_sqr_sum=gs.qd_float(0.0))
+        # The color gradient is the sum of the kernel gradients that the DFSPH factor takes
+        ret = qd.Struct(
+            density=gs.qd_float(0.0),
+            normal=qd.Vector.zero(gs.qd_float, 3),
+            grad_sqr_sum=gs.qd_float(0.0),
+            drho=gs.qd_float(0.0),
+            n_neighbors=0,
+        )
         if is_active:
-            func_for_all_neighbors(
-                i_p, i_b, i_lane, ret, sph_state, sph_info, func_task_compute_dfsph_factor, n_lanes=N_LANES
-            )
+            func_for_all_neighbors(i_p, i_b, i_lane, ret, sph_state, sph_info, func_task_compute_rho, n_lanes=N_LANES)
         if qd.static(N_LANES > 1):
+            ret.density = qd_block_sum(ret.density, sph_config.log2_neighbor_lanes)
             ret.grad_sqr_sum = qd_block_sum(ret.grad_sqr_sum, sph_config.log2_neighbor_lanes)
+            ret.drho = qd_block_sum(ret.drho, sph_config.log2_neighbor_lanes)
+            ret.n_neighbors = qd_block_sum(ret.n_neighbors, sph_config.log2_neighbor_lanes)
             for i_d in qd.static(range(3)):
-                ret.grad_p[i_d] = qd_block_sum(ret.grad_p[i_d], sph_config.log2_neighbor_lanes)
-        # The walls, at rest, change the density of the particle by its own velocity, which they change with its own
-        # stiffness and with the stiffness they take from it among the liquid around it (see func_solver_iteration),
-        # weighted by its share of the kernel sum of the liquid.
+                ret.normal[i_d] = qd_block_sum(ret.normal[i_d], sph_config.log2_neighbor_lanes)
         wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(
             i_p, i_b, i_lane, sph_state, sph_info, sph_config, sph_config.log2_neighbor_lanes, is_active
         )
         if is_active and i_lane == 0:
             qd.atomic_add(sph_state.envs_solve.n_active[i_b], 1)
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
-            rho_rel = sph_state.particles_reordered.rho[i_p, i_b] / sph_info.particles.rho[i_o]
+            # The particle itself weighs into its density by the kernel at distance 0
             kernel_self = func_cubic_kernel(0.0, sph_info.support_radius[None], sph_info.kernel_norm[None])
-            # The relative density of the liquid alone includes the particle itself, so it never vanishes
-            self_weight = sph_info.particle_volume[None] * kernel_self / (rho_rel - wall_volume)
-            grad_p = ret.grad_p + wall_volume_grad
-            sum_grad_p_k = ret.grad_sqr_sum + grad_p.dot(ret.grad_p + (1.0 + self_weight) * wall_volume_grad)
+            rho0 = sph_info.particles.rho[i_o]
+            rho = (sph_info.particle_volume[None] * kernel_self + wall_volume + ret.density) * rho0
+            sph_state.particles_reordered.rho[i_p, i_b] = rho
+            sph_state.particles_normal_reordered[i_p, i_b] = wall_volume_grad + ret.normal
 
+            # The walls weigh the stiffness of the neighbors through kernel gradients that are all zero beyond the
+            # support radius of the particle (see func_wall_volume). The distance to the surface of the moving
+            # boundaries takes a margin of one particle size, as their quadrature points lie on that surface. The
+            # particles keep their positions over the solves of the substep.
+            pos = sph_state.particles_reordered.pos[i_p, i_b]
+            support_radius = sph_info.support_radius[None]
+            walls_dist = qd.min(
+                (pos - sph_info.boundary.lower[None]).min(), (sph_info.boundary.upper[None] - pos).min()
+            )
+            is_near_boundary = walls_dist < support_radius
+            if qd.static(sph_config.has_boundary):
+                if sph_state.boundary.surface_dist[i_o, i_b] < support_radius + sph_info.particle_size[None]:
+                    is_near_boundary = True
+            sph_state.particles_is_near_boundary_reordered[i_p, i_b] = is_near_boundary
+
+            # The walls, at rest, change the density of the particle by its own velocity, which they change with its
+            # own stiffness and with the stiffness they take from it among the liquid around it (see
+            # func_solver_iteration), weighted by its share of the kernel sum of the liquid. The relative density of the
+            # liquid alone includes the particle itself, so it never vanishes.
+            self_weight = sph_info.particle_volume[None] * kernel_self / (rho / rho0 - wall_volume)
+            grad_p = ret.normal + wall_volume_grad
+            sum_grad_p_k = ret.grad_sqr_sum + grad_p.dot(ret.normal + (1.0 + self_weight) * wall_volume_grad)
             factor = gs.qd_float(0.0)
             if sum_grad_p_k > sph_info.factor_eps[None]:
                 factor = -1.0 / sum_grad_p_k
@@ -991,6 +1004,19 @@ def kernel_compute_dfsph_factor(sph_state: SPHState, sph_info: SPHInfo, sph_conf
                 # A particle without neighbors carries no pressure into the next density solve
                 sph_state.particles_reordered.p[i_p, i_b] = 0.0
             sph_state.particles_reordered.dfsph_factor[i_p, i_b] = factor
+
+            func_store_density_error(
+                i_p,
+                i_b,
+                ret.drho,
+                ret.n_neighbors,
+                wall_volume,
+                wall_volume_grad,
+                sph_state,
+                sph_info,
+                sph_config,
+                solve_density=False,
+            )
 
 
 @qd.func
@@ -1014,9 +1040,7 @@ def func_compute_density_rate(
     """
     Compute what a solve of divergence-free smoothed particle hydrodynamics (DFSPH) cancels for the sorted particles.
 
-    The divergence solve cancels the positive rate of change of the density, and the density solve the predicted
-    relative density at the end of the substep. Each particle also gets the stiffness that the next Jacobi iteration
-    applies to cancel it, and adds its error to that of its environment, summed for func_update_convergence.
+    See func_store_density_error.
     """
     # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_neighbors)
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
@@ -1026,6 +1050,9 @@ def func_compute_density_rate(
         i_lane = i_t % N_LANES
         i_b = i_t // N_LANES % n_envs
         i_p = i_t // (N_LANES * n_envs)
+        # The pass counter advances here, where no thread reads it (see func_update_convergence)
+        if i_t == 0:
+            sph_state.solve_loop.n_passes[None] = sph_state.solve_loop.n_passes[None] + 1
         is_solved = sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]
         ret = qd.Struct(drho=gs.qd_float(0.0), n_neighbors=0)
         if is_solved:
@@ -1039,49 +1066,79 @@ def func_compute_density_rate(
             i_p, i_b, i_lane, sph_state, sph_info, sph_config, sph_config.log2_neighbor_lanes, is_solved
         )
         if is_solved and i_lane == 0:
-            # The walls are at rest, while the moving boundaries carry their own velocity
-            i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
-            ret.drho = ret.drho + sph_state.particles_reordered.vel[i_p, i_b].dot(wall_volume_grad)
-            if qd.static(sph_config.has_boundary):
-                ret.drho = ret.drho - sph_state.boundary.vel_flux[i_o, i_b]
-            rho0 = sph_info.particles.rho[i_o]
-            err = gs.qd_float(0.0)
-            if qd.static(solve_density):
-                drho = sph_state.particles_reordered.rho[i_p, i_b] / rho0 + sph_info.substep_dt[None] * ret.drho
-                sph_state.particles_reordered.drho[i_p, i_b] = drho
+            func_store_density_error(
+                i_p,
+                i_b,
+                ret.drho,
+                ret.n_neighbors,
+                wall_volume,
+                wall_volume_grad,
+                sph_state,
+                sph_info,
+                sph_config,
+                solve_density,
+            )
 
-                # The stiffness accumulated by the density solve is carried over from one substep to the next, so the
-                # iterations update it in both directions: they take back the part the liquid no longer needs, and
-                # clamp it so that the pressure never pulls the liquid together. The update is relaxed (see
-                # jacobi_relaxation in SPHInfo).
-                kappa = -sph_state.particles_reordered.p[i_p, i_b] / rho0
-                k_i = (
-                    sph_info.jacobi_relaxation[None]
-                    * (drho - 1.0)
-                    * sph_state.particles_reordered.dfsph_factor[i_p, i_b]
-                )
-                sph_state.particles_k_reordered[i_p, i_b] = qd.min(kappa + k_i, 0.0) - kappa
 
-                # A particle under pressure counts its expansion as well, which the iterations correct by taking
-                # pressure back, while a particle free of pressure only counts its compression, the liquid being free
-                # to expand.
-                err_rel = drho - 1.0
-                if kappa >= 0.0:
-                    err_rel = qd.max(err_rel, 0.0)
-                err = rho0 * qd.abs(err_rel)
-            else:
-                # Only a positive divergence is corrected, and none where the neighbors of the particle are too few, the
-                # walls standing for neighbors
-                drho = qd.max(ret.drho, 0.0)
-                if ret.n_neighbors < sph_info.n_neighbors_min[None] and wall_volume <= 0.0:
-                    drho = 0.0
-                sph_state.particles_reordered.drho[i_p, i_b] = drho
-                sph_state.particles_k_reordered[i_p, i_b] = drho * sph_state.particles_reordered.dfsph_factor[i_p, i_b]
-                err = rho0 * drho
-            if qd.static(sph_config.is_deterministic):
-                func_exact_sum_add(0, i_b, err, sph_state.envs_solve.err)
-            else:
-                qd.atomic_add(sph_state.envs_solve.err_sum[i_b], err)
+@qd.func
+def func_store_density_error(
+    i_p: int,
+    i_b: int,
+    neighbors_drho: float,
+    n_neighbors: int,
+    wall_volume: float,
+    wall_volume_grad: qd.types.vector(3),
+    sph_state: SPHState,
+    sph_info: SPHInfo,
+    sph_config: qd.template(),
+    solve_density: qd.template(),
+):
+    """
+    Store what a solve of divergence-free smoothed particle hydrodynamics (DFSPH) cancels for a sorted particle.
+
+    `neighbors_drho` is the rate of change of the density that the `n_neighbors` neighbors of the particle give it, and
+    `wall_volume` and `wall_volume_grad` the kernel volume of the boundaries around it and its gradient. The divergence
+    solve cancels the positive rate of change of the density, and the density solve the predicted relative density at
+    the end of the substep. The particle gets the stiffness that the next Jacobi iteration applies to cancel it, and adds
+    its error to that of its environment, summed for func_update_convergence.
+    """
+    # The walls are at rest, while the moving boundaries carry their own velocity
+    i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
+    drho_rate = neighbors_drho + sph_state.particles_reordered.vel[i_p, i_b].dot(wall_volume_grad)
+    if qd.static(sph_config.has_boundary):
+        drho_rate = drho_rate - sph_state.boundary.vel_flux[i_o, i_b]
+    rho0 = sph_info.particles.rho[i_o]
+    err = gs.qd_float(0.0)
+    if qd.static(solve_density):
+        drho = sph_state.particles_reordered.rho[i_p, i_b] / rho0 + sph_info.substep_dt[None] * drho_rate
+        sph_state.particles_reordered.drho[i_p, i_b] = drho
+
+        # The stiffness accumulated by the density solve is carried over from one substep to the next, so the iterations
+        # update it in both directions: they take back the part the liquid no longer needs, and clamp it so that the
+        # pressure never pulls the liquid together. The update is relaxed (see jacobi_relaxation in SPHInfo).
+        kappa = -sph_state.particles_reordered.p[i_p, i_b] / rho0
+        k_i = sph_info.jacobi_relaxation[None] * (drho - 1.0) * sph_state.particles_reordered.dfsph_factor[i_p, i_b]
+        sph_state.particles_k_reordered[i_p, i_b] = qd.min(kappa + k_i, 0.0) - kappa
+
+        # A particle under pressure counts its expansion as well, which the iterations correct by taking pressure back,
+        # while a particle free of pressure only counts its compression, the liquid being free to expand.
+        err_rel = drho - 1.0
+        if kappa >= 0.0:
+            err_rel = qd.max(err_rel, 0.0)
+        err = rho0 * qd.abs(err_rel)
+    else:
+        # Only a positive divergence is corrected, and none where the neighbors of the particle are too few, the walls
+        # standing for neighbors
+        drho = qd.max(drho_rate, 0.0)
+        if n_neighbors < sph_info.n_neighbors_min[None] and wall_volume <= 0.0:
+            drho = 0.0
+        sph_state.particles_reordered.drho[i_p, i_b] = drho
+        sph_state.particles_k_reordered[i_p, i_b] = drho * sph_state.particles_reordered.dfsph_factor[i_p, i_b]
+        err = rho0 * drho
+    if qd.static(sph_config.is_deterministic):
+        func_exact_sum_add(0, i_b, err, sph_state.envs_solve.err)
+    else:
+        qd.atomic_add(sph_state.envs_solve.err_sum[i_b], err)
 
 
 @qd.kernel(fastcache=True)
@@ -1135,10 +1192,11 @@ def func_task_solver_iteration(
 
     # The stiffness and the position of the neighbors, weighted for the stiffness of the walls (see
     # func_solver_iteration)
-    kernel_ij = func_cubic_kernel(offset_ij.norm(), sph_info.support_radius[None], sph_info.kernel_norm[None])
-    ret.weight_sum = ret.weight_sum + kernel_ij
-    ret.k_sum_w = ret.k_sum_w + kernel_ij * k_j
-    ret.pos_sum = ret.pos_sum + kernel_ij * sph_state.particles_reordered.pos[j_p, i_b]
+    if ret.is_near_boundary:
+        kernel_ij = func_cubic_kernel(offset_ij.norm(), sph_info.support_radius[None], sph_info.kernel_norm[None])
+        ret.weight_sum = ret.weight_sum + kernel_ij
+        ret.k_sum_w = ret.k_sum_w + kernel_ij * k_j
+        ret.pos_sum = ret.pos_sum + kernel_ij * sph_state.particles_reordered.pos[j_p, i_b]
 
 
 @qd.func
@@ -1151,16 +1209,8 @@ def func_solver_iteration(
 
     The velocity of every particle changes by the stiffness of its own and of its neighbors. The divergence solve
     corrects velocities directly, while the density solve accelerates over the substep. The first pass of the density
-    solve is its warm start, and the divergence solve checks its convergence before its first iteration, so its first
-    pass leaves the velocities untouched.
+    solve is its warm start.
     """
-    is_first_pass = sph_state.solve_loop.n_passes[None] == 0
-    warm_start = False
-    is_iterating = True
-    if qd.static(solve_density):
-        warm_start = is_first_pass
-    else:
-        is_iterating = not is_first_pass
     # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_neighbors)
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
     n_particles, n_envs = sph_state.particles_reordered.pos.shape
@@ -1169,17 +1219,26 @@ def func_solver_iteration(
         i_lane = i_t % N_LANES
         i_b = i_t // N_LANES % n_envs
         i_p = i_t // (N_LANES * n_envs)
-        is_solved = (
-            is_iterating and sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]
-        )
+        # Every thread reads the pass counter and one thread clears the loop flag, which spares the pass the launches of
+        # serial statements (see func_update_convergence).
+        if i_t == 0:
+            sph_state.solve_loop.is_looping[()] = 0
+        warm_start = False
+        if qd.static(solve_density):
+            warm_start = sph_state.solve_loop.n_passes[None] == 0
+        is_solved = sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]
         dv_scale = gs.qd_float(1.0)
         if qd.static(solve_density):
             dv_scale = sph_info.substep_dt[None]
         k_i = sph_state.particles_k_reordered[i_p, i_b]
+        # The neighbors weigh the stiffness of the walls near them alone (see 'particles_is_near_boundary_reordered')
+        pos = sph_state.particles_reordered.pos[i_p, i_b]
+        is_near_boundary = sph_state.particles_is_near_boundary_reordered[i_p, i_b]
         ret = qd.Struct(
             dv=qd.Vector.zero(gs.qd_float, 3),
             k_i=k_i,
             dv_scale=dv_scale,
+            is_near_boundary=is_near_boundary,
             weight_sum=gs.qd_float(0.0),
             k_sum_w=gs.qd_float(0.0),
             pos_sum=qd.Vector.zero(gs.qd_float, 3),
@@ -1199,7 +1258,6 @@ def func_solver_iteration(
         )
         if is_solved and i_lane == 0:
             # The particle itself weighs into the stiffness and the position its neighbors give the walls
-            pos = sph_state.particles_reordered.pos[i_p, i_b]
             kernel_self = func_cubic_kernel(0.0, sph_info.support_radius[None], sph_info.kernel_norm[None])
             ret.weight_sum = ret.weight_sum + kernel_self
             ret.k_sum_w = ret.k_sum_w + kernel_self * k_i
@@ -1247,14 +1305,16 @@ def func_update_convergence(
     Each environment stops once the average density error of its own particles meets the tolerance, so that its result
     is the same whatever the other environments simulate alongside it, and the density solve only after its warm start.
     The error summed by the density rate pass is reset once read, for the next pass. The loop runs on as long as an
-    environment iterates on, for `n_iters_max` iterations at most after its first pass.
+    environment iterates on, for `n_iters_max` iterations at most. The pass counter already counts the current pass, and
+    the loop flag starts the pass cleared (see func_solver_iteration).
     """
-    n_passes = sph_state.solve_loop.n_passes[None]
-    can_stop = True
-    if qd.static(solve_density):
-        can_stop = n_passes > 0
-    sph_state.solve_loop.is_looping[()] = 0
     for i_b in range(sph_state.envs_solve.is_solving.shape[0]):
+        # The density solve counts its warm start among its passes
+        n_iters = sph_state.solve_loop.n_passes[None]
+        can_stop = True
+        if qd.static(solve_density):
+            n_iters = n_iters - 1
+            can_stop = n_iters > 0
         if sph_state.envs_solve.is_solving[i_b]:
             err_tol = sph_info.divergence_err_tol[None]
             if qd.static(solve_density):
@@ -1267,9 +1327,8 @@ def func_update_convergence(
                 sph_state.envs_solve.err_sum[i_b] = 0.0
             if can_stop and err <= err_tol * sph_state.envs_solve.n_active[i_b]:
                 sph_state.envs_solve.is_solving[i_b] = False
-            elif n_passes < n_iters_max:
+            elif n_iters < n_iters_max:
                 sph_state.solve_loop.is_looping[()] = 1
-    sph_state.solve_loop.n_passes[None] = n_passes + 1
 
 
 @qd.kernel(graph=True, fastcache=True)
@@ -1287,11 +1346,14 @@ def kernel_solve_incompressibility(
     The warm start of the density solve applies the pressure carried over from the previous substep, which overshoots
     wherever that pressure corrected a density error at once. The average density error leaves such particles unnoticed,
     so the density solve iterates at least once to take their pressure back. Otherwise, the pressure keeps pushing them
-    apart substep after substep. The divergence solve checks its convergence before its first iteration, which a
-    divergence-free velocity field leaves without iterations.
+    apart substep after substep. The divergence solve checks its convergence before its first iteration, on the error
+    that comes with the DFSPH factor (see kernel_compute_rho_and_dfsph_factor), so that a divergence-free velocity
+    field leaves its loop without walking over the neighbors.
     """
     sph_state.solve_loop.n_passes[None] = 0
     is_looping[()] = 1
+    if qd.static(not solve_density):
+        func_update_convergence(n_iters_max, sph_state, sph_info, sph_config, solve_density)
     # FIXME: quadrants#1083 - the statements before a graph do_while run again on every pass when the loop body opens
     # with bare statements, so the loop body opens with a for loop.
     while qd.graph.do_while(is_looping):

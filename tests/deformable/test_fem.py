@@ -232,14 +232,14 @@ def test_halt_on_nan(show_viewer):
 
 @pytest.mark.required("sparse")
 @pytest.mark.parametrize(
-    "coupler_type, material_model, fem_floor_contact_type",
+    "coupler_type, material_model",
     [
-        (gs.options.SAPCouplerOptions, "linear", "tet"),
-        (gs.options.SAPCouplerOptions, "linear_corotated", "vert"),
-        (gs.options.LegacyCouplerOptions, "linear", None),
+        (gs.options.SAPCouplerOptions, "linear"),
+        (gs.options.SAPCouplerOptions, "linear_corotated"),
+        (gs.options.LegacyCouplerOptions, "linear"),
     ],
 )
-def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_contact_type, show_viewer):
+def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
     SPHERE_POS = (0.4, -0.1, 0.1)
     SPHERE_RADIUS = 0.1
     SPHERE_RHO = 500.0
@@ -255,14 +255,16 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_con
     REST_VEL_MAX = 2e-2
     # A sphere resting on vertex contacts deforms its coarse tessellation unevenly, which rolls it unless it is stiff
     # enough to keep its contact patch on a few vertices.
-    SPHERE_E = 3e5 if fem_floor_contact_type == "vert" else 1e5
+    SPHERE_E = 3e5 if coupler_type == gs.options.SAPCouplerOptions else 1e5
     SPHERE_DRIFT_MAX = 1e-2
     SPHERE_SPIN_MAX = 0.2
 
     # The hanging bar checks the exact physics of the solve, whose tolerance its bounds follow from
     coupler_kwargs = {}
     if coupler_type == gs.options.SAPCouplerOptions:
-        coupler_kwargs = dict(sap_convergence_rtol=SAP_RTOL, fem_floor_contact_type=fem_floor_contact_type)
+        coupler_kwargs = dict(
+            sap_convergence_rtol=SAP_RTOL,
+        )
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -272,7 +274,6 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_con
         ),
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
-            enable_vertex_constraints=True,
         ),
         coupler_options=coupler_type(**coupler_kwargs),
         viewer_options=gs.options.ViewerOptions(
@@ -416,6 +417,52 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_con
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("requires_grad, n_linesearch_iterations", [(False, 0), (True, 4)])
+def test_implicit_newton_dx_threshold(requires_grad, n_linesearch_iterations, show_viewer):
+    # A truncated PCG solve leaves the first Newton iteration short of the solution, so that later iterations move the
+    # vertices, unless a threshold above the first displacement ends them. A differentiable scene runs the iterations
+    # from the host when its data are ndarrays.
+    N_PCG_ITERATIONS = 5
+
+    verts_pos = []
+    # The options of the solver hold for the whole scene, hence a second build for the single Newton iteration
+    for n_newton_iterations, newton_dx_threshold in ((10, 1.0), (1, 1e-6)):
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(
+                requires_grad=requires_grad,
+            ),
+            fem_options=gs.options.FEMOptions(
+                use_implicit_solver=True,
+                n_newton_iterations=n_newton_iterations,
+                n_pcg_iterations=N_PCG_ITERATIONS,
+                n_linesearch_iterations=n_linesearch_iterations,
+                newton_dx_threshold=newton_dx_threshold,
+            ),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(0.6, 0.0, 0.6),
+                camera_lookat=(0.0, 0.0, 0.5),
+            ),
+            show_viewer=show_viewer,
+        )
+        sphere = scene.add_entity(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, 0.5),
+                radius=0.1,
+            ),
+            material=gs.materials.FEM.Elastic(
+                model="linear_corotated",
+            ),
+        )
+        scene.build(n_envs=2)
+        # Distinct stretches per environment, each of them converging on its own
+        stretch = sphere.init_positions.new_tensor(((1.0, 1.0, 1.2), (1.1, 1.0, 1.0)))
+        sphere.set_position(sphere.init_positions * stretch[:, None])
+        scene.step()
+        verts_pos.append(sphere.get_verts_pos())
+    assert_equal(verts_pos[0], verts_pos[1])
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_legacy_coupler_rigid_velocity_correction(show_viewer):
     DT = 0.01
@@ -510,7 +557,8 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
     MOTION_SPEED = 0.005
     VERTICES_IDX = [5, 7]
     MODE_AMPLITUDE = 1e-3
-    PCG_THRESHOLD = 1e-20
+    # Below the round-off floor of either precision, so that the implicit solves run to round-off
+    PCG_THRESHOLD = 1e-40
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -525,7 +573,6 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
             damping=DAMPING,
             damping_alpha=DAMPING,
             damping_beta=DAMPING_BETA,
-            enable_vertex_constraints=True,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, 0.6, HEIGHT + 0.5),
@@ -652,10 +699,8 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
         pos_tols = dict(atol=1e-2 * MODE_AMPLITUDE)
         vel_tols = dict(atol=1e-2 * MODE_AMPLITUDE * omega_sqr**0.5)
     elif precision == "64":
-        # The solve stops below a residual force sqrt(PCG_THRESHOLD), which moves the mode of unit modal mass by at
-        # most that times substep_dt^2 * sqrt(m_max) / m_min per substep, every substep at most doubling the error
-        mass_ratio = vibrating_verts_mass.max().sqrt() / vibrating_verts_mass.min()
-        pos_atol = 2**N_SUBSTEPS * PCG_THRESHOLD**0.5 * substep_dt**2 * mass_ratio
+        # The solve runs to round-off, which leaves the modal coordinates with the rounding of the positions they project
+        pos_atol = 4.0 * gs.EPS * (vibrating_box.get_verts_pos().abs() * modal_mass.abs()).sum()
         pos_tols, vel_tols = dict(atol=pos_atol), dict(atol=pos_atol / substep_dt)
     else:
         pos_tols = vel_tols = dict(rtol=2e-4)
@@ -898,7 +943,64 @@ def test_soft_constraint(asset_tmp_path, show_viewer):
 
 
 @pytest.mark.required
-def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
+@pytest.mark.parametrize("coupler_type", [gs.options.LegacyCouplerOptions, gs.options.SAPCouplerOptions])
+def test_stiffness_damping_spares_rigid_motion(coupler_type, precision, show_viewer):
+    DT = 0.01
+    N_STEPS = 10
+    BLOCK_SIZE = (0.1, 0.05, 0.05)
+    # Towed along the normal of its pinned face in the first environment, and along that face in the second one
+    TOW_SPEED = 0.1
+    TOW_VELOCITY = ((TOW_SPEED, 0.0, 0.0), (0.0, 0.0, TOW_SPEED))
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        fem_options=gs.options.FEMOptions(
+            use_implicit_solver=True,
+            # The mass damping slows down any moving body, where the stiffness damping acts on the strain rate alone
+            damping_alpha=0.0,
+        ),
+        coupler_options=coupler_type(),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.3, -0.3, 0.2),
+            camera_lookat=(0.05, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=BLOCK_SIZE,
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1e5,
+            model="linear_corotated",
+        ),
+    )
+    scene.build(n_envs=2)
+
+    # A block moving at the speed of its towed rear face translates rigidly. Damping that motion would hold its free
+    # vertices behind the face by damping_beta times the speed.
+    tow_velocity = torch.tensor(TOW_VELOCITY, dtype=gs.tc_float, device=gs.device)
+    verts_x = block.init_positions[:, 0]
+    towed_verts_idx = torch.nonzero(verts_x < verts_x.min() + gs.EPS)[:, 0]
+    block.set_velocity(tow_velocity)
+    block.set_vertex_constraints(towed_verts_idx)
+    # The SAP solve, the looser of the two, stops at a residual of its default relative tolerance times the momentum,
+    # which leaves the velocity off by that tolerance times the speed, and the positions by that times the time step at
+    # every step.
+    sap_rtol = 1e-4 if precision == "64" else 1e-3
+    atol = N_STEPS * DT * sap_rtol * TOW_SPEED
+    for i_step in range(1, N_STEPS + 1):
+        verts_pos_ref = block.init_positions + i_step * DT * tow_velocity[:, None]
+        block.update_constraint_targets(towed_verts_idx, verts_pos_ref[:, towed_verts_idx])
+        scene.step()
+        assert_allclose(block.get_verts_pos(), verts_pos_ref, atol=atol)
+
+
+@pytest.mark.required
+def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show_viewer):
     SPHERE_RADIUS = 0.1
     BOX_SIZE = 0.015
     CUBE_HALFSIZE = 0.05
@@ -906,6 +1008,9 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
     CUBE_HYDROELASTIC_MODULUS = 1e5
     PEDESTAL_HALFSIZE = 0.05
     BALL_RADIUS = 0.03
+    CUBES_GAP = 1e-3
+    LID_HALFSIZE = 0.06
+    LID_HALFHEIGHT = 0.01
     GRAVITY = 9.81
 
     scene = gs.Scene(
@@ -917,13 +1022,16 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
         ),
-        coupler_options=gs.options.SAPCouplerOptions(),
+        # The capacity holds the contacts of the scene but not the pairs of tets of the sphere neighbouring each other
+        # at rest, which the contact search must skip.
+        coupler_options=gs.options.SAPCouplerOptions(
+            max_collision_pairs=8192,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, 0.6, 0.45),
             camera_lookat=(0.0, 0.0, 0.15),
         ),
         show_viewer=show_viewer,
-        show_FPS=False,
     )
     scene.add_entity(
         morph=gs.morphs.Plane(),
@@ -981,7 +1089,43 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
         ),
         material=gs.materials.FEM.Elastic(),
     )
+    # A single entity of two cubes apart at rest, the upper one falling onto the lower one. Their surface is the one of
+    # the cubes above, which the closed form of their overlap relies on.
+    cube = gs.utils.mesh.create_box(extents=(2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE))
+    cubes_verts = np.concatenate(
+        [cube.vertices + (0.0, 0.0, (2 * i + 1) * CUBE_HALFSIZE + i * CUBES_GAP) for i in range(2)]
+    )
+    cubes_path = str(asset_tmp_path / "two_cubes.obj")
+    igl.write_triangle_mesh(cubes_path, cubes_verts, np.concatenate([cube.faces, cube.faces + len(cube.vertices)]))
+    cubes = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cubes_path,
+            pos=(0.3, 0.3, 0.0),
+        ),
+        material=gs.materials.FEM.Elastic(
+            rho=CUBE_RHO,
+            hydroelastic_modulus=CUBE_HYDROELASTIC_MODULUS,
+        ),
+    )
+    # A rigid lid resting on a light cube whose vertices are all pinned, which hold the lid whatever their mass
+    pinned_cube = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.3, -0.3, CUBE_HALFSIZE),
+            size=(2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE),
+        ),
+        material=gs.materials.FEM.Elastic(
+            rho=10.0,
+            hydroelastic_modulus=CUBE_HYDROELASTIC_MODULUS,
+        ),
+    )
+    lid = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.3, -0.3, 2 * CUBE_HALFSIZE + LID_HALFHEIGHT),
+            size=(2 * LID_HALFSIZE, 2 * LID_HALFSIZE, 2 * LID_HALFHEIGHT),
+        ),
+    )
     scene.build()
+    pinned_cube.set_vertex_constraints(range(pinned_cube.n_vertices))
 
     # Run simulation
     for _ in range(40):
@@ -1008,23 +1152,61 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
     cubes_overlap_ref *= (2.0 * CUBE_HALFSIZE / (2.0 * CUBE_HALFSIZE - cubes_overlap_ref)) ** 2
     assert_allclose(cubes_overlap, cubes_overlap_ref, rtol=0.02)
 
+    # The upper cube of the single entity comes to rest on its lower one as the separate cubes do
+    is_upper = tensor_to_array(cubes.init_positions)[:, 2] > 2 * CUBE_HALFSIZE + CUBES_GAP / 2
+    cubes_pos = tensor_to_array(cubes.get_verts_pos())
+    assert_allclose(cubes.get_verts_vel(), 0.0, atol=1e-3)
+    assert_allclose(
+        cubes_pos[~is_upper, 2].max() - cubes_pos[is_upper, 2].min(),
+        cubes_overlap_ref,
+        rtol=0.02 if precision == "64" else 0.05,
+    )
+
     # The ball settles on the pedestal.
     # FIXME: No closed form gives this depth: the elastic flattening of the ball and its pressure field near the contact
     # depend on its TetGen mesh. A mesher-independent ball mesh and the elastic contact solution would make it derivable.
     assert_allclose(2 * PEDESTAL_HALFSIZE - ball.get_verts_pos()[..., 2].min(), 2.42e-4, rtol=5e-2)
 
+    # The lid sinks into the pressure field of the pinned cube, which peaks at the single vertex TetGen inserts inside
+    # it, depth h below the top face. Only the tets joining that face to that vertex have a pressure gradient normal to
+    # the lid, E * d / h at depth d over a face of side 2 * L * (1 - d / h), L the half size of the cube. One fixed-point
+    # iteration from the unshrunk face solves the balance with the weight of the lid well within the tolerance.
+    assert_allclose(lid.get_vel(), 0.0, atol=1e-5)
+    cube_z = pinned_cube.init_positions[:, 2]
+    apex_depth = 2 * CUBE_HALFSIZE - cube_z[(cube_z > gs.EPS) & (cube_z < 2 * CUBE_HALFSIZE - gs.EPS)]
+    assert apex_depth.numel() == 1
+    lid_depth = 2 * CUBE_HALFSIZE + LID_HALFHEIGHT - lid.get_pos()[..., 2]
+    lid_depth_ref = lid.get_mass() * GRAVITY * apex_depth / (CUBE_HYDROELASTIC_MODULUS * (2.0 * CUBE_HALFSIZE) ** 2)
+    lid_depth_ref /= (1.0 - lid_depth_ref / apex_depth) ** 2
+    assert_allclose(lid_depth, lid_depth_ref, rtol=0.01)
+
 
 @pytest.mark.required("sparse")
-@pytest.mark.parametrize("capacity_option", ["max_collision_pairs", "max_contacts", "n_sap_iterations"])
-def test_sap_coupler_capacity(capacity_option, show_viewer):
+@pytest.mark.parametrize(
+    "capacity_option, capacity, enable_fem_self_collision, enable_fem_neutral_collision",
+    [
+        ("max_collision_pairs", 1, True, False),
+        ("max_contacts", 1, True, False),
+        ("n_sap_iterations", 1, True, False),
+        ("max_collision_pairs", 8192, True, True),
+        ("max_collision_pairs", 700, False, False),
+    ],
+)
+def test_sap_coupler_capacity(
+    capacity_option, capacity, enable_fem_self_collision, enable_fem_neutral_collision, show_viewer
+):
     SPHERE_RADIUS = 0.1
 
     scene = gs.Scene(
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
         ),
+        # With neutral collision, the pairs of tets of the sphere adjacent at rest exceed the capacity holding the scene.
+        # Without self-collision, the capacity bounds the query of the box against the sphere alone.
         coupler_options=gs.options.SAPCouplerOptions(
-            **{capacity_option: 1},
+            enable_fem_self_collision=enable_fem_self_collision,
+            enable_fem_neutral_collision=enable_fem_neutral_collision,
+            **{capacity_option: capacity},
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, 0.6, 0.3),
@@ -1042,13 +1224,31 @@ def test_sap_coupler_capacity(capacity_option, show_viewer):
         ),
         material=gs.materials.FEM.Elastic(),
     )
+    # A tilted box landing on the sphere, the boxes of its large faces spanning many tets that do not cross them
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 1.8 * SPHERE_RADIUS + 0.12),
+            size=(0.3, 0.3, 0.1),
+            euler=(45.0, 35.0, 0.0),
+        ),
+    )
     scene.build(n_envs=2)
 
-    # The error a step flags raises at the second step after it on CUDA, where the check does not wait for the device.
-    # The solve stopped at its cap starts the third step from the velocities of the second, far from its solution.
-    with pytest.raises(gs.GenesisException, match=capacity_option):
-        for _ in range(5):
+    if capacity == 1 or enable_fem_neutral_collision:
+        # The error a step flags raises at the second step after it on CUDA, where the check does not wait for the
+        # device. The solve stopped at its cap starts the third step from the velocities of the second, far from its
+        # solution. The overflow of a kind of contact names its handler.
+        error_pattern = (
+            capacity_option if capacity_option == "n_sap_iterations" else rf"ContactHandler needs .*{capacity_option}"
+        )
+        with pytest.raises(gs.GenesisException, match=error_pattern):
+            for _ in range(5):
+                scene.step()
+    else:
+        # A capacity holding the candidate pairs of the scene holds, however many tets the boxes of its faces span
+        for _ in range(20):
             scene.step()
+        assert (tensor_to_array(box.get_pos())[..., 2] > 2 * SPHERE_RADIUS).all()
 
 
 @pytest.mark.required
@@ -1103,6 +1303,21 @@ def test_sap_coupler_default_capacity(show_viewer):
             size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
         ),
     )
+    # A FEM cube falling onto another one, away from the rigid boxes
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-1.0, 0.0, BOX_SIZE),
+            size=(2 * BOX_SIZE, 2 * BOX_SIZE, 2 * BOX_SIZE),
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    stacked_cube = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-1.0, 0.0, 3 * BOX_SIZE + 1e-3),
+            size=(2 * BOX_SIZE, 2 * BOX_SIZE, 2 * BOX_SIZE),
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
     scene.build(n_envs=2)
 
     # The default capacities of the contacts hold both landings
@@ -1116,6 +1331,7 @@ def test_sap_coupler_default_capacity(show_viewer):
     stacked_box_pos = tensor_to_array(stacked_box.get_pos())
     assert_allclose(stacked_box_pos[..., :2], (1.0, 0.0), atol=2e-3)
     assert_allclose(stacked_box_pos[..., 2], 2 * BOX_SIZE + BOX_SIZE / 2, atol=2e-3)
+    assert_allclose(stacked_cube.get_verts_pos().mean(dim=-2), (-1.0, 0.0, 3 * BOX_SIZE), atol=2e-3)
 
 
 @pytest.mark.slow("gpu")  # gpu ~120s
@@ -1131,6 +1347,7 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(xml_path, tol, show_
     MOTION_SPEED = 0.005
     VERTICES_IDX = [4, 6]
     SLIDER_FORCE = 0.01
+    SAP_RTOL = 1e-8
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -1140,9 +1357,11 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(xml_path, tol, show_
         ),
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
-            enable_vertex_constraints=True,
         ),
-        coupler_options=gs.options.SAPCouplerOptions(),
+        # The sliders check the exact velocities of the joint equality, which the solve resolves to its tolerance
+        coupler_options=gs.options.SAPCouplerOptions(
+            sap_convergence_rtol=SAP_RTOL,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, 0.6, HEIGHT + 0.5),
             camera_lookat=(0.0, 0.0, HEIGHT),

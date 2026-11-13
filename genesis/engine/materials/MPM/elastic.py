@@ -43,7 +43,7 @@ class Elastic(Base):
             self.needs_svd = False
 
     @qd.func
-    def _update_F_S_Jp_elastic(self, J, F_tmp, U, S, V, Jp):
+    def _update_F_S_Jp_elastic(self, J, F_tmp, U, S, V, Jp, eps):
         F_new = F_tmp
         S_new = S
         Jp_new = Jp

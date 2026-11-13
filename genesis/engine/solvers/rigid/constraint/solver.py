@@ -21,7 +21,7 @@ from genesis.engine.solvers.rigid.collider.data import ColliderState
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, LinksState, RigidErrorCode, RigidInfo
 from genesis.grad.bridge import no_grad
 from genesis.utils.data import DataItem, eoa, iter_data
-from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
+from genesis.utils.misc import assign_indexed_tensor, broadcast_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
 from ..collider.contact import func_add_contacts_force_to_links
 from . import backward as backward_constraint_solver, linesearch, noslip as constraint_noslip
@@ -516,13 +516,16 @@ class ConstraintSolver:
         n_equalities = (eq_const_info["type"] >= 0).sum(dim=-1)
         if (n_equalities[envs_idx] >= self._solver.n_equalities + self._solver._options.max_dynamic_constraints).any():
             gs.raise_exception(
-                f"No room left for another dynamic constraint. Please increase the value of RigidSolver's option "
-                f"'max_dynamic_constraints' ({self._solver._options.max_dynamic_constraints})."
+                "No room left for another dynamic constraint. Please increase the value of "
+                f"{type(self._solver).__name__}'s option 'max_dynamic_constraints' "
+                f"({self._solver._options.max_dynamic_constraints})."
             )
 
-        # The type-specific data is padded to its 8 entries (see kernel_add_dynamic_constraint).
-        eq_data_tail_padded = np.zeros(8, dtype=gs.np_float)
-        eq_data_tail_padded[: len(eq_data_tail)] = eq_data_tail
+        # The anchor and the type-specific data, padded to its 8 entries, are given per selected env (see
+        # kernel_add_dynamic_constraint).
+        anchor_pos = broadcast_tensor(anchor_pos, gs.tc_float, (len(envs_idx), 3)).contiguous()
+        eq_data_tail_padded = torch.zeros((len(envs_idx), 8), dtype=gs.tc_float, device=gs.device)
+        eq_data_tail_padded[:, : eq_data_tail.shape[-1]] = eq_data_tail
         self._eq_const_info_cache.clear()
         kernel_add_dynamic_constraint(
             link1_idx,
@@ -1241,25 +1244,22 @@ def func_equality_jdotv(
 
 
 @qd.func
-def func_equality_links(
-    i_b: int,
-    i_e: int,
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+def func_equality_link_rows(
+    i_b: int, i_e: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
-    """Add the rows of an equality constraint coupling two links: a connect, a weld or a screw.
+    """Return the rows of an equality constraint coupling two links: a connect, a weld or a screw.
 
-    The equality is the one i_e of env i_b. Each type sets the directions, errors and inverse weights of its rows, and
-    all types share one walk of the kinematic chains for the Jacobian of their rows and one for its bias. A connect keeps
-    an anchor of each link together with 3 rows, a weld also keeps their orientations with 3 more, and a screw leaves
-    link2 a single dof relative to link1 with 5 rows. The data of the equality holds:
+    The equality is the one i_e of env i_b. Row r constrains lin_dirs[r] . (v1 - v2) + ang_dirs[r] . (w1 - w2) to bring
+    errors[r] to zero, v1 being the velocity of point1 attached to link1, v2 of point2 attached to link2, and w1, w2
+    their angular velocities. A connect keeps an anchor of each link together with 3 rows, a weld also keeps their
+    orientations with 3 more, and a screw leaves link2 a single dof relative to link1 with 5 rows. The data of the
+    equality holds:
     connect [0:3] the anchor in the frame of link1, [3:6] in the frame of link2
     weld    [0:3] the anchor in the frame of link2, [3:6] in the frame of link1, [6:10] the orientation of link2 relative
             to link1, [10] the torque scale of the rotation rows
     screw   see func_screw_frame
+    Returns the number of rows, point1, point2, lin_dirs, ang_dirs, errors and the inverse weight of each row, the
+    unused rows being zero.
     """
     EPS = rigid_info.EPS[None]
 
@@ -1379,6 +1379,33 @@ def func_equality_links(
         rows_invweight[2] = invweight[1]
         rows_invweight[3] = invweight[1]
         rows_invweight[4] = pitch_cos**2 * invweight[0] + pitch_sin**2 * invweight[1]
+    return n_rows, point1, point2, lin_dirs, ang_dirs, errors, rows_invweight
+
+
+@qd.func
+def func_equality_links(
+    i_b: int,
+    i_e: int,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Add the rows of an equality constraint coupling two links: a connect, a weld or a screw.
+
+    The equality is the one i_e of env i_b, its rows those of func_equality_link_rows. All types share one walk of the
+    kinematic chains for the Jacobian of their rows and one for its bias.
+    """
+    EPS = rigid_info.EPS[None]
+
+    eq_type = dyn_info.equalities.eq_type[i_e, i_b]
+    i_l1 = dyn_info.equalities.eq_obj1id[i_e, i_b]
+    i_l2 = dyn_info.equalities.eq_obj2id[i_e, i_b]
+    eq_data = dyn_info.equalities.eq_data[i_e, i_b]
+    n_rows, point1, point2, lin_dirs, ang_dirs, errors, rows_invweight = func_equality_link_rows(
+        i_b, i_e, dyn_state, dyn_info, rigid_info, rigid_config
+    )
 
     dyn_state.links.is_constrained[i_l1, i_b] = True
     if i_l2 > -1:
@@ -2211,11 +2238,12 @@ def kernel_add_dynamic_constraint(
 ):
     """Register a constraint between two links, taking their current relative pose as its reference.
 
-    The anchor is the point anchor_pos given in the frame of link anchor_link_idx. The constraint data holds:
+    The anchor of each selected env is its row of anchor_pos, a point given in the frame of link anchor_link_idx, and
+    its type-specific entries are its row of eq_data_tail. The constraint data holds:
     [0:3]   the anchor, in the frame of link2
     [3:6]   the anchor, in the frame of link1
     [6:10]  the orientation of link2 relative to link1
-    [10:18] the type-specific entries of eq_data_tail (see func_equality_links and func_screw_frame)
+    [10:18] the type-specific entries (see func_equality_links and func_screw_frame)
     Every selected env has an equality slot left (see ConstraintSolver.add_dynamic_constraint).
     """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
@@ -2223,7 +2251,7 @@ def kernel_add_dynamic_constraint(
         i_b = envs_idx[i_b_]
         i_e = constraint_state.qd_n_equalities[i_b]
         anchor = gu.qd_transform_by_trans_quat(
-            gs.qd_vec3([anchor_pos[0], anchor_pos[1], anchor_pos[2]]),
+            gs.qd_vec3([anchor_pos[i_b_, 0], anchor_pos[i_b_, 1], anchor_pos[i_b_, 2]]),
             dyn_state.links.pos[anchor_link_idx, i_b],
             dyn_state.links.quat[anchor_link_idx, i_b],
         )
@@ -2246,7 +2274,7 @@ def kernel_add_dynamic_constraint(
         for i_4 in qd.static(range(4)):
             dyn_info.equalities.eq_data[i_e, i_b][i_4 + 6] = relpose[i_4]
         for i_t in qd.static(range(8)):
-            dyn_info.equalities.eq_data[i_e, i_b][i_t + 10] = eq_data_tail[i_t]
+            dyn_info.equalities.eq_data[i_e, i_b][i_t + 10] = eq_data_tail[i_b_, i_t]
 
         dyn_info.equalities.sol_params[i_e, i_b] = qd.Vector(
             [2 * rigid_info.substep_dt[None], 1.0, 0.9, 0.95, 0.001, 0.5, 2.0]

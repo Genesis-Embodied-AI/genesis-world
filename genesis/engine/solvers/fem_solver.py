@@ -71,6 +71,7 @@ from genesis.utils.misc import (
     get_gpu_cores_per_unit,
     qd_isfinite,
     qd_to_numpy,
+    qd_to_torch,
     qd_zero_grad,
     tensor_to_array,
 )
@@ -99,6 +100,10 @@ if TYPE_CHECKING:
 MAX_ENTITY_CLUSTERS = 8
 MIN_CLUSTER_VERTICES = 64
 MAX_SCENE_CLUSTERS = 16
+
+# Default threshold of the PCG solves of a forward simulation on their squared residual relative to its initial one, by
+# precision (see FEMOptions)
+PCG_THRESHOLD_DEFAULT = {np.float64: 1e-9, np.float32: 1e-6}
 
 
 class FEMErrorCode(ErrorCode):
@@ -134,6 +139,8 @@ CLUSTERS_VERTICES = Size("clusters_vertices")
 CLUSTERS_ELEMENTS = Size("clusters_elements")
 COARSE_ENTITIES = Size("coarse_entities")
 COARSE_ENTRIES = Size("coarse_entries")
+# The slots of the vertex constraints of an environment (see 'FEMOptions.max_vertex_constraints')
+CONSTRAINT_SLOTS = Size("constraint_slots")
 
 # The arrays of the implicit solve, which the explicit solver leaves out
 IMPLICIT = "implicit"
@@ -238,8 +245,8 @@ class FEMEnvsSolve(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     The progress and scalars of the implicit solve of each environment.
 
     They are whether its Newton iterations, its preconditioned conjugate gradient (PCG) solve and its line search go on,
-    the scalars of the PCG solve, the squared residual below which the PCG solve of a differentiable scene stops (see
-    'pcg_threshold_rel'), and the energy, step and slope of the line search.
+    the scalars of the PCG solve, the squared residual below which its PCG solve stops (see 'pcg_threshold' in
+    FEMInfo), and the energy, step and slope of the line search.
     """
 
     is_active: qd.Tensor = field(bool)
@@ -451,10 +458,12 @@ class FEMInfo(Data, kind=DataKind.CONSTANT):
     n_newton_iterations: qd.Tensor = field(int, shape=(), labels=IMPLICIT)
     n_pcg_iterations: qd.Tensor = field(int, shape=(), labels=IMPLICIT)
     n_linesearch_iterations: qd.Tensor = field(int, shape=(), labels=IMPLICIT)
+    # The squared residual at which a PCG solve stops, relative to its initial one, at least the square of the precision
+    # of the simulation, below which the residual is round-off
     pcg_threshold: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
-    # The squared residual, relative to the first one of the substep, at which the solve of a differentiable scene
-    # stops: round-off, since its backward pass is the adjoint of the root of the solve.
-    pcg_threshold_rel: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
+    # The root mean square of the displacements of the vertices over a Newton iteration below which an environment
+    # stops iterating
+    newton_dx_threshold: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
     # The sufficient decrease constant and the backtracking factor of the line search
     linesearch_c: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
     linesearch_tau: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
@@ -503,9 +512,9 @@ class FEMInfo(Data, kind=DataKind.CONSTANT):
 
 
 # TODO: constraints set after a saved state survive 'scene.reset' (see MPMParticleConstraints in mpm_solver.py)
-class FEMVertexConstraints(Data, kind=DataKind.INFO, shape=(VERTICES, ENVS)):
+class FEMVertexConstraints(Data, kind=DataKind.INFO, shape=(CONSTRAINT_SLOTS, ENVS)):
     """
-    The constraints of the FEM vertices, one per vertex and environment.
+    The constraints of the FEM vertices of each environment, in its first slots.
 
     A constrained vertex is set to `target_pos`, or pulled toward it by a critically damped spring of stiffness
     `stiffness` for a soft constraint, the target following the rigid link `link_idx` when there is one, at the offset
@@ -513,7 +522,10 @@ class FEMVertexConstraints(Data, kind=DataKind.INFO, shape=(VERTICES, ENVS)):
     within the Newton solve instead (see 'kernel_cloth_predict').
     """
 
-    is_constrained: qd.Tensor = field(bool)
+    # Slot of the constraint of each vertex, -1 for a free vertex, and slots in use by environment
+    vertices_slot: qd.Tensor = field(int, shape=(VERTICES, ENVS))
+    envs_n_constraints: qd.Tensor = field(int, shape=(ENVS,))
+    vertex_idx: qd.Tensor = field(int)
     target_pos: qd.Tensor = field((float, 3))
     is_soft_constraint: qd.Tensor = field(bool)
     stiffness: qd.Tensor = field(float)
@@ -526,8 +538,6 @@ class FEMConfig(Config):
     """The compile-time configuration of the kernels of the finite element method (FEM) solver."""
 
     use_implicit_solver: bool
-    requires_grad: bool
-    enable_vertex_constraints: bool
     # Whether a block of threads sums the terms of each environment and the lanes of a subgroup tile those of each
     # vertex, on GPU, where a single thread runs each environment on CPU
     enable_cooperative_kernels: bool
@@ -628,8 +638,8 @@ class FEMData(Data):
                     n_newton_iterations=solver._n_newton_iterations,
                     n_pcg_iterations=solver._n_pcg_iterations,
                     n_linesearch_iterations=solver._n_linesearch_iterations,
-                    pcg_threshold=solver._pcg_threshold,
-                    pcg_threshold_rel=(1e-5 if gs.qd_float == qd.f32 else 1e-12) ** 2,
+                    pcg_threshold=max(solver._pcg_threshold, np.finfo(gs.np_float).eps ** 2),
+                    newton_dx_threshold=solver._newton_dx_threshold,
                     linesearch_c=solver._linesearch_c,
                     linesearch_tau=solver._linesearch_tau,
                     # The elimination runs in single precision (see 'FEMCoarseSolve')
@@ -718,13 +728,17 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._n_newton_iterations = options.n_newton_iterations
         self._newton_dx_threshold = options.newton_dx_threshold
         self._n_pcg_iterations = options.n_pcg_iterations
+        # A differentiable scene solves to round-off, which the adjoint of the root of the solve needs to match the finite
+        # differences of the simulation
         self._pcg_threshold = options.pcg_threshold
+        if self._pcg_threshold is None:
+            self._pcg_threshold = 0.0 if self._requires_grad else PCG_THRESHOLD_DEFAULT[gs.np_float]
         self._n_linesearch_iterations = options.n_linesearch_iterations
         self._linesearch_c = options.linesearch_c
         self._linesearch_tau = options.linesearch_tau
         self._damping_alpha = options.damping_alpha
         self._damping_beta = options.damping_beta
-        self._enable_vertex_constraints = options.enable_vertex_constraints
+        self._max_vertex_constraints = options.max_vertex_constraints
 
         # use scaled volume for better numerical stability, similar to p_vol_scale in mpm
         self._vol_scale = 1e4
@@ -732,9 +746,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self.fem_state: FEMState | None = None
         self.fem_info: FEMInfo | None = None
         self.fem_config: FEMConfig | None = None
-        # Allocated on first use, a placeholder until then (see 'init_constraints')
         self.vertex_constraints: FEMVertexConstraints | None = None
-        self._is_constraints_initialized = False
         self.data_manager: FEMData | None = None
 
     def build(self):
@@ -782,8 +794,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         cloth_rest = self._build_cloth_rest() if self.is_solved_in_global_newton else None
         self.fem_config = FEMConfig(
             use_implicit_solver=self._use_implicit_solver,
-            requires_grad=self._requires_grad,
-            enable_vertex_constraints=self._enable_vertex_constraints,
             enable_cooperative_kernels=enable_cooperative_kernels,
             # The generic kernels outside performance mode serve every scene with the largest bound, sparing a
             # compilation per bound at a small cost for the scenes of small entities.
@@ -874,7 +884,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self.register_errors(
             self.data_manager.errno,
             {
-                FEMErrorCode.INVALID_VERTEX_NAN: (
+                FEMErrorCode.INVALID_VERTEX_NAN: lambda: (
                     "NaN detected in FEM states. Try reducing the time step size or adjusting simulation parameters."
                 ),
             },
@@ -960,8 +970,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     continue
                 array.from_numpy(values.astype(gs.np_float if array.dtype == gs.qd_float else gs.np_int, copy=False))
 
-            if self._enable_vertex_constraints:
-                self.init_constraints()
+            # Laid out environment-first like the arrays of the solve, whose blocks read the vertices of an environment
+            self.vertex_constraints = FEMVertexConstraints(
+                sizes=dict(vertices=self.n_vertices, constraint_slots=self._max_vertex_constraints, envs=self._B),
+                env_first=True,
+            )
+            kernel_clear_vertex_constraints(self.vertex_constraints)
 
         self._build_gravity(self.fem_info.gravity)
 
@@ -1102,34 +1116,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             )
         return IPCSurfacePrimitives(*[np.concatenate(arrays) for arrays in zip(*entities_primitives)])
 
-    def init_constraints(self) -> None:
-        """Allocate the vertex constraints, none constrained."""
-        self._is_constraints_initialized = True
-        self.vertex_constraints = FEMVertexConstraints(
-            sizes=dict(vertices=self.n_vertices, envs=self._B), env_first=False
-        )
-        kernel_clear_vertex_constraints(self.vertex_constraints)
-
-    def load_checkpoint(
-        self,
-        checkpoint: SolverCheckpoint,
-        *,
-        boundary_only: bool = False,
-        envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
-    ) -> None:
-        # The constraints are allocated on first use, so a record holds them only if they existed when it was made: a
-        # record holding them allocates them before they are written back, and one without them leaves none.
-        is_constrained_record = checkpoint.arrays.get("vertex_constraints.is_constrained")
-        if (
-            is_constrained_record is not None
-            and is_constrained_record.ndim > 0
-            and not self._is_constraints_initialized
-        ):
-            self.init_constraints()
-        super().load_checkpoint(checkpoint, boundary_only=boundary_only, envs_idx=envs_idx)
-        if is_constrained_record is not None and is_constrained_record.ndim == 0 and self._is_constraints_initialized:
-            kernel_clear_vertex_constraints(self.vertex_constraints)
-
     def reset_grad(self) -> None:
         if self._requires_grad:
             qd_zero_grad(self.fem_state.vertices)
@@ -1220,15 +1206,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         links_state = self._sim.rigid_solver.dyn_state.links
         if self.fem_config.has_cloth:
             # The Newton solver solves the substep from the prediction (see NewtonSolver)
-            kernel_cloth_predict(
-                self.fem_state, links_state, self.fem_info, self.vertex_constraints, self._is_constraints_initialized
-            )
+            kernel_cloth_predict(self.fem_state, links_state, self.fem_info, self.vertex_constraints)
             return
         if self._use_implicit_solver:
             kernel_precompute_material_data(self.fem_state, self.fem_info, self.fem_config)
-            kernel_init_pos_and_inertia(
-                self.fem_state, links_state, self.fem_info, self.vertex_constraints, self.fem_config
-            )
+            kernel_init_pos_and_inertia(self.fem_state, links_state, self.fem_info, self.vertex_constraints)
             # The SAP coupler solves the motion from the momentum residual instead (see 'Simulator.build')
             if not self._is_free_solve_skipped:
                 # The solve is reversed through the adjoint of its root, which spares reversing its iterations
@@ -1251,8 +1233,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             kernel_init_vel(self.fem_state)
             kernel_compute_vel(self.fem_state, self.fem_info, self.fem_config)
             kernel_apply_uniform_force(self.fem_state, self.fem_info)
-            if self._is_constraints_initialized:
-                kernel_apply_soft_constraints(self.fem_state, links_state, self.fem_info, self.vertex_constraints)
+            kernel_apply_soft_constraints(self.fem_state, links_state, self.fem_info, self.vertex_constraints)
 
     def substep_post_coupling(self) -> None:
         if not self.is_active:
@@ -1262,7 +1243,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             kernel_copy_next_to_curr(self.fem_state)
             return
         kernel_compute_pos(self.fem_state, self.fem_info, self._errno)
-        if self._is_constraints_initialized and not self._use_implicit_solver:
+        if not self._use_implicit_solver:
             kernel_apply_hard_constraints(
                 self.fem_state, self._sim.rigid_solver.dyn_state.links, self.vertex_constraints, self._errno
             )
@@ -1294,6 +1275,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # on the host for such scenes, reading the flag of each loop after every iteration.
         loops = self.fem_state.solve_loops
         args = (
+            loops.newton_counter,
             loops.pcg_counter,
             loops.linesearch_counter,
             self.fem_state,
@@ -1305,7 +1287,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if not is_adjoint:
             kernel_solve_stage(*args, stage=int(FEMSolveStage.INIT_NEWTON))
         # Each loop runs its body once before testing its flag, as a graph do-while does
-        for _ in range(1 if is_adjoint else max(self._n_newton_iterations, 1)):
+        n_newton_iterations = 1 if is_adjoint else max(self._n_newton_iterations, 1)
+        for i_newton in range(n_newton_iterations):
             stage = FEMSolveStage.INIT_ADJOINT if is_adjoint else FEMSolveStage.NEWTON_HEAD
             kernel_solve_stage(*args, stage=int(stage))
             is_looping = True
@@ -1324,6 +1307,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 kernel_solve_stage(*args, stage=int(FEMSolveStage.SKIP_LINESEARCH))
             if not is_adjoint:
                 kernel_solve_stage(*args, stage=int(FEMSolveStage.END_NEWTON))
+                if i_newton + 1 < n_newton_iterations and not qd_to_numpy(loops.newton_counter):
+                    break
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- gradient ---------------------------------------
@@ -1533,12 +1518,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     f"A cloth vertex cannot follow the link '{rigid_solver.links[link_idx].name}', which moves within the "
                     "same solve as the cloth."
                 )
-        if self._use_implicit_solver and not self._enable_vertex_constraints:
-            gs.raise_exception(
-                "This feature is disabled. Please set 'enable_vertex_constraints=True' when using FEM implicit solver."
-            )
-        if not self._is_constraints_initialized:
-            self.init_constraints()
 
         is_target_current = target_poss is None
         target_poss, verts_idx, envs_idx = self._sanitize_io_variables(
@@ -1560,6 +1539,22 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             link_init_pos = broadcast_tensor(link_init_pos, gs.tc_float, (len(envs_idx), 3)).contiguous()
             link_init_quat = broadcast_tensor(link_init_quat, gs.tc_float, (len(envs_idx), 4)).contiguous()
 
+        # Checked before any environment is written, so that the vertices are constrained in every selected environment
+        # or in none. A vertex given several times takes a single slot, the earlier occurrences being -1 when targets are
+        # given (see 'drop_repeated_index') and repeated otherwise.
+        vertices_slot = qd_to_torch(self.vertex_constraints.vertices_slot, transpose=True)
+        envs_verts_idx = envs_idx[:, None].expand_as(verts_idx)
+        is_new = (verts_idx >= 0) & (vertices_slot[envs_verts_idx, verts_idx.clamp(min=0)] < 0)
+        rows_idx = torch.arange(len(envs_idx), device=gs.device)[:, None].expand_as(verts_idx)
+        is_new_vert = torch.zeros((len(envs_idx), self.n_vertices), dtype=torch.bool, device=gs.device)
+        is_new_vert.index_put_((rows_idx, verts_idx.clamp(min=0)), is_new, accumulate=True)
+        envs_n_constraints = qd_to_torch(self.vertex_constraints.envs_n_constraints, transpose=True)[envs_idx]
+        if (envs_n_constraints + is_new_vert.sum(dim=-1) > self._max_vertex_constraints).any():
+            gs.raise_exception(
+                "No room left for these vertex constraints. Please increase the value of "
+                f"{type(self).__name__}'s option 'max_vertex_constraints' ({self._max_vertex_constraints})."
+            )
+
         kernel_set_vertex_constraints(
             verts_idx,
             envs_idx,
@@ -1578,27 +1573,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         """Update the target position of some constrained vertices (see 'set_vertex_constraints')."""
         if target_poss is None:
             gs.raise_exception("The target positions of the constraints must be specified.")
-        if not self._is_constraints_initialized:
-            gs.logger.warning("Ignoring update_constraint_targets; constraints have not been initialized.")
-            return
-        self._write_data(
-            self.vertex_constraints.target_pos,
-            target_poss,
-            verts_idx,
-            self.n_vertices,
-            "verts_idx",
-            envs_idx=envs_idx,
-            element_shape=(3,),
+        target_poss, verts_idx, envs_idx = self._sanitize_io_variables(
+            target_poss, verts_idx, self.n_vertices, "verts_idx", envs_idx, (3,), batched_idx=True
         )
-        if gs.use_zerocopy and gs.backend == gs.metal:
-            torch.mps.synchronize()
+        kernel_update_constraint_targets(verts_idx, envs_idx, target_poss, self.vertex_constraints)
 
     @mutates(StateChange.MODEL)
     def remove_vertex_constraints(self, verts_idx=None, envs_idx=None):
         """Remove the constraints of some vertices (see 'set_vertex_constraints'), of all of them if None."""
-        if not self._is_constraints_initialized:
-            gs.logger.warning("Ignoring remove_vertex_constraints; constraints have not been initialized.")
-            return
         _, verts_idx, envs_idx = self._sanitize_io_variables(
             None, verts_idx, self.n_vertices, "verts_idx", envs_idx, batched_idx=True, skip_allocation=True
         )
@@ -1917,22 +1899,18 @@ def func_element_displacement(i_e: int, i_b: int, fem_state: FEMState, fem_info:
 
 
 @qd.func
-def func_element_mapping_matrix(
-    i_e: int, i_b: int, fem_info: FEMInfo, vertex_constraints: FEMVertexConstraints, fem_config: qd.template()
-):
+def func_element_mapping_matrix(i_e: int, fem_info: FEMInfo):
     """
     Return the matrix S mapping the displacement of the vertices of an element to the change of its deformation
-    gradient, the rows of the constrained vertices zeroed.
+    gradient.
+
+    The constrained vertices take part in the deformation like the others: their motion strains the element, and the
+    forces the element puts on them are dropped where they are gathered (see 'func_is_vertex_free').
     """
     B = fem_info.elements.B[i_e]
     S = qd.Matrix.zero(gs.qd_float, 4, 3)
     S[:3, :] = B
     S[3, :] = -B[0, :] - B[1, :] - B[2, :]
-    if qd.static(fem_config.enable_vertex_constraints):
-        i_vs = fem_info.elements.el2v[i_e]
-        for i_k in qd.static(range(4)):
-            if vertex_constraints.is_constrained[i_vs[i_k], i_b]:
-                S[i_k, :] = qd.Vector.zero(gs.qd_float, 3)
     return S
 
 
@@ -1960,12 +1938,7 @@ def func_elastic_product(
 
 @qd.func
 def func_element_energy_gradient_damped(
-    i_e: int,
-    i_b: int,
-    fem_state: FEMState,
-    fem_info: FEMInfo,
-    vertex_constraints: FEMVertexConstraints,
-    fem_config: qd.template(),
+    i_e: int, i_b: int, fem_state: FEMState, fem_info: FEMInfo, fem_config: qd.template()
 ):
     """
     Return the energy density of an element at the end of a substep of the implicit solver, and its damped gradient.
@@ -1978,7 +1951,7 @@ def func_element_energy_gradient_damped(
     actu = fem_state.elements.actu[i_e, i_b]
     energy, gradient = func_element_energy_gradient(i_e, i_b, F, actu, fem_state, fem_info, fem_config)
     if qd.static(fem_config.has_damping_beta):
-        S = func_element_mapping_matrix(i_e, i_b, fem_info, vertex_constraints, fem_config)
+        S = func_element_mapping_matrix(i_e, fem_info)
         x = func_element_displacement(i_e, i_b, fem_state, fem_info)
         dF, dP = func_elastic_product(i_e, i_b, S, x, fem_state, fem_info, fem_config)
         gradient = gradient + fem_info.damping_beta_over_dt[None] * dP
@@ -1989,10 +1962,10 @@ def func_element_energy_gradient_damped(
 def func_vertex_inertia_force(
     i_v: int,
     i_b: int,
+    has_constraints: bool,
     fem_state: FEMState,
     fem_info: FEMInfo,
     vertex_constraints: FEMVertexConstraints,
-    fem_config: qd.template(),
 ):
     """
     Return the force of the inertia and of the Rayleigh mass damping on a vertex at the end of a substep of the
@@ -2005,27 +1978,26 @@ def func_vertex_inertia_force(
         (pos - fem_state.vertices_energy.inertia[i_v, i_b])
         + (pos - fem_state.vertices.pos[i_v, i_b]) * fem_info.damping_alpha_dt[None]
     )
-    if qd.static(fem_config.enable_vertex_constraints):
-        if vertex_constraints.is_constrained[i_v, i_b]:
-            force = qd.Vector.zero(gs.qd_float, 3)
+    if not func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints):
+        force = qd.Vector.zero(gs.qd_float, 3)
     return force
 
 
 @qd.func
-def func_constraint_target(i_v: int, i_b: int, links_state: LinksState, vertex_constraints: FEMVertexConstraints):
+def func_constraint_target(i_s: int, i_b: int, links_state: LinksState, vertex_constraints: FEMVertexConstraints):
     """
-    Return the target of a constrained vertex.
+    Return the target of the vertex constraint in a slot of an environment.
 
     The target of a vertex following a link is computed from the pose of the link wherever it is used, so that the
     gradient flows from the link to the vertex.
     """
-    target_pos = vertex_constraints.target_pos[i_v, i_b]
-    i_l = vertex_constraints.link_idx[i_v, i_b]
+    target_pos = vertex_constraints.target_pos[i_s, i_b]
+    i_l = vertex_constraints.link_idx[i_s, i_b]
     if i_l >= 0:
         offset_quat = qd_transform_quat_by_quat(
-            qd_inv_quat(vertex_constraints.link_init_quat[i_v, i_b]), links_state.quat[i_l, i_b]
+            qd_inv_quat(vertex_constraints.link_init_quat[i_s, i_b]), links_state.quat[i_l, i_b]
         )
-        offset_pos = qd_transform_by_quat(vertex_constraints.link_offset_pos[i_v, i_b], offset_quat)
+        offset_pos = qd_transform_by_quat(vertex_constraints.link_offset_pos[i_s, i_b], offset_quat)
         target_pos = links_state.pos[i_l, i_b] + offset_pos
     return target_pos
 
@@ -2082,11 +2054,12 @@ def kernel_apply_hard_constraints(
     fem_state: FEMState, links_state: LinksState, vertex_constraints: FEMVertexConstraints, errno: qd.Tensor
 ):
     """Set the vertices under a hard constraint to their target, at rest."""
-    for i_v, i_b in qd.ndrange(
-        *vertex_constraints.is_constrained.shape, axes=qd.static(eoa(vertex_constraints.is_constrained))
+    for i_s, i_b in qd.ndrange(
+        *vertex_constraints.vertex_idx.shape, axes=qd.static(eoa(vertex_constraints.vertex_idx))
     ):
-        if vertex_constraints.is_constrained[i_v, i_b] and not vertex_constraints.is_soft_constraint[i_v, i_b]:
-            target_pos = func_constraint_target(i_v, i_b, links_state, vertex_constraints)
+        if i_s < vertex_constraints.envs_n_constraints[i_b] and not vertex_constraints.is_soft_constraint[i_s, i_b]:
+            i_v = vertex_constraints.vertex_idx[i_s, i_b]
+            target_pos = func_constraint_target(i_s, i_b, links_state, vertex_constraints)
             fem_state.vertices.pos_next[i_v, i_b] = target_pos
             fem_state.vertices.vel_next[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
             if not qd_isfinite(target_pos):
@@ -2098,13 +2071,14 @@ def kernel_apply_soft_constraints(
     fem_state: FEMState, links_state: LinksState, fem_info: FEMInfo, vertex_constraints: FEMVertexConstraints
 ):
     """Pull the vertices of the soft constraints toward their targets with critically damped springs."""
-    for i_v, i_b in qd.ndrange(
-        *vertex_constraints.is_constrained.shape, axes=qd.static(eoa(vertex_constraints.is_constrained))
+    for i_s, i_b in qd.ndrange(
+        *vertex_constraints.vertex_idx.shape, axes=qd.static(eoa(vertex_constraints.vertex_idx))
     ):
-        if vertex_constraints.is_constrained[i_v, i_b] and vertex_constraints.is_soft_constraint[i_v, i_b]:
-            target_pos = func_constraint_target(i_v, i_b, links_state, vertex_constraints)
+        if i_s < vertex_constraints.envs_n_constraints[i_b] and vertex_constraints.is_soft_constraint[i_s, i_b]:
+            i_v = vertex_constraints.vertex_idx[i_s, i_b]
+            target_pos = func_constraint_target(i_s, i_b, links_state, vertex_constraints)
             target_vel = qd.Vector.zero(gs.qd_float, 3)
-            i_l = vertex_constraints.link_idx[i_v, i_b]
+            i_l = vertex_constraints.link_idx[i_s, i_b]
             if i_l >= 0:
                 target_vel = links_state.cd_vel[i_l, i_b] + links_state.cd_ang[i_l, i_b].cross(
                     target_pos - links_state.root_COM[i_l, i_b]
@@ -2113,7 +2087,7 @@ def kernel_apply_soft_constraints(
             # The spring is integrated by backward Euler, the position moving with the velocity it gives, which keeps
             # it stable whatever its stiffness. The rigid solver has already stepped, so the link places the target at
             # the end of the substep: m (v' - v) = dt (-k (x + dt v' - x_t) - c (v' - v_t)).
-            stiffness = vertex_constraints.stiffness[i_v, i_b]
+            stiffness = vertex_constraints.stiffness[i_s, i_b]
             mass = fem_info.vertices.mass[i_v]
             damping = 2.0 * qd.math.sqrt(stiffness * mass)
             dt = fem_info.substep_dt[None]
@@ -2142,13 +2116,15 @@ def kernel_precompute_material_data(fem_state: FEMState, fem_info: FEMInfo, fem_
         func_element_precompute(i_e, i_b, F, fem_state, fem_info, fem_config)
 
 
+@qd.func
+def func_activate_envs(fem_state: FEMState):
+    for i_b in range(fem_state.envs_solve.is_active.shape[0]):
+        fem_state.envs_solve.is_active[i_b] = True
+
+
 @qd.kernel(fastcache=True)
 def kernel_init_pos_and_inertia(
-    fem_state: FEMState,
-    links_state: LinksState,
-    fem_info: FEMInfo,
-    vertex_constraints: FEMVertexConstraints,
-    fem_config: qd.template(),
+    fem_state: FEMState, links_state: LinksState, fem_info: FEMInfo, vertex_constraints: FEMVertexConstraints
 ):
     """
     Start the positions of the vertices at the end of a substep of the implicit solver from those at its start, and
@@ -2156,23 +2132,24 @@ def kernel_init_pos_and_inertia(
 
     Every environment enters the Newton iterations of the substep that follows.
     """
-    for i_b in range(fem_state.envs_solve.is_active.shape[0]):
-        fem_state.envs_solve.is_active[i_b] = True
+    func_activate_envs(fem_state)
     for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape, axes=qd.static(eoa(fem_state.vertices.pos))):
-        is_free = True
-        if qd.static(fem_config.enable_vertex_constraints):
-            if vertex_constraints.is_constrained[i_v, i_b]:
-                target_pos = func_constraint_target(i_v, i_b, links_state, vertex_constraints)
-                fem_state.vertices.pos_next[i_v, i_b] = target_pos
-                fem_state.vertices_energy.inertia[i_v, i_b] = target_pos
-                is_free = False
-        if is_free:
+        has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
+        if func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints):
             fem_state.vertices_energy.inertia[i_v, i_b] = (
                 fem_state.vertices.pos[i_v, i_b]
                 + fem_state.vertices.vel[i_v, i_b] * fem_info.substep_dt[None]
                 + fem_info.gravity[i_b] * fem_info.dt2[None]
             )
             fem_state.vertices.pos_next[i_v, i_b] = fem_state.vertices.pos[i_v, i_b]
+    for i_s, i_b in qd.ndrange(
+        *vertex_constraints.vertex_idx.shape, axes=qd.static(eoa(vertex_constraints.vertex_idx))
+    ):
+        if i_s < vertex_constraints.envs_n_constraints[i_b]:
+            i_v = vertex_constraints.vertex_idx[i_s, i_b]
+            target_pos = func_constraint_target(i_s, i_b, links_state, vertex_constraints)
+            fem_state.vertices.pos_next[i_v, i_b] = target_pos
+            fem_state.vertices_energy.inertia[i_v, i_b] = target_pos
 
 
 @qd.func
@@ -2203,11 +2180,16 @@ def func_block_sum(i_t: int, values, n_threads: qd.template()):
 
 
 @qd.func
-def func_is_vertex_free(i_v: int, i_b: int, vertex_constraints: FEMVertexConstraints, fem_config: qd.template()):
-    """Return whether a vertex moves in the implicit solve, unconstrained."""
+def func_is_vertex_free(i_v: int, i_b: int, has_constraints: bool, vertex_constraints: FEMVertexConstraints):
+    """
+    Return whether a vertex moves in the implicit solve, unconstrained.
+
+    The vertex is i_v of the environment i_b, and `has_constraints` whether that environment has any constraint, which
+    the caller reads once for all the vertices it checks, so that an environment without constraint reads none of them.
+    """
     is_free = True
-    if qd.static(fem_config.enable_vertex_constraints):
-        is_free = not vertex_constraints.is_constrained[i_v, i_b]
+    if has_constraints:
+        is_free = vertex_constraints.vertices_slot[i_v, i_b] < 0
     return is_free
 
 
@@ -2246,6 +2228,7 @@ def func_build_coarse(
         i_c_start = fem_info.coarse_entities_cluster_start[i_ent]
         n_rows = 6 * (fem_info.coarse_entities_cluster_start[i_ent + 1] - i_c_start)
         column = qd.Vector.zero(gs.qd_float, n_rows_max)
+        has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
         i_ce_start = fem_info.clusters_elements_start[i_c]
         n_cluster_elements = fem_info.clusters_elements_start[i_c + 1] - i_ce_start
         for i_ce_ in range((n_cluster_elements + n_lanes - 1) // n_lanes):
@@ -2258,22 +2241,24 @@ def func_build_coarse(
                 # about axis i_a - 3.
                 d = qd.Matrix.zero(gs.qd_float, 3, 4)
                 x = qd.Matrix.zero(gs.qd_float, 3, 4)
+                is_free = qd.Vector.zero(gs.qd_int, 4)
                 for i_k in qd.static(range(4)):
                     i_v = i_vs[i_k]
                     i_c_k = fem_info.vertices_cluster_idx[i_v]
                     i_cv_start = fem_info.clusters_vertices_start[i_c_k]
                     i_v_ref = fem_info.clusters_vertices_idx[i_cv_start]
                     d[:, i_k] = fem_state.vertices.pos[i_v, i_b] - fem_state.vertices.pos[i_v_ref, i_b]
+                    is_free[i_k] = func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints)
                     if i_c_k == i_c:
-                        if func_is_vertex_free(i_v, i_b, vertex_constraints, fem_config):
+                        if is_free[i_k]:
                             for i_x in qd.static(range(3)):
                                 if i_a == i_x:
                                     x[i_x, i_k] = 1.0
                                 if i_a == 3 + i_x:
                                     x[:, i_k] = I_3[:, i_x].cross(d[:, i_k])
-                # Its elastic forces, which the mapping matrix zeroes on the constrained vertices, and its inertia from
-                # the share of the element in the mass of each of its vertices (see 'kernel_add_elements')
-                S = func_element_mapping_matrix(i_e, i_b, fem_info, vertex_constraints, fem_config)
+                # Its elastic forces and its inertia from the share of the element in the mass of each of its vertices
+                # (see 'kernel_add_elements'), dropped on the constrained vertices.
+                S = func_element_mapping_matrix(i_e, fem_info)
                 _, dP = func_elastic_product(i_e, i_b, S, x, fem_state, fem_info, fem_config)
                 V = fem_info.elements.V[i_e]
                 corner_mass = 0.25 * fem_info.elements.mass_scaled[i_e] / fem_info.vol_scale[None]
@@ -2284,6 +2269,8 @@ def func_build_coarse(
                 for i_k in qd.static(range(4)):
                     i_c_k = fem_info.vertices_cluster_idx[i_vs[i_k]]
                     force_k = forces[:, i_k]
+                    if not is_free[i_k]:
+                        force_k = qd.Vector.zero(gs.qd_float, 3)
                     torque_k = d[:, i_k].cross(force_k)
                     for j_c in qd.static(range(fem_config.max_entity_clusters)):
                         if i_c_k - i_c_start == j_c:
@@ -2399,7 +2386,6 @@ def func_precondition_env(
     fem_state: FEMState,
     fem_info: FEMInfo,
     vertex_constraints: FEMVertexConstraints,
-    fem_config: qd.template(),
     n_threads: qd.template(),
 ):
     """
@@ -2422,6 +2408,7 @@ def func_precondition_env(
     i_tile = i_t // n_lanes
     i_lane = i_t % n_lanes
     n_clusters = fem_info.clusters_entity_idx.shape[0]
+    has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
     if qd.static(not is_serial):
         qd.simt.grid.mem_fence()
         qd.simt.block.sync()
@@ -2436,7 +2423,7 @@ def func_precondition_env(
                 i_cv = i_cv_ * n_lanes + i_lane
                 if i_cv < n_cluster_vertices:
                     i_v = fem_info.clusters_vertices_idx[i_cv_start + i_cv]
-                    if func_is_vertex_free(i_v, i_b, vertex_constraints, fem_config):
+                    if func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints):
                         r = fem_state.vertices_solve.r[i_v, i_b]
                         d = fem_state.vertices.pos[i_v, i_b] - fem_state.vertices.pos[i_v_ref, i_b]
                         torque = d.cross(r)
@@ -2486,7 +2473,7 @@ def func_precondition_env(
                 r = fem_state.vertices_solve.r[i_v, i_b]
                 z = fem_state.vertices_solve.prec[i_v, i_b] @ r
                 i_c = fem_info.vertices_cluster_idx[i_v]
-                if i_c >= 0 and func_is_vertex_free(i_v, i_b, vertex_constraints, fem_config):
+                if i_c >= 0 and func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints):
                     i_cv_start = fem_info.clusters_vertices_start[i_c]
                     i_v_ref = fem_info.clusters_vertices_idx[i_cv_start]
                     d = fem_state.vertices.pos[i_v, i_b] - fem_state.vertices.pos[i_v_ref, i_b]
@@ -2571,7 +2558,7 @@ def func_accumulate_vertex(
                     if qd.static(gather_internal_force):
                         force_internal = func_element_internal_force(i_e, i_b, fem_state, fem_info, fem_config)
                     else:
-                        S = func_element_mapping_matrix(i_e, i_b, fem_info, vertex_constraints, fem_config)
+                        S = func_element_mapping_matrix(i_e, fem_info)
                     if qd.static(gather_Ap and is_serial):
                         p = qd.Matrix.cols([fem_state.vertices_solve.p[i_vs[i_j], i_b] for i_j in qd.static(range(4))])
                         _, dP = func_elastic_product(i_e, i_b, S, p, fem_state, fem_info, fem_config)
@@ -2629,6 +2616,7 @@ def func_accumulate_vertex(
         n_owned = 1 if i_lane == 0 else 0
         if qd.static(is_serial):
             n_owned = n_vertices
+        has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
         for i_o in range(n_owned):
             i_v_o = i_v
             if qd.static(is_serial):
@@ -2637,13 +2625,17 @@ def func_accumulate_vertex(
                 mat_elastic = fem_state.vertices_solve.diag3x3[i_v_o, i_b]
                 if qd.static(gather_Ap):
                     vec_elastic = fem_state.vertices_solve.Ap[i_v_o, i_b]
+            # A constrained vertex follows its target, the elastic forces on it dropped
+            if not func_is_vertex_free(i_v_o, i_b, has_constraints, vertex_constraints):
+                vec_elastic = qd.Vector.zero(gs.qd_float, 3)
+                mat_elastic = qd.Matrix.zero(gs.qd_float, 3, 3)
             mass_over_dt2 = fem_info.vertices.mass_over_dt2[i_v_o]
             if qd.static(gather_Ap):
                 p = fem_state.vertices_solve.p[i_v_o, i_b]
                 fem_state.vertices_solve.Ap[i_v_o, i_b] = mass_over_dt2 * (damping_alpha_dt + 1.0) * p + vec_elastic
             else:
                 force_inertia = func_vertex_inertia_force(
-                    i_v_o, i_b, fem_state, fem_info, vertex_constraints, fem_config
+                    i_v_o, i_b, has_constraints, fem_state, fem_info, vertex_constraints
                 )
                 fem_state.vertices_energy.force[i_v_o, i_b] = force_inertia + vec_elastic
                 diag3x3 = mat_elastic + mass_over_dt2 * (damping_alpha_dt + 1.0) * I_3
@@ -2684,7 +2676,7 @@ def func_accumulate_vertices(
                     fem_state.solve_loops.n_pcg_left[()] = fem_state.solve_loops.n_pcg_left[()] - 1
             # The stress along the search direction (see 'FEMElementsEnergy')
             if envs_is_active[i_b]:
-                S = func_element_mapping_matrix(i_e, i_b, fem_info, vertex_constraints, fem_config)
+                S = func_element_mapping_matrix(i_e, fem_info)
                 i_vs = fem_info.elements.el2v[i_e]
                 p = qd.Matrix.cols([fem_state.vertices_solve.p[i_vs[i_k], i_b] for i_k in qd.static(range(4))])
                 _, dP = func_elastic_product(i_e, i_b, S, p, fem_state, fem_info, fem_config)
@@ -2751,6 +2743,7 @@ def func_init_pcg(
         i_t = i_flat % n_threads
         n_vertices = fem_info.vertices.mass.shape[0]
         is_active = fem_state.envs_solve.is_active[i_b]
+        has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
         rTr = gs.qd_float(0.0)
         if is_active:
             for i_v_ in range((n_vertices + n_threads - 1) // n_threads):
@@ -2759,10 +2752,13 @@ def func_init_pcg(
                     r = fem_state.vertices_energy.force[i_v, i_b]
                     if qd.static(is_adjoint):
                         r = fem_state.vertices.pos_next.grad[i_v, i_b]
+                    # A constrained vertex stays out of the solve, its search direction staying zero
+                    if not func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints):
+                        r = qd.Vector.zero(gs.qd_float, 3)
                     fem_state.vertices_solve.x[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
                     fem_state.vertices_solve.r[i_v, i_b] = r
                     rTr = rTr + r.dot(r)
-        rTz = func_precondition_env(i_b, i_t, is_active, fem_state, fem_info, vertex_constraints, fem_config, n_threads)
+        rTz = func_precondition_env(i_b, i_t, is_active, fem_state, fem_info, vertex_constraints, n_threads)
         if is_active:
             for i_v_ in range((n_vertices + n_threads - 1) // n_threads):
                 i_v = i_v_ * n_threads + i_t
@@ -2773,14 +2769,8 @@ def func_init_pcg(
             if is_active:
                 fem_state.envs_solve.rTr[i_b] = rTr
                 fem_state.envs_solve.rTz[i_b] = rTz
-            rTr_threshold = fem_info.pcg_threshold[None]
-            if qd.static(fem_config.requires_grad):
-                is_first_residual = True
-                if qd.static(not is_adjoint):
-                    is_first_residual = fem_state.solve_loops.n_newton_left[()] == fem_info.n_newton_iterations[None]
-                if is_first_residual:
-                    fem_state.envs_solve.rTr_threshold[i_b] = fem_info.pcg_threshold_rel[None] * rTr
-                rTr_threshold = fem_state.envs_solve.rTr_threshold[i_b]
+            rTr_threshold = fem_info.pcg_threshold[None] * rTr
+            fem_state.envs_solve.rTr_threshold[i_b] = rTr_threshold
             is_pcg_active = is_active and rTr > rTr_threshold
             fem_state.envs_solve.is_pcg_active[i_b] = is_pcg_active
             if is_pcg_active:
@@ -2796,7 +2786,6 @@ def func_update_pcg_env(
     fem_state: FEMState,
     fem_info: FEMInfo,
     vertex_constraints: FEMVertexConstraints,
-    fem_config: qd.template(),
     n_threads: qd.template(),
     update_loop_flag: qd.template(),
 ):
@@ -2825,14 +2814,11 @@ def func_update_pcg_env(
                 fem_state.vertices_solve.x[i_v, i_b] = fem_state.vertices_solve.x[i_v, i_b] + alpha * p
                 fem_state.vertices_solve.r[i_v, i_b] = r
                 rTr_new = rTr_new + r.dot(r)
-    rTz_new = func_precondition_env(i_b, i_t, is_active, fem_state, fem_info, vertex_constraints, fem_config, n_threads)
+    rTz_new = func_precondition_env(i_b, i_t, is_active, fem_state, fem_info, vertex_constraints, n_threads)
     rTr_new, rTz_new = func_block_sum(i_t, values=qd.Vector([rTr_new, rTz_new]), n_threads=n_threads)
 
     # Convergence check, then the new search direction
-    rTr_threshold = fem_info.pcg_threshold[None]
-    if qd.static(fem_config.requires_grad):
-        rTr_threshold = fem_state.envs_solve.rTr_threshold[i_b]
-    is_still_active = is_active and rTr_new > rTr_threshold
+    is_still_active = is_active and rTr_new > fem_state.envs_solve.rTr_threshold[i_b]
     beta = gs.qd_float(0.0)
     if is_still_active:
         beta = rTz_new / rTz
@@ -2882,7 +2868,7 @@ def func_pcg_iter(
         i_b = i_flat // n_threads
         i_t = i_flat % n_threads
         func_update_pcg_env(
-            i_b, i_t, pcg_counter, fem_state, fem_info, vertex_constraints, fem_config, n_threads, update_loop_flag=True
+            i_b, i_t, pcg_counter, fem_state, fem_info, vertex_constraints, n_threads, update_loop_flag=True
         )
 
 
@@ -2917,7 +2903,7 @@ def func_pcg_solve_per_env_block(
             for i_e_ in range((fem_info.elements.V.shape[0] + BLOCK_DIM - 1) // BLOCK_DIM):
                 i_e = i_e_ * BLOCK_DIM + i_t
                 if i_e < fem_info.elements.V.shape[0]:
-                    S = func_element_mapping_matrix(i_e, i_b, fem_info, vertex_constraints, fem_config)
+                    S = func_element_mapping_matrix(i_e, fem_info)
                     i_vs = fem_info.elements.el2v[i_e]
                     p = qd.Matrix.cols([fem_state.vertices_solve.p[i_vs[i_k], i_b] for i_k in qd.static(range(4))])
                     _, dP = func_elastic_product(i_e, i_b, S, p, fem_state, fem_info, fem_config)
@@ -2951,7 +2937,6 @@ def func_pcg_solve_per_env_block(
                 fem_state,
                 fem_info,
                 vertex_constraints,
-                fem_config,
                 n_threads=BLOCK_DIM,
                 update_loop_flag=False,
             )
@@ -3049,11 +3034,7 @@ def func_init_linesearch(
 
 @qd.func
 def func_linesearch_iter(
-    linesearch_counter: qd.Tensor,
-    fem_state: FEMState,
-    fem_info: FEMInfo,
-    vertex_constraints: FEMVertexConstraints,
-    fem_config: qd.template(),
+    linesearch_counter: qd.Tensor, fem_state: FEMState, fem_info: FEMInfo, fem_config: qd.template()
 ):
     # See BLOCK_DIM in 'func_init_pcg'
     BLOCK_DIM = qd.static(256)
@@ -3061,6 +3042,7 @@ def func_linesearch_iter(
     n_threads = qd.static(BLOCK_DIM if fem_config.enable_cooperative_kernels else 1)
 
     _B = fem_state.envs_solve.is_active.shape[0]
+    n_vertices = fem_info.vertices.mass.shape[0]
     for i_v, i_b in qd.ndrange(*fem_state.vertices_solve.x.shape, axes=qd.static(eoa(fem_state.vertices_solve.x))):
         # A line search iteration starts here: its loop flag drops until an environment iterates on
         if i_b == 0 and i_v == 0:
@@ -3081,7 +3063,7 @@ def func_linesearch_iter(
             actu = fem_state.elements.actu[i_e, i_b]
             energy = func_element_energy(i_e, i_b, J, F, actu, fem_state, fem_info, fem_config)
             if qd.static(fem_config.has_damping_beta):
-                S = func_element_mapping_matrix(i_e, i_b, fem_info, vertex_constraints, fem_config)
+                S = func_element_mapping_matrix(i_e, fem_info)
                 x = func_element_displacement(i_e, i_b, fem_state, fem_info)
                 dF, dP = func_elastic_product(i_e, i_b, S, x, fem_state, fem_info, fem_config)
                 energy = energy + 0.5 * fem_info.damping_beta_over_dt[None] * (dF * dP).sum()
@@ -3097,17 +3079,25 @@ def func_linesearch_iter(
             energy = func_env_energy_part(i_b, i_t, fem_state, fem_info, fem_config, n_threads, add_damping_alpha=True)
         energy = func_block_sum(i_t, values=qd.Vector([energy]), n_threads=n_threads)[0]
 
+        step_size = fem_state.envs_solve.step_size[i_b]
+        is_rejected = is_active and (
+            energy
+            > fem_state.envs_solve.prev_energy[i_b]
+            + fem_info.linesearch_c[None] * step_size * fem_state.envs_solve.m[i_b]
+        )
+        # A search that runs out of trials takes no step, so that the positions always follow the stored step
+        is_exhausted = is_rejected and fem_state.solve_loops.n_linesearch_left[()] <= 0
+        if is_exhausted:
+            for i_v_ in range((n_vertices + n_threads - 1) // n_threads):
+                i_v = i_v_ * n_threads + i_t
+                if i_v < n_vertices:
+                    fem_state.vertices.pos_next[i_v, i_b] = fem_state.vertices_solve.x_prev[i_v, i_b]
         if i_t == 0 and is_active:
-            step_size = fem_state.envs_solve.step_size[i_b]
-            is_still_active = (
-                energy
-                > fem_state.envs_solve.prev_energy[i_b]
-                + fem_info.linesearch_c[None] * step_size * fem_state.envs_solve.m[i_b]
-            )
-            fem_state.envs_solve.is_linesearch_active[i_b] = is_still_active
-            if is_still_active:
-                if fem_state.solve_loops.n_linesearch_left[()] > 0:
-                    linesearch_counter[()] = 1
+            fem_state.envs_solve.is_linesearch_active[i_b] = is_rejected and not is_exhausted
+            if is_exhausted:
+                fem_state.envs_solve.step_size[i_b] = 0.0
+            elif is_rejected:
+                linesearch_counter[()] = 1
                 fem_state.envs_solve.step_size[i_b] = step_size * fem_info.linesearch_tau[None]
 
 
@@ -3115,9 +3105,46 @@ def func_linesearch_iter(
 def func_skip_linesearch(fem_state: FEMState, fem_info: FEMInfo):
     for i_v, i_b in qd.ndrange(*fem_state.vertices_solve.x.shape, axes=qd.static(eoa(fem_state.vertices_solve.x))):
         if fem_state.envs_solve.is_active[i_b]:
+            if i_v == 0:
+                fem_state.envs_solve.step_size[i_b] = 1.0
             fem_state.vertices.pos_next[i_v, i_b] = (
                 fem_state.vertices.pos_next[i_v, i_b] + fem_state.vertices_solve.x[i_v, i_b]
             )
+
+
+@qd.func
+def func_end_newton(newton_counter: qd.Tensor, fem_state: FEMState, fem_info: FEMInfo, fem_config: qd.template()):
+    """
+    End a Newton iteration of each environment, which stops iterating once its vertices moved by less than the threshold
+    over the iteration, in root mean square.
+
+    The loop flag drops until an environment iterates on with iterations left.
+    """
+    # See BLOCK_DIM in 'func_init_pcg'
+    BLOCK_DIM = qd.static(256)
+
+    n_threads = qd.static(BLOCK_DIM if fem_config.enable_cooperative_kernels else 1)
+    n_vertices = fem_info.vertices.mass.shape[0]
+    fem_state.solve_loops.n_newton_left[()] = fem_state.solve_loops.n_newton_left[()] - 1
+    newton_counter[()] = 0
+    qd.loop_config(block_dim=qd.static(n_threads if n_threads > 1 else None))
+    for i_flat in range(fem_state.envs_solve.is_active.shape[0] * n_threads):
+        i_b = i_flat // n_threads
+        i_t = i_flat % n_threads
+        is_active = fem_state.envs_solve.is_active[i_b]
+        dx_sqr = gs.qd_float(0.0)
+        if is_active:
+            step_size = fem_state.envs_solve.step_size[i_b]
+            for i_v_ in range((n_vertices + n_threads - 1) // n_threads):
+                i_v = i_v_ * n_threads + i_t
+                if i_v < n_vertices:
+                    dx_sqr = dx_sqr + (step_size * fem_state.vertices_solve.x[i_v, i_b]).norm_sqr()
+        dx_sqr = func_block_sum(i_t, values=qd.Vector([dx_sqr]), n_threads=n_threads)[0]
+        if i_t == 0 and is_active:
+            if dx_sqr < n_vertices * fem_info.newton_dx_threshold[None] ** 2:
+                fem_state.envs_solve.is_active[i_b] = False
+            elif fem_state.solve_loops.n_newton_left[()] > 0:
+                newton_counter[()] = 1
 
 
 @qd.func
@@ -3133,9 +3160,7 @@ def func_newton_head(
         *fem_state.elements_energy.energy.shape, axes=qd.static(eoa(fem_state.elements_energy.energy))
     ):
         if fem_state.envs_solve.is_active[i_b]:
-            energy, gradient = func_element_energy_gradient_damped(
-                i_e, i_b, fem_state, fem_info, vertex_constraints, fem_config
-            )
+            energy, gradient = func_element_energy_gradient_damped(i_e, i_b, fem_state, fem_info, fem_config)
             fem_state.elements_energy.energy[i_e, i_b] = energy
             fem_state.elements_energy.stress[i_e, i_b] = -fem_info.elements.V[i_e] * gradient
     func_accumulate_vertices(
@@ -3179,12 +3204,10 @@ def kernel_batch_solve(
         if qd.static(fem_config.has_linesearch):
             func_init_linesearch(linesearch_counter, fem_state, fem_info, fem_config)
             while qd.graph.do_while(linesearch_counter):
-                func_linesearch_iter(linesearch_counter, fem_state, fem_info, vertex_constraints, fem_config)
+                func_linesearch_iter(linesearch_counter, fem_state, fem_info, fem_config)
         else:
             func_skip_linesearch(fem_state, fem_info)
-        fem_state.solve_loops.n_newton_left[()] = fem_state.solve_loops.n_newton_left[()] - 1
-        if fem_state.solve_loops.n_newton_left[()] <= 0:
-            newton_counter[()] = 0
+        func_end_newton(newton_counter, fem_state, fem_info, fem_config)
 
 
 @qd.func
@@ -3204,6 +3227,7 @@ def kernel_solve_adjoint(
     fem_config: qd.template(),
 ):
     """Run the adjoint solve of a substep, which seeds the adjoint of the forces (see '_implicit_solve_grad')."""
+    func_activate_envs(fem_state)
     func_build_coarse(fem_state, fem_info, vertex_constraints, fem_config)
     func_init_pcg(pcg_counter, fem_state, fem_info, vertex_constraints, fem_config, is_adjoint=True)
     func_pcg_solve(pcg_counter, fem_state, fem_info, vertex_constraints, fem_config)
@@ -3212,6 +3236,7 @@ def kernel_solve_adjoint(
 
 @qd.kernel(fastcache=True)
 def kernel_solve_stage(
+    newton_counter: qd.types.ndarray(qd.i32, ndim=0),
     pcg_counter: qd.types.ndarray(qd.i32, ndim=0),
     linesearch_counter: qd.types.ndarray(qd.i32, ndim=0),
     fem_state: FEMState,
@@ -3229,10 +3254,11 @@ def kernel_solve_stage(
         func_build_coarse(fem_state, fem_info, vertex_constraints, fem_config)
         fem_state.solve_loops.n_newton_left[()] = fem_info.n_newton_iterations[None]
     if qd.static(stage == FEMSolveStage.END_NEWTON):
-        fem_state.solve_loops.n_newton_left[()] = fem_state.solve_loops.n_newton_left[()] - 1
+        func_end_newton(newton_counter, fem_state, fem_info, fem_config)
     if qd.static(stage == FEMSolveStage.NEWTON_HEAD):
         func_newton_head(pcg_counter, fem_state, fem_info, vertex_constraints, fem_config)
     if qd.static(stage == FEMSolveStage.INIT_ADJOINT):
+        func_activate_envs(fem_state)
         func_build_coarse(fem_state, fem_info, vertex_constraints, fem_config)
         func_init_pcg(pcg_counter, fem_state, fem_info, vertex_constraints, fem_config, is_adjoint=True)
     if qd.static(stage == FEMSolveStage.PCG_ITER):
@@ -3245,12 +3271,12 @@ def kernel_solve_stage(
     if qd.static(stage == FEMSolveStage.INIT_LINESEARCH):
         func_init_linesearch(linesearch_counter, fem_state, fem_info, fem_config)
     if qd.static(stage == FEMSolveStage.LINESEARCH_ITER):
-        func_linesearch_iter(linesearch_counter, fem_state, fem_info, vertex_constraints, fem_config)
+        func_linesearch_iter(linesearch_counter, fem_state, fem_info, fem_config)
     if qd.static(stage == FEMSolveStage.SKIP_LINESEARCH):
         func_skip_linesearch(fem_state, fem_info)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_compute_implicit_force(
     fem_state: FEMState,
     fem_info: FEMInfo,
@@ -3261,23 +3287,28 @@ def kernel_compute_implicit_force(
     Compute the forces at the end of a substep of the implicit solver, whose autodiff alone runs (see
     '_implicit_solve_grad').
 
-    The elements scatter their forces, which autodiff reverses, where the solve gathers.
+    The elements scatter their forces, which autodiff reverses, where the solve gathers. A constrained vertex has no
+    force, while its motion strains the elements around it.
     """
     for i_e, i_b in qd.ndrange(
         *fem_state.elements_energy.energy.shape, axes=qd.static(eoa(fem_state.elements_energy.energy))
     ):
-        _, gradient = func_element_energy_gradient_damped(i_e, i_b, fem_state, fem_info, vertex_constraints, fem_config)
+        _, gradient = func_element_energy_gradient_damped(i_e, i_b, fem_state, fem_info, fem_config)
         i_vs = fem_info.elements.el2v[i_e]
-        S = func_element_mapping_matrix(i_e, i_b, fem_info, vertex_constraints, fem_config)
+        S = func_element_mapping_matrix(i_e, fem_info)
         force = -fem_info.elements.V[i_e] * gradient @ S.transpose()
+        has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
         for i_k in qd.static(range(4)):
-            qd.atomic_add(fem_state.vertices_energy.force[i_vs[i_k], i_b], force[:, i_k])
+            i_v = i_vs[i_k]
+            if func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints):
+                qd.atomic_add(fem_state.vertices_energy.force[i_v, i_b], force[:, i_k])
     for i_v, i_b in qd.ndrange(
         *fem_state.vertices_energy.force.shape, axes=qd.static(eoa(fem_state.vertices_energy.force))
     ):
+        has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
         qd.atomic_add(
             fem_state.vertices_energy.force[i_v, i_b],
-            func_vertex_inertia_force(i_v, i_b, fem_state, fem_info, vertex_constraints, fem_config),
+            func_vertex_inertia_force(i_v, i_b, has_constraints, fem_state, fem_info, vertex_constraints),
         )
 
 
@@ -3296,11 +3327,14 @@ def kernel_material_data_grad(
     """
     for i_e, i_b in qd.ndrange(*fem_state.elements.actu.shape, axes=qd.static(eoa(fem_state.elements.actu))):
         i_vs = fem_info.elements.el2v[i_e]
-        S = func_element_mapping_matrix(i_e, i_b, fem_info, vertex_constraints, fem_config)
-        # The forces -V * gradient @ S^T on the vertices dotted with lambda give <gradient, -V * lambda @ S>
-        vertices_lambda = qd.Matrix.cols(
-            [fem_state.vertices_energy.force.grad[i_vs[i_k], i_b] for i_k in qd.static(range(4))]
-        )
+        S = func_element_mapping_matrix(i_e, fem_info)
+        # The forces -V * gradient @ S^T on the free vertices dotted with lambda give <gradient, -V * lambda @ S>
+        vertices_lambda = qd.Matrix.zero(gs.qd_float, 3, 4)
+        has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
+        for i_k in qd.static(range(4)):
+            i_v = i_vs[i_k]
+            if func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints):
+                vertices_lambda[:, i_k] = fem_state.vertices_energy.force.grad[i_v, i_b]
         gradient_grad = -fem_info.elements.V[i_e] * vertices_lambda @ S
         _, F_start = func_element_J_F(i_e, i_b, fem_state.vertices.pos, fem_info)
         _, F = func_element_J_F(i_e, i_b, fem_state.vertices.pos_next, fem_info)
@@ -3375,11 +3409,7 @@ HINGE_PAIRS = 10
 
 @qd.kernel(fastcache=True)
 def kernel_cloth_predict(
-    fem_state: FEMState,
-    links_state: LinksState,
-    fem_info: FEMInfo,
-    vertex_constraints: FEMVertexConstraints,
-    is_constrained: qd.template(),
+    fem_state: FEMState, links_state: LinksState, fem_info: FEMInfo, vertex_constraints: FEMVertexConstraints
 ):
     """
     Predict the substep of the cloth, and start its Newton solve at the positions at the start of the substep.
@@ -3402,16 +3432,19 @@ def kernel_cloth_predict(
         is_fixed = False
         target_pos = pos
         constraint_mass = gs.qd_float(0.0)
-        if qd.static(is_constrained):
-            if vertex_constraints.is_constrained[i_v, i_b]:
-                target_pos = func_constraint_target(i_v, i_b, links_state, vertex_constraints)
-                if vertex_constraints.is_soft_constraint[i_v, i_b]:
-                    constraint_mass = dt * dt * vertex_constraints.stiffness[i_v, i_b]
-                else:
-                    is_kinematic = True
-                    constraint_mass = fem_info.cloth_constraint_strength_ratio[None] * fem_info.vertices.mass[i_v]
-                    pin_dist = fem_info.cloth_constraint_pin_dist[None]
-                    is_fixed = (pos - target_pos).norm_sqr() < pin_dist * pin_dist
+        # An environment without constraint reads no slot (see 'func_is_vertex_free')
+        i_s = -1
+        if vertex_constraints.envs_n_constraints[i_b] > 0:
+            i_s = vertex_constraints.vertices_slot[i_v, i_b]
+        if i_s >= 0:
+            target_pos = func_constraint_target(i_s, i_b, links_state, vertex_constraints)
+            if vertex_constraints.is_soft_constraint[i_s, i_b]:
+                constraint_mass = dt * dt * vertex_constraints.stiffness[i_s, i_b]
+            else:
+                is_kinematic = True
+                constraint_mass = fem_info.cloth_constraint_strength_ratio[None] * fem_info.vertices.mass[i_v]
+                pin_dist = fem_info.cloth_constraint_pin_dist[None]
+                is_fixed = (pos - target_pos).norm_sqr() < pin_dist * pin_dist
         fem_state.cloth_vertices.is_kinematic[i_v, i_b] = is_kinematic
         fem_state.cloth_vertices.is_fixed[i_v, i_b] = is_fixed
         fem_state.cloth_vertices.target_pos[i_v, i_b] = target_pos
@@ -3971,10 +4004,11 @@ def kernel_update_vverts_render(fem_state: FEMState, fem_info: FEMInfo):
 @qd.kernel(fastcache=True)
 def kernel_clear_vertex_constraints(vertex_constraints: FEMVertexConstraints):
     for i_v, i_b in qd.ndrange(
-        *vertex_constraints.is_constrained.shape, axes=qd.static(eoa(vertex_constraints.is_constrained))
+        *vertex_constraints.vertices_slot.shape, axes=qd.static(eoa(vertex_constraints.vertices_slot))
     ):
-        vertex_constraints.is_constrained[i_v, i_b] = False
-        vertex_constraints.link_idx[i_v, i_b] = -1
+        vertex_constraints.vertices_slot[i_v, i_b] = -1
+    for i_b in range(vertex_constraints.envs_n_constraints.shape[0]):
+        vertex_constraints.envs_n_constraints[i_b] = 0
 
 
 @qd.kernel(fastcache=True)
@@ -3990,36 +4024,85 @@ def kernel_set_vertex_constraints(
     vertex_constraints: FEMVertexConstraints,
     is_soft_constraint: bool,
 ):
-    """Constrain some vertices, those following a link keeping their offset to where it stands."""
-    for i_v_, i_b_ in qd.ndrange(
-        verts_idx.shape[1], envs_idx.shape[0], axes=qd.static(eoa(vertex_constraints.is_constrained))
-    ):
+    """
+    Constrain some vertices, those following a link keeping their offset to where it stands.
+
+    A vertex already constrained keeps its slot, and a new one takes the next free slot of its environment, the vertices
+    of an environment taking their slots in order. Every selected environment has the slots left (see
+    'FEMSolver.set_vertex_constraints').
+    """
+    for i_b_ in range(envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        for i_v_ in range(verts_idx.shape[1]):
+            i_v = verts_idx[i_b_, i_v_]
+            # The earlier occurrences of a repeated vertex are -1 (see 'drop_repeated_index')
+            if i_v >= 0:
+                i_s = vertex_constraints.vertices_slot[i_v, i_b]
+                if i_s < 0:
+                    i_s = vertex_constraints.envs_n_constraints[i_b]
+                    vertex_constraints.envs_n_constraints[i_b] = i_s + 1
+                    vertex_constraints.vertices_slot[i_v, i_b] = i_s
+                    vertex_constraints.vertex_idx[i_s, i_b] = i_v
+                vertex_constraints.is_soft_constraint[i_s, i_b] = is_soft_constraint
+                vertex_constraints.stiffness[i_s, i_b] = stiffness
+                vertex_constraints.link_idx[i_s, i_b] = link_idx
+                vertex_constraints.target_pos[i_s, i_b] = qd.Vector(
+                    [target_poss[i_b_, i_v_, 0], target_poss[i_b_, i_v_, 1], target_poss[i_b_, i_v_, 2]]
+                )
+                vertex_constraints.link_offset_pos[i_s, i_b] = fem_state.vertices.pos[i_v, i_b] - qd.Vector(
+                    [link_init_pos[i_b_, 0], link_init_pos[i_b_, 1], link_init_pos[i_b_, 2]]
+                )
+                vertex_constraints.link_init_quat[i_s, i_b] = qd.Vector(
+                    [
+                        link_init_quat[i_b_, 0],
+                        link_init_quat[i_b_, 1],
+                        link_init_quat[i_b_, 2],
+                        link_init_quat[i_b_, 3],
+                    ]
+                )
+
+
+@qd.kernel(fastcache=True)
+def kernel_update_constraint_targets(
+    verts_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    target_poss: qd.types.ndarray(),
+    vertex_constraints: FEMVertexConstraints,
+):
+    """Set the targets of some constrained vertices, the free ones being left as they are."""
+    for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
         i_v = verts_idx[i_b_, i_v_]
-        # The earlier occurrences of a repeated vertex are -1 (see 'drop_repeated_index')
         if i_v >= 0:
-            vertex_constraints.is_constrained[i_v, i_b] = True
-            vertex_constraints.is_soft_constraint[i_v, i_b] = is_soft_constraint
-            vertex_constraints.stiffness[i_v, i_b] = stiffness
-            vertex_constraints.link_idx[i_v, i_b] = link_idx
-            vertex_constraints.target_pos[i_v, i_b] = qd.Vector(
-                [target_poss[i_b_, i_v_, 0], target_poss[i_b_, i_v_, 1], target_poss[i_b_, i_v_, 2]]
-            )
-            vertex_constraints.link_offset_pos[i_v, i_b] = fem_state.vertices.pos[i_v, i_b] - qd.Vector(
-                [link_init_pos[i_b_, 0], link_init_pos[i_b_, 1], link_init_pos[i_b_, 2]]
-            )
-            vertex_constraints.link_init_quat[i_v, i_b] = qd.Vector(
-                [link_init_quat[i_b_, 0], link_init_quat[i_b_, 1], link_init_quat[i_b_, 2], link_init_quat[i_b_, 3]]
-            )
+            i_s = vertex_constraints.vertices_slot[i_v, i_b]
+            if i_s >= 0:
+                vertex_constraints.target_pos[i_s, i_b] = qd.Vector(
+                    [target_poss[i_b_, i_v_, 0], target_poss[i_b_, i_v_, 1], target_poss[i_b_, i_v_, 2]]
+                )
 
 
 @qd.kernel(fastcache=True)
 def kernel_remove_vertex_constraints(
     verts_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), vertex_constraints: FEMVertexConstraints
 ):
-    for i_v_, i_b_ in qd.ndrange(
-        verts_idx.shape[1], envs_idx.shape[0], axes=qd.static(eoa(vertex_constraints.is_constrained))
-    ):
+    """Free some vertices, the last constraint of their environment moving into the slot of each one."""
+    for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        i_v = verts_idx[i_b_, i_v_]
-        vertex_constraints.is_constrained[i_v, i_b] = False
+        for i_v_ in range(verts_idx.shape[1]):
+            i_v = verts_idx[i_b_, i_v_]
+            i_s = -1
+            if i_v >= 0:
+                i_s = vertex_constraints.vertices_slot[i_v, i_b]
+            if i_s >= 0:
+                i_s_last = vertex_constraints.envs_n_constraints[i_b] - 1
+                i_v_last = vertex_constraints.vertex_idx[i_s_last, i_b]
+                vertex_constraints.vertex_idx[i_s, i_b] = i_v_last
+                vertex_constraints.target_pos[i_s, i_b] = vertex_constraints.target_pos[i_s_last, i_b]
+                vertex_constraints.is_soft_constraint[i_s, i_b] = vertex_constraints.is_soft_constraint[i_s_last, i_b]
+                vertex_constraints.stiffness[i_s, i_b] = vertex_constraints.stiffness[i_s_last, i_b]
+                vertex_constraints.link_idx[i_s, i_b] = vertex_constraints.link_idx[i_s_last, i_b]
+                vertex_constraints.link_offset_pos[i_s, i_b] = vertex_constraints.link_offset_pos[i_s_last, i_b]
+                vertex_constraints.link_init_quat[i_s, i_b] = vertex_constraints.link_init_quat[i_s_last, i_b]
+                vertex_constraints.vertices_slot[i_v_last, i_b] = i_s
+                vertex_constraints.vertices_slot[i_v, i_b] = -1
+                vertex_constraints.envs_n_constraints[i_b] = i_s_last

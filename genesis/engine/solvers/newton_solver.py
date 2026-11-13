@@ -618,20 +618,20 @@ class NewtonSolver(Solver):
         self.register_errors(
             self.data_manager.errno,
             {
-                NewtonErrorCode.INVALID_SOLVE_NAN: (
+                NewtonErrorCode.INVALID_SOLVE_NAN: lambda: (
                     "The Newton solve of the implicit MPM solver or of the cloth produced values that are not finite. "
                     "Please decrease the simulation timestep or adjust the material parameters."
                 ),
-                NewtonErrorCode.INVALID_CONTACT_THICKNESS: (
+                NewtonErrorCode.INVALID_CONTACT_THICKNESS: lambda: (
                     "The cloth lies within its contact thickness of a plane or of another part of the cloth, where its "
                     "contact is undefined. Start the cloth farther than its contact thickness from the planes and from "
                     "itself, or lower gs.materials.FEM.Cloth(contact_thickness)."
                 ),
-                NewtonErrorCode.INVALID_PROXY_PATH: (
+                NewtonErrorCode.INVALID_PROXY_PATH: lambda: (
                     "A rigid link drifted from the pose its contact with the cloth sees beyond the bound of the step "
                     "that the Newton solve certified. Please report this issue."
                 ),
-                NewtonErrorCode.PROXY_SOLVE_EXHAUSTED: (
+                NewtonErrorCode.PROXY_SOLVE_EXHAUSTED: lambda: (
                     "The Newton solve of the cloth in contact with rigid links stopped before converging, the substep "
                     "being left uncommitted: raise NewtonOptions(max_iterations) or loosen NewtonOptions(velocity_tol)."
                 ),

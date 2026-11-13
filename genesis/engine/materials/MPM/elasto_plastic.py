@@ -43,13 +43,13 @@ class ElastoPlastic(Base):
         self.update_F_S_Jp = self._update_F_S_Jp_elasto_plastic
 
     @qd.func
-    def _update_F_S_Jp_elasto_plastic(self, J, F_tmp, U, S, V, Jp):
+    def _update_F_S_Jp_elasto_plastic(self, J, F_tmp, U, S, V, Jp, eps):
         F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         sigma = func_diagonal(S)
         if qd.static(self.use_von_mises):
             S_new = qd.max(S, 0.05)  # to prevent NaN
-            sigma_new, is_yielding = func_von_mises_return_map(sigma, self.mu, self.von_mises_yield_stress)
+            sigma_new, is_yielding = func_von_mises_return_map(sigma, self.mu, self.von_mises_yield_stress, eps)
             if is_yielding:
                 S_new = func_diagonal_matrix(sigma_new)
                 F_new = U @ S_new @ V.transpose()
@@ -64,7 +64,7 @@ class ElastoPlastic(Base):
 
 
 @qd.func
-def func_von_mises_return_map(sigma: qd.types.vector(3), mu: float, yield_stress: float):
+def func_von_mises_return_map(sigma: qd.types.vector(3), mu: float, yield_stress: float, eps: float):
     """
     Return the singular values of the deformation gradient after the von Mises return map, and whether it yields.
 
@@ -73,7 +73,7 @@ def func_von_mises_return_map(sigma: qd.types.vector(3), mu: float, yield_stress
     """
     epsilon = qd.log(qd.max(sigma, 0.05))
     epsilon_hat = epsilon - epsilon.sum() / 3.0
-    epsilon_hat_norm = epsilon_hat.norm(gs.EPS)
+    epsilon_hat_norm = epsilon_hat.norm(eps)
     delta_gamma = epsilon_hat_norm - yield_stress / (2.0 * mu)
     sigma_new = sigma
     is_yielding = delta_gamma > 0.0

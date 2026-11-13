@@ -43,6 +43,8 @@ LOGGER = logging.getLogger(__name__)
 _WIN_STD_ERROR_HANDLE = -12
 _WIN_HANDLE_FLAG_PROTECT_FROM_CLOSE = 0x2
 
+_UNSIGNED_TO_SIGNED_DTYPES = {torch.uint16: torch.int16, torch.uint32: torch.int32, torch.uint64: torch.int64}
+
 
 class DeprecationError(Exception):
     pass
@@ -331,6 +333,13 @@ def get_gpu_core_count() -> int:
     return 256 * cores_per_unit
 
 
+def get_gpu_block_shared_memory_bytes() -> int:
+    """Return the shared memory a block of threads holds on the active GPU, in bytes."""
+    # FIXME: quadrants#976 - the shared memory of a block is a 64 KiB lower bound on AMDGPU, which caps what CDNA4
+    # (gfx950) holds below its 160 KiB per block.
+    return qd.lang.impl.get_max_shared_memory_bytes(is_lowerbound_ok=True)
+
+
 def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
     """Return the ascending sizes s worth compiling for a shared tile of s x (s + 1) ``gs.qd_float`` on the active GPU.
 
@@ -349,9 +358,7 @@ def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
     if gs.backend == gs.cpu:
         gs.raise_exception("CPU backend not supported by this method.")
     itemsize = 4 if gs.qd_float == qd.f32 else 8
-    # FIXME: quadrants#976 - the shared memory of a block is a 64 KiB lower bound on AMDGPU, which caps the tiles of
-    # CDNA4 (gfx950) below what its 160 KiB per block holds.
-    block_bytes = qd.lang.impl.get_max_shared_memory_bytes(is_lowerbound_ok=True)
+    block_bytes = get_gpu_block_shared_memory_bytes()
     unit_bytes, reserved_bytes, granule_bytes, max_blocks = block_bytes, 0, 1, block_bytes // (8 * 9 * itemsize)
     if torch.cuda.is_available():
         # CUDA and ROCm alike: a block of these tiles is one warp (wavefront), whose slots bound the resident blocks.
@@ -1156,7 +1163,14 @@ def qd_from_torch(value: qd.Tensor | qd.Field | qd.Ndarray, tensor: torch.Tensor
         value = value._unwrap()
     if gs.use_zerocopy.is_supported:
         view = qd_to_torch(value, copy=False)
-        view.copy_(tensor)
+        # A host tensor goes to the device by chunks, as a single copy holds a staging buffer as large as the tensor,
+        # which a unified-memory GPU counts as device memory
+        if tensor.device.type == "cpu" and tensor.shape == view.shape and view.ndim > 0:
+            n_rows = max(2**24 // max(view[0].numel(), 1), 1)
+            for i_row in range(0, view.shape[0], n_rows):
+                view[i_row : i_row + n_rows].copy_(tensor[i_row : i_row + n_rows])
+        else:
+            view.copy_(tensor)
     else:
         value.from_torch(tensor.to(to_pytorch_type(value.dtype)))
 
@@ -1539,14 +1553,67 @@ def assign_indexed_tensor(
     value: "np.typing.ArrayLike",
     dim_names: tuple[str, ...] | list[str] | None = None,
 ) -> None:
+    # See broadcast_tensor for arrays with negative strides
+    if isinstance(value, np.ndarray) and any(stride < 0 for stride in value.strides):
+        value = value.copy()
+    # Torch writes no unsigned integer wider than 8 bits through a mask or an index on CPU and CUDA, so such a tensor is
+    # written as its signed bits, which is exact.
+    if isinstance(tensor, torch.Tensor) and tensor.dtype in _UNSIGNED_TO_SIGNED_DTYPES:
+        signed_dtype = _UNSIGNED_TO_SIGNED_DTYPES[tensor.dtype]
+        value = torch.as_tensor(value, dtype=tensor.dtype, device=tensor.device).view(signed_dtype)
+        tensor = tensor.view(signed_dtype)
+
+    # A boolean mask selecting along one axis, the others being sliced, writes through the mask itself. Indexing by it
+    # would count its entries on the device and read the count back, which synchronizes the host.
+    mask_axis = None
+    for axis, index in enumerate(indices):
+        if not isinstance(index, slice):
+            is_mask = isinstance(index, torch.Tensor) and index.dtype == torch.bool and index.ndim == 1
+            if mask_axis is not None or not is_mask:
+                mask_axis = None
+                break
+            mask_axis = axis
+    selection = None
+    if mask_axis is not None and not isinstance(tensor, np.ndarray):
+        selection = tensor[tuple([slice(None) if axis == mask_axis else index for axis, index in enumerate(indices)])]
+        if not isinstance(value, (int, float)):
+            # The entries of a value of the rank of the selection, or omitting every axis up to the masked one, follow
+            # from its shape alone. Any other value is broadcast against the number of selected entries by indexing.
+            value_shape = np.shape(value)
+            value_offset = selection.ndim - len(value_shape)
+            is_value_explicit = value_offset == 0 or value_offset > mask_axis
+            for axis, size in enumerate(value_shape, value_offset):
+                if axis != mask_axis and size not in (1, selection.shape[axis]):
+                    is_value_explicit = False
+            if not is_value_explicit:
+                selection = None
     if isinstance(tensor, np.ndarray):
-        # See broadcast_tensor for arrays with negative strides
-        if isinstance(value, np.ndarray) and any(stride < 0 for stride in value.strides):
-            value = value.copy()
         value = torch.as_tensor(value)
+    elif selection is not None:
+        spread = [1] * selection.ndim
+        spread[mask_axis] = -1
+        # A mask given on the host selects on the device of the tensor
+        mask = indices[mask_axis].to(device=selection.device).view(spread)
+        if isinstance(value, (int, float)):
+            selection.masked_fill_(mask, value)
+            return
+        # A value spanning the masked axis, or broadcast along it, is written entry by entry, any other one holds the
+        # selected entries in order.
+        broadcast_shape = list(selection.shape)
+        broadcast_shape[mask_axis] = value_shape[mask_axis] if value_offset == 0 else 1
+        value = broadcast_tensor(value, selection.dtype, broadcast_shape, dim_names)
+        if broadcast_shape[mask_axis] in (1, selection.shape[mask_axis]):
+            torch.where(mask, value, selection, out=selection)
+        else:
+            # Metal mis-scatters a stride-0 broadcast mask or source, which must be dense there
+            if gs.backend == gs.metal:
+                mask = mask.expand_as(selection).contiguous()
+                value = value.contiguous()
+            selection.masked_scatter_(mask, value)
+        return
     # A single value written over a selection of one axis has faster forms than advanced indexing, which stages an
     # index tensor and a scatter that dominate a write this small: the buffer is filled whole when every axis is taken
-    # whole, a boolean mask fills through the mask itself, and a selection of rows fills through the rows.
+    # whole, and a selection of rows fills through the rows.
     elif isinstance(value, (int, float)):
         axes = [axis for axis, index in enumerate(indices) if not (isinstance(index, slice) and index == slice(None))]
         if not axes:
@@ -1555,15 +1622,9 @@ def assign_indexed_tensor(
         if len(axes) == 1:
             axis = axes[0]
             index = indices[axis]
-            if isinstance(index, torch.Tensor):
-                if index.dtype == torch.bool:
-                    spread = [1] * tensor.ndim
-                    spread[axis] = -1
-                    tensor.masked_fill_(index.view(spread), value)
-                    return
-                if index.ndim == 1 and index.dtype == torch.int64:
-                    tensor.index_fill_(axis, index, value)
-                    return
+            if isinstance(index, torch.Tensor) and index.ndim == 1 and index.dtype == torch.int64:
+                tensor.index_fill_(axis, index, value)
+                return
     else:
         # Every occurrence of an index given several times writes the value of its last occurrence, since a scatter
         # writes them in no defined order. The tensors and integers indexing the axes broadcast against each other into
