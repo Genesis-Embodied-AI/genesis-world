@@ -46,17 +46,11 @@ def main():
             ),
         ),
     )
-    # Grippy finger pads, the rest of the arm keeping the friction its asset states
     franka = scene.add_entity(
         options=gs.entities.Rigid(
             morph=gs.morphs.MJCF(
                 file="xml/franka_emika_panda/panda.xml",
             ),
-            links={
-                gs.LinkIndex.named("*_finger"): gs.options.Link(
-                    friction=1.5,
-                ),
-            },
         ),
     )
 
