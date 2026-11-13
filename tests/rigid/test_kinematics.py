@@ -372,6 +372,27 @@ def test_inverse_kinematics_multilink(show_viewer, tol):
     assert_allclose(middle_finger_distal.get_pos(envs_idx=(1,)), middle_finger_pos, tol=tol)
     assert_allclose(wrist.get_pos(envs_idx=(1,)), wrist_pos, tol=tol)
 
+    # A fingertip pose reached by the joints of its finger alone, fewer than the six components of its error
+    index_finger_dofs_idx = [robot.get_joint(f"index_finger_joint{i}").dofs_idx_local[0] for i in range(1, 5)]
+    robot.set_dofs_position((0.1, 0.4, 0.4, 0.3), dofs_idx_local=index_finger_dofs_idx, envs_idx=(0,))
+    index_finger_pos = index_finger_distal.get_pos(envs_idx=(0,))
+    index_finger_quat = index_finger_distal.get_quat(envs_idx=(0,))
+    robot.set_dofs_position((0.0, 0.0, 0.0, 0.0), dofs_idx_local=index_finger_dofs_idx, envs_idx=(0,))
+    qpos, err = robot.inverse_kinematics(
+        link=index_finger_distal,
+        pos=index_finger_pos,
+        quat=index_finger_quat,
+        pos_tol=tol,
+        rot_tol=tol,
+        max_solver_iters=100,
+        dofs_idx_local=index_finger_dofs_idx,
+        return_error=True,
+        envs_idx=(0,),
+    )
+    assert_allclose(err, 0.0, atol=tol)
+    robot.set_qpos(qpos, envs_idx=(0,))
+    assert_allclose(index_finger_distal.get_pos(envs_idx=(0,)), index_finger_pos, tol=tol)
+
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_inverse_kinematics_local_point(n_envs, show_viewer, tol):
