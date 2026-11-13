@@ -6,7 +6,7 @@ from typing import Annotated, Self
 
 import numpy as np
 
-from pydantic import ConfigDict, Field, SerializeAsAny, StrictBool, model_validator
+from pydantic import ConfigDict, Field, StrictBool, model_validator
 
 import genesis as gs
 from genesis.repr_base import get_public_name
@@ -24,9 +24,14 @@ class _Selection(Options):
 
     model_config = ConfigDict(frozen=True)
 
-    # Dumped as the selectors they are, whose fields their base does not declare
-    members: Annotated[tuple[SerializeAsAny["_Selection"], ...], Field(min_length=2, strict=False)] | None = None
+    members: Annotated[tuple[Self, ...], Field(min_length=2, strict=False)] | None = None
     is_intersection: StrictBool = False
+
+    @model_validator(mode="after")
+    def _check_members(self) -> Self:
+        if self.is_intersection and self.members is None:
+            gs.raise_exception("An intersection of selectors takes members.")
+        return self
 
     def __or__(self, other: Self) -> Self:
         return self._combine(other, is_intersection=False)
@@ -47,7 +52,7 @@ class _Selection(Options):
                 else (selector,)
             )
         ]
-        return type(self)(members=members, is_intersection=is_intersection)
+        return type(self)(members=tuple(members), is_intersection=is_intersection)
 
     def _resolve_members(self, parts_idx: list[np.ndarray]) -> np.ndarray:
         """Combine the indices of the parts each member holds, as the operator of the combination does."""
@@ -92,7 +97,8 @@ class Link(_Selection):
 
         'links_path' holds the names from the root of the kinematic tree down to each link.
         """
-        if self.members is not None:
+        if self.names is None:
+            assert self.members is not None
             return self._resolve_members([member.resolve(links_path) for member in self.members])
         links_name = [link_path[-1] for link_path in links_path]
         unknown_names = [name for name in self.names if not any(fnmatchcase(l_name, name) for l_name in links_name)]
@@ -185,10 +191,15 @@ class _NamedOrdinalIndex(_OrdinalIndex):
             return self._resolve_members([member.resolve(geoms_name) for member in self.members])
         if self.names is None:
             return self._resolve_ordinals(len(geoms_name), "geom")
-        unknown_names = [name for name in self.names if not any(fnmatchcase(g_name, name) for g_name in geoms_name)]
+        # An unnamed geom, whose name is empty, matches no pattern, not even '*'
+        unknown_names = [
+            name for name in self.names if not any(g_name and fnmatchcase(g_name, name) for g_name in geoms_name)
+        ]
         if unknown_names:
             gs.raise_exception(f"No geom matches {unknown_names}. Existing geoms: {geoms_name}.")
-        is_selected = [any(fnmatchcase(geom_name, name) for name in self.names) for geom_name in geoms_name]
+        is_selected = [
+            bool(geom_name) and any(fnmatchcase(geom_name, name) for name in self.names) for geom_name in geoms_name
+        ]
         return np.flatnonzero(is_selected).astype(gs.np_int, copy=False)
 
 

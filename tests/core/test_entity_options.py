@@ -90,7 +90,7 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
                 fixed=True,
             ),
         )
-        sphere_options.select(gs.indices.Geom.named("*")).set_friction(friction)
+        sphere_options.select(gs.indices.Geom.at(slice(None))).set_friction(friction)
         spheres.append(scene.add_entity(options=sphere_options))
     # The torus is decomposed into convex pieces
     mixed_geoms_options = gs.entities.Rigid(

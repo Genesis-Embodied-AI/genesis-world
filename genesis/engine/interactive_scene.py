@@ -281,7 +281,8 @@ class InteractiveScene:
                     # A USD morph describes a whole stage (potentially many bodies); add_stage parses and adds them and
                     # takes no name. Every other morph is a single entity added by name.
                     if isinstance(options.morph, gs.morphs.USD):
-                        scene.add_stage(options=options)
+                        # A stage names each entity it adds, so the options of an entity of a stage drop its name
+                        scene.add_stage(options=options.model_copy(update={"name": None}))
                     # An entity handed the very options its description was resolved from is unchanged by the edit, so
                     # it is created from that description without reading its asset again. An edit hands in new ones.
                     elif desc is not None and options is desc.options:
