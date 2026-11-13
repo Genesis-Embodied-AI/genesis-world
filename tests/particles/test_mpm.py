@@ -394,6 +394,9 @@ def test_implicit_particle_constraints(show_viewer):
 
 
 @pytest.mark.required
+# At E = 1e9 the Newton system is too ill-conditioned for the single-precision PCG to reach its tolerance, which makes
+# the step lose the velocity of the block at random
+@pytest.mark.precision("64")
 def test_implicit_halt_on_nan(show_viewer):
     IMPACT_VELOCITY = 5.0
     N_STEPS = 50
