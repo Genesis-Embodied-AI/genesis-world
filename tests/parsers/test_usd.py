@@ -571,12 +571,10 @@ def test_collision_filtering(collision_filtering_usd, show_viewer, caplog):
             ),
         ),
     )
-    with pytest.raises(gs.GenesisException, match="no link or geom options"):
-        scene.add_stage(
-            options=gs.entities.Rigid(
-                morph=gs.morphs.USD(file=collision_filtering_usd), links={gs.LinkIndex.named("base"): gs.options.Link()}
-            )
-        )
+    stage_options = gs.entities.Rigid(morph=gs.morphs.USD(file=collision_filtering_usd))
+    stage_options.select(gs.LinkIndex.named("base")).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="select no part"):
+        scene.add_stage(options=stage_options)
     scene.build()
     ghosts_pos = [tensor_to_array(ghost.get_pos()) for ghost in ghosts]
 

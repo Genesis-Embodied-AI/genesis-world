@@ -358,25 +358,22 @@ class FEMEntity(Entity):
         if not init_positions.shape[0] > 0:
             gs.raise_exception("Entity has zero vertices.")
 
-        # The vertex options select vertices as the morph states them, relative to its position before its rotation.
+        # The settings select vertices as the morph states them, relative to its position before its rotation. The
+        # later of two settings of one vertex applies.
         verts_pos_morph = verts - self._morph.pos
-        verts_is_fixed = {}
-        conflict_verts_idx = set()
-        for vertex_index, vertex_options in self._options.vertices.items():
-            if "is_fixed" in vertex_options.model_fields_set:
-                for i_v in vertex_index.resolve(verts_pos_morph):
-                    if i_v in verts_is_fixed:
-                        conflict_verts_idx.add(i_v)
-                    else:
-                        verts_is_fixed[i_v] = vertex_options.is_fixed
-        if conflict_verts_idx:
-            gs.logger.warning(
-                f"Two selections of equal specificity give 'is_fixed' of vertices "
-                f"{sorted(map(int, conflict_verts_idx))} of entity '{self.name}'. The first one applies."
-            )
-        self._fixed_verts_idx_local = np.array(
-            sorted(i_v for i_v, is_fixed in verts_is_fixed.items() if is_fixed), dtype=gs.np_int
-        )
+        verts_is_fixed = np.zeros(len(verts), dtype=np.bool_)
+        for setting in self._options.settings:
+            is_selected = np.ones(len(verts), dtype=np.bool_)
+            for group in setting.selectors:
+                is_in_group = np.zeros(len(verts), dtype=np.bool_)
+                for vertex_index in group:
+                    is_in_group[vertex_index.resolve(verts_pos_morph)] = True
+                is_selected &= is_in_group
+            if not is_selected.any():
+                gs.raise_exception(f"The selection {setting.selection_repr} holds no vertex of entity '{self.name}'.")
+            if "is_fixed" in setting.block.model_fields_set:
+                verts_is_fixed[is_selected] = setting.block.is_fixed
+        self._fixed_verts_idx_local = np.flatnonzero(verts_is_fixed).astype(gs.np_int, copy=False)
 
         self.init_positions = torch.tensor(init_positions, dtype=gs.tc_float, device=gs.device)
         self.init_positions_COM_offset = torch.tensor(

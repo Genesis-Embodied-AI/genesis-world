@@ -421,6 +421,9 @@ class Scene(RBC):
             )
         if options.morph is None:
             gs.raise_exception("Entity construction requires a morph.")
+        # The entity holds a read-only copy, so that later edits of the options leave it as it is
+        options = copy.copy(options)
+        options._is_read_only = True
         morph = options.morph
         material = options.material
         name = options.name
@@ -545,10 +548,8 @@ class Scene(RBC):
                 )
             if options.name is not None:
                 gs.raise_exception("A stage adds several entities, so its options take no name.")
-            if isinstance(options, gs.entities.Rigid) and (options.links or options.geoms):
-                gs.raise_exception(
-                    "A stage adds entities of different links, so its options take no link or geom options."
-                )
+            if isinstance(options, gs.entities.Rigid) and options.settings:
+                gs.raise_exception("A stage adds entities of different links, so its options select no part.")
             morph = options.morph
         if not isinstance(morph, gs.morphs.USD):
             gs.raise_exception(f"Unsupported morph: {morph}.")
@@ -960,6 +961,7 @@ class Scene(RBC):
                         options._make_read_only()
                 # A copy without validation, which keeps every field held, defaults included
                 entity._options = BaseModel.model_copy(entity._options, update={"morph": morph, "surface": surface})
+                entity._options._is_read_only = True
 
             # reset state
             self._reset()

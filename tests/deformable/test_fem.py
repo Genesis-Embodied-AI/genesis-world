@@ -862,27 +862,21 @@ def test_vertex_options_fix_vertices(show_viewer, tol):
         ),
         show_viewer=show_viewer,
     )
-    # Vertex options fix the vertices they select at their initial positions. A box selects in the frame of the morph,
-    # which the rotation of the morph turns into a side face of the entity.
-    fixed_vertex_options = gs.options.Vertex(
-        is_fixed=True,
-    )
-    rotated_box = scene.add_entity(
-        options=gs.entities.FEM(
-            morph=gs.morphs.Box(
-                pos=(0.0, 0.0, 0.6),
-                size=(0.2, 0.2, 0.2),
-                euler=(90.0, 0.0, 0.0),
-            ),
-            material=gs.materials.FEM.Elastic(
-                E=1e4,
-            ),
-            vertices={
-                gs.VertexIndex.in_box(lower=(-0.1, -0.1, 0.1), upper=(0.1, 0.1, 0.1)): fixed_vertex_options,
-            },
+    # Fixed vertices stay at their initial positions. A box selects in the frame of the morph, which the rotation of the
+    # morph turns into a side face of the entity.
+    rotated_box_options = gs.entities.FEM(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.6),
+            size=(0.2, 0.2, 0.2),
+            euler=(90.0, 0.0, 0.0),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1e4,
         ),
     )
-    # The union of an ordinal selection of two top corners and of the vertices closest to the other two pins the whole
+    rotated_box_options.select(gs.VertexIndex.in_box(lower=(-0.1, -0.1, 0.1), upper=(0.1, 0.1, 0.1))).set_is_fixed(True)
+    rotated_box = scene.add_entity(options=rotated_box_options)
+    # A list holding an ordinal selection of two top corners and the vertices closest to the other two pins the whole
     # top face. The ordinals come from the same box added to a scene that is not built.
     probe_box = gs.Scene().add_entity(
         options=gs.entities.FEM(
@@ -894,39 +888,35 @@ def test_vertex_options_fix_vertices(show_viewer, tol):
     )
     probe_verts_pos = tensor_to_array(probe_box.init_positions)
     top_verts_idx = np.flatnonzero(probe_verts_pos[:, 2] > 0.1 - 1e-6)
-    top_face_selection = gs.VertexIndex.at(top_verts_idx[:2])
-    for corner_pos in probe_verts_pos[top_verts_idx[2:]]:
-        top_face_selection = top_face_selection | gs.VertexIndex.closest_to(pos=corner_pos, max_distance=1e-3)
-    hanging_box = scene.add_entity(
-        options=gs.entities.FEM(
-            morph=gs.morphs.Box(
-                pos=(0.5, 0.0, 0.6),
-                size=(0.2, 0.2, 0.2),
-            ),
-            material=gs.materials.FEM.Elastic(
-                E=1e4,
-            ),
-            vertices={
-                top_face_selection: fixed_vertex_options,
-            },
+    top_face_selection = [
+        gs.VertexIndex.at(top_verts_idx[:2]),
+        *(gs.VertexIndex.closest_to(pos=pos, max_distance=1e-3) for pos in probe_verts_pos[top_verts_idx[2:]]),
+    ]
+    hanging_box_options = gs.entities.FEM(
+        morph=gs.morphs.Box(
+            pos=(0.5, 0.0, 0.6),
+            size=(0.2, 0.2, 0.2),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1e4,
         ),
     )
+    hanging_box_options.select(top_face_selection).set_is_fixed(True)
+    hanging_box = scene.add_entity(options=hanging_box_options)
 
+    cloth_options = gs.entities.FEM(morph=gs.morphs.Sphere(), material=gs.materials.FEM.Cloth())
     with pytest.raises(gs.GenesisException, match="vertices"):
-        gs.entities.FEM(
-            morph=gs.morphs.Sphere(),
-            material=gs.materials.FEM.Cloth(),
-            vertices={gs.VertexIndex.at(0): gs.options.Vertex()},
-        )
-    for vertex_index, match in (
-        (gs.VertexIndex.closest_to(pos=(0.1, 0.1, 0.2), max_distance=0.05), "max_distance"),
-        (gs.VertexIndex.in_box(lower=(0.2, 0.2, 0.2), upper=(0.3, 0.3, 0.3)), "No vertex"),
-        (gs.VertexIndex.at(probe_verts_pos.shape[0]), "no valid vertex"),
+        cloth_options.select(gs.VertexIndex.at(0)).set_is_fixed(True)
+    for selectors, match in (
+        ((gs.VertexIndex.closest_to(pos=(0.1, 0.1, 0.2), max_distance=0.05),), "max_distance"),
+        ((gs.VertexIndex.in_box(lower=(0.2, 0.2, 0.2), upper=(0.3, 0.3, 0.3)),), "No vertex"),
+        ((gs.VertexIndex.at(probe_verts_pos.shape[0]),), "no valid vertex"),
+        ((gs.VertexIndex.at(0), gs.VertexIndex.at(1)), "holds no vertex"),
     ):
+        rejected_options = hanging_box.options.model_copy()
+        rejected_options.select(*selectors).set_is_fixed(True)
         with pytest.raises(gs.GenesisException, match=match):
-            gs.Scene().add_entity(
-                options=hanging_box.options.model_copy(update={"vertices": {vertex_index: fixed_vertex_options}})
-            )
+            gs.Scene().add_entity(options=rejected_options)
 
     scene.build(n_envs=2)
     for _ in range(N_STEPS):
