@@ -815,9 +815,30 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             )
             kernel_clear_vertex_constraints(self.vertex_constraints)
 
-            for entity in self._entities:
-                if entity._fixed_verts_idx_local.size > 0:
-                    self._set_vertex_constraints(entity._fixed_verts_idx_local + entity._v_start)
+            # The vertices fixed by the settings of the entity options are held at their initial positions
+            fixed_verts_idx = [entity._fixed_verts_idx_local + entity._v_start for entity in self._entities]
+            if any(entity_fixed_verts_idx.size for entity_fixed_verts_idx in fixed_verts_idx):
+                # Imported here to avoid a circular dependency (see 'substep_pre_coupling')
+                from genesis.engine.couplers import IPCCoupler
+
+                if isinstance(self._sim.coupler, IPCCoupler):
+                    gs.raise_exception("Vertex constraints are not supported by the IPC coupler.")
+                target_poss, verts_idx, envs_idx = self._sanitize_io_variables(
+                    None, np.concatenate(fixed_verts_idx), self.n_vertices, "verts_idx", None, (3,), batched_idx=True
+                )
+                kernel_get_values(verts_idx, envs_idx, target_poss, self.fem_state.vertices.pos)
+                kernel_set_vertex_constraints(
+                    verts_idx,
+                    envs_idx,
+                    link_idx=-1,
+                    stiffness=0.0,
+                    target_poss=target_poss,
+                    link_init_pos=torch.zeros((len(envs_idx), 3), dtype=gs.tc_float, device=gs.device),
+                    link_init_quat=torch.zeros((len(envs_idx), 4), dtype=gs.tc_float, device=gs.device),
+                    fem_state=self.fem_state,
+                    vertex_constraints=self.vertex_constraints,
+                    is_soft_constraint=False,
+                )
 
         self._build_gravity(self.fem_info.gravity)
 
@@ -1221,18 +1242,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         envs_idx : None | int | array_like, shape (M,), optional
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
         """
-        self._set_vertex_constraints(verts_idx, target_poss, link_idx, is_soft_constraint, stiffness, envs_idx)
-
-    def _set_vertex_constraints(
-        self,
-        verts_idx: IndexType | None = None,
-        target_poss: np.typing.ArrayLike | torch.Tensor | None = None,
-        link_idx: int = -1,
-        is_soft_constraint: bool = False,
-        stiffness: float = 0.0,
-        envs_idx: IndexType | None = None,
-    ) -> None:
-        """Constrain some vertices (see 'set_vertex_constraints'), also before the scene is built."""
         # Imported here to avoid a circular dependency (see 'substep_pre_coupling')
         from genesis.engine.couplers import IPCCoupler
 

@@ -34,7 +34,7 @@ def main():
             file="xml/franka_emika_panda/panda.xml",
         ),
     )
-    franka_options.select(gs.LinkIndex.named("left_finger", "right_finger")).set_friction(1.5)
+    franka_options.select(gs.indices.Link.named("left_finger", "right_finger")).set_friction(1.5)
     franka = scene.add_entity(options=franka_options)
 
     cube = scene.add_entity(

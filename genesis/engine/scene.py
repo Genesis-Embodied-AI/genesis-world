@@ -396,8 +396,6 @@ class Scene(RBC):
             gs.raise_exception("Pass either entity options or individual entity arguments, never both.")
         if options.morph is None:
             gs.raise_exception("Entity construction requires a morph.")
-        # The entity holds a frozen copy, so that later records on the options leave it as it is
-        options = options._frozen_copy()
         material = options.material
         # The surface resolves on a copy, since other entities may share it. The morph resolves in place, as shared
         # morphs rely on (see 'Entity.options').

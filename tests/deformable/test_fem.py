@@ -641,7 +641,9 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
             E=1e4,
         ),
     )
-    rotated_box_options.select(gs.VertexIndex.in_box(lower=(-0.1, -0.1, 0.1), upper=(0.1, 0.1, 0.1))).set_is_fixed(True)
+    rotated_box_options.select(gs.indices.Vertex.in_box(lower=(-0.1, -0.1, 0.1), upper=(0.1, 0.1, 0.1))).set_is_fixed(
+        True
+    )
     rotated_box = scene.add_entity(options=rotated_box_options)
     # A list holding an ordinal selection of two top corners and the vertices closest to the other two pins the whole
     # top face. The ordinals come from the same box added to a scene that is not built.
@@ -655,10 +657,10 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
     )
     probe_verts_pos = tensor_to_array(probe_box.init_positions)
     top_verts_idx = np.flatnonzero(probe_verts_pos[:, 2] > BOX_SIZE - 1e-6)
-    top_face_selection = [
-        gs.VertexIndex.at(top_verts_idx[:2]),
-        *(gs.VertexIndex.closest_to(pos, max_distance=1e-3) for pos in probe_verts_pos[top_verts_idx[2:]]),
-    ]
+    top_face_selection = (
+        gs.indices.Vertex.at(top_verts_idx[:2]),
+        *(gs.indices.Vertex.closest_to(pos, max_distance=1e-3) for pos in probe_verts_pos[top_verts_idx[2:]]),
+    )
     hanging_box_options = gs.entities.FEM(
         morph=gs.morphs.Box(
             pos=(1.5, 0.0, HEIGHT),
@@ -668,22 +670,25 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
             E=1e4,
         ),
     )
-    hanging_box_options.select(top_face_selection).set_is_fixed(True)
+    hanging_box_options.select(*top_face_selection).set_is_fixed(True)
     hanging_box = scene.add_entity(options=hanging_box_options)
 
     cloth_options = gs.entities.FEM(morph=gs.morphs.Sphere(), material=gs.materials.FEM.Cloth())
     with pytest.raises(gs.GenesisException, match="vertices"):
-        cloth_options.select(gs.VertexIndex.at(0)).set_is_fixed(True)
-    for selectors, match in (
-        ((gs.VertexIndex.closest_to(pos=(0.1, 0.1, 0.2), max_distance=0.05),), "max_distance"),
-        ((gs.VertexIndex.in_box(lower=(0.2, 0.2, 0.2), upper=(0.3, 0.3, 0.3)),), "No vertex"),
-        ((gs.VertexIndex.at(probe_verts_pos.shape[0]),), "no valid vertex"),
-        ((gs.VertexIndex.at(0), gs.VertexIndex.at(1)), "holds no vertex"),
+        cloth_options.select(gs.indices.Vertex.at(0)).set_is_fixed(True)
+    for vertex_index, match in (
+        (gs.indices.Vertex.closest_to(pos=(0.1, 0.1, 0.2), max_distance=0.05), "max_distance"),
+        (gs.indices.Vertex.in_box(lower=(0.2, 0.2, 0.2), upper=(0.3, 0.3, 0.3)), "No vertex"),
+        (gs.indices.Vertex.at(probe_verts_pos.shape[0]), "no valid vertex"),
     ):
         rejected_options = hanging_box.options.model_copy()
-        rejected_options.select(*selectors).set_is_fixed(True)
+        rejected_options.select(vertex_index).set_is_fixed(True)
         with pytest.raises(gs.GenesisException, match=match):
             gs.Scene().add_entity(options=rejected_options)
+    disjoint_options = hanging_box.options.model_copy()
+    disjoint_options.select(gs.indices.Vertex.at(0)).select(gs.indices.Vertex.at(1)).set_is_fixed(True)
+    with pytest.raises(gs.GenesisException, match="holds no vertex"):
+        gs.Scene().add_entity(options=disjoint_options)
 
     scene.build(n_envs=2)
     free_boxes_pos_0 = torch.stack([free_box.get_verts_pos() for free_box in free_boxes])

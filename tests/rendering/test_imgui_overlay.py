@@ -328,7 +328,7 @@ def test_scene_rebuild():
         ),
         name="duck",
     )
-    duck_options.select(gs.GeomIndex.at(slice(None))).set_friction(0.9)
+    duck_options.select(gs.indices.Geom.at(slice(None))).set_friction(0.9)
     scene.add_entity(options=duck_options)
     scene.build()
 

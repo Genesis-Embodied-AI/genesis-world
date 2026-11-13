@@ -572,7 +572,7 @@ def test_collision_filtering(collision_filtering_usd, show_viewer, caplog):
         ),
     )
     stage_options = gs.entities.Rigid(morph=gs.morphs.USD(file=collision_filtering_usd))
-    stage_options.select(gs.LinkIndex.named("base")).set_friction(1.0)
+    stage_options.select(gs.indices.Link.named("base")).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="select no part"):
         scene.add_stage(options=stage_options)
     scene.build()

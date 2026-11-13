@@ -1,17 +1,18 @@
 """Typed options an entity is constructed from, each class deciding the kind of entity and the solver simulating it."""
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from types import TracebackType
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, Self, TypeVar, overload
 
-from pydantic import ConfigDict, Field, InstanceOf, PrivateAttr, StrictBool, model_validator
+from pydantic import ConfigDict, Field, InstanceOf, StrictBool, model_validator
 
 import genesis as gs
 from genesis.engine import materials
 from genesis.engine.materials.base import Material
+from genesis.repr_base import get_public_name
 from genesis.typing import ValidFloat
 
-from .indices import GeomIndex, LinkIndex, VertexIndex
+from . import indices
 from .morphs import Morph
 from .options import Options
 from .surfaces import Surface
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
 
 EntityT = TypeVar("EntityT", bound="Entity")
 
-Selector = LinkIndex | GeomIndex | VertexIndex
+Selector = indices.Link | indices.Geom | indices.Vertex
 
 
 def get_entity_options_cls(material: Material) -> type["BaseEntity"]:
@@ -126,15 +127,17 @@ class Setting(_FrozenOptions):
 
     Parameters
     ----------
-    selectors : tuple[tuple[gs.LinkIndex | gs.GeomIndex | gs.VertexIndex, ...], ...]
-        The groups of selectors of the parts. A part is selected when every group holds it, and a group holds the parts
-        any of its selectors holds. The selectors of one group are of one kind.
+    selectors : tuple[tuple[gs.indices.Link | gs.indices.Geom | gs.indices.Vertex, ...], ...]
+        The selectors of each 'select' call leading to the parts. A part is selected when every call holds it, and a
+        call holds the parts any of its selectors holds. The selectors of one call are of one type.
     block : gs.options.Geom | gs.options.Vertex
         The quantities set on the parts, of which the fields given explicitly apply.
     """
 
     selectors: Annotated[
-        tuple[Annotated[tuple[LinkIndex | GeomIndex | VertexIndex, ...], Field(min_length=1, strict=False)], ...],
+        tuple[
+            Annotated[tuple[indices.Link | indices.Geom | indices.Vertex, ...], Field(min_length=1, strict=False)], ...
+        ],
         Field(min_length=1, strict=False),
     ]
     block: Geom | Vertex
@@ -144,8 +147,8 @@ class Setting(_FrozenOptions):
         for group in self.selectors:
             if len({type(selector) for selector in group}) > 1:
                 gs.raise_exception(
-                    f"A list of selectors holds the parts any of them holds, so they select one kind of part, got "
-                    f"{[type(selector).__name__ for selector in group]}."
+                    "The selectors of one 'select' call are of one type, and selections of different types nest. Got "
+                    f"{[f'gs.{get_public_name(type(selector))}' for selector in group]}."
                 )
         if not self.block.model_fields_set:
             gs.raise_exception(f"gs.options.{type(self.block).__name__} sets no quantity. Give at least one field.")
@@ -155,9 +158,11 @@ class Setting(_FrozenOptions):
     def selection_repr(self) -> str:
         """The selection of the setting on one line, for error messages."""
         return " and ".join(
-            "["
-            + ", ".join(f"{type(selector).__name__}{selector.model_dump(exclude_none=True)}" for selector in group)
-            + "]"
+            "("
+            + " or ".join(
+                f"{get_public_name(type(selector))}{selector.model_dump(exclude_none=True)}" for selector in group
+            )
+            + ")"
             for group in self.selectors
         )
 
@@ -168,8 +173,9 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
     A concrete subclass decides the kind of entity and the solver simulating it, and declares the materials it admits,
     the selectors of its parts and the blocks of quantities set on them. The fields are fixed at construction, while
     ``select`` records into the options the quantities set on parts of the entity, where the kind of entity has parts.
-    ``Scene.add_entity`` keeps a frozen copy, which records nothing more, so later records leave the entity as it is. A
-    copy of the options (``model_copy()``) records again, starting from the settings recorded so far.
+    The entity holds a frozen copy, whose settings are a tuple recording nothing more, so later records leave the
+    entity as it is. A copy of the options (``model_copy()``) records into a list of its own, starting from the settings
+    recorded so far.
 
     Parameters
     ----------
@@ -181,22 +187,22 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
         The appearance of the entity, its visualization mode included. If None, use ``gs.surfaces.Default()``.
     name : str | None, optional
         The name of the entity, unique within the scene. If None, a name is generated from the morph.
-    settings : tuple[gs.options.Setting, ...], optional
-        The quantities set on selections of parts of the entity, in the order they were set (see ``select``). Default
-        is none.
+    settings : list[gs.options.Setting] | tuple[gs.options.Setting, ...], optional
+        The quantities set on selections of parts of the entity, in the order they were set (see ``select``), a tuple
+        once frozen. Default is none.
     """
 
+    # Whether the kind of entity admits several morphs, one per variant of a heterogeneous entity
+    _admits_variants: ClassVar[bool] = False
     # Selectors of the parts of the entity, and blocks of the quantities set on them, that the kind of entity admits
-    _selector_types: ClassVar[tuple[type[LinkIndex | GeomIndex | VertexIndex], ...]] = ()
+    _selector_types: ClassVar[tuple[type[indices.Link | indices.Geom | indices.Vertex], ...]] = ()
     _block_types: ClassVar[tuple[type[Geom | Vertex], ...]] = ()
 
     # Checked by instance alone, since validation would run the validators of 'Morph' on the sequence of morphs
     morph: InstanceOf[Morph] | Annotated[tuple[InstanceOf[Morph], ...], Field(strict=False)] | None = None
     surface: Surface | None = None
     name: str | None = None
-    settings: tuple[Setting, ...] = ()
-
-    _is_frozen: bool = PrivateAttr(default=False)
+    settings: list[Setting] | tuple[Setting, ...] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -215,22 +221,30 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
 
     @model_validator(mode="after")
     def _check_settings(self) -> Self:
+        if isinstance(self.morph, tuple) and not self._admits_variants:
+            gs.raise_exception(
+                f"An entity of gs.entities.{type(self).__name__} is created from one morph, got {len(self.morph)}."
+            )
         for setting in self.settings:
-            for group in setting.selectors:
-                if not isinstance(group[0], self._selector_types):
-                    gs.raise_exception(
-                        f"gs.entities.{type(self).__name__} selects no part with gs.{type(group[0]).__name__}."
-                    )
-            if not isinstance(setting.block, self._block_types):
-                gs.raise_exception(
-                    f"gs.entities.{type(self).__name__} sets no gs.options.{type(setting.block).__name__} on its parts."
-                )
+            self._check_setting(setting)
         return self
 
     def __copy__(self) -> Self:
         options = super().__copy__()
-        options._is_frozen = False
+        # A copy records into a list of its own, frozen or not
+        options.__dict__["settings"] = list(self.settings)
         return options
+
+    def _check_setting(self, setting: Setting) -> None:
+        for group in setting.selectors:
+            if not isinstance(group[0], self._selector_types):
+                gs.raise_exception(
+                    f"gs.entities.{type(self).__name__} selects no part with gs.{get_public_name(type(group[0]))}."
+                )
+        if not isinstance(setting.block, self._block_types):
+            gs.raise_exception(
+                f"gs.entities.{type(self).__name__} sets no gs.options.{type(setting.block).__name__} on its parts."
+            )
 
     @property
     def morphs(self) -> tuple[Morph, ...]:
@@ -241,19 +255,17 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
 
     def _frozen_copy(self, update: dict[str, Any] | None = None) -> Self:
         """Return a copy of these options, with the fields 'update' gives, that records no more settings."""
-        options = self.model_copy(update=update)
-        options._is_frozen = True
-        return options
+        return self.model_copy(update={**(update or {}), "settings": tuple(self.settings)})
 
     def _record(self, settings: tuple[Setting, ...]) -> None:
-        """Record settings after those recorded so far, validated as the options would be at construction."""
-        if self._is_frozen:
+        """Record settings after those recorded so far, each checked as at construction."""
+        if isinstance(self.settings, tuple):
             gs.raise_exception(
                 "The options an entity holds are frozen. Select parts on a copy of them ('model_copy()') instead."
             )
-        # Every validator runs on the options holding the new settings, whose settings are then adopted
-        options = type(self)(**{**dict(self), "settings": (*self.settings, *settings)})
-        object.__setattr__(self, "settings", options.settings)
+        for setting in settings:
+            self._check_setting(setting)
+        self.settings.extend(settings)
         self.__pydantic_fields_set__.add("settings")
 
 
@@ -269,7 +281,7 @@ class _PartSelection(Generic[OptionsT]):
     """
 
     def __init__(
-        self, options: OptionsT, selectors: tuple[tuple[LinkIndex | GeomIndex | VertexIndex, ...], ...]
+        self, options: OptionsT, selectors: tuple[tuple[indices.Link | indices.Geom | indices.Vertex, ...], ...]
     ) -> None:
         self._options = options
         self._selectors = selectors
@@ -287,30 +299,21 @@ class _PartSelection(Generic[OptionsT]):
         return self
 
 
-def _get_selector_groups(
-    selectors: tuple["Selector | Sequence[Selector]", ...], selector_types: tuple[type["Selector"], ...]
-) -> tuple[type["Selector"], tuple[tuple["Selector", ...], ...]]:
-    """Return the type of the selectors given to 'select', and their groups, a list holding what any member holds.
-
-    The selectors are of one type among 'selector_types', the selectors of a level the selection admits.
-    """
-    groups = tuple(
-        (selector,) if isinstance(selector, (LinkIndex, GeomIndex, VertexIndex)) else tuple(selector)
-        for selector in selectors
-    )
-    selector_types_given = {type(selector) for group in groups for selector in group}
+def _get_selector_type(
+    selectors: tuple["Selector", ...], selector_types: tuple[type["Selector"], ...]
+) -> type["Selector"]:
+    """Return the type of the selectors given to one 'select' call, one among 'selector_types' a selection admits."""
+    selector_types_given = {type(selector) for selector in selectors}
     if len(selector_types_given) != 1:
         gs.raise_exception(
-            "'select' takes selectors of one type, and selections of different types nest. Got "
-            f"{sorted(selector_type.__name__ for selector_type in selector_types_given)}."
+            "'select' takes at least one selector, all of one type, and selections of different types nest. Got "
+            f"{sorted(f'gs.{get_public_name(selector_type)}' for selector_type in selector_types_given)}."
         )
     (selector_type,) = selector_types_given
     if not issubclass(selector_type, selector_types):
-        gs.raise_exception(
-            f"This selection selects with {[selector_type.__name__ for selector_type in selector_types]}, got "
-            f"{selector_type.__name__}."
-        )
-    return selector_type, groups
+        selector_names = [f"gs.{get_public_name(selector_type)}" for selector_type in selector_types]
+        gs.raise_exception(f"This selection selects with {selector_names}, got gs.{get_public_name(selector_type)}.")
+    return selector_type
 
 
 class _GeomSetters(_PartSelection[OptionsT]):
@@ -340,38 +343,35 @@ class _GeomSetters(_PartSelection[OptionsT]):
 class GeomSelection(_GeomSetters[OptionsT]):
     """A selection of collision geoms of an entity (see ``gs.entities.Rigid.select``)."""
 
-    def select(self, *selectors: GeomIndex | Sequence[GeomIndex]) -> "GeomSelection[OptionsT]":
-        """Return the selection of the geoms of this selection that every argument holds."""
-        _, groups = _get_selector_groups(selectors, (GeomIndex,))
-        return GeomSelection(self._options, (*self._selectors, *groups))
+    def select(self, *selectors: indices.Geom) -> "GeomSelection[OptionsT]":
+        """Return the selection of the geoms of this selection that any of the selectors holds."""
+        _get_selector_type(selectors, (indices.Geom,))
+        return GeomSelection(self._options, (*self._selectors, selectors))
 
 
 class LinkSelection(_GeomSetters[OptionsT]):
     """A selection of links of an entity, whose geom setters apply to every geom of the links (see ``select``)."""
 
     @overload
-    def select(self, *selectors: LinkIndex | Sequence[LinkIndex]) -> "LinkSelection[OptionsT]": ...
+    def select(self, *selectors: indices.Link) -> "LinkSelection[OptionsT]": ...
 
     @overload
-    def select(self, *selectors: GeomIndex | Sequence[GeomIndex]) -> GeomSelection[OptionsT]: ...
+    def select(self, *selectors: indices.Geom) -> GeomSelection[OptionsT]: ...
 
-    def select(
-        self, *selectors: LinkIndex | GeomIndex | Sequence[LinkIndex] | Sequence[GeomIndex]
-    ) -> "LinkSelection[OptionsT] | GeomSelection[OptionsT]":
-        """Return the selection of the links, or the geoms, of this selection that every argument holds."""
-        selector_type, groups = _get_selector_groups(selectors, (LinkIndex, GeomIndex))
-        if selector_type is GeomIndex:
-            return GeomSelection(self._options, (*self._selectors, *groups))
-        return LinkSelection(self._options, (*self._selectors, *groups))
+    def select(self, *selectors: indices.Link | indices.Geom) -> "LinkSelection[OptionsT] | GeomSelection[OptionsT]":
+        """Return the selection of the links, or the geoms, of this selection that any of the selectors holds."""
+        if _get_selector_type(selectors, (indices.Link, indices.Geom)) is indices.Geom:
+            return GeomSelection(self._options, (*self._selectors, selectors))
+        return LinkSelection(self._options, (*self._selectors, selectors))
 
 
 class VertexSelection(_PartSelection[OptionsT]):
     """A selection of vertices of a deformable entity (see ``gs.entities.FEM.select``)."""
 
-    def select(self, *selectors: VertexIndex | Sequence[VertexIndex]) -> "VertexSelection[OptionsT]":
-        """Return the selection of the vertices of this selection that every argument holds."""
-        _, groups = _get_selector_groups(selectors, (VertexIndex,))
-        return VertexSelection(self._options, (*self._selectors, *groups))
+    def select(self, *selectors: indices.Vertex) -> "VertexSelection[OptionsT]":
+        """Return the selection of the vertices of this selection that any of the selectors holds."""
+        _get_selector_type(selectors, (indices.Vertex,))
+        return VertexSelection(self._options, (*self._selectors, selectors))
 
     def set(self, *blocks: Vertex) -> Self:
         """Set on the selected vertices the fields each block gives explicitly, overriding an earlier call."""
@@ -394,35 +394,33 @@ class Rigid(BaseEntity["RigidEntity"]):
         arrow is drawn every frame, so reserve it for the entities being inspected. Default is False.
     """
 
-    _selector_types = (LinkIndex, GeomIndex)
+    _admits_variants = True
+    _selector_types = (indices.Link, indices.Geom)
     _block_types = (Geom,)
 
     material: materials.Rigid = Field(default_factory=materials.Rigid)
     visualize_contact: StrictBool = False
 
     @overload
-    def select(self, *selectors: LinkIndex | Sequence[LinkIndex]) -> LinkSelection[Self]: ...
+    def select(self, *selectors: indices.Link) -> LinkSelection[Self]: ...
 
     @overload
-    def select(self, *selectors: GeomIndex | Sequence[GeomIndex]) -> GeomSelection[Self]: ...
+    def select(self, *selectors: indices.Geom) -> GeomSelection[Self]: ...
 
-    def select(
-        self, *selectors: LinkIndex | GeomIndex | Sequence[LinkIndex] | Sequence[GeomIndex]
-    ) -> LinkSelection[Self] | GeomSelection[Self]:
-        """Select the links, or the collision geoms, that every argument holds, to set quantities of their geoms on.
+    def select(self, *selectors: indices.Link | indices.Geom) -> LinkSelection[Self] | GeomSelection[Self]:
+        """Select the links, or the collision geoms, that any of the selectors holds, to set the quantities of geoms on.
 
-        An argument is a selector, or a list of selectors holding the parts any of them holds, all of one type. Select
-        links and geoms together by nesting: ``options.select(fingers).select(gs.GeomIndex.named("pad*"))``.
+        The selectors of one call are of one type, and a call on a selection keeps the parts both hold, so links and
+        geoms select together by nesting: ``options.select(fingers).select(gs.indices.Geom.named("pad*"))``.
 
         A quantity set on links applies to every collision geom of those links. For each field of each geom, a value
         set on a geom selection overrides a value set on links, which overrides the material. Between two selections of
         one of these levels, the later one applies. A selection that holds no geom of the entity, or of one of its
         heterogeneous variants, raises when the entity is added.
         """
-        selector_type, groups = _get_selector_groups(selectors, self._selector_types)
-        if selector_type is GeomIndex:
-            return GeomSelection(self, groups)
-        return LinkSelection(self, groups)
+        if _get_selector_type(selectors, self._selector_types) is indices.Geom:
+            return GeomSelection(self, (selectors,))
+        return LinkSelection(self, (selectors,))
 
 
 class Kinematic(BaseEntity["KinematicEntity"]):
@@ -433,6 +431,8 @@ class Kinematic(BaseEntity["KinematicEntity"]):
     material : gs.materials.Kinematic, optional
         The material of the entity. Defaults to ``gs.materials.Kinematic()``.
     """
+
+    _admits_variants = True
 
     material: materials.Kinematic = Field(default_factory=materials.Kinematic)
 
@@ -447,26 +447,24 @@ class FEM(BaseEntity["FEMEntity"]):
         takes no settings.
     """
 
-    _selector_types = (VertexIndex,)
+    _selector_types = (indices.Vertex,)
     _block_types = (Vertex,)
 
     material: materials.FEM.Base
 
-    @model_validator(mode="after")
-    def _check_cloth_settings(self) -> Self:
-        if isinstance(self.material, materials.FEM.Cloth) and self.settings:
+    def _check_setting(self, setting: Setting) -> None:
+        if isinstance(self.material, materials.FEM.Cloth):
             gs.raise_exception("gs.entities.FEM cannot honour settings of vertices for a Cloth material.")
-        return self
+        super()._check_setting(setting)
 
-    def select(self, *selectors: VertexIndex | Sequence[VertexIndex]) -> VertexSelection[Self]:
-        """Select the vertices of the volume mesh that every argument holds, to set quantities on.
+    def select(self, *selectors: indices.Vertex) -> VertexSelection[Self]:
+        """Select the vertices of the volume mesh that any of the selectors holds, to set quantities on.
 
-        An argument is a selector, or a list of selectors holding the vertices any of them holds. Between two selections
-        setting one field of one vertex, the later one applies. A selection that holds no vertex raises when the entity
-        is added.
+        A call on a selection keeps the vertices both hold. Between two selections setting one field of one vertex, the
+        later one applies. A selection that holds no vertex raises when the entity is added.
         """
-        _, groups = _get_selector_groups(selectors, self._selector_types)
-        return VertexSelection(self, groups)
+        _get_selector_type(selectors, self._selector_types)
+        return VertexSelection(self, (selectors,))
 
 
 class MPM(BaseEntity["MPMEntity"]):
@@ -520,7 +518,7 @@ class Hybrid(BaseEntity["HybridEntity"]):
 
 # The class of entity options each material class goes to, the one each options class declares for its material. A
 # material takes the class of the nearest of its bases (see 'get_entity_options_cls').
-_OPTIONS_CLS_BY_MATERIAL_CLS: dict[type[Material], type[BaseEntity]] = {
+_OPTIONS_CLS_BY_MATERIAL_CLS: dict[type[Any] | None, type[BaseEntity]] = {
     options_cls.model_fields["material"].annotation: options_cls
     for options_cls in (Rigid, Kinematic, FEM, MPM, SPH, PBD, Hybrid)
 }

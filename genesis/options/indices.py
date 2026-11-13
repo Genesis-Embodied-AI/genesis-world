@@ -1,29 +1,70 @@
 """Selectors of the links, geoms and vertices of an entity, which entity options select parts of it with."""
 
 from fnmatch import fnmatchcase
+from functools import reduce
 from typing import Annotated, Self
 
 import numpy as np
 
-from pydantic import ConfigDict, Field, StrictBool, model_validator
+from pydantic import ConfigDict, Field, SerializeAsAny, StrictBool, model_validator
 
 import genesis as gs
+from genesis.repr_base import get_public_name
 from genesis.typing import IArrayType, PositiveFloat, StrArrayType, StrictInt, Vec3FType
 
 from .options import Options
 
 
 class _Selection(Options):
-    """A selector of the parts of an entity, which entity options select with (see ``gs.entities.Rigid.select``)."""
+    """A selector of the parts of an entity, which entity options select with (see ``gs.entities.Rigid.select``).
+
+    Selectors of one type combine with ``|``, holding the parts either holds, and with ``&``, holding the parts both
+    hold. A combination keeps its members as given and resolves them as the entity is added.
+    """
 
     model_config = ConfigDict(frozen=True)
 
+    # Dumped as the selectors they are, whose fields their base does not declare
+    members: Annotated[tuple[SerializeAsAny["_Selection"], ...], Field(min_length=2, strict=False)] | None = None
+    is_intersection: StrictBool = False
 
-class LinkIndex(_Selection):
+    def __or__(self, other: Self) -> Self:
+        return self._combine(other, is_intersection=False)
+
+    def __and__(self, other: Self) -> Self:
+        return self._combine(other, is_intersection=True)
+
+    def _combine(self, other: Self, is_intersection: bool) -> Self:
+        if type(other) is not type(self):
+            return NotImplemented
+        # A combination of the same operator flattens, so that 'a | b | c' holds three members
+        members = [
+            member
+            for selector in (self, other)
+            for member in (
+                selector.members
+                if selector.members is not None and selector.is_intersection == is_intersection
+                else (selector,)
+            )
+        ]
+        return type(self)(members=members, is_intersection=is_intersection)
+
+    def _resolve_members(self, parts_idx: list[np.ndarray]) -> np.ndarray:
+        """Combine the indices of the parts each member holds, as the operator of the combination does."""
+        return reduce(np.intersect1d if self.is_intersection else np.union1d, parts_idx)
+
+
+class Link(_Selection):
     """Select the links of an entity by name, or the links of the subtrees under some links (see ``named``)."""
 
-    names: Annotated[StrArrayType, Field(min_length=1)]
+    names: Annotated[StrArrayType, Field(min_length=1)] | None = None
     is_subtree: StrictBool = False
+
+    @model_validator(mode="after")
+    def _check_single_selection(self) -> Self:
+        if (self.names is None) == (self.members is None):
+            gs.raise_exception("gs.indices.Link takes names, or members combined with '|' or '&'.")
+        return self
 
     @classmethod
     def named(cls, *names: str) -> Self:
@@ -51,6 +92,8 @@ class LinkIndex(_Selection):
 
         'links_path' holds the names from the root of the kinematic tree down to each link.
         """
+        if self.members is not None:
+            return self._resolve_members([member.resolve(links_path) for member in self.members])
         links_name = [link_path[-1] for link_path in links_path]
         unknown_names = [name for name in self.names if not any(fnmatchcase(l_name, name) for l_name in links_name)]
         if unknown_names:
@@ -79,14 +122,19 @@ class _OrdinalIndex(_Selection):
 
     @classmethod
     def at(cls, idx: "int | slice | np.typing.ArrayLike") -> Self:
-        """Select the elements a numpy index picks: an ordinal, ordinals or a slice."""
+        """Select the elements a numpy index picks: an ordinal, ordinals or a slice.
+
+        The index counts the elements of the whole entity, whichever selection it is selected in, in the order the
+        entity lists them: its collision geoms link after link in the order of ``entity.links``, as the asset states
+        them before post-processing (see ``Geom``), or the vertices of its volume mesh.
+        """
         if isinstance(idx, slice):
             return cls(span=(idx.start, idx.stop, idx.step))
         idx = np.atleast_1d(idx)
         if not np.issubdtype(idx.dtype, np.integer):
             gs.raise_exception(
-                f"{cls.__name__}.at takes integer ordinals or a slice, not {idx.dtype}. Convert a boolean mask with "
-                "'np.flatnonzero'."
+                f"gs.{get_public_name(cls)}.at takes integer ordinals or a slice, not {idx.dtype}. Convert a boolean "
+                "mask with 'np.flatnonzero'."
             )
         return cls(ordinals=tuple(idx.tolist()))
 
@@ -99,9 +147,9 @@ class _OrdinalIndex(_Selection):
         try:
             ordinals = np.unique(np.arange(n, dtype=gs.np_int)[idx])
         except (IndexError, ValueError) as e:
-            gs.raise_exception_from(f"{type(self).__name__} selects no valid {domain} among {n}: {self}.", e)
+            gs.raise_exception_from(f"gs.{get_public_name(type(self))} selects no valid {domain} among {n}: {self}.", e)
         if ordinals.size == 0:
-            gs.raise_exception(f"{type(self).__name__} selects no {domain}: {self}.")
+            gs.raise_exception(f"gs.{get_public_name(type(self))} selects no {domain}: {self}.")
         return ordinals
 
 
@@ -112,8 +160,11 @@ class _NamedOrdinalIndex(_OrdinalIndex):
 
     @model_validator(mode="after")
     def _check_single_selection(self) -> Self:
-        if sum(selection is not None for selection in (self.ordinals, self.span, self.names)) != 1:
-            gs.raise_exception(f"{type(self).__name__} takes one of ordinals, a span and names.")
+        if sum(selection is not None for selection in (self.ordinals, self.span, self.names, self.members)) != 1:
+            gs.raise_exception(
+                f"gs.{get_public_name(type(self))} takes one of ordinals, a span, names and members combined with '|' or "
+                "'&'."
+            )
         return self
 
     @classmethod
@@ -130,6 +181,8 @@ class _NamedOrdinalIndex(_OrdinalIndex):
 
     def resolve(self, geoms_name: list[str]) -> np.ndarray:
         """Return the ordinals of the selected geoms, given the names of every geom, raising on a name matching none."""
+        if self.members is not None:
+            return self._resolve_members([member.resolve(geoms_name) for member in self.members])
         if self.names is None:
             return self._resolve_ordinals(len(geoms_name), "geom")
         unknown_names = [name for name in self.names if not any(fnmatchcase(g_name, name) for g_name in geoms_name)]
@@ -139,14 +192,13 @@ class _NamedOrdinalIndex(_OrdinalIndex):
         return np.flatnonzero(is_selected).astype(gs.np_int, copy=False)
 
 
-class GeomIndex(_NamedOrdinalIndex):
+class Geom(_NamedOrdinalIndex):
     """Select collision geoms by their ordinal in the asset or by name.
 
-    An ordinal counts the collision geoms of the whole entity, link after link in the order of the asset.
-    Post-processing splits a geom into convex pieces and fuses geoms with identical properties, which renumbers them,
-    so the ordinal counts the collision geoms as the asset states them, and selecting one selects every piece it is
-    split into. Geoms whose values differ are never fused, so a value set on a selection never reaches a geom it does
-    not hold.
+    An ordinal counts the collision geoms of the whole entity (see ``at``). Post-processing splits a geom into convex
+    pieces and fuses geoms with identical properties, which renumbers them in ``entity.geoms``, so the ordinal counts
+    the collision geoms as the asset states them, and selecting one selects every piece it is split into. Geoms whose
+    values differ are never fused, so a value set on a selection never reaches a geom it does not hold.
 
     A name is matched against the names the asset gives its collision geoms, as an exact name or a glob pattern,
     case-sensitively whatever the platform, a literal '*', '?' or '[' being enclosed in brackets ('pad[[]1]' selects
@@ -156,7 +208,7 @@ class GeomIndex(_NamedOrdinalIndex):
     """
 
 
-class VertexIndex(_OrdinalIndex):
+class Vertex(_OrdinalIndex):
     """Select vertices of an entity, by ordinal or by position in the frame of its morph.
 
     A selection resolves once, as the entity is added, on the vertices of its simulation mesh. The frame of the morph
@@ -170,11 +222,13 @@ class VertexIndex(_OrdinalIndex):
 
     @model_validator(mode="after")
     def _check_single_selection(self) -> Self:
-        selections = (self.ordinals, self.span, self.box, self.closest_pos)
+        selections = (self.ordinals, self.span, self.box, self.closest_pos, self.members)
         if sum(selection is not None for selection in selections) != 1:
-            gs.raise_exception("Select vertices with one of 'VertexIndex.at', 'in_box' and 'closest_to'.")
+            gs.raise_exception(
+                "Select vertices with one of 'Vertex.at', 'in_box' and 'closest_to', combined with '|' or '&'."
+            )
         if (self.closest_pos is None) != (self.max_distance is None):
-            gs.raise_exception("'VertexIndex.closest_to' takes a position and a max distance together.")
+            gs.raise_exception("'Vertex.closest_to' takes a position and a max distance together.")
         if self.box is not None and any(lower > upper for lower, upper in zip(*self.box)):
             gs.raise_exception(f"The lower corner {self.box[0]} of a box exceeds its upper corner {self.box[1]}.")
         return self
@@ -191,6 +245,8 @@ class VertexIndex(_OrdinalIndex):
 
     def resolve(self, verts_pos: np.ndarray) -> np.ndarray:
         """Return the sorted indices of the selected vertices, given their positions in the frame of the morph."""
+        if self.members is not None:
+            return self._resolve_members([member.resolve(verts_pos) for member in self.members])
         if self.box is not None:
             # A vertex on a bound counts as inside, within a rounding error of its position that scales with the mesh
             tol = 1e-6 * max(np.ptp(verts_pos, axis=0).max(), 1.0)
