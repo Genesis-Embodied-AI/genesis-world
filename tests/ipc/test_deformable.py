@@ -55,7 +55,7 @@ def test_robot_grasp_fem(coup_type, show_viewer):
     )
 
     scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.Plane(),
             material=gs.materials.Rigid(
                 coup_friction=0.8,
@@ -72,7 +72,7 @@ def test_robot_grasp_fem(coup_type, show_viewer):
         material_kwargs["coup_links"] = ("left_finger", "right_finger")
 
     franka = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.MJCF(
                 file="xml/franka_emika_panda/panda_non_overlap.xml",
             ),
@@ -81,19 +81,21 @@ def test_robot_grasp_fem(coup_type, show_viewer):
     )
 
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=BOX_POS,
-            size=(0.05, 0.05, 0.05),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=5.0e4,
-            nu=0.45,
-            rho=1000.0,
-            friction_mu=0.5,
-            model="stable_neohookean",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.2, 0.8, 0.2, 0.5),
+        spec=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=BOX_POS,
+                size=(0.05, 0.05, 0.05),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.2, 0.8, 0.2, 0.5),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=5.0e4,
+                nu=0.45,
+                rho=1000.0,
+                friction_mu=0.5,
+                model="stable_neohookean",
+            ),
         ),
     )
 
@@ -202,18 +204,20 @@ def test_cloth_corner_drag(n_envs, show_viewer):
 
     asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/IPC/grid20x20.obj",
-            scale=2 * CLOTH_HALF,
-            pos=(-CLOTH_HALF, 0.0, -CLOTH_HALF),
-        ),
-        material=gs.materials.FEM.Cloth(
-            E=1e4,
-            nu=0.3,
-            rho=200.0,
-            friction_mu=0.8,
-            thickness=0.001,
-            bending_stiffness=None,
+        spec=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/IPC/grid20x20.obj",
+                scale=2 * CLOTH_HALF,
+                pos=(-CLOTH_HALF, 0.0, -CLOTH_HALF),
+            ),
+            material=gs.materials.FEM.Cloth(
+                E=1e4,
+                nu=0.3,
+                rho=200.0,
+                friction_mu=0.8,
+                thickness=0.001,
+                bending_stiffness=None,
+            ),
         ),
     )
 
@@ -221,7 +225,7 @@ def test_cloth_corner_drag(n_envs, show_viewer):
     boxes = []
     for z_sign in (+1, -1):
         box = scene.add_entity(
-            options=gs.entities.Rigid(
+            spec=gs.entities.Rigid(
                 morph=gs.morphs.Box(
                     size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
                     pos=(-BOX_SIZE, z_sign * (0.5 * BOX_SIZE + GAP), -BOX_SIZE),
@@ -309,19 +313,21 @@ def test_cloth_uniform_biaxial_stretching(E, nu, strech_scale, n_envs, show_view
 
     asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/IPC/grid20x20.obj",
-            scale=2 * CLOTH_HALF,
-            pos=(0.0, 0.0, 0.0),
-            euler=(90, 0, 0),
-        ),
-        material=gs.materials.FEM.Cloth(
-            E=E,
-            nu=nu,
-            rho=200.0,
-            friction_mu=0.8,
-            thickness=THICKNESS,
-            bending_stiffness=None,
+        spec=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/IPC/grid20x20.obj",
+                scale=2 * CLOTH_HALF,
+                pos=(0.0, 0.0, 0.0),
+                euler=(90, 0, 0),
+            ),
+            material=gs.materials.FEM.Cloth(
+                E=E,
+                nu=nu,
+                rho=200.0,
+                friction_mu=0.8,
+                thickness=THICKNESS,
+                bending_stiffness=None,
+            ),
         ),
     )
 
@@ -330,7 +336,7 @@ def test_cloth_uniform_biaxial_stretching(E, nu, strech_scale, n_envs, show_view
     for x_sign, y_sign in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
         for z_sign in (+1, -1):
             box = scene.add_entity(
-                options=gs.entities.Rigid(
+                spec=gs.entities.Rigid(
                     morph=gs.morphs.Box(
                         size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
                         pos=(

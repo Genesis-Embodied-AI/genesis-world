@@ -35,7 +35,7 @@ def main():
 
     # floor
     plane = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Plane(
                 pos=(0.0, 0.0, -0.5),
             ),
@@ -47,7 +47,7 @@ def main():
 
     # user specified external color texture
     scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/sphere.obj",
                 scale=0.5,
@@ -62,7 +62,7 @@ def main():
     )
     # user specified color (using color shortcut)
     scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/sphere.obj",
                 scale=0.5,
@@ -75,7 +75,7 @@ def main():
     )
     # smooth shortcut
     scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/sphere.obj",
                 scale=0.5,
@@ -88,7 +88,7 @@ def main():
     )
     # Iron
     scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/sphere.obj",
                 scale=0.5,
@@ -101,7 +101,7 @@ def main():
     )
     # Gold
     scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/sphere.obj",
                 scale=0.5,
@@ -114,7 +114,7 @@ def main():
     )
     # Glass
     scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/sphere.obj",
                 scale=0.5,
@@ -127,7 +127,7 @@ def main():
     )
     # Opacity
     scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/sphere.obj",
                 scale=0.5,
@@ -140,7 +140,7 @@ def main():
     )
     # asset's own attributes
     scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/wooden_sphere_OBJ/wooden_sphere.obj",
                 scale=0.15,
@@ -150,7 +150,7 @@ def main():
     )
     # override asset's attributes
     scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/wooden_sphere_OBJ/wooden_sphere.obj",
                 scale=0.15,

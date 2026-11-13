@@ -31,9 +31,15 @@ def main():
         show_FPS=True,
     )
 
-    plane = scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     r0 = scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        ),
     )
 
     scene.build()

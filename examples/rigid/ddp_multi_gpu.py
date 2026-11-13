@@ -56,12 +56,17 @@ def run_worker(args: argparse.Namespace) -> None:
         show_viewer=args.vis and local_rank == 0,
         show_FPS=False,
     )
-    scene.add_entity(gs.morphs.Plane())
-    franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
+    scene.add_entity(
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
         ),
-        visualize_contact=True,
+    )
+    franka = scene.add_entity(
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+        ),
     )
     scene.build(n_envs=args.num_envs)
 

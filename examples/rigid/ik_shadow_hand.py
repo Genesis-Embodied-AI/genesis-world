@@ -22,7 +22,7 @@ def main():
     )
 
     target_1 = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/axis.obj",
                 scale=0.05,
@@ -34,7 +34,7 @@ def main():
     )
 
     target_2 = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/axis.obj",
                 scale=0.05,
@@ -45,7 +45,7 @@ def main():
         ),
     )
     target_3 = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/axis.obj",
                 scale=0.05,
@@ -56,7 +56,7 @@ def main():
         ),
     )
     robot = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.URDF(
                 scale=1.0,
                 file="urdf/shadow_hand/shadow_hand.urdf",

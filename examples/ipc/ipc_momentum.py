@@ -36,22 +36,24 @@ def main():
     # FEM bodies use StableNeoHookean constitution, Rigid bodies use ABD constitution
     # FEM entities (added to IPC as deformable bodies)
     blob = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.3, 0.0, 0.4),
-            radius=0.1,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e5,
-            nu=0.45,
-            rho=1000.0,
-            model="stable_neohookean",
+        spec=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=(0.3, 0.0, 0.4),
+                radius=0.1,
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1.0e5,
+                nu=0.45,
+                rho=1000.0,
+                model="stable_neohookean",
+            ),
         ),
     )
 
     # Rigid bodies (added to both Genesis rigid solver AND IPC as ABD objects)
     # This enables contact between rigid bodies and FEM bodies through IPC
     rigid_cube = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.Box(
                 pos=(0.0, 0.0, 0.4),
                 size=(0.1, 0.1, 0.1),

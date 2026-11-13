@@ -33,10 +33,12 @@ def main():
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     franka = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.MJCF(
                 file="xml/franka_emika_panda/panda.xml",
             ),
@@ -47,7 +49,7 @@ def main():
         ),
     )
     cube = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.Box(
                 size=(0.04, 0.04, 0.04),
                 pos=(0.65, 0.0, 0.02),

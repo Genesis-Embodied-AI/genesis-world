@@ -22,10 +22,14 @@ scene = gs.Scene(
 
 
 scene.add_entity(
-    gs.morphs.Plane(),
+    spec=gs.entities.Rigid(
+        morph=gs.morphs.Plane(),
+    ),
 )
 robot = scene.add_entity(
-    gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+    spec=gs.entities.Rigid(
+        morph=gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+    ),
 )
 
 scene.build()

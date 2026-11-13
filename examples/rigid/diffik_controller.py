@@ -31,7 +31,7 @@ def main():
     )
 
     plane = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Plane(),
         ),
     )
@@ -39,7 +39,7 @@ def main():
     robot_config = config[args.robot]
     mjcf_file = robot_config["mjcf_file"]
     robot = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.MJCF(
                 file=mjcf_file,
             ),
@@ -49,7 +49,7 @@ def main():
     print("links=", robot.links)
 
     target_entity = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/axis.obj",
                 scale=0.10,

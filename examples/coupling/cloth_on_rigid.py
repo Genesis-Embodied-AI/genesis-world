@@ -37,14 +37,14 @@ def main():
     )
 
     plane = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.Plane(),
             material=frictionless_rigid,
         ),
     )
 
     obj = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.Sphere(
                 radius=0.2,
                 pos=(0.0, 0.0, 0.0),
@@ -55,15 +55,17 @@ def main():
     )
 
     cloth = scene.add_entity(
-        material=gs.materials.PBD.Cloth(),
-        morph=gs.morphs.Mesh(
-            file="meshes/cloth.obj",
-            scale=1.0,
-            pos=(0.0, 0.0, 0.3),
-            euler=(180.0, 0.0, 0.0),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.4, 0.8, 1.0),
+        spec=gs.entities.PBD(
+            morph=gs.morphs.Mesh(
+                file="meshes/cloth.obj",
+                scale=1.0,
+                pos=(0.0, 0.0, 0.3),
+                euler=(180.0, 0.0, 0.0),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.4, 0.8, 1.0),
+            ),
+            material=gs.materials.PBD.Cloth(),
         ),
     )
 

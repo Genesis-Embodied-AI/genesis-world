@@ -29,18 +29,24 @@ def main():
         show_viewer=args.vis,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     robot = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/go2/urdf/go2.urdf",
-            pos=(0.0, 0.0, 0.42),
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/go2/urdf/go2.urdf",
+                pos=(0.0, 0.0, 0.42),
+            ),
         ),
     )
 
     # The ghost is a kinematic entity: it visualizes the commanded pose without taking part in the dynamics.
     ghost = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.URDF(
                 file="urdf/go2/urdf/go2.urdf",
                 pos=(0.0, 0.0, 0.42),

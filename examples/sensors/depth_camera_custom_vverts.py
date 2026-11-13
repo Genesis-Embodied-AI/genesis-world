@@ -45,12 +45,18 @@ def main():
     )
 
     # Rigid entities (RigidSolver)
-    plane = scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     go2 = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/go2/urdf/go2.urdf",
-            pos=(0.0, 0.0, 0.42),
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/go2/urdf/go2.urdf",
+                pos=(0.0, 0.0, 0.42),
+            ),
         ),
     )
 
@@ -62,7 +68,7 @@ def main():
     sphere_tri = trimesh.Trimesh(vertices=sphere_verts, faces=sphere_tri.faces, process=False)
 
     kin_sphere = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.MeshSet(
                 files=(sphere_tri,),
                 pos=(0, 0, 0),
@@ -83,7 +89,7 @@ def main():
     box_tri.vertices += np.array([0.0, 1.0, 0.15], dtype=np.float32)
 
     kin_box = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.MeshSet(
                 files=(box_tri,),
                 pos=(0, 0, 0),

@@ -21,13 +21,17 @@ def main():
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(),
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml", pos=(0.0, 0.0, 0.0)),
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml", pos=(0.0, 0.0, 0.0)),
+        ),
     )
     scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.MJCF(
                 file="xml/franka_emika_panda/panda.xml",
                 pos=(0.0, 1.0, 0.0),
@@ -38,7 +42,7 @@ def main():
         ),
     )
     scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.MJCF(
                 file="xml/franka_emika_panda/panda.xml",
                 pos=(0.0, 2.0, 0.0),

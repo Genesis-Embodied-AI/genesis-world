@@ -49,7 +49,7 @@ def main():
 
     # create ground plane
     scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.Plane(),
             material=rigid_material,
         ),
@@ -57,7 +57,7 @@ def main():
 
     box_morph = gs.morphs.Box(pos=[0.25, 0.25, 0.25], size=[0.25, 0.25, 0.25])
     box = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=box_morph,
             material=rigid_material,
         ),
@@ -68,7 +68,13 @@ def main():
     cloth_morph = gs.morphs.Mesh(pos=cloth_pos, scale=cloth_scale, file="meshes/cloth.obj")
     cloth_material = gs.materials.PBD.Cloth()
     cloth_surface = gs.surfaces.Default(color=(0.2, 0.4, 0.8, 1.0))  # , vis_mode="particle")
-    cloth = scene.add_entity(cloth_morph, cloth_material, cloth_surface)
+    cloth = scene.add_entity(
+        spec=gs.entities.PBD(
+            morph=cloth_morph,
+            surface=cloth_surface,
+            material=cloth_material,
+        ),
+    )
 
     scene.build(n_envs=0)
 

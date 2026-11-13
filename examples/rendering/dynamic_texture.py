@@ -234,7 +234,9 @@ def main():
         show_viewer=args.vis,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     asset_path = snapshot_download(
         repo_type="dataset",

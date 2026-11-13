@@ -68,7 +68,11 @@ def main():
     )
 
     # Add flat floor
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     # Add Franka robot
     franka_material_kwargs = dict(
@@ -77,7 +81,7 @@ def main():
     if args.coup_type == "two_way_soft_constraint":
         franka_material_kwargs["coup_links"] = ("left_finger", "right_finger")
     franka = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.MJCF(
                 file="xml/franka_emika_panda/panda_non_overlap.xml",
                 pos=(0.0, 0.0, 0.005),
@@ -95,41 +99,45 @@ def main():
         max_workers=1,
     )
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{cloth_asset_path}/IPC/grid20x20.obj",
-            scale=0.5,
-            pos=(0.5, 0.0, 0.1),
-            euler=(90, 0, 0),
-        ),
-        material=gs.materials.FEM.Cloth(
-            E=6e4,
-            nu=0.49,
-            rho=200,
-            friction_mu=0.5,
-            thickness=0.001,
-            bending_stiffness=10.0,
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.3, 0.1, 0.8, 1.0),
+        spec=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=f"{cloth_asset_path}/IPC/grid20x20.obj",
+                scale=0.5,
+                pos=(0.5, 0.0, 0.1),
+                euler=(90, 0, 0),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.3, 0.1, 0.8, 1.0),
+            ),
+            material=gs.materials.FEM.Cloth(
+                E=6e4,
+                nu=0.49,
+                rho=200,
+                friction_mu=0.5,
+                thickness=0.001,
+                bending_stiffness=10.0,
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{cloth_asset_path}/IPC/grid20x20.obj",
-            scale=0.3,
-            pos=(0.5, 0.0, 0.14),
-            euler=(90, 0, 0),
-        ),
-        material=gs.materials.FEM.Cloth(
-            E=6e4,
-            nu=0.49,
-            rho=200,
-            friction_mu=0.5,
-            thickness=0.001,
-            bending_stiffness=40.0,
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.3, 0.5, 0.8, 1.0),
+        spec=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=f"{cloth_asset_path}/IPC/grid20x20.obj",
+                scale=0.3,
+                pos=(0.5, 0.0, 0.14),
+                euler=(90, 0, 0),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.3, 0.5, 0.8, 1.0),
+            ),
+            material=gs.materials.FEM.Cloth(
+                E=6e4,
+                nu=0.49,
+                rho=200,
+                friction_mu=0.5,
+                thickness=0.001,
+                bending_stiffness=40.0,
+            ),
         ),
     )
 
@@ -142,7 +150,7 @@ def main():
             x = (i + 1.7) * grid_spacing
             y = (j - 1.5) * grid_spacing
             scene.add_entity(
-                options=gs.entities.Rigid(
+                spec=gs.entities.Rigid(
                     morph=gs.morphs.Box(
                         pos=(x, y, cube_height),
                         size=(cube_size, cube_size, cube_size),

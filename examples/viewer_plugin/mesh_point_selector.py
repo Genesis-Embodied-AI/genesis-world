@@ -263,7 +263,7 @@ if __name__ == "__main__":
     vis_mode = "visual" if args.use_visual_geom else "collision"
 
     hand = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.URDF(
                 file="urdf/shadow_hand/shadow_hand.urdf",
                 collision=True,
@@ -279,7 +279,7 @@ if __name__ == "__main__":
         ),
     )
     duck = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.Mesh(
                 file="meshes/duck/duck.obj",
                 pos=(0.0, 0.3, 0.0),

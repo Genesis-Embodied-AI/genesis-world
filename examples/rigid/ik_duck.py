@@ -23,7 +23,7 @@ def main():
     )
 
     robot = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/duck.obj",
                 scale=0.06,
@@ -33,7 +33,7 @@ def main():
     )
 
     target_entity = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/axis.obj",
                 scale=0.15,

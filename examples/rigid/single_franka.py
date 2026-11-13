@@ -21,13 +21,17 @@ def main():
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(),
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+            visualize_contact=True,
         ),
-        visualize_contact=True,
     )
 
     cam_0 = scene.add_camera(

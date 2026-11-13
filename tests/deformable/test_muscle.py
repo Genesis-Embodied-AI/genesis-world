@@ -30,7 +30,7 @@ def test_muscle(n_envs, muscle_material, use_implicit_solver, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.Plane(),
             material=gs.materials.Rigid(
                 coup_friction=5.0,

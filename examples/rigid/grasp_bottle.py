@@ -29,22 +29,26 @@ def main():
     )
 
     plane = scene.add_entity(
-        gs.morphs.URDF(file="urdf/plane/plane.urdf", fixed=True),
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.URDF(file="urdf/plane/plane.urdf", fixed=True),
+        ),
     )
     bottle = scene.add_entity(
-        material=gs.materials.Rigid(
-            rho=300,
-        ),
-        morph=gs.morphs.URDF(
-            file="urdf/3763/mobility_vhacd.urdf",
-            scale=0.09,
-            pos=(0.65, 0.0, 0.036),
-            euler=(0, 90, 0),
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/3763/mobility_vhacd.urdf",
+                scale=0.09,
+                pos=(0.65, 0.0, 0.036),
+                euler=(0, 90, 0),
+            ),
+            material=gs.materials.Rigid(
+                rho=300,
+            ),
         ),
     )
     # Grippy finger pads, the rest of the arm keeping the friction its asset states
     franka = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.MJCF(
                 file="xml/franka_emika_panda/panda.xml",
             ),

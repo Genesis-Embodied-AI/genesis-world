@@ -29,7 +29,9 @@ def main():
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
 
     # Only entities opting into visual raycasting can be grabbed with --use-visual-geom.
@@ -39,7 +41,7 @@ def main():
     vis_mode = "visual" if args.use_visual_geom else "collision"
 
     scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.Sphere(
                 pos=(-0.3, -0.3, 0),
                 radius=0.1,
@@ -51,7 +53,7 @@ def main():
         ),
     )
     scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.Mesh(
                 file="meshes/duck/duck.obj",
                 pos=(0.0, 0.0, 0.5),
@@ -67,7 +69,7 @@ def main():
         angle = i * (2 * math.pi / 6)
         radius = 0.5 + i * 0.1
         scene.add_entity(
-            options=gs.entities.Rigid(
+            spec=gs.entities.Rigid(
                 morph=gs.morphs.Box(
                     pos=(radius * math.cos(angle), radius * math.sin(angle), 0.1 + i * 0.1),
                     size=(0.2, 0.2, 0.2),

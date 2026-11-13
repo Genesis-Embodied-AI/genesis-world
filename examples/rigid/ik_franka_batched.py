@@ -24,12 +24,12 @@ def main():
     )
 
     plane = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Plane(),
         ),
     )
     robot = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.MJCF(
                 file="xml/franka_emika_panda/panda.xml",
             ),
@@ -37,7 +37,7 @@ def main():
     )
 
     target_entity = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.Mesh(
                 file="meshes/axis.obj",
                 scale=0.15,

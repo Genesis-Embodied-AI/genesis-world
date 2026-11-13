@@ -36,7 +36,7 @@ def main():
     )
 
     plane = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.URDF(
                 file="urdf/plane/plane.urdf",
                 fixed=True,
@@ -52,7 +52,7 @@ def main():
         coup_softness=0.0,
     )
     wheel_0 = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.URDF(
                 file="urdf/wheel/wheel.urdf",
                 pos=(0.5, -0.2, 1.6),
@@ -66,7 +66,7 @@ def main():
     )
 
     wheel_0 = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.URDF(
                 file="urdf/wheel/wheel.urdf",
                 pos=(0.5, 0.3, 1.2),
@@ -80,7 +80,7 @@ def main():
     )
 
     wheel_0 = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.URDF(
                 file="urdf/wheel/wheel.urdf",
                 pos=(0.5, -0.3, 0.8),
@@ -94,7 +94,7 @@ def main():
     )
 
     wheel_0 = scene.add_entity(
-        options=gs.entities.Rigid(
+        spec=gs.entities.Rigid(
             morph=gs.morphs.URDF(
                 file="urdf/wheel/wheel.urdf",
                 pos=(0.5, 0.4, 0.4),
@@ -108,10 +108,12 @@ def main():
     )
 
     emitter = scene.add_emitter(
-        material=gs.materials.MPM.Sand(),
         max_particles=200000,
-        surface=gs.surfaces.Rough(
-            color=(1.0, 0.9, 0.6, 1.0),
+        spec=gs.entities.MPM(
+            surface=gs.surfaces.Rough(
+                color=(1.0, 0.9, 0.6, 1.0),
+            ),
+            material=gs.materials.MPM.Sand(),
         ),
     )
     scene.build(n_envs=0)
