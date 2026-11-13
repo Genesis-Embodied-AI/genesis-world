@@ -34,8 +34,8 @@ EntityT = TypeVar("EntityT", bound="Entity")
 Selector = LinkIndex | GeomIndex | VertexIndex
 
 
-def get_entity_options_cls(material: Material) -> type["BaseEntity"] | None:
-    """Return the class of entity options of the solver simulating a material, or None if no solver simulates it.
+def get_entity_options_cls(material: Material) -> type["BaseEntity"]:
+    """Return the class of entity options of the solver simulating a material, raising if no solver simulates it.
 
     A material goes to the class of the nearest of its bases that the solvers of Genesis simulate, so a subclass a user
     declares goes where the material it derives from goes.
@@ -44,7 +44,7 @@ def get_entity_options_cls(material: Material) -> type["BaseEntity"] | None:
         options_cls = _OPTIONS_CLS_BY_MATERIAL_CLS.get(material_cls)
         if options_cls is not None:
             return options_cls
-    return None
+    gs.raise_exception(f"No entity options admit material {type(material).__name__}.")
 
 
 def get_entity_options(
@@ -62,8 +62,6 @@ def get_entity_options(
     the options refuse an argument their class has no field for.
     """
     options_cls = Rigid if material is None else get_entity_options_cls(material)
-    if options_cls is None:
-        gs.raise_exception(f"No entity options admit material {type(material).__name__}.")
     # Heterogeneous morphs may come as any iterable of morphs
     if isinstance(morph, Iterable) and not isinstance(morph, Morph):
         morph = tuple(morph)
@@ -115,8 +113,9 @@ class Vertex(_FrozenOptions):
     is_fixed : bool, optional
         Whether the vertices stay at their initial positions, as a hard constraint the solver enforces at every
         substep. It holds an entity in place by a few vertices, such as a soft pad clamped by one face. The vertices are
-        vertex constraints from the build on, which ``FEMEntity.remove_vertex_constraints`` releases like any other. The
-        IPC coupler does not support it, so a Cloth material rejects it. Default is False.
+        vertex constraints from the build on, which ``FEMEntity.remove_vertex_constraints`` releases like any other. A
+        Cloth material takes no fixed vertices, since the IPC coupler simulating it has no vertex constraints. Default is
+        False.
     """
 
     is_fixed: StrictBool = False
@@ -207,13 +206,10 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
         material = data.get("material")
         if isinstance(material, Material) and "material" in cls.model_fields:
             options_cls = get_entity_options_cls(material)
-            if options_cls is None or not issubclass(cls, options_cls):
-                options_name = "the entity options of its solver"
-                if options_cls is not None:
-                    options_name = f"gs.entities.{options_cls.__name__}"
+            if not issubclass(cls, options_cls):
                 gs.raise_exception(
                     f"gs.entities.{cls.__name__} cannot take material {type(material).__name__} of another solver. "
-                    f"Pass it to {options_name} instead."
+                    f"Pass it to gs.entities.{options_cls.__name__} instead."
                 )
         return data
 
@@ -522,13 +518,9 @@ class Hybrid(BaseEntity["HybridEntity"]):
     material: materials.Hybrid
 
 
-# The class of entity options each material class goes to, a material taking that of the nearest of its bases
+# The class of entity options each material class goes to, the one each options class declares for its material. A
+# material takes the class of the nearest of its bases (see 'get_entity_options_cls').
 _OPTIONS_CLS_BY_MATERIAL_CLS: dict[type[Material], type[BaseEntity]] = {
-    materials.Rigid: Rigid,
-    materials.Kinematic: Kinematic,
-    materials.FEM.Base: FEM,
-    materials.MPM.Base: MPM,
-    materials.SPH.Base: SPH,
-    materials.PBD.Base: PBD,
-    materials.Hybrid: Hybrid,
+    options_cls.model_fields["material"].annotation: options_cls
+    for options_cls in (Rigid, Kinematic, FEM, MPM, SPH, PBD, Hybrid)
 }
