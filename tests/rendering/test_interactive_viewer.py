@@ -9,13 +9,13 @@ import pytest
 
 import av
 import OpenGL.error
-from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
 
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.options.sensors import RasterizerCameraOptions
 from genesis.recorders.trajectory import TRAJECTORY_FORMAT, Trajectory
 from genesis.utils.misc import tensor_to_array
+from genesis.utils.video_encoder import VideoEncoder
 from genesis.vis.keybindings import Key, KeyAction, Keybind, KeyMod, MouseButton
 from genesis.vis.viewer_plugins.plugins.mouse_interaction import GRAB_ACC
 
@@ -306,15 +306,15 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
     # The encoding of a frame blocks until released, which must not hold up the simulation.
     is_encoding, is_encoder_released = threading.Event(), threading.Event()
 
-    class BlockingVideoWriter(FFMPEG_VideoWriter):
-        def write_frame(self, img_array):
+    class BlockingVideoEncoder(VideoEncoder):
+        def write(self, frame):
             is_encoding.set()
             is_encoder_released.wait()
-            super().write_frame(img_array)
+            super().write(frame)
 
     monkeypatch.setattr(
-        "moviepy.video.io.ffmpeg_writer.FFMPEG_VideoWriter",
-        functools.partial(BlockingVideoWriter, codec="libx264rgb", ffmpeg_params=["-qp", "0"], pixel_format="rgb24"),
+        "genesis.ext.pyrender.viewer.VideoEncoder",
+        functools.partial(BlockingVideoEncoder, codec="libx264rgb", codec_options={"qp": "0"}, pix_fmt="rgb24"),
     )
 
     # Mock 'on_key_release' to determine whether requests have been processed
