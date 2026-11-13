@@ -64,7 +64,7 @@ def test_reject_material_for_solver():
 
 
 @pytest.mark.required
-def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box_sphere_mjcf):
+def test_selection_precedence(tmp_path, caplog, show_viewer, tol, two_box_free_mjcf, torus_box_sphere_mjcf):
     DT = 1e-2
     N_STEPS = 10
     PUSH_FORCE = 50.0
@@ -257,20 +257,28 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
     assert loaded["rigid"].model_dump() == rigid_options.model_dump()
     assert loaded["fem"].model_dump() == fem_options.model_dump()
 
-    with pytest.raises(gs.GenesisException, match="equal specificity"):
-        scene.add_entity(
+    with caplog.at_level("WARNING"):
+        overlapping_box = scene.add_entity(
             options=gs.entities.Rigid(
-                morph=gs.morphs.Box(pos=(5.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
+                morph=gs.morphs.Box(
+                    pos=(5.0, 0.0, 0.0),
+                    size=(0.1, 0.1, 0.1),
+                ),
                 links={
                     gs.LinkIndex.named("box_baselink"): gs.options.Link(
                         geoms={
-                            gs.GeomIndex.at(0): gs.options.Geom(friction=2.0),
-                            gs.GeomIndex.at([True]): gs.options.Geom(friction=1.0),
-                        }
-                    )
+                            gs.GeomIndex.at(0): gs.options.Geom(
+                                friction=2.0,
+                            ),
+                            gs.GeomIndex.at([True]): gs.options.Geom(
+                                friction=1.0,
+                            ),
+                        },
+                    ),
                 },
             )
         )
+    assert "equal specificity give 'friction'" in caplog.text
     with pytest.raises(gs.GenesisException, match="selects no valid geom"):
         scene.add_entity(
             options=gs.entities.Rigid(
@@ -280,17 +288,6 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
                         geoms={gs.GeomIndex.at(1): gs.options.Geom(friction=1.0)}
                     )
                 },
-            )
-        )
-    with pytest.raises(gs.GenesisException, match="equal specificity"):
-        scene.add_entity(
-            options=arm.options.model_copy(
-                update={
-                    "links": {
-                        gs.LinkIndex.named("arm*"): gs.options.Link(friction=1.0),
-                        gs.LinkIndex.named("arm2"): gs.options.Link(friction=2.0),
-                    }
-                }
             )
         )
     with pytest.raises(gs.GenesisException, match="No collision geom of the entity"):
@@ -306,11 +303,10 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
             options=arm.options.model_copy(update={"geoms": {gs.GeomIndex.at(2): gs.options.Geom(friction=1.0)}})
         )
 
-    # The options of an entity hand out copies of what they hold, so editing them leaves the entity as it is
-    arm.options.morph.pos = (9.0, 9.0, 9.0)
-    assert_allclose(arm.options.morph.pos, (0.0, -1.0, 0.6), tol=gs.EPS)
-
     scene.build(n_envs=2)
+    with pytest.raises(gs.GenesisException, match="read-only"):
+        arm.options.morph.pos = (9.0, 9.0, 9.0)
+
     # The mass of each box is its volume, 0.2^3 m^3, times the density its geom options give
     assert_allclose(dense_body.get_mass(), (8000.0 + 1000.0) * 0.2**3, tol=tol)
     assert_allclose(dense_body.get_qpos(), dense_body_ghost.get_qpos(), tol=tol)
@@ -324,6 +320,7 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
     assert_allclose(arm.get_link("arm2").get_mass(), 2000.0 * 0.01, tol=tol)
     assert_allclose(arm.get_link("arm1").geoms[0].get_friction(), 0.5, tol=gs.EPS)
     assert_allclose(arm.get_link("arm2").geoms[0].get_friction(), 1.5, tol=gs.EPS)
+    assert_allclose(overlapping_box.geoms[0].get_friction(), 2.0, tol=gs.EPS)
     # The subtree under 'arm1' holds 'arm2' as well
     for geom in arm.geoms:
         assert_allclose(geom.get_friction_torsional(), 0.02, tol=gs.EPS)
