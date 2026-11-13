@@ -38,7 +38,7 @@ SNAPSHOTS_LOCK_PATH = os.path.join(TEST_DIR, "snapshots.lock")
 @cache
 def get_snapshots_revision():
     with open(SNAPSHOTS_LOCK_PATH, encoding="utf-8") as f:
-        return dict(line.split() for line in f if line.strip())
+        return dict(line.split() for line in f)
 
 
 @cache

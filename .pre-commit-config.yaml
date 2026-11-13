@@ -7,3 +7,23 @@ repos:
     - id: ruff-check
     # Run the formatter.
     - id: ruff-format
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v6.0.0
+  hooks:
+    - id: file-contents-sorter
+      files: ^tests/snapshots\.lock$
+- repo: local
+  hooks:
+    - id: snapshots-lock-format
+      name: snapshots lock format
+      description: Each line of the snapshots lock is a snapshot path and the 40-hex commit pinning it.
+      language: pygrep
+      entry: '^(?!\S+/__snapshots__/\S+ [0-9a-f]{40}$)'
+      files: ^tests/snapshots\.lock$
+    - id: snapshots-lock-duplicates
+      name: snapshots lock duplicates
+      description: A snapshot path is pinned once.
+      language: pygrep
+      entry: '^(\S+) [0-9a-f]{40}\n\1 '
+      args: [--multiline]
+      files: ^tests/snapshots\.lock$
