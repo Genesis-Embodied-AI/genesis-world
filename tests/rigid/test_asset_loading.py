@@ -224,8 +224,9 @@ def test_parsing_inertia_defaults(
     undefined_inertia,
     undefined_inertia_arm,
     degenerate_inertials,
-    zero_density_marker_mjcf,
     implicit_inertial_origin_chain,
+    authored_geom_density_mjcf,
+    mjcf_geom_density_defaults,
     show_viewer,
     tol,
     caplog,
@@ -242,6 +243,7 @@ def test_parsing_inertia_defaults(
     # Principal moments per unit mass of the two geometries a recovered inertia is derived from.
     SPHERE_INERTIA_PER_MASS = 2.0 * 0.06**2 / 5.0
     BOX_INERTIA_PER_MASS = 2.0 * 0.2**2 / 12.0
+    CUBE_VOLUME = 0.2**3
     GRAVITY = (0.0, 0.0, -9.81)
 
     scene = gs.Scene(
@@ -293,7 +295,8 @@ def test_parsing_inertia_defaults(
     entity_mounted.attach(carrier_welded, parent_link_name=carrier_welded.base_link.name, pos=(0.0, 0.0, 0.2))
     entity_zero_density = scene.add_entity(
         morph=gs.morphs.MJCF(
-            file=zero_density_marker_mjcf,
+            file=authored_geom_density_mjcf,
+            pos=(0.0, -2.0, -0.5),
         ),
     )
     entity_chain_unmerged = scene.add_entity(
@@ -403,6 +406,39 @@ def test_parsing_inertia_defaults(
     )
     stacked_tip.attach(stacked_middle, parent_link_name=stacked_middle.base_link.name, pos=(0.0, 0.0, 0.2))
     stacked_middle.attach(stacked_base, parent_link_name=stacked_base.base_link.name, pos=(0.0, 0.0, 0.2))
+    # Every collision geom of these assets keeps the density the file states for it, recomputed or not. The mounted
+    # copies hang in parallel rows from the zero-density link of the scaled one, so that none of them overlap.
+    entity_density = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=authored_geom_density_mjcf,
+            pos=(0.0, 4.0, 0.0),
+            recompute_inertia=True,
+            convexify=False,
+        ),
+    )
+    entity_density_scaled = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=authored_geom_density_mjcf,
+            pos=(0.0, 7.0, 0.0),
+            scale=2.0,
+            recompute_inertia=True,
+        ),
+    )
+    entities_density_mounted = []
+    for i_e, (xml, _, material_density) in enumerate(mjcf_geom_density_defaults):
+        entity_density_mounted = scene.add_entity(
+            morph=gs.morphs.MJCF(
+                file=xml,
+                batch_fixed_verts=True,
+            ),
+            material=gs.materials.Rigid(
+                rho=material_density,
+            ),
+        )
+        entity_density_mounted.attach(
+            entity_density_scaled, parent_link_name="weightless", pos=(0.0, 0.5 * (i_e + 1), 0.0)
+        )
+        entities_density_mounted.append(entity_density_mounted)
 
     with caplog.at_level("WARNING"):
         scene.build()
@@ -410,6 +446,56 @@ def test_parsing_inertia_defaults(
     # A 0.1 m cube of each entity's own density, rather than both taking the density of the one they hang from.
     assert_allclose(stacked_middle.base_link.get_mass(), 2000.0 * 0.1**3, tol=gs.EPS)
     assert_allclose(stacked_tip.base_link.get_mass(), 8000.0 * 0.1**3, tol=gs.EPS)
+
+    masses = {link.name: link.get_mass() for link in entity_density.links}
+    assert_allclose(masses["on_geom"], 250.0 * CUBE_VOLUME, tol=gs.EPS)
+    assert_allclose(masses["on_class"], 1000.0 * CUBE_VOLUME, tol=gs.EPS)
+    assert_allclose(masses["on_default"], 1000.0 * CUBE_VOLUME, tol=gs.EPS)
+    assert_allclose(masses["unstated"], 1000.0 * CUBE_VOLUME, tol=gs.EPS)
+    assert_allclose(masses["mixed"], (250.0 + 1000.0) * CUBE_VOLUME, tol=gs.EPS)
+    assert_allclose(masses["fused"], 10.0, tol=gs.EPS)
+    assert_allclose(masses["weighed"], 5.0 + 1000.0 * CUBE_VOLUME, tol=gs.EPS)
+    # The unscaled copy watertightens the open mesh and the scaled one decomposes it, which keeps the mass alone
+    assert_allclose(masses["weighed_mesh"], 5.0, tol=gs.EPS)
+    assert_allclose(entity_density_scaled.get_link("weighed_mesh").get_mass(), 5.0 * 2.0**3, tol=gs.EPS)
+    assert_allclose(masses["weightless"], gs.EPS, tol=gs.EPS)
+    assert_equal(entity_density.get_link("weightless").desc.inertia, 0.0)
+
+    assert_allclose(entity_density.get_link("mixed").get_pos(relative=False), (4.18, 4.0, 1.0), tol=gs.EPS)
+    assert_allclose(entity_density.get_link("fused").get_pos(relative=False), (5.12, 4.0, 1.0), tol=gs.EPS)
+    # A geom stating its mass beside one stating none leaves the link aligned on its center of mass, recomputed or not
+    weighed_com_x = 3.0 + 0.3 * (1000.0 * CUBE_VOLUME - 5.0) / (5.0 + 1000.0 * CUBE_VOLUME)
+    assert_allclose(entity_density.get_link("weighed").get_pos(relative=False), (weighed_com_x, 4.0, 1.0), tol=gs.EPS)
+    assert_allclose(entity_density.get_link("weighed_pair").get_pos(relative=False), (-1.76, 4.0, 1.0), tol=gs.EPS)
+    assert_allclose(
+        entity_zero_density.get_link("weighed").get_pos(relative=False), (weighed_com_x, -2.0, 0.5), tol=gs.EPS
+    )
+    assert_allclose(
+        entity_density.get_link("on_geom").desc.inertia, np.eye(3) * 250.0 * CUBE_VOLUME * 0.2**2 / 6.0, tol=gs.EPS
+    )
+
+    for name in ("on_geom", "on_class", "on_default", "unstated", "mixed", "fused", "weighed"):
+        link = entity_density.get_link(name)
+        scaled_link = entity_density_scaled.get_link(name)
+        assert_allclose(scaled_link.get_mass(), link.get_mass() * 2.0**3, tol=gs.EPS, err_msg=name)
+        assert_allclose(scaled_link.desc.inertial_pos, link.desc.inertial_pos * 2.0, tol=gs.EPS, err_msg=name)
+        assert_allclose(scaled_link.desc.inertia, link.desc.inertia * 2.0**5, tol=gs.EPS, err_msg=name)
+
+    # An explicit material density overrides every density of the file, as it does for URDF
+    for entity_density_mounted, (_, root_density, material_density) in zip(
+        entities_density_mounted, mjcf_geom_density_defaults
+    ):
+        if material_density is not None:
+            geoms_mass = np.full(7, material_density) * CUBE_VOLUME
+        else:
+            density = 1000.0 if root_density is None else root_density
+            geoms_mass = np.array([density, 1000.0, 1000.0, 0.0, 500.0, 250.0, 250.0]) * CUBE_VOLUME
+        center = np.dot(geoms_mass, np.arange(7)) / geoms_mass.sum()
+        inertia = np.eye(3) * geoms_mass.sum() * 0.2**2 / 6.0
+        inertia[1, 1] += np.dot(geoms_mass, (np.arange(7) - center) ** 2)
+        inertia[2, 2] = inertia[1, 1]
+        assert_allclose(entity_density_mounted.base_link.get_mass(), geoms_mass.sum(), tol=gs.EPS)
+        assert_allclose(entity_density_mounted.base_link.desc.inertia, inertia, tol=gs.EPS)
 
     # The link 'no_inertial' has no inertial element, so its whole inertial is the geometry estimate. Every link carries
     # the same sphere, so this mass is the reference for the recovered masses below.
@@ -435,9 +521,9 @@ def test_parsing_inertia_defaults(
         # The fixed child 'bob' carries the mass, so 'connector' keeps a zero inertia and a zero mass floored at gs.EPS.
         (entity.get_link("connector"), gs.EPS, GEOM_POS, 0.0),
         (entity.get_link("bob"), 1.0, GEOM_POS, BOB_INERTIA_PER_MASS),
-        # The geom of 'marker' has a zero density and 'hull' carries the mass, so the marker keeps a zero mass.
-        (entity_zero_density.get_link("hull"), 8.0, (0.0, 0.0, 0.0), BOX_INERTIA_PER_MASS),
-        (entity_zero_density.get_link("marker"), gs.EPS, (0.0, 0.0, 0.0), 0.0),
+        # The geom of 'weightless' has a zero density and 'unstated' carries the mass, so it keeps a zero mass.
+        (entity_zero_density.get_link("unstated"), 8.0, (0.0, 0.0, 0.0), BOX_INERTIA_PER_MASS),
+        (entity_zero_density.get_link("weightless"), gs.EPS, (0.0, 0.0, 0.0), 0.0),
     ):
         assert_allclose(link.desc.mass, expected_mass, rtol=1e-6, err_msg=link.name)
         assert_allclose(link.desc.inertial_pos, expected_com, tol=tol, err_msg=link.name)
