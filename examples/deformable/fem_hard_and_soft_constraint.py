@@ -87,7 +87,7 @@ def main():
 
     blob = scene.add_entity(options=blob_options)
     cube = scene.add_entity(options=cube_options)
-    scene.add_entity(options=cylinder_options)
+    cylinder = scene.add_entity(options=cylinder_options)
 
     # Recording every simulation step would be far denser than any player needs, and the step size here is tiny.
     video_fps = min(100.0, 1.0 / args.dt)
