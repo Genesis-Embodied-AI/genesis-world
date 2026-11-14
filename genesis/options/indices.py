@@ -133,10 +133,9 @@ class _OrdinalIndex(_Selection):
         The index is local to the selection it is selected in, as the ``*_idx_local`` arguments of the entity getters
         are local to the entity. Selected on the entity options, it counts the elements of the whole entity. Selected on
         a link selection, it counts the collision geoms of each selected link apart, so
-        ``options.select(fingers).select(gs.indices.Geom.at(0))`` selects the first geom of every finger. Selected on a
-        vertex selection, it counts the selected vertices. The elements count in the order the entity lists them: its
-        collision geoms link after link in the order of ``entity.links``, as the asset states them before
-        post-processing (see ``Geom``), or the vertices of its volume mesh.
+        ``options.select(fingers).select(gs.indices.Geom.at(0))`` selects the first geom of every finger. The elements
+        count in the order the entity lists them: its collision geoms link after link in the order of ``entity.links``,
+        as the asset states them before post-processing (see ``Geom``), or the vertices of its volume mesh.
         """
         if isinstance(idx, slice):
             return cls(span=(idx.start, idx.stop, idx.step))

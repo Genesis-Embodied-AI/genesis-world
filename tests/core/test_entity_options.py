@@ -171,15 +171,15 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
     with rigid_options.select(gs.indices.Link.named("box_baselink")) as box_link:
         box_link.select(gs.indices.Geom.at([0])).set_rho(1000.0)
         box_link.select(gs.indices.Geom.at(slice(0, 1))).set_friction_rolling(0.001)
-    rigid_options.select(gs.indices.Geom.named("box*"), gs.indices.Geom.named("*")).set_friction(2.0)
+    rigid_options.select(gs.indices.Geom.named("box*") | gs.indices.Geom.named("*")).set_friction(2.0)
     fem_options = gs.entities.FEM(
         morph=gs.morphs.Box(
             size=(0.1, 0.1, 0.1),
         ),
         material=gs.materials.FEM.Elastic(),
     )
-    corners = (gs.indices.Vertex.at(0), gs.indices.Vertex.closest_to(pos=(0.05, 0.05, 0.05), max_distance=0.01))
-    fem_options.select(*corners).set_is_fixed(True)
+    corners = gs.indices.Vertex.at(0) | gs.indices.Vertex.closest_to(pos=(0.05, 0.05, 0.05), max_distance=0.01)
+    fem_options.select(corners).set_is_fixed(True)
     fem_options.select(gs.indices.Vertex.at(slice(0, 4)) & (gs.indices.Vertex.at(0) | gs.indices.Vertex.at(1))).set(
         gs.options.Vertex(is_fixed=False)
     )
@@ -205,12 +205,12 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
         scene.add_entity(morph=gs.morphs.Sphere(), options=gs.entities.Rigid(morph=gs.morphs.Sphere()))
     with pytest.raises(gs.GenesisException, match="got gs.indices.Vertex"):
         gs.entities.Rigid(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1))).select(gs.indices.Vertex.at(0)).set_friction(1.0)
-    with pytest.raises(gs.GenesisException, match="all of one type"):
-        box_options.select(gs.indices.Link.named("box_baselink"), gs.indices.Geom.at(0)).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="got gs.indices.Link"):
-        box_options.select(gs.indices.Geom.at(0)).select(gs.indices.Link.named("box_baselink")).set_friction(1.0)
+        box_options.select(gs.indices.Link.named("box_baselink")).select(gs.indices.Link.named("box_baselink"))
     with pytest.raises(gs.GenesisException, match="frozen"):
         box.options.name = "renamed_box"
+    with pytest.raises(gs.GenesisException, match="frozen"):
+        box_options.selection_blocks = ()
     with pytest.raises(gs.GenesisException, match="sets no quantity"):
         box_options.select(gs.indices.Geom.at(0)).set(gs.options.Geom())
     out_of_range_options = box_options.model_copy()

@@ -645,7 +645,7 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
         True
     )
     rotated_box = scene.add_entity(options=rotated_box_options)
-    # A list holding an ordinal selection of two top corners and the vertices closest to the other two pins the whole
+    # The union of an ordinal selection of two top corners and of the vertices closest to the other two pins the whole
     # top face. The ordinals come from the same box added to a scene that is not built.
     probe_box = gs.Scene().add_entity(
         options=gs.entities.FEM(
@@ -657,10 +657,9 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
     )
     probe_verts_pos = tensor_to_array(probe_box.init_positions)
     top_verts_idx = np.flatnonzero(probe_verts_pos[:, 2] > BOX_SIZE - 1e-6)
-    top_face_selection = (
-        gs.indices.Vertex.at(top_verts_idx[:2]),
-        *(gs.indices.Vertex.closest_to(pos, max_distance=1e-3) for pos in probe_verts_pos[top_verts_idx[2:]]),
-    )
+    top_face_selection = gs.indices.Vertex.at(top_verts_idx[:2])
+    for pos in probe_verts_pos[top_verts_idx[2:]]:
+        top_face_selection = top_face_selection | gs.indices.Vertex.closest_to(pos, max_distance=1e-3)
     hanging_box_options = gs.entities.FEM(
         morph=gs.morphs.Box(
             pos=(1.5, 0.0, HEIGHT),
@@ -670,7 +669,7 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
             E=1e4,
         ),
     )
-    hanging_box_options.select(*top_face_selection).set_is_fixed(True)
+    hanging_box_options.select(top_face_selection).set_is_fixed(True)
     hanging_box = scene.add_entity(options=hanging_box_options)
 
     cloth_options = gs.entities.FEM(morph=gs.morphs.Sphere(), material=gs.materials.FEM.Cloth())
