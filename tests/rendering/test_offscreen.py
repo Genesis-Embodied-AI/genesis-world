@@ -202,8 +202,7 @@ def test_emissive_composites(base_plus_emissive_glb, show_viewer, renderer):
 
 @pytest.mark.required
 def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
-    # The camera sensor renders through a rasterizer of its own, so it receives the drawn pixels independently of the
-    # camera.
+    # The camera sensor renders through a rasterizer of its own, which receives the drawn pixels apart from the camera.
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, 0.0, 4.0),
