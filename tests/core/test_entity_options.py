@@ -45,7 +45,7 @@ def torus_box_sphere_mjcf(asset_tmp_path):
     ET.SubElement(body, "freejoint")
     ET.SubElement(body, "geom", name="torus", type="mesh", mesh="torus")
     ET.SubElement(body, "geom", name="top_cap", type="box", size="0.03 0.03 0.03", pos="0 0 0.1")
-    ET.SubElement(body, "geom", name="bottom_cap[1]", type="sphere", size="0.03", pos="0 0 -0.1")
+    ET.SubElement(body, "geom", name="bottom_cap[1]", type="sphere", size="0.03", pos="0 0 -0.1", friction="0.8")
     ET.SubElement(body, "geom", name="ring", type="mesh", mesh="torus", pos="0 0.3 0")
     tip = ET.SubElement(body, "body", name="tip", pos="0 0 0.2")
     ET.SubElement(tip, "joint", type="hinge")
@@ -123,6 +123,8 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
         body.select(gs.indices.Geom.named("tor*")).set_friction(0.7)
         body.select(gs.indices.Geom.at(1)).set_friction(1.5)
         body.select(gs.indices.Geom.at(slice(1, 3))).set_friction_torsional(0.03)
+    # A field given as None stands for the value of the asset, overriding the material
+    mixed_geoms_options.select(gs.indices.Geom.named("bottom_cap[[]1]")).set(gs.options.Geom(friction=None))
     # The fifth collision geom of the entity is the capsule of the second link
     mixed_geoms_options.select(gs.indices.Geom.at(4)).set_friction_rolling(0.001)
     mixed_geoms_body = scene.add_entity(options=mixed_geoms_options)
@@ -277,7 +279,7 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
     geoms_friction = {
         gs.GEOM_TYPE.MESH: (None, 0.01, 0.0005),
         gs.GEOM_TYPE.BOX: (1.5, 0.03, 0.002),
-        gs.GEOM_TYPE.SPHERE: (0.3, 0.03, 0.002),
+        gs.GEOM_TYPE.SPHERE: (0.8, 0.03, 0.002),
         gs.GEOM_TYPE.CAPSULE: (1.2, 0.01, 0.001),
     }
     for geom in mixed_geoms_body.geoms:
