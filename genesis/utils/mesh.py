@@ -621,7 +621,7 @@ def postprocess_collision_geoms(
             int(g_info.get("conaffinity", 0)),
             *(
                 float("nan") if g_info.get(name) is None else float(g_info[name])
-                for name in ("friction", "friction_torsional", "friction_rolling", "density", "rho")
+                for name in (*gs.options.Geom.model_fields, "density")
             ),
             np.zeros(0) if sol_params is None else np.ascontiguousarray(sol_params, dtype=np.float64),
             np.ascontiguousarray(g_info.get("pos", gu.zero_pos()), dtype=np.float64),
@@ -792,16 +792,9 @@ def _postprocess_collision_geoms_impl(
                         and all(first_g_info.get(name) == g_info.get(name) for name in ("contype", "conaffinity"))
                         and all(
                             np.allclose(first_g_info.get(name, np.nan), g_info.get(name, np.nan), equal_nan=True)
-                            # A fused mesh carries a single density, so geoms with different densities must stay
-                            # separate for the density-weighted link inertial to survive fusion.
-                            for name in (
-                                "friction",
-                                "friction_torsional",
-                                "friction_rolling",
-                                "sol_params",
-                                "density",
-                                "rho",
-                            )
+                            # A fused mesh carries one value of each quantity a geom takes from its asset or a
+                            # selection block (see 'gs.options.Geom'), so geoms differing in any stay separate.
+                            for name in (*gs.options.Geom.model_fields, "density", "sol_params")
                         )
                     ):
                         fusion_group.append(i)

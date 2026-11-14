@@ -1460,11 +1460,10 @@ class KinematicEntityDescription(EntityDescription):
                 if morph.collision and (g_info["contype"] or g_info["conaffinity"]):
                     cg_infos.append(g_info)
                     geoms_link_idx.append(i_l)
-        # The values the asset states, which a field given as None on a block stands for
-        geoms_asset_values = [
-            {name: g_info.get(name) for name in ("density", "friction", "friction_torsional", "friction_rolling")}
-            for g_info in cg_infos
-        ]
+        # The values the asset states, which a field given as None on a block stands for, the asset stating a density
+        # where a block sets 'rho'
+        asset_names = ["density" if name == "rho" else name for name in gs.options.Geom.model_fields]
+        geoms_asset_values = [{name: g_info.get(name) for name in asset_names} for g_info in cg_infos]
 
         # A material value overrides the one each geom of the asset states. Dropping the density up front keeps the
         # align anchor, its all-or-none source check and the inertia estimate uniform-density.
