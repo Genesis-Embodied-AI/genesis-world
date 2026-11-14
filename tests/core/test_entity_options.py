@@ -129,6 +129,8 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
         body.select(gs.indices.Geom.named("tor*")).set_friction(0.7)
         body.select(gs.indices.Geom.at(1)).set_friction(1.5)
         body.select(gs.indices.Geom.at(slice(1, 3))).set_friction_torsional(0.03)
+    # A density given as None stands for the default density on geoms that still fuse with each other
+    mixed_geoms_options.select(gs.indices.Link.named("body")).set(gs.options.Geom(rho=None))
     # A field given as None stands for the value of the asset, overriding the material
     mixed_geoms_options.select(gs.indices.Geom.named("bottom_cap[[]1]")).set(gs.options.Geom(friction=None))
     # The fifth collision geom of the entity is the capsule of the second link
