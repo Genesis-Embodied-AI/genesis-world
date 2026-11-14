@@ -88,6 +88,10 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
         gs.options.Geom(rho=2000.0, friction=0.8)
     )
     arm_options.select(gs.indices.Link.named("arm1")).set_friction(0.6)
+    # Nesting a link selection in another keeps it at the link level, so the later selection of the subtree applies
+    arm_options.select(gs.indices.Link.subtree("arm1")).select(gs.indices.Link.named("arm2")).set_friction_torsional(
+        0.05
+    )
     arm_options.select(gs.indices.Link.subtree("base")).set_friction_torsional(0.02)
     arm = scene.add_entity(options=arm_options)
     spheres = []
@@ -117,6 +121,8 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
     )
     caps = gs.indices.Geom.named("top_cap") | gs.indices.Geom.named("bottom_cap[[]1]")
     mixed_geoms_options.select(caps).set(gs.options.Geom(friction_torsional=0.05, friction_rolling=0.002))
+    # A nested ordinal counts the geoms of the selection alone, so this selects the second cap
+    mixed_geoms_options.select(caps).select(gs.indices.Geom.at(1)).set_friction_rolling(0.004)
     # An ordinal under links counts the geoms of each link apart, so this selects the torus and the capsule
     mixed_geoms_options.select(gs.indices.Link.subtree("body")).select(gs.indices.Geom.at(0)).set_friction(1.2)
     with mixed_geoms_options.select(gs.indices.Link.named("body")) as body:
@@ -185,7 +191,9 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
     fem_options.select(gs.indices.Vertex.at(slice(0, 4)) & (gs.indices.Vertex.at(0) | gs.indices.Vertex.at(1))).set(
         gs.options.Vertex(is_fixed=False)
     )
-    fem_options.select(gs.indices.Vertex.in_box(lower=(0.0, 0.0, 0.0), upper=(0.1, 0.1, 0.1))).set_is_fixed(True)
+    fem_options.select(gs.indices.Vertex.in_box(lower=(0.0, 0.0, 0.0), upper=(0.1, 0.1, 0.1))).select(
+        gs.indices.Vertex.at(0)
+    ).set_is_fixed(True)
     serialization.export(exported, {"rigid": rigid_options, "fem": fem_options})
     loaded = serialization.load(exported, {"rigid": gs.entities.Rigid, "fem": gs.entities.FEM})
     assert loaded["rigid"].model_dump() == rigid_options.model_dump()
@@ -208,7 +216,7 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
     with pytest.raises(gs.GenesisException, match="got gs.indices.Vertex"):
         gs.entities.Rigid(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1))).select(gs.indices.Vertex.at(0)).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="got gs.indices.Link"):
-        box_options.select(gs.indices.Link.named("box_baselink")).select(gs.indices.Link.named("box_baselink"))
+        box_options.select(gs.indices.Geom.at(0)).select(gs.indices.Link.named("box_baselink"))
     with pytest.raises(gs.GenesisException, match="frozen"):
         box.options.name = "renamed_box"
     with pytest.raises(gs.GenesisException, match="frozen"):
@@ -279,7 +287,7 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
     geoms_friction = {
         gs.GEOM_TYPE.MESH: (None, 0.01, 0.0005),
         gs.GEOM_TYPE.BOX: (1.5, 0.03, 0.002),
-        gs.GEOM_TYPE.SPHERE: (0.8, 0.03, 0.002),
+        gs.GEOM_TYPE.SPHERE: (0.8, 0.03, 0.004),
         gs.GEOM_TYPE.CAPSULE: (1.2, 0.01, 0.001),
     }
     for geom in mixed_geoms_body.geoms:

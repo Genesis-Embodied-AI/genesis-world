@@ -360,9 +360,12 @@ class FEMEntity(Entity):
         verts_pos_morph = verts - self._morph.pos
         verts_is_fixed = np.zeros(len(verts), dtype=np.bool_)
         for selection_block in self._options.selection_blocks:
-            # Vertices are a single level, so a block holds one selector (see 'BaseEntity._check_selection_block')
-            (vertex_index,) = selection_block.selectors
-            verts_idx = vertex_index.resolve(verts_pos_morph)
+            # Each selector resolves among the vertices the selectors before it hold, an ordinal counting those alone
+            verts_idx = np.arange(len(verts))
+            for vertex_index in selection_block.selectors:
+                if verts_idx.size == 0:
+                    break
+                verts_idx = verts_idx[vertex_index._resolve(verts_pos_morph[verts_idx])]
             if verts_idx.size == 0:
                 gs.raise_exception(
                     f"The selection {selection_block.selection_repr} holds no vertex of entity '{self.name}'."

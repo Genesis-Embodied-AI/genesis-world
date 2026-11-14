@@ -674,6 +674,9 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
                 tensor_ = tensor_[None]
         return tensor_, inputs_idx_, envs_idx_
 
+    def post_build(self) -> None:
+        """Apply what the entity options of the solver set, through the public setters, once the scene is built."""
+
     def build(self):
         self._B = self._sim._B
         self.build_errno(self._B)

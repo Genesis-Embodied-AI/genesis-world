@@ -188,6 +188,11 @@ class Simulator(RBC):
         for solver in self._solvers:
             solver._add_force_field(force_field)
 
+    def post_build(self) -> None:
+        """Apply what the entity options set, through the public setters of the solvers, once the scene is built."""
+        for solver in self._active_solvers:
+            solver.post_build()
+
     def build(self):
         self.n_envs = self.scene.n_envs
         self._B = self.scene._B

@@ -688,6 +688,11 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
     disjoint_options.select(gs.indices.Vertex.at(0) & gs.indices.Vertex.at(1)).set_is_fixed(True)
     with pytest.raises(gs.GenesisException, match="holds no vertex"):
         gs.Scene().add_entity(options=disjoint_options)
+    # A nested ordinal counts the vertices of the selection alone
+    nested_options = hanging_box.options.model_copy()
+    nested_options.select(gs.indices.Vertex.at([0, 1])).select(gs.indices.Vertex.at(2)).set_is_fixed(True)
+    with pytest.raises(gs.GenesisException, match="no valid vertex among 2"):
+        gs.Scene().add_entity(options=nested_options)
 
     scene.build(n_envs=2)
     free_boxes_pos_0 = torch.stack([free_box.get_verts_pos() for free_box in free_boxes])
