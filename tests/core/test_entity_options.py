@@ -220,6 +220,10 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
         box.options.name = "renamed_box"
     with pytest.raises(gs.GenesisException, match="frozen"):
         box_options.selection_blocks = ()
+    # A copy records again, deep or not
+    box.options.model_copy(deep=True).select(gs.indices.Geom.at(0)).set_friction(3.0)
+    with pytest.raises(gs.GenesisException, match="at least 1"):
+        gs.entities.Rigid(morph=())
     with pytest.raises(gs.GenesisException, match="sets no quantity"):
         box_options.select(gs.indices.Geom.at(0)).set(gs.options.Geom())
     out_of_range_options = box_options.model_copy()
