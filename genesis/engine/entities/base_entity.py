@@ -53,8 +53,6 @@ class Entity(BuildableMixin, RBC):
         self._morph = options.morphs[0]
         self._surface = surface
 
-        # The entity holds a frozen copy of its options, which records its name, generated from its morph if they state
-        # none, so that later records on the options leave the entity as it is
         names = {entity.name for entity in entities if entity.name is not None}
         if options.name is not None:
             if options.name in names:
