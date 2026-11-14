@@ -242,9 +242,6 @@ class Texture(object):
             glTexImage3D(
                 self.tex_type, 0, internal_fmt, width, height, len(self.source), 0, fmt, self.data_format, data
             )
-            for layer, layer_data in self._pending_layers.items():
-                glTexSubImage3D(self.tex_type, 0, 0, 0, layer, width, height, 1, fmt, self.data_format, layer_data)
-            self._pending_layers.clear()
         else:
             glTexImage2D(self.tex_type, 0, internal_fmt, width, height, 0, fmt, self.data_format, data)
         # A texture array has no mipmaps, since generating them covers every layer, which would make the upload of a
@@ -295,6 +292,8 @@ class Texture(object):
 
         # Unbind texture
         glBindTexture(self.tex_type, 0)
+        if is_array:
+            self.upload_source()
 
     def _remove_from_context(self):
         if self._texid is not None:
