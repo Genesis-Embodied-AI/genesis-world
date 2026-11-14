@@ -291,7 +291,7 @@ def test_set_vverts(renderer, show_viewer):
     scene.build(n_envs=3)
 
     # vfaces_info covers all vgeoms in global vvert space, not just opt-in entities.
-    solver = scene.sim.rigid_solver
+    solver = scene.rigid_solver
     vfaces_idx = qd_to_numpy(solver.dyn_info.vfaces.vverts_idx)
     assert vfaces_idx.shape[0] == solver.n_vfaces
     for vg in solver.vgeoms:

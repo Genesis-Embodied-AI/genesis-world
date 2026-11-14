@@ -43,7 +43,7 @@ def test_data_accessor(n_envs, batched, tol):
     gs_geom = gs_link.geoms[0]
     gs_vgeom = gs_link.vgeoms[0]
     scene.build(n_envs=n_envs)
-    gs_s = scene.sim.rigid_solver
+    gs_s = scene.rigid_solver
 
     # Initialize the simulation
     np.random.seed(0)
@@ -416,12 +416,12 @@ def test_getter_vs_state_post_step_consistency(enable_mujoco_compatibility):
     scene.build()
 
     scene.step()
-    dof_vel = scene.rigid_solver.get_dofs_velocity()
+    dof_vel = box.get_dofs_velocity()
     assert_allclose(dof_vel[:3], (0.0, 0.0, GRAVITY * DT), atol=gs.EPS)
     vel = box_link.get_vel()
     with pytest.raises(AssertionError) if enable_mujoco_compatibility else nullcontext():
         assert_allclose(dof_vel[:3], vel, atol=gs.EPS)
-    dof_pos = scene.rigid_solver.get_qpos()
+    dof_pos = box.get_qpos()
     assert_allclose(dof_pos[:3], (0.0, 0.0, GRAVITY * DT**2), atol=gs.EPS)
     pos = box_link.get_pos()
     with pytest.raises(AssertionError) if enable_mujoco_compatibility else nullcontext():
@@ -981,8 +981,8 @@ def test_inertial_property_setters(sliding_ball_pair, xml_path, implicit_inertia
 
     # One route brings a single link to the mass, keeping the inertia it was given, and the other the whole body by a
     # ratio, which scales the inertia with it - so the link route writes the heavier inertia itself to match.
-    mass_ratio = 2.0 / scene.rigid_solver.get_links_mass(per_link.links[1].idx)
-    links_inertia = scene.rigid_solver.get_links_inertia(per_link.links[1].idx)
+    mass_ratio = 2.0 / per_link.get_links_mass(1)
+    links_inertia = per_link.get_links_inertia(1)
     per_link.links[1].set_mass(2.0)
     per_link.set_links_inertia(links_inertia * mass_ratio[..., None, None], links_idx_local=1)
     whole_entity.set_mass(3.0)
@@ -992,15 +992,14 @@ def test_inertial_property_setters(sliding_ball_pair, xml_path, implicit_inertia
         assert_allclose(pair.get_mass(), authored.get_mass(), tol=gs.EPS)
 
     # The inertia grows with the mass, as it does for a body of the same shape built heavier.
-    authored_inertia = scene.rigid_solver.get_links_inertia(authored.links[1].idx)
-    assert_allclose(authored_inertia, scene.rigid_solver.get_links_inertia(per_link.links[1].idx), tol=gs.EPS)
+    assert_allclose(authored.get_links_inertia(1), per_link.get_links_inertia(1), tol=gs.EPS)
 
-    links_idx = [pair.base_link.idx for pair in pairs]
     for pair in pairs:
         pair.set_dofs_velocity([0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     # Long enough to fall onto the plane and keep sliding, so the contact rows take part.
     for _ in range(60):
-        scene.rigid_solver.apply_links_external_wrench([[[2.0, 0.0, 0.0]] * len(links_idx)] * 4, links_idx=links_idx)
+        for pair in pairs:
+            pair.base_link.apply_external_force([2.0, 0.0, 0.0])
         scene.step()
     assert (authored.get_pos()[:, 2] < 0.2).all(), "the pairs must have landed for the contact solve to be exercised"
 
@@ -1182,7 +1181,7 @@ def test_axis_aligned_bounding_boxes(n_envs, coupler_options, enable_collision, 
         assert_allclose(torch.min(link_geoms_aabb[..., 0, :], dim=0).values, link_aabb[..., 0, :], tol=gs.EPS)
         assert_allclose(torch.max(link_geoms_aabb[..., 1, :], dim=0).values, link_aabb[..., 1, :], tol=gs.EPS)
 
-    all_aabbs = scene.sim.rigid_solver.get_AABB()
+    all_aabbs = scene.rigid_solver.get_AABB()
     aabbs = [geom.get_AABB().expand(aabb_shape) for entity in scene.entities for geom in entity.geoms]
     if n_envs > 0:
         assert all_aabbs.ndim == 4 and len(all_aabbs) == n_envs
@@ -1444,7 +1443,7 @@ def test_object_repr():
     scene.build(n_envs=2)
 
     # Every printable object renders without raising, across both the brief and the full colorized form
-    for obj in (scene, scene.entities, cam, scene.sim.rigid_solver):
+    for obj in (scene, scene.entities, cam, scene.rigid_solver):
         assert repr(obj)
     for entity in scene.entities:
         assert entity._repr_brief()

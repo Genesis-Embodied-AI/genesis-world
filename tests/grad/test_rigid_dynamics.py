@@ -36,7 +36,7 @@ def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
     n_dofs = pair.entity_ana.n_dofs
     n_links = pair.entity_ana.n_links
 
-    # Single-link joints read the entity pose; multi-link topologies read the rigid-solver per-link pose.
+    # Single-link joints read the entity pose; multi-link topologies read the per-link poses.
     is_single_link = model_name in ("grad_free", "grad_revolute", "grad_prismatic", "grad_spherical")
     # (setter, output, input_seed) per joint, plus the position and quaternion target seeds. Single-step
     # force->position is only checked on cartpole, where its sensitivity clears the finite-difference floor.
@@ -118,7 +118,7 @@ def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
                 return entity.get_pos() if out == "pos" else entity.get_quat()
             # The poses of the links are those the configuration implies, which a step may leave pending
             entity.solver.update_forward_pos()
-            return entity.solver.get_links_pos() if out == "pos" else entity.solver.get_links_quat()
+            return entity.get_links_pos(relative=False) if out == "pos" else entity.get_links_quat(relative=False)
 
         def clear_poses(scene, entity):
             poses.clear()
@@ -275,7 +275,7 @@ def test_per_step_pd_target_grad_matches_fd(n_envs, grad_free_with_revolute, pre
             dofs_readings.extend(
                 [
                     entity.get_dofs_control_force(),
-                    entity.solver.get_dofs_actuator_force(),
+                    entity.get_dofs_actuator_force(),
                     entity.get_dofs_force(),
                     entity.get_dofs_acc(),
                 ]

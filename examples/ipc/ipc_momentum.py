@@ -87,8 +87,6 @@ def main():
         """Compute total linear momentum of the system."""
         nonlocal fem_prev_pos
 
-        rigid_solver = scene.sim.rigid_solver
-
         # Rigid body linear momentum.
         cube_vel = tensor_to_array(
             rigid_cube.get_links_vel(links_idx_local=0, ref=gs.link_ref_frame.link_COM)[..., 0, :]

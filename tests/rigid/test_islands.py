@@ -60,7 +60,7 @@ def test_constraint_capacity_covers_friction_rows(show_viewer):
             ),
         )
     scene.build()
-    constraint_solver = scene.sim.rigid_solver.constraint_solver
+    constraint_solver = scene.rigid_solver.constraint_solver
     assert constraint_solver.constraint_state.island.constraint_id.shape[0] >= constraint_solver.len_constraints
 
 
@@ -792,7 +792,7 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
 
     z0 = box_force.get_pos()[..., 2]
     for _ in range(6):
-        solver.apply_links_external_wrench([0.0, 0.0, 40.0], links_idx=box_force.base_link_idx)
+        box_force.base_link.apply_external_wrench([0.0, 0.0, 40.0])
         scene.step()
     assert (
         not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_force.idx).all()
@@ -927,11 +927,11 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
     # to settle into the new one. Both writes are made while the body sleeps, and the weight they land on is the
     # analytic one of a free body.
     MASS = 4.0
-    invweight_before = solver.get_links_invweight(box_mass.base_link_idx)
+    invweight_before = box_mass.base_link.get_invweight()
     box_mass.set_mass(MASS)
     assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_mass.idx).all()
-    assert_allclose(solver.get_links_invweight(box_mass.base_link_idx)[..., 0], 1.0 / MASS, tol=gs.EPS)
-    assert ((invweight_before - solver.get_links_invweight(box_mass.base_link_idx)).abs() > 1e-3).all()
+    assert_allclose(box_mass.base_link.get_invweight()[..., 0], 1.0 / MASS, tol=gs.EPS)
+    assert ((invweight_before - box_mass.base_link.get_invweight()).abs() > 1e-3).all()
 
     # The mean inertia the constraint solve is quoted on is the mean of the mass-matrix diagonal, so a mass written on
     # a woken tree is in it; a tree left asleep would hold its contribution at whatever it last ran with.
@@ -1081,9 +1081,9 @@ def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversa
     # The undisturbed entity's free bodies all settled and slept independently; disturbing one wakes only its island.
     assert all(link_asleep(link) for link in multibody_bases)
     disturbed = multibody_bases[0]
-    solver.set_dofs_velocity(
+    multibody.set_dofs_velocity(
         [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        list(range(disturbed.dof_start, disturbed.dof_start + disturbed.n_dofs)),
+        dofs_idx_local=range(disturbed.dof_start - multibody.dof_start, disturbed.dof_end - multibody.dof_start),
     )
     assert not link_asleep(disturbed)
     assert all(link_asleep(link) for link in multibody_bases[1:])
@@ -1151,7 +1151,7 @@ def test_hibernation_wakes_on_daisy_chain(show_viewer, n_envs):
         scene.step()
     assert asleep(box_a) and asleep(box_b) and asleep(box_far)
 
-    solver.apply_links_external_wrench([20.0, 0.0, 0.0], links_idx=box_a.base_link_idx)
+    box_a.base_link.apply_external_wrench([20.0, 0.0, 0.0])
     scene.step()
     assert not asleep(box_a)
     assert not asleep(box_b)
@@ -1193,7 +1193,7 @@ def test_hibernation_repartitioning(show_viewer, n_envs):
     )
     scene.build(n_envs=n_envs)
 
-    solver = scene.sim.rigid_solver
+    solver = scene.rigid_solver
     box1_idx = box1._idx_in_solver
     box2_idx = box2._idx_in_solver
     island_state = solver.constraint_solver.constraint_state.island

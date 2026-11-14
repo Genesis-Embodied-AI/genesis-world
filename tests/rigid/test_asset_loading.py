@@ -617,8 +617,8 @@ def test_urdf_parsing_merge_fixed_links(urdf_path, fixed, show_viewer, tol):
             robot.set_pos(pos0)
             robot.set_quat(quat0)
 
-    com_robot_1, com_robot_2 = scene.rigid_solver.get_links_root_COM(
-        links_idx=(robot_1.base_link_idx, robot_2.base_link_idx)
+    com_robot_1, com_robot_2 = (
+        robot.get_links_pos(robot.base_link.idx_local, ref=gs.link_ref_frame.root_COM) for robot in (robot_1, robot_2)
     )
     assert_allclose(com_robot_1, com_robot_2, tol=5e-7)
 
@@ -1161,7 +1161,7 @@ def test_mesh_primitive_COM(show_viewer):
     assert twin_geometry.get_vert_adjacency() is geometry.get_vert_adjacency()
     assert twin_geometry.inertial is geometry.inertial
 
-    rigid = scene.sim.rigid_solver
+    rigid = scene.rigid_solver
     for _ in range(50):
         scene.step()
 
@@ -1868,8 +1868,7 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
         assert_allclose(com_offset[0, 0], com_offset[2, 0], tol=tol)
 
     # Inertia matrix: variant B should match explicit URDF values
-    links_idx = slice(het_obj.link_start, het_obj.link_end)
-    inertial_i = qd_to_numpy(scene.rigid_solver.dyn_info.links.inertial_i, None, links_idx, transpose=True)
+    inertial_i = tensor_to_array(het_obj.get_links_inertia())
     # Variant A: diagonal inertia matches URDF
     assert_allclose(inertial_i[[0, 1], 0], np.eye(3) * sphere_base_inertia_diag, tol=tol)
     assert_allclose(inertial_i[[0, 1], 1], np.eye(3) * sphere_moving_inertia_diag, tol=tol)
@@ -1924,7 +1923,7 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
     assert_allclose(links_offset[..., 1:], 0.0, tol=tol)
 
     # Check that the acceleration is matching the analytical formula
-    links_mass = qd_to_numpy(scene.rigid_solver.dyn_info.links.inertial_mass, None, links_idx, transpose=True)
+    links_mass = tensor_to_array(het_obj.get_links_mass())
     force = np.zeros((scene.n_envs, 2, 3))
     force[..., 2] = -links_mass * GRAVITY
     het_obj.set_pos((0, 0, 0.2))
@@ -1933,7 +1932,7 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
     assert_allclose(het_obj.get_links_acc()[..., 2], GRAVITY, tol=tol)
     het_obj.zero_all_dofs_velocity()
     for _ in range(10):
-        scene.rigid_solver.apply_links_external_wrench(force, links_idx=links_idx, ref=gs.link_ref_frame.link_COM)
+        het_obj.apply_links_external_wrench(force, ref=gs.link_ref_frame.link_COM)
         scene.step()
         assert_allclose(het_obj.get_links_acc(), 0.0, tol=tol)
 

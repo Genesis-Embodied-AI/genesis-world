@@ -180,7 +180,7 @@ def test_frictionloss_grad_matches_fd(grad_revolute_frictionloss, precision, sho
         if i_step == 0:
             actuator_forces.clear()
         else:
-            actuator_forces.append(entity.solver.get_dofs_actuator_force())
+            actuator_forces.append(entity.get_dofs_actuator_force())
 
     assert_grad_matches_fd(
         pair,

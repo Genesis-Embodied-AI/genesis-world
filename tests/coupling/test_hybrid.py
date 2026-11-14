@@ -725,7 +725,7 @@ def test_sap_equality_constraints(show_viewer, xml_path, n_envs, is_batched, tol
     )
     entity.set_dofs_velocity(dofs_vel)
     for anchor_link, link in ((entity.get_link("drop_anchor"), ball), (ground.base_link, cube)):
-        scene.sim.rigid_solver.add_weld_constraint(anchor_link.idx, link.idx, envs_idx=welded_envs_idx)
+        scene.rigid_solver.add_weld_constraint(anchor_link.idx, link.idx, envs_idx=welded_envs_idx)
     scene.step()
     qpos_expected = qpos[..., joints_qs_idx] + dofs_vel[..., joints_dofs_idx] * DT
     assert_allclose(entity.get_qpos()[..., joints_qs_idx], qpos_expected, tol=tol)

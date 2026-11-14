@@ -388,7 +388,7 @@ def test_error_handling(tmp_path, caplog):
     # and the destruction of the scene completes behind it
     with pytest.raises(gs.GenesisException, match="integer type"):
         scene.destroy()
-    assert scene.sim is None and scene.visualizer is None
+    assert not scene.is_built and scene.visualizer is None
     # The header, then the first, second and fourth steps and the reset, then the two steps and the stop
     with open(pos_path, "r") as f:
         assert len(list(csv.reader(f))) == 1 + 4 + 3

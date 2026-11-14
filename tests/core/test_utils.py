@@ -1130,8 +1130,6 @@ def test_genuine_interpenetration(show_viewer):
         for convexify in (False, True)
     }
     scene.build()
-    links_pos0 = tensor_to_array(scene.rigid_solver.get_links_pos(), dtype=np.float64)
-    links_quat0 = tensor_to_array(scene.rigid_solver.get_links_quat(), dtype=np.float64)
 
     def placed(geoms, pos, quat):
         quat = np.asarray(quat)
@@ -1156,7 +1154,9 @@ def test_genuine_interpenetration(show_viewer):
             [
                 (
                     gu.inv_transform_by_trans_quat(
-                        tensor_to_array(geom.get_verts(), dtype=np.float64), links_pos0[link.idx], links_quat0[link.idx]
+                        tensor_to_array(geom.get_verts(), dtype=np.float64),
+                        tensor_to_array(link.get_pos(relative=False), dtype=np.float64),
+                        tensor_to_array(link.get_quat(relative=False), dtype=np.float64),
                     ),
                     geom.trimesh.faces.astype(np.int64),
                 )

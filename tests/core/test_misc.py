@@ -27,12 +27,12 @@ def test_scene_destroy_cleans_up_simulator():
     scene.build()
     scene.step()
 
-    assert scene._sim is not None
+    assert scene.is_built
 
     scene.destroy()
 
-    assert scene._sim is None
-    assert scene._visualizer is None
+    assert not scene.is_built
+    assert scene.visualizer is None
 
 
 @pytest.mark.required
@@ -45,10 +45,10 @@ def test_scene_destroy_idempotent():
     scene.step()
 
     scene.destroy()
-    assert scene._sim is None
+    assert not scene.is_built
 
     scene.destroy()
-    assert scene._sim is None
+    assert not scene.is_built
 
 
 @pytest.mark.required
@@ -479,7 +479,7 @@ def test_solver_state_change_subscribers(show_viewer, two_link_fixed_urdf):
     )
     scene.build(n_envs=2)
 
-    solver = scene.sim.rigid_solver
+    solver = scene.rigid_solver
 
     # Eager mode: a callback fires immediately on each matching change and nothing is retained.
     eager_events = []
@@ -608,11 +608,11 @@ def test_per_solver_gravity():
 
         new_gravity = [0.0, 0.0, -5.0]
 
-        rigid = scene.sim.rigid_solver
+        rigid = scene.rigid_solver
         rigid.set_gravity(new_gravity)
         assert_allclose(rigid.get_gravity(), new_gravity, atol=1e-6)
 
-        mpm = scene.sim.mpm_solver
+        mpm = scene.mpm_solver
         mpm.set_gravity(new_gravity)
         assert_allclose(mpm.get_gravity(), new_gravity, atol=1e-6)
 

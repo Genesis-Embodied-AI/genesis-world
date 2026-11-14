@@ -54,24 +54,24 @@ def test_gravity(show_viewer, tol):
     for envs_idx, expected_envs_idx in envs_idx_cases:
         values = gravity_values[: len(expected_envs_idx)]
 
-        scene.sim.set_gravity((0.0, 0.0, 0.0))
-        scene.sim.set_gravity(values, envs_idx=envs_idx)
+        scene.rigid_solver.set_gravity(0.0)
+        scene.rigid_solver.set_gravity(values, envs_idx=envs_idx)
         actual_gravity = scene.rigid_solver.get_gravity()
 
-        scene.sim.set_gravity((0.0, 0.0, 0.0))
-        scene.sim.set_gravity(values, envs_idx=expected_envs_idx)
+        scene.rigid_solver.set_gravity(0.0)
+        scene.rigid_solver.set_gravity(values, envs_idx=expected_envs_idx)
         assert_equal(actual_gravity, scene.rigid_solver.get_gravity())
 
-    scene.sim.set_gravity(torch.tensor([0.0, 0.0, 0.0]))
-    scene.sim.set_gravity(torch.tensor([[9.0, 0.0, 0.0], [0.0, 2.0, 0.0]]), envs_idx=[0, 1])
-    scene.sim.set_gravity(torch.tensor([1.0, 0.0, 0.0]), envs_idx=np.int64(-3))
-    scene.sim.set_gravity(torch.tensor([0.0, 0.0, 3.0]), envs_idx=-1)
+    scene.rigid_solver.set_gravity(0.0)
+    scene.rigid_solver.set_gravity([[9.0, 0.0, 0.0], [0.0, 2.0, 0.0]], envs_idx=[0, 1])
+    scene.rigid_solver.set_gravity([1.0, 0.0, 0.0], envs_idx=np.int64(-3))
+    scene.rigid_solver.set_gravity([0.0, 0.0, 3.0], envs_idx=-1)
     # A vector that is not one, and one vector per environment where a single environment was named: rejected by
     # shape, with the shape said, rather than by whatever the write would have made of it.
     with pytest.raises(gs.GenesisException, match="Invalid input shape"):
-        scene.sim.set_gravity(torch.tensor([0.0, -10.0]))
+        scene.rigid_solver.set_gravity([0.0, -10.0])
     with pytest.raises(gs.GenesisException, match="Invalid input shape"):
-        scene.sim.set_gravity(torch.tensor([[0.0, 0.0, -10.0], [0.0, 0.0, -10.0]]), envs_idx=1)
+        scene.rigid_solver.set_gravity([[0.0, 0.0, -10.0], [0.0, 0.0, -10.0]], envs_idx=1)
 
     scene.step()
 
@@ -113,7 +113,7 @@ def test_all_fixed(show_viewer):
     assert_allclose(cube.get_quat(), (1.0, 0.0, 0.0, 0.0), tol=gs.EPS)
     assert_allclose(cube.get_vel(), 0, tol=gs.EPS)
     assert_allclose(cube.get_ang(), 0, tol=gs.EPS)
-    assert_allclose(scene.rigid_solver.get_links_acc(), 0, tol=gs.EPS)
+    assert_allclose(cube.get_links_acc(), 0, tol=gs.EPS)
 
 
 @pytest.mark.required("sparse")
@@ -255,8 +255,7 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     scene.build()
     rigid_solver = scene.rigid_solver
 
-    end_effector_link_idx = robot.links[-1].idx
-    end_effector_link_idx_local = robot.links[-1].idx_local
+    end_effector_link = robot.links[-1]
     duck_link_idx = duck.links[0].idx
     duck_mass = duck.get_mass()
     duck_init_link_pos = duck.base_link.get_pos()
@@ -267,9 +266,9 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     duck_lever_arm = (0.2, -0.15, 0.1)
     duck_force_local = tensor_to_array(duck_mass * GRAVITY * duck_init_link_R[2])
     for step in range(801):
-        ee_pos = rigid_solver.get_links_pos(end_effector_link_idx)[0]
-        duck_pos = rigid_solver.get_links_pos(duck_link_idx)[0]
-        duck_quat = rigid_solver.get_links_quat(duck_link_idx)[0]
+        ee_pos = end_effector_link.get_pos()
+        duck_pos = duck.base_link.get_pos(relative=False)
+        duck_quat = duck.base_link.get_quat(relative=False)
         if step == 0:
             assert_allclose(ee_pos, (0.8, 0.0, 0.02), tol=1e-4)
         elif step in (500, 600):
@@ -299,7 +298,7 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
             ref=gs.link_ref_frame.link_COM,
             local=True,
         )
-        robot.apply_links_external_wrench(force=force, torque=torque, links_idx_local=end_effector_link_idx_local)
+        end_effector_link.apply_external_wrench(force=force, torque=torque)
         scene.step()
 
     duck.base_link.apply_external_torque((0, 1, 0), ref=gs.link_ref_frame.link_COM, local=True)
@@ -313,19 +312,17 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     with pytest.raises(AssertionError):
         assert_allclose(base_link.desc.inertial_quat, gu.identity_quat(), tol=gs.EPS)
     base_inertial_quat = torch.as_tensor(base_link.desc.inertial_quat, device=gs.device)
-    base_link_pos = rigid_solver.get_links_pos(base_link.idx)
-    base_link_quat = rigid_solver.get_links_quat(base_link.idx)
-    base_link_COM = rigid_solver.get_links_pos(base_link.idx, ref=gs.link_ref_frame.link_COM)
-    base_root_COM = rigid_solver.get_links_root_COM(base_link.idx)
+    base_link_pos = base_link.get_pos(relative=False)
+    base_link_quat = base_link.get_quat(relative=False)
+    base_link_COM = robot.get_links_pos(base_link.idx_local, ref=gs.link_ref_frame.link_COM)[..., 0, :]
+    base_root_COM = robot.get_links_pos(base_link.idx_local, ref=gs.link_ref_frame.root_COM)[..., 0, :]
     base_link_R = gu.quat_to_R(base_link_quat)
     base_inertial_R = gu.quat_to_R(gu.transform_quat_by_quat(base_inertial_quat, base_link_quat))
     lever_arm = torch.tensor((0.0, 0.0, 0.1), dtype=gs.tc_float, device=gs.device)
     force_local = torch.tensor((0.0, 1.0, 0.0), dtype=gs.tc_float, device=gs.device)
 
     rigid_solver.clear_external_force()
-    rigid_solver.apply_links_external_wrench(
-        force=force_local, links_idx=base_link.idx, pos=lever_arm, ref=gs.link_ref_frame.link_origin, local=True
-    )
+    base_link.apply_external_wrench(force=force_local, pos=lever_arm, ref=gs.link_ref_frame.link_origin, local=True)
     force_world = base_link_R @ force_local
     point_world = base_link_pos + base_link_R @ lever_arm
     assert_allclose(rigid_solver.dyn_state.links.cfrc_input_vel[base_link.idx, 0], -force_world, tol=5e-7)
@@ -346,9 +343,7 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     )
 
     rigid_solver.clear_external_force()
-    rigid_solver.apply_links_external_wrench(
-        force=force_local, links_idx=base_link.idx, pos=lever_arm, ref=gs.link_ref_frame.link_COM, local=True
-    )
+    base_link.apply_external_wrench(force=force_local, pos=lever_arm, ref=gs.link_ref_frame.link_COM, local=True)
     force_world = base_inertial_R @ force_local
     point_world = base_link_COM + base_inertial_R @ lever_arm
     assert_allclose(rigid_solver.dyn_state.links.cfrc_input_vel[base_link.idx, 0], -force_world, tol=5e-7)
@@ -359,13 +354,11 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     )
 
     with pytest.raises(gs.GenesisException, match="'ref' must be one of"):
-        rigid_solver.apply_links_external_wrench(
-            force=(0, 0, 0), links_idx=duck_link_idx, ref=gs.link_ref_frame.root_COM
-        )
+        duck.base_link.apply_external_wrench(force=(0, 0, 0), ref=gs.link_ref_frame.root_COM)
     with pytest.raises(gs.GenesisException, match="Either 'force' or 'torque'"):
-        rigid_solver.apply_links_external_wrench(links_idx=duck_link_idx)
+        duck.base_link.apply_external_wrench()
     with pytest.raises(gs.GenesisException, match="'pos' requires 'force'"):
-        rigid_solver.apply_links_external_wrench(torque=(0, 0, 0), links_idx=duck_link_idx, pos=lever_arm)
+        duck.base_link.apply_external_wrench(torque=(0, 0, 0), pos=lever_arm)
 
     # Armature on a free joint adds to the inertia the solver turns the body with. A torque from rest spins the body up
     # by that augmented inertia under the implicit integrators too. The torque is given in the inertial frame, which
@@ -1111,7 +1104,7 @@ def test_cholesky_tiling(monkeypatch, tol):
         assert scene.rigid_solver.rigid_config.enable_tiled_cholesky_mass_matrix == enable_tiled_cholesky
 
         scene.step()
-        assert not scene.rigid_solver.get_error_envs_mask().any()
+        assert not scene.get_error_envs_mask().any()
         assert (scene.rigid_solver.constraint_solver.constraint_state.n_constraints.to_numpy() > 0).all()
 
         Mgrad = scene.rigid_solver.constraint_solver.constraint_state.Mgrad.to_numpy()
@@ -1292,4 +1285,4 @@ def test_cholesky_tiling_large_shared_memory(show_viewer):
     assert scene.rigid_solver.rigid_config.island_tile_cap_last >= 114
 
     scene.step()
-    assert not scene.rigid_solver.get_error_envs_mask().any()
+    assert not scene.get_error_envs_mask().any()

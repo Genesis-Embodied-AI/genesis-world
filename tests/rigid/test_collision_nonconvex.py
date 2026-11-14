@@ -52,7 +52,7 @@ def test_collision(show_viewer):
     for i in range(500):
         scene.step()
         if i > 450:
-            qvel = scene.sim.rigid_solver.dyn_state.dofs.vel.to_numpy()[:, 0]
+            qvel = ball.get_dofs_velocity()
             assert_allclose(qvel, 0, atol=0.05)
 
 
@@ -769,11 +769,10 @@ def test_convexify(euler, show_viewer, gjk_collision):
     #     GUI=False,
     # )
     scene.build()
-    gs_sim = scene.sim
 
     # Make sure that all the geometries in the scene are convex
-    assert gs_sim.rigid_solver.dyn_info.geoms.is_convex.to_numpy().all()
-    assert not gs_sim.rigid_solver.collider.collider_config.has_nonconvex_nonterrain
+    assert scene.rigid_solver.dyn_info.geoms.is_convex.to_numpy().all()
+    assert not scene.rigid_solver.collider.collider_config.has_nonconvex_nonterrain
 
     # There should be only one geometry for the apple as it can be convexify without decomposition,
     # but for the others it is hard to tell... Let's use some reasonable guess.
@@ -791,8 +790,8 @@ def test_convexify(euler, show_viewer, gjk_collision):
         scene.step()
         # cam.render()
         if i > N_SETTLE:
-            vel_lin_all.append(gs_sim.rigid_solver.get_links_vel(ref=gs.link_ref_frame.link_COM))
-            vel_ang_all.append(gs_sim.rigid_solver.get_links_ang())
+            vel_lin_all.append(scene.rigid_solver.get_links_vel(ref=gs.link_ref_frame.link_COM))
+            vel_ang_all.append(scene.rigid_solver.get_links_ang())
     # cam.stop_recording(save_to_filename="video.mp4", fps=60)
     # FIXME: There is spurious residual motion on both paths that prevents the objects from truly settling
     assert_allclose(torch.quantile(torch.stack(vel_lin_all, dim=0), 0.5, dim=0), 0.0, tol=0.01)

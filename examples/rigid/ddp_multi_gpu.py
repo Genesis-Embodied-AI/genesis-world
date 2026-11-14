@@ -57,7 +57,7 @@ def run_worker(args: argparse.Namespace) -> None:
         show_FPS=False,
     )
     scene.add_entity(gs.morphs.Plane())
-    scene.add_entity(
+    franka = scene.add_entity(
         gs.morphs.MJCF(
             file="xml/franka_emika_panda/panda.xml",
         ),
@@ -79,8 +79,7 @@ def run_worker(args: argparse.Namespace) -> None:
         # Launched without torchrun, the script trains as a single rank whose group needs no network rendezvous
         dist.init_process_group(backend=backend, store=dist.HashStore(), rank=0, world_size=1)
 
-    rigid = scene.sim.rigid_solver
-    qpos = rigid.get_qpos().to(device)
+    qpos = franka.get_qpos().to(device)
     obs_dim = qpos.shape[1]
     act_dim = 1
     model = TinyMLP(obs_dim, act_dim).to(device)
@@ -90,7 +89,7 @@ def run_worker(args: argparse.Namespace) -> None:
     # train loop
     for step in range(args.steps):
         scene.step()
-        qpos = rigid.get_qpos().to(device)
+        qpos = franka.get_qpos().to(device)
 
         obs = qpos + torch.randn_like(qpos)
 

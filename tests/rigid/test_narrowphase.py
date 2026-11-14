@@ -431,19 +431,19 @@ class AnalyticalVsGJKSceneCreator:
 
     def step_analytical(self):
         # see section '# errno' above for discussion on our abusing errno, and the assumptions which we make.
-        self.scene_analytical._sim.rigid_solver._errno.fill(0)
+        self.scene_analytical.rigid_solver.clear_errno()
         self.scene_analytical.step()
-        errno_val = self.scene_analytical._sim.rigid_solver._errno[0]
+        errno_val = qd_to_numpy(self.scene_analytical.rigid_solver.data_manager.errno)[0]
         assert (errno_val & (ERRNO_CALLED_GJK_K1 | ERRNO_CALLED_GJK_K2)) == 0, "Analytical scene should not use GJK."
 
     def step_gjk(self, expect_collision: bool = True):
         # see section '# errno' above for discussion on our abusing errno, and the assumptions which we make.
-        self.scene_gjk._sim.rigid_solver._errno.fill(0)
+        self.scene_gjk.rigid_solver.clear_errno()
         self.scene_gjk.step()
-        errno_val = self.scene_gjk._sim.rigid_solver._errno[0]
+        errno_val = qd_to_numpy(self.scene_gjk.rigid_solver.data_manager.errno)[0]
         if expect_collision:
             # Kernel1 runs GJK on every pair left by the broad phase (analytical paths are disabled).
-            if self.scene_gjk._sim.rigid_solver.collider._use_split_narrowphase:
+            if self.scene_gjk.rigid_solver.collider._use_split_narrowphase:
                 assert (errno_val & ERRNO_CALLED_GJK_K1) != 0, "GJK scene should use GJK in contact0."
             # On GPU: multicontact is reached when contact0 detects a collision and enqueues the pair.
             # On CPU: the monolithic kernel calls gjk.func_gjk_contact directly (skipping gjk.func_gjk).

@@ -106,12 +106,12 @@ def test_state_query_grad_parity(show_viewer):
     ctrl = torch.tensor(np.random.randn(robot.n_dofs), dtype=gs.tc_float, device=gs.device, requires_grad=True)
 
     grads = []
-    for is_solver_source in (False, True):
+    for is_link_source in (False, True):
         scene.reset()
         robot.set_dofs_velocity(ctrl)
         scene.step()
-        if is_solver_source:
-            chassis_pos = scene.rigid_solver.get_links_pos(links_idx=robot.base_link_idx)
+        if is_link_source:
+            chassis_pos = robot.base_link.get_pos()
         else:
             chassis_pos = robot.get_pos()
         loss = torch.linalg.norm(chassis_pos)

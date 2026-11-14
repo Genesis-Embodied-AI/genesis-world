@@ -74,9 +74,9 @@ def test_position_control(show_viewer):
     # in the particular case where `approximate_implicitfast` integrator is used.
     # Note that the low-level internal API is used because invweights must NOT be updated, otherwise
     # the test cannot pass. This is unecessary and not recommended for practical applications.
-    # robot.set_dofs_armature(robot.get_dofs_armature(envs_idx=1) + MOTORS_KD * scene.sim._substep_dt, envs_idx=1)
+    # robot.set_dofs_armature(robot.get_dofs_armature(envs_idx=1) + MOTORS_KD * scene.sim.substep_dt, envs_idx=1)
     dofs_armature = scene.rigid_solver.dyn_info.dofs.armature.to_numpy()
-    dofs_armature[:, 1] += tensor_to_array(MOTORS_KD * scene.sim._substep_dt)
+    dofs_armature[:, 1] += tensor_to_array(MOTORS_KD * scene.sim.substep_dt)
     scene.rigid_solver.dyn_info.dofs.armature.from_numpy(dofs_armature)
 
     force_range = qd_to_torch(scene.rigid_solver.dyn_info.dofs.force_range)

@@ -177,9 +177,9 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
 
     # add weld constraint and move back up. The hanging box is welded in the air afterwards, so that deleting the
     # cube weld goes through the swap-remove path and must preserve the full record of the hanging box weld.
-    scene.sim.rigid_solver.add_weld_constraint(cube.base_link.idx, end_effector.idx, envs_idx=(0, 1, 2))
+    scene.rigid_solver.add_weld_constraint(cube.base_link.idx, end_effector.idx, envs_idx=(0, 1, 2))
     hanging_box.set_pos(HANGING_BOX_POS)
-    scene.sim.rigid_solver.add_weld_constraint(hanging_box.base_link.idx, fixed_box.base_link.idx)
+    scene.rigid_solver.add_weld_constraint(hanging_box.base_link.idx, fixed_box.base_link.idx)
     robot.control_dofs_position(qpos_up)
     for _ in range(60):
         scene.step()
@@ -191,8 +191,8 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
     assert_allclose(hanging_box.get_pos(), HANGING_BOX_POS, tol=1e-3)
 
     # drop
-    scene.sim.rigid_solver.delete_weld_constraint(cube.base_link.idx, end_effector.idx, envs_idx=(0, 1))
-    weld_const_info = scene.sim.rigid_solver.get_weld_constraints(as_tensor=True, to_torch=True)
+    scene.rigid_solver.delete_weld_constraint(cube.base_link.idx, end_effector.idx, envs_idx=(0, 1))
+    weld_const_info = scene.rigid_solver.get_weld_constraints(as_tensor=True, to_torch=True)
     links_ab = torch.stack((weld_const_info["link_a"], weld_const_info["link_b"]), dim=-1)
     box_weld = (hanging_box.base_link.idx, fixed_box.base_link.idx)
     cube_weld = (cube.base_link.idx, end_effector.idx)
@@ -302,7 +302,7 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
     scene.build(n_envs=2, env_spacing=(0.0, 1.5))
 
     # Every nut but the helix one is screwed differently in each environment.
-    rigid = scene.sim.rigid_solver
+    rigid = scene.rigid_solver
     rigid.add_screw_constraint(post_helix.base_link.idx, nut_helix.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=PITCH)
 
     # The free nut slides in the first environment and spins on a hinge in the second.
@@ -554,12 +554,12 @@ def test_get_constraints_api(show_viewer, tol):
     scene.build(n_envs=2)
 
     link_a, link_b = robot.base_link.idx, cube.base_link.idx
-    scene.sim.rigid_solver.add_weld_constraint(link_a, link_b, envs_idx=[1])
+    scene.rigid_solver.add_weld_constraint(link_a, link_b, envs_idx=[1])
     with pytest.raises(gs.GenesisException, match="already coupled"):
-        scene.sim.rigid_solver.add_weld_constraint(link_a, link_b, envs_idx=[1])
+        scene.rigid_solver.add_weld_constraint(link_a, link_b, envs_idx=[1])
 
     for as_tensor, to_torch in ((True, True), (True, False), (False, True), (False, False)):
-        weld_const_info = scene.sim.rigid_solver.get_weld_constraints(as_tensor, to_torch)
+        weld_const_info = scene.rigid_solver.get_weld_constraints(as_tensor, to_torch)
         link_a_, link_b_ = weld_const_info["link_a"], weld_const_info["link_b"]
         if as_tensor:
             assert_allclose((link_a_[0], link_b_[0]), ((-1,), (-1,)), tol=0)
@@ -596,7 +596,7 @@ def test_set_sol_params(n_envs, batched, tol):
         ),
     )
     scene.build(n_envs=2)
-    assert scene.sim._substep_dt == 0.01
+    assert scene.sim.substep_dt == 0.01
 
     for objs, batched in ((robot.joints, batched), (robot.geoms, False), (robot.equalities, True)):
         for obj in objs:

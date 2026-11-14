@@ -303,7 +303,7 @@ def change_scene(args: list[str]):
         for _ in range(60):
             scene.step()
 
-        qpos = scene.sim.rigid_solver.get_qpos()
+        qpos = scene.rigid_solver.get_qpos()
         if args.n_envs > 0:
             assert qpos.ndim == 2
             assert qpos.shape[0] == args.n_envs
