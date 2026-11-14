@@ -379,8 +379,7 @@ class Rigid(BaseEntity["RigidEntity"]):
                options.select(gs.indices.Link.subtree("hand") & gs.indices.Link.named("thumb")).set_friction(3.0)
                options.select(gs.indices.Link.subtree("hand")).set_friction(1.0)
 
-        A selection that holds no geom of the entity, or of one of its heterogeneous variants, raises when the entity is
-        added.
+        A selection that holds no geom of the entity, or of one of its heterogeneous variants, raises in ``add_entity``.
         """
         if not isinstance(selector, self._selector_types):
             gs.raise_exception(
@@ -442,7 +441,7 @@ class FEM(BaseEntity["FEMEntity"]):
            written (nesting, ``|``, ``&``) never makes it more specific.
         2. Between two vertex selections, the later call applies.
 
-        A selection that holds no vertex raises when the entity is added.
+        A selection that holds no vertex raises in ``add_entity``.
         """
         if not isinstance(selector, indices.Vertex):
             gs.raise_exception(
