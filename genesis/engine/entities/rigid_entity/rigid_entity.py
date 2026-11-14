@@ -1655,7 +1655,7 @@ class RigidEntity(KinematicEntity):
         self._edge_start = solver.n_edges
         self._free_verts_state_start = solver.n_free_verts
         self._fixed_verts_state_start = solver.n_fixed_verts
-        self._equality_start = 0
+        self._equality_start = solver.n_equalities
         self._free_verts_idx_local = torch.tensor([], dtype=gs.tc_int, device=gs.device)
         self._fixed_verts_idx_local = torch.tensor([], dtype=gs.tc_int, device=gs.device)
         self._visualize_contact: bool = desc.visualize_contact

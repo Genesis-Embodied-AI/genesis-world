@@ -589,6 +589,12 @@ def test_set_sol_params(n_envs, batched, tol):
             euler=(0, 0, 90),
         ),
     )
+    robot_b = scene.add_entity(
+        gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+            pos=(0.0, -0.4, 0.1),
+        ),
+    )
     scene.build(n_envs=2)
     assert scene.sim._substep_dt == 0.01
 
@@ -600,3 +606,10 @@ def test_set_sol_params(n_envs, batched, tol):
                 assert_allclose(obj.get_sol_params(), sol_params, tol=tol)
             obj.set_sol_params([0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0])
             assert_allclose(obj.get_sol_params(), [2.0e-02, 0.5, 1e-4, 1e-4, 0.0, 1e-4, 1.0], tol=tol)
+
+    # Each entity reads and writes the parameters of its own equality constraints
+    (equality_a,), (equality_b,) = robot.equalities, robot_b.equalities
+    equality_a.set_sol_params([0.03, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0])
+    equality_b.set_sol_params([0.04, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0])
+    assert_allclose(equality_a.get_sol_params(), [0.03, 0.6, 1e-4, 1e-4, 0.0, 1e-4, 1.0], tol=tol)
+    assert_allclose(equality_b.get_sol_params(), [0.04, 0.7, 1e-4, 1e-4, 0.0, 1e-4, 1.0], tol=tol)
