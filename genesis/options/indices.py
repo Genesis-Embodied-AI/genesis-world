@@ -113,7 +113,7 @@ class Link(_Selection):
             any(fnmatchcase(link_name, name) for link_name in link_names for name in self.names)
             for link_names in links_name_checked
         ]
-        return np.flatnonzero(is_selected).astype(gs.np_int, copy=False)
+        return np.flatnonzero(is_selected)
 
 
 class _OrdinalIndex(_Selection):
@@ -204,7 +204,7 @@ class _NamedOrdinalIndex(_OrdinalIndex):
                         for scope_geoms_idx in scopes_geoms_idx
                     ]
                 )
-            ).astype(gs.np_int, copy=False)
+            )
         # An unnamed geom, whose name is empty, matches no pattern, not even '*'
         unknown_names = [
             name for name in self.names if not any(g_name and fnmatchcase(g_name, name) for g_name in geoms_name)
@@ -214,7 +214,7 @@ class _NamedOrdinalIndex(_OrdinalIndex):
         is_selected = [
             bool(geom_name) and any(fnmatchcase(geom_name, name) for name in self.names) for geom_name in geoms_name
         ]
-        return np.flatnonzero(is_selected).astype(gs.np_int, copy=False)
+        return np.flatnonzero(is_selected)
 
 
 class Geom(_NamedOrdinalIndex):
@@ -280,7 +280,7 @@ class Vertex(_OrdinalIndex):
             is_inside = np.all((lower <= verts_pos) & (verts_pos <= upper), axis=-1)
             if not is_inside.any():
                 gs.raise_exception(f"No vertex lies inside the box from {self.box[0]} to {self.box[1]}.")
-            return np.flatnonzero(is_inside).astype(gs.np_int, copy=False)
+            return np.flatnonzero(is_inside)
         if self.closest_pos is not None:
             distances = np.linalg.norm(verts_pos - np.array(self.closest_pos), axis=-1)
             i_v = np.argmin(distances)

@@ -68,6 +68,13 @@ def get_entity_options(
         morph = tuple(morph)
     if vis_mode is not None:
         surface = (gs.surfaces.Default() if surface is None else surface).model_copy(update={"vis_mode": vis_mode})
+    # Only rigid entities have contacts to draw, and 'False' asks for nothing, so every kind of entity accepts it
+    if "visualize_contact" not in options_cls.model_fields:
+        if visualize_contact:
+            gs.raise_exception(
+                f"'visualize_contact' only applies to rigid entities, not to gs.entities.{options_cls.__name__}."
+            )
+        visualize_contact = None
     fields = {"morph": morph, "material": material, "surface": surface, "visualize_contact": visualize_contact}
     return options_cls(**{field: value for field, value in {**fields, "name": name}.items() if value is not None})
 

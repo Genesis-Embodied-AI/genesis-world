@@ -24,6 +24,16 @@ def two_box_free_mjcf():
 
 
 @pytest.fixture
+def sphere_free_mjcf():
+    mjcf = ET.Element("mujoco", model="sphere_free")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    body = ET.SubElement(worldbody, "body", name="body", pos="0 0 0")
+    ET.SubElement(body, "freejoint")
+    ET.SubElement(body, "geom", type="sphere", size="0.1")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture
 def torus_box_sphere_mjcf(asset_tmp_path):
     torus_path = asset_tmp_path / "torus.obj"
     trimesh.creation.torus(major_radius=0.1, minor_radius=0.03).export(torus_path)
@@ -44,7 +54,7 @@ def torus_box_sphere_mjcf(asset_tmp_path):
 
 
 @pytest.mark.required
-def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box_sphere_mjcf):
+def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_free_mjcf, torus_box_sphere_mjcf):
     DT = 1e-2
     N_STEPS = 10
     PUSH_FORCE = 50.0
@@ -215,6 +225,21 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
     unknown_link_options.select(gs.indices.Link.named("arm3")).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="links_to_keep"):
         scene.add_entity(options=unknown_link_options)
+    rootless_options = arm.options.model_copy()
+    rootless_options.select(gs.indices.Link.named("base")).select(gs.indices.Geom.at(0)).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="holds no collision geom"):
+        scene.add_entity(options=rootless_options)
+    # Every heterogeneous variant holds what the entity selects
+    variants_options = gs.entities.Rigid(
+        morph=(gs.morphs.MJCF(file=two_box_free_mjcf), gs.morphs.MJCF(file=sphere_free_mjcf))
+    )
+    variants_options.select(gs.indices.Geom.at(1)).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="selects no valid geom among 1"):
+        scene.add_entity(options=variants_options)
+    # Only rigid entities draw contacts, which every kind may decline
+    gs.Scene().add_entity(gs.morphs.Sphere(), material=gs.materials.Kinematic(), visualize_contact=False)
+    with pytest.raises(gs.GenesisException, match="only applies to rigid entities"):
+        gs.Scene().add_entity(gs.morphs.Sphere(), material=gs.materials.FEM.Elastic(), visualize_contact=True)
 
     scene.build(n_envs=2)
 

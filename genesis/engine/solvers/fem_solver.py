@@ -1281,7 +1281,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if (envs_n_constraints + is_new_vert.sum(dim=-1) > self._max_vertex_constraints).any():
             gs.raise_exception(
                 "No room left for these vertex constraints. Please increase the value of "
-                f"{type(self).__name__}'s option 'max_vertex_constraints' ({self._max_vertex_constraints})."
+                f"{type(self).__name__}'s option 'max_vertex_constraints' ({self._options.max_vertex_constraints})."
             )
 
         kernel_set_vertex_constraints(

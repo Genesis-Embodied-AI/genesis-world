@@ -365,6 +365,8 @@ class FEMEntity(Entity):
                 is_in_group = np.zeros(len(verts), dtype=np.bool_)
                 # A selector picks among the vertices selected so far, an ordinal counting those vertices alone
                 held_verts_idx = np.flatnonzero(is_selected)
+                if held_verts_idx.size == 0:
+                    break
                 for vertex_index in group:
                     is_in_group[held_verts_idx[vertex_index.resolve(verts_pos_morph[held_verts_idx])]] = True
                 is_selected &= is_in_group

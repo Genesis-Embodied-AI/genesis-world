@@ -95,7 +95,7 @@ Location: `genesis/engine/materials/`
 
 ## Entity options
 
-An entity is constructed from typed options, whose class decides the kind of entity and the solver simulating it: each class names the options class of its solver (`gs.entities.BaseEntity._solver_options_cls`) and admits the materials of that solver. `gs.entities.Hybrid` names no solver, since a hybrid entity adds a rigid entity and an MPM entity of their own. The flattened arguments of `Scene.add_entity` are a shorthand for the entity options its material is given to, `gs.entities.Rigid` when it is None.
+An entity is constructed from typed options, whose class decides the kind of entity and the solver simulating it: the simulator maps each class to the solver simulating its entities, and each class admits the materials of that solver. `gs.entities.Hybrid` maps to no solver, since a hybrid entity adds a rigid entity and an MPM entity of their own. The flattened arguments of `Scene.add_entity` are a shorthand for the entity options its material is given to, `gs.entities.Rigid` when it is None.
 
 ```python
 # Rigid, through the flattened arguments

@@ -307,6 +307,9 @@ class Scene(RBC):
     def add_entity(self, *, options: gs.entities.BaseEntity[EntityT]) -> EntityT: ...
 
     @overload
+    def add_entity(self, *, options: gs.entities.BaseEntity) -> "Entity": ...
+
+    @overload
     def add_entity(
         self,
         morph: Morph | Iterable[Morph],
@@ -476,7 +479,7 @@ class Scene(RBC):
         vis_mode: Literal["visual", "collision"] | None = None,
         *,
         options: gs.entities.Rigid | gs.entities.Kinematic | None = None,
-    ) -> list["KinematicEntity | RigidEntity"]:
+    ) -> list:
         """Add a USD stage to the scene, as one entity per articulation or rigid body it holds.
 
         The class of ``options`` decides the kind of every entity of the stage, ``gs.entities.Rigid`` or
@@ -507,26 +510,28 @@ class Scene(RBC):
             The created entities.
         """
         if options is None:
-            options = get_entity_options(morph, material, surface, visualize_contact, vis_mode)
-        elif any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode)):
-            gs.raise_exception("Pass either entity options or individual entity arguments, never both.")
-        if not isinstance(options, (gs.entities.Rigid, gs.entities.Kinematic)):
+            stage_options = get_entity_options(morph, material, surface, visualize_contact, vis_mode)
+        else:
+            if any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode)):
+                gs.raise_exception("Pass either entity options or individual entity arguments, never both.")
+            stage_options = options
+        if not isinstance(stage_options, (gs.entities.Rigid, gs.entities.Kinematic)):
             gs.raise_exception(
-                f"A stage holds rigid or kinematic entities, which gs.entities.{type(options).__name__} cannot "
+                f"A stage holds rigid or kinematic entities, which gs.entities.{type(stage_options).__name__} cannot "
                 "construct."
             )
-        if options.name is not None:
+        if stage_options.name is not None:
             gs.raise_exception("A stage adds several entities, so its options take no name.")
-        if isinstance(options, gs.entities.Rigid) and options.settings:
+        if stage_options.settings:
             gs.raise_exception("A stage adds entities of different links, so its options select no part.")
-        if not isinstance(options.morph, gs.morphs.USD):
-            gs.raise_exception(f"Unsupported morph: {options.morph}.")
+        if not isinstance(stage_options.morph, gs.morphs.USD):
+            gs.raise_exception(f"Unsupported morph: {stage_options.morph}.")
         from genesis.utils.usd import parse_usd_stage
 
         # One `gs.morphs.USD` per entity of the stage, added while the stage it was split from stays open.
-        with parse_usd_stage(options.morph) as entity_morphs:
+        with parse_usd_stage(stage_options.morph) as entity_morphs:
             return [
-                self.add_entity(options=options.model_copy(update={"morph": entity_morph}))
+                self.add_entity(options=stage_options.model_copy(update={"morph": entity_morph}))
                 for entity_morph in entity_morphs
             ]
 
@@ -832,21 +837,23 @@ class Scene(RBC):
         if options is None:
             if material is None:
                 gs.raise_exception("An emitter requires a material or entity options.")
-            options = get_entity_options(material=material, surface=surface)
-        elif material is not None or surface is not None:
-            gs.raise_exception("Pass either entity options or a material and a surface, never both.")
-        if not isinstance(options, (gs.entities.MPM, gs.entities.SPH)) and not (
-            isinstance(options, gs.entities.PBD)
-            and isinstance(options.material, (gs.materials.PBD.Liquid, gs.materials.PBD.Particle))
+            emitter_options = get_entity_options(material=material, surface=surface)
+        else:
+            if material is not None or surface is not None:
+                gs.raise_exception("Pass either entity options or a material and a surface, never both.")
+            emitter_options = options
+        if not isinstance(emitter_options, (gs.entities.MPM, gs.entities.SPH)) and not (
+            isinstance(emitter_options, gs.entities.PBD)
+            and isinstance(emitter_options.material, (gs.materials.PBD.Liquid, gs.materials.PBD.Particle))
         ):
             gs.raise_exception(
-                f"Non-supported entity options for emitter: gs.entities.{type(options).__name__}. Supported ones are "
-                "gs.entities.MPM, gs.entities.SPH and gs.entities.PBD with a Liquid or a Particle material."
+                f"Non-supported entity options for emitter: gs.entities.{type(emitter_options).__name__}. Supported "
+                "ones are gs.entities.MPM, gs.entities.SPH and gs.entities.PBD with a Liquid or a Particle material."
             )
-        if options.morph is not None:
+        if emitter_options.morph is not None:
             gs.raise_exception("The emitter sets the morph of its entity options. Leave it None.")
 
-        surface = options.surface
+        surface = emitter_options.surface
         if surface is None:
             surface = gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))
         if surface.vis_mode is None:
@@ -856,7 +863,7 @@ class Scene(RBC):
 
         emitter = Emitter(max_particles)
         morph = gs.morphs.Nowhere(n_particles=max_particles)
-        entity = self.add_entity(options=options.model_copy(update={"morph": morph, "surface": surface}))
+        entity = self.add_entity(options=emitter_options.model_copy(update={"morph": morph, "surface": surface}))
         emitter.set_entity(entity)
         self._emitters.append(emitter)
         return emitter
