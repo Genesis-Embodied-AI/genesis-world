@@ -161,8 +161,13 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
             pos=(5.0, 0.0, 0.0),
             size=(0.1, 0.1, 0.1),
         ),
+        material=gs.materials.Rigid(
+            rho=500.0,
+        ),
     )
     box_options.select(gs.indices.Geom.at(0)).set_friction(2.0).end().select(gs.indices.Geom.at([0])).set_friction(1.0)
+    # A density given as None stands for that of the asset, and the box states none, so the default density applies
+    box_options.select(gs.indices.Geom.at(0)).set(gs.options.Geom(rho=None))
     box = scene.add_entity(options=box_options)
     box_options.select(gs.indices.Geom.at(0)).set_friction(3.0)
     with pytest.raises(gs.GenesisException, match="frozen"):
@@ -270,6 +275,8 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
     assert_allclose(arm.get_link("arm1").geoms[0].get_friction(), 0.6, tol=gs.EPS)
     assert_allclose(arm.get_link("arm2").geoms[0].get_friction(), 1.5, tol=gs.EPS)
     assert_allclose(box.geoms[0].get_friction(), 1.0, tol=gs.EPS)
+    # The default density of an object, 600 kg/m^3, times the volume of the box, 0.1^3 m^3
+    assert_allclose(box.get_mass(), 600.0 * 0.1**3, tol=tol)
     for geom in arm.geoms:
         assert_allclose(geom.get_friction_torsional(), 0.02, tol=gs.EPS)
         assert_allclose(geom.get_friction_rolling(), 0.003, tol=gs.EPS)
