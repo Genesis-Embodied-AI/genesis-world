@@ -325,7 +325,7 @@ class RigidJoint(BuildableMixin, RBC):
         """
         n_dofs = self.n_dofs
         enable_heterogeneous = self._solver._enable_heterogeneous
-        n_envs = self._solver._B
+        n_envs = self._solver.n_envs_
         shape = (n_dofs, n_envs) if enable_heterogeneous else (n_dofs,)
         lengths = np.ones(shape, dtype=gs.np_float)
         if n_dofs == 0:

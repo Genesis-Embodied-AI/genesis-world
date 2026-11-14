@@ -146,7 +146,7 @@ class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin](Bui
 
         # Tactile-specific options (probe_gain, dead_taxel_*) live on ``TactileProbeSensorOptionsMixin``; generic
         # probe sensors (e.g. SurfaceDistanceProbe) don't carry them and register defaults (gain 1, no dead).
-        B = self._manager._sim._B
+        B = self._manager.n_envs_
         opts = self._options
         is_tactile = isinstance(opts, TactileProbeSensorOptionsMixin)
         # Initial per-probe gain (probe_gain may be scalar or per-probe array).
@@ -338,7 +338,7 @@ class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin](Bui
         environments. ``probe_world_flat`` is ``(n_debug_envs * n_probes, 3)`` with env-offset already added. Assumes
         ``self._link`` is set (consumer inherits ``RigidSensorMixin``).
         """
-        if self._manager._sim.n_envs > 0:
+        if self._manager.n_envs > 0:
             envs_idx = [context.rendered_envs_idx[i] for i in rendered_envs_idx]
             n_debug_envs = len(envs_idx)
             env_offsets = context.scene.envs_offset[np.asarray(envs_idx, dtype=gs.np_int)]

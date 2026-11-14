@@ -46,7 +46,7 @@ class Raycaster:
         self.targets: list[RaycastTarget] = []
         self._lock = Lock()
 
-        n_envs_max = scene._B
+        n_envs_max = scene.sim.n_envs_
         # Visual meshes exist on both solvers, while collision geometry is the rigid solver's alone.
         solvers = (scene.sim.rigid_solver, scene.sim.kinematic_solver) if use_visual_geom else (scene.sim.rigid_solver,)
         for solver in solvers:
@@ -100,7 +100,7 @@ class Raycaster:
         ray_origin = torch.as_tensor(ray_origin, dtype=gs.tc_float, device=gs.device)
         ray_direction = torch.as_tensor(ray_direction, dtype=gs.tc_float, device=gs.device)
         rays_origin = ray_origin - self._envs_offset
-        envs_idx = self.scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self.scene.sim.sanitize_envs_idx(envs_idx)
         closest_hit: RayHit | None = None
         for target in self.targets:
             # Each pass caps its traversal at the best distance so far, so any hit it reports is closer by

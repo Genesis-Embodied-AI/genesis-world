@@ -209,8 +209,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: RigidOptions) -> None:
-        super().__init__(scene, sim, options)
+    def __init__(self, sim: "Simulator", options: RigidOptions) -> None:
+        super().__init__(sim, options)
 
         self._enable_collision = options.enable_collision
         self._enable_multi_contact = options.enable_multi_contact
@@ -319,7 +319,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         return entity
 
     @gs.assert_unbuilt
-    def build(self) -> None:
+    def build(self, n_envs: int) -> None:
         # A link the world carries holds None where its asset states nothing (see 'RigidLinkDescription'). The solver
         # stores a value for every link, and the inertial of such a link never enters the dynamics, so zero it is.
         for link in self.links:
@@ -358,7 +358,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if not self._enable_mujoco_compatibility:
                 self._options.tolerance *= 0.1
 
-        super().build()
+        super().build(n_envs)
 
         self._init_vert_fields()
         self._init_geom_fields()
@@ -435,7 +435,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 variants_default = np.array([variant.default_armature or 0.0 for variant in entity.desc.variants])
             else:
                 variants_default = np.array([entity.main_morph.default_armature or 0.0])
-            envs_default = variants_default[_balanced_variant_mapping(variants_default.size, self._B)]
+            envs_default = variants_default[_balanced_variant_mapping(variants_default.size, self.n_envs_)]
             if (envs_default <= 0.0).all():
                 continue
             dofs_idx.extend(link.dof_start for link in rotor_links)
@@ -564,7 +564,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             gs.backend != gs.cpu and not sparse_solve and (self.n_dofs >= 16 or (is_generic and self.n_dofs > 0))
         )
         enable_cooperative_constraint_kernels = enable_tiled_island_seed and (
-            is_generic or self._sim._B <= get_gpu_core_count()
+            is_generic or self.n_envs_ <= get_gpu_core_count()
         )
         # The noslip sweep of an island is the last one-thread process of the cooperative regime, so its block-per-island
         # variant takes the same bound (see func_noslip in noslip.py).
@@ -584,7 +584,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         )
         # A CPU thread runs a contiguous range of environments, one after the other (see _allocate in data.py)
         constraint_layout_batch_first = (
-            gs.backend == gs.cpu or enable_cooperative_constraint_kernels or self.sim._para_level < gs.PARA_LEVEL.ALL
+            gs.backend == gs.cpu or enable_cooperative_constraint_kernels or self.sim.para_level < gs.PARA_LEVEL.ALL
         )
 
         # The level sweep (see func_sweep_links_by_level) syncs the lanes of a block, which the CPU does not offer, and
@@ -606,12 +606,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     _, levels_n_links = np.unique(
                         links_group_idx[group_links] * self.n_links + links_level[group_links], return_counts=True
                     )
-                    n_lane_steps = n_lanes_per_env * (-(-levels_n_links // n_lanes_per_env)).sum() * self._sim._B
+                    n_lane_steps = n_lanes_per_env * (-(-levels_n_links // n_lanes_per_env)).sum() * self.n_envs_
                     enable_level_sweep &= bool(n_lane_steps <= groups_n_links.max() * get_gpu_core_count())
 
         rigid_config = dict(
             backend=gs.backend,
-            para_level=self.sim._para_level,
+            para_level=self.sim.para_level,
             requires_grad=self.sim.options.requires_grad,
             use_hibernation=self._use_hibernation,
             batch_links_info=self._options.batch_links_info,
@@ -978,7 +978,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             gs.raise_exception(
                 "Links and dofs must be batched to selectively update invweight and meaninertia for some environment."
             )
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self._sim.sanitize_envs_idx(envs_idx)
 
         kernel_refresh_invweight_and_meaninertia(
             envs_idx,
@@ -1075,7 +1075,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 continue
 
             n_variants = len(link._variant_vgeom_ranges)
-            variant_idx = _balanced_variant_mapping(n_variants, self._B)
+            variant_idx = _balanced_variant_mapping(n_variants, self.n_envs_)
 
             # Build per-env arrays from link's variant data
             geom_starts = np.array([link._variant_geom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
@@ -1171,7 +1171,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # is batched (always so for a heterogeneous entity, optionally for a homogeneous one).
         dof_length = np.concatenate([joint.dofs_length for joint in joints], axis=0)
         if self._options.batch_dofs_info and dof_length.ndim == 1:
-            dof_length = np.broadcast_to(dof_length[:, None], (len(dof_length), self._B))
+            dof_length = np.broadcast_to(dof_length[:, None], (len(dof_length), self.n_envs_))
         self.dyn_info.dofs.dof_length.from_numpy(dof_length)
 
     def _init_geom_fields(self):
@@ -1303,12 +1303,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         collision (and any raycast deriving its vertices from geom poses) reading a one-step-stale pose.
         """
         if not self._is_forward_pos_updated:
-            self._update_forward_kinematics(self.scene._envs_idx)
+            self._update_forward_kinematics(self._envs_idx)
 
     def _update_forward_kinematics(self, envs_idx):
         """Update the cartesian space and the velocities of the links of the given environments from their state."""
         if not isinstance(envs_idx, torch.Tensor):
-            envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+            envs_idx = self._sim.sanitize_envs_idx(envs_idx)
         if envs_idx.dtype == torch.bool:
             fn = kernel_masked_forward_kinematics_links_geoms
         else:
@@ -1347,7 +1347,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         # A differentiable scene has no SAP coupler, which a scene with 'requires_grad' refuses at build
         if is_recording:
-            envs_idx = self._scene._sanitize_envs_idx(None)
+            envs_idx = self._sim.sanitize_envs_idx(None)
             self._update_forward_kinematics(envs_idx)
             kernel_forward_dynamics_without_qacc(
                 self.dyn_state,
@@ -1710,7 +1710,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 torch.mps.synchronize()
         if (self._use_hibernation and not gs.use_zerocopy) or not partial:
             # The kernels that follow take the selection sanitized once for all of them
-            envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+            envs_idx = self._sim.sanitize_envs_idx(envs_idx)
             if self._use_hibernation and not gs.use_zerocopy:
                 kernel_reset_hibernation(
                     envs_idx,
@@ -1797,7 +1797,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 pos = torch.as_tensor(pos, dtype=gs.tc_float, device=gs.device)
                 same_pos = pos.ndim < 2 or len(pos) == 1 or (torch.diff(pos, dim=0).abs() < gs.EPS).all()
                 set_all_envs = envs_idx is None or torch.equal(
-                    torch.sort(self._scene._sanitize_envs_idx(envs_idx)).values, self._scene._envs_idx
+                    torch.sort(self._sim.sanitize_envs_idx(envs_idx)).values, self._envs_idx
                 )
                 if not (set_all_envs and same_pos):
                     gs.raise_exception(
@@ -1826,7 +1826,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
             # Raise exception for fixed links with at least one geom and non-batched fixed vertices, except if setting
             # same location for all envs at once
-            set_all_envs = torch.equal(torch.sort(envs_idx).values, self._scene._envs_idx)
+            set_all_envs = torch.equal(torch.sort(envs_idx).values, self._envs_idx)
             has_fixed_verts = any(
                 link.is_fixed and link.geoms and not link.entity._batch_fixed_verts
                 for link in (self.links[i_l] for i_l in links_idx)
@@ -1923,7 +1923,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 quat = torch.as_tensor(quat, dtype=gs.tc_float, device=gs.device)
                 same_quat = quat.ndim < 2 or len(quat) == 1 or (torch.diff(quat, dim=0).abs() < gs.EPS).all()
                 set_all_envs = envs_idx is None or torch.equal(
-                    torch.sort(self._scene._sanitize_envs_idx(envs_idx)).values, self._scene._envs_idx
+                    torch.sort(self._sim.sanitize_envs_idx(envs_idx)).values, self._envs_idx
                 )
                 if not (set_all_envs and same_quat):
                     gs.raise_exception(
@@ -1964,7 +1964,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 quat = gu.transform_quat_by_quat(offset_quat, quat)
                 relative = False
 
-            set_all_envs = torch.equal(torch.sort(envs_idx).values, self._scene._envs_idx)
+            set_all_envs = torch.equal(torch.sort(envs_idx).values, self._envs_idx)
             has_fixed_verts = any(
                 link.is_fixed and link.geoms and not link.entity._batch_fixed_verts
                 for link in (self.links[i_l] for i_l in links_idx)
@@ -2089,7 +2089,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     f"mass and principal axes of all its links. Set the mass of the whole entity instead. {remedy}"
                 )
 
-        envs_idx = envs_idx if self._options.batch_links_info else self._scene._envs_idx
+        envs_idx = envs_idx if self._options.batch_links_info else self._envs_idx
         if not self._options.batch_links_info or self.n_envs == 0:
             values = values[None]
         # The weights are solved again rather than scaled by the mass ratio: a weight follows the mass alone for a body
@@ -3193,7 +3193,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # The axis and its point are given in the authored link frames, which the morph offset and the inertial
         # alignment move away from the internal ones the constraint is solved in (see '_offset_world_shift'). The
         # offsets follow the sorted unique envs that 'add_dynamic_constraint' fills.
-        envs_idx_unique = torch.unique(self._scene._sanitize_envs_idx(envs_idx))
+        envs_idx_unique = torch.unique(self._sim.sanitize_envs_idx(envs_idx))
         anchor_link_idx = link2_idx if pos is None else link1_idx
         anchor_offset_pos = _select_links_offset(self._links_offset_pos, anchor_link_idx, envs_idx_unique)[..., 0, :]
         anchor_offset_quat = _select_links_offset(self._links_offset_quat, anchor_link_idx, envs_idx_unique)[..., 0, :]

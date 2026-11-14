@@ -185,8 +185,8 @@ class PBDSolver(ParticleSolver):
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: PBDOptions) -> None:
-        super().__init__(scene, sim, options)
+    def __init__(self, sim: "Simulator", options: PBDOptions) -> None:
+        super().__init__(sim, options)
 
         self._max_stretch_solver_iterations = options.max_stretch_solver_iterations
         self._max_bending_solver_iterations = options.max_bending_solver_iterations
@@ -207,11 +207,11 @@ class PBDSolver(ParticleSolver):
         self.pbd_config: PBDConfig | None = None
 
     @gs.assert_unbuilt
-    def build(self) -> None:
-        super().build()
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
 
         is_unused = not self.is_active
-        sizes = dict(envs=self._B, particles=self._n_particles)
+        sizes = dict(envs=self.n_envs_, particles=self._n_particles)
         self.pbd_state = PBDState(
             sizes=dict(sizes, **hash_grid_sizes(math.prod(self._hash_grid_res))),
             values=dict(hash_grid=dict(cell_size=self._hash_grid_cell_size, grid_res=self._hash_grid_res)),
@@ -372,7 +372,7 @@ class PBDSolver(ParticleSolver):
     ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
         if isinstance(material, gs.materials.PBD.Cloth):
             entity = PBD2DEntity(
-                scene=self.scene,
+                scene=self._sim.scene,
                 solver=self,
                 material=material,
                 morph=morph,
@@ -388,7 +388,7 @@ class PBDSolver(ParticleSolver):
             )
         elif isinstance(material, gs.materials.PBD.Elastic):
             entity = PBD3DEntity(
-                scene=self.scene,
+                scene=self._sim.scene,
                 solver=self,
                 material=material,
                 morph=morph,
@@ -404,7 +404,7 @@ class PBDSolver(ParticleSolver):
             )
         elif isinstance(material, gs.materials.PBD.Liquid):
             entity = PBDParticleEntity(
-                scene=self.scene,
+                scene=self._sim.scene,
                 solver=self,
                 material=material,
                 morph=morph,
@@ -416,7 +416,7 @@ class PBDSolver(ParticleSolver):
             )
         elif isinstance(material, gs.materials.PBD.Particle):
             entity = PBDFreeParticleEntity(
-                scene=self.scene,
+                scene=self._sim.scene,
                 solver=self,
                 material=material,
                 morph=morph,

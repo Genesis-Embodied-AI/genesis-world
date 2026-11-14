@@ -799,7 +799,7 @@ class KinematicEntity(Entity):
 
         # For heterogeneous entities, compute AABB per-environment respecting active_envs_idx
         if self._enable_heterogeneous:
-            envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+            envs_idx = self._solver.sim.sanitize_envs_idx(envs_idx)
             n_envs = len(envs_idx)
             aabb_min = torch.full((n_envs, 3), float("inf"), dtype=gs.tc_float, device=gs.device)
             aabb_max = torch.full((n_envs, 3), float("-inf"), dtype=gs.tc_float, device=gs.device)
@@ -1530,7 +1530,7 @@ class KinematicEntity(Entity):
             Pose error for each target. The 6-vector is [err_pos_x, err_pos_y, err_pos_z, err_rot_x, err_rot_y,
             err_rot_z]. Only returned if `return_error` is True.
         """
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self._solver.sim.sanitize_envs_idx(envs_idx)
 
         if self.n_dofs == 0:
             gs.raise_exception("Entity has zero dofs.")
@@ -1732,7 +1732,7 @@ class RigidEntity(KinematicEntity):
 
         # Make sure that the entity is not object
         if (
-            isinstance(self.sim.coupler, IPCCoupler)
+            isinstance(self._solver.sim.coupler, IPCCoupler)
             and self.material.coup_type == "ipc_only"
             and any(l_desc.is_robot for l_desc in self._desc.links)
         ):
@@ -1948,7 +1948,7 @@ class RigidEntity(KinematicEntity):
             A tensor of boolean mask indicating the batch indices with failed plan.
         """
         if self._solver.n_envs > 0:
-            n_envs = len(self._scene._sanitize_envs_idx(envs_idx))
+            n_envs = len(self._solver.sim.sanitize_envs_idx(envs_idx))
         else:
             n_envs = 1
 
@@ -2041,7 +2041,7 @@ class RigidEntity(KinematicEntity):
         # For heterogeneous entities, compute AABB per-environment respecting active_envs_idx.
         # FIXME: Remove this branch after implementing 'get_verts'.
         if self._enable_heterogeneous and self._solver.n_envs > 0:
-            envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+            envs_idx = self._solver.sim.sanitize_envs_idx(envs_idx)
             n_envs = len(envs_idx)
             aabb_min = torch.full((n_envs, 3), float("inf"), dtype=gs.tc_float, device=gs.device)
             aabb_max = torch.full((n_envs, 3), float("-inf"), dtype=gs.tc_float, device=gs.device)
@@ -2326,7 +2326,11 @@ class RigidEntity(KinematicEntity):
         """
         from genesis.engine.couplers import IPCCoupler
 
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type is not None and self.base_link.is_fixed:
+        if (
+            isinstance(self._solver.sim.coupler, IPCCoupler)
+            and self.material.coup_type is not None
+            and self.base_link.is_fixed
+        ):
             gs.raise_exception(
                 "This method is only supported by `RigidMaterial.coup_type=None` for fixed-based rigid entities."
             )
@@ -2355,7 +2359,11 @@ class RigidEntity(KinematicEntity):
         """
         from genesis.engine.couplers import IPCCoupler
 
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type is not None and self.base_link.is_fixed:
+        if (
+            isinstance(self._solver.sim.coupler, IPCCoupler)
+            and self.material.coup_type is not None
+            and self.base_link.is_fixed
+        ):
             gs.raise_exception(
                 "This method is only supported by `RigidMaterial.coup_type=None` for fixed-based rigid entities."
             )
@@ -2377,7 +2385,9 @@ class RigidEntity(KinematicEntity):
         self._solver.update_verts_for_geoms(slice(self.geom_start, self.geom_end))
 
         n_fixed_verts, n_free_vertices = len(self._fixed_verts_idx_local), len(self._free_verts_idx_local)
-        tensor = torch.empty((self._solver._B, n_fixed_verts + n_free_vertices, 3), dtype=gs.tc_float, device=gs.device)
+        tensor = torch.empty(
+            (self._solver.n_envs_, n_fixed_verts + n_free_vertices, 3), dtype=gs.tc_float, device=gs.device
+        )
 
         if n_fixed_verts > 0:
             verts_idx = slice(self._fixed_verts_state_start, self._fixed_verts_state_start + n_fixed_verts)
@@ -2416,7 +2426,7 @@ class RigidEntity(KinematicEntity):
         """
         from genesis.engine.couplers import IPCCoupler
 
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type == "external_articulation":
+        if isinstance(self._solver.sim.coupler, IPCCoupler) and self.material.coup_type == "external_articulation":
             gs.raise_exception("This method is not supported by `RigidMaterial.coup_type='external_articulation'`.")
         super().set_qpos(qpos, qs_idx_local, envs_idx, zero_velocity=zero_velocity, skip_forward=skip_forward)
 
@@ -2594,7 +2604,7 @@ class RigidEntity(KinematicEntity):
         """
         from genesis.engine.couplers import IPCCoupler
 
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type == "external_articulation":
+        if isinstance(self._solver.sim.coupler, IPCCoupler) and self.material.coup_type == "external_articulation":
             gs.raise_exception("This method is not supported by `RigidMaterial.coup_type='external_articulation'`.")
         super().set_dofs_position(position, dofs_idx_local, envs_idx, zero_velocity=zero_velocity)
 
@@ -2618,7 +2628,7 @@ class RigidEntity(KinematicEntity):
         """
         from genesis.engine.couplers import IPCCoupler
 
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type == "ipc_only":
+        if isinstance(self._solver.sim.coupler, IPCCoupler) and self.material.coup_type == "ipc_only":
             gs.raise_exception("This method is not supported for `coup_type='ipc_only'` entities.")
 
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
@@ -2640,7 +2650,7 @@ class RigidEntity(KinematicEntity):
         """
         from genesis.engine.couplers import IPCCoupler
 
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type == "ipc_only":
+        if isinstance(self._solver.sim.coupler, IPCCoupler) and self.material.coup_type == "ipc_only":
             gs.raise_exception("This method is not supported for `coup_type='ipc_only'` entities.")
 
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
@@ -2663,7 +2673,7 @@ class RigidEntity(KinematicEntity):
         """
         from genesis.engine.couplers import IPCCoupler
 
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type == "ipc_only":
+        if isinstance(self._solver.sim.coupler, IPCCoupler) and self.material.coup_type == "ipc_only":
             gs.raise_exception("This method is not supported for `coup_type='ipc_only'` entities.")
 
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
@@ -2687,7 +2697,7 @@ class RigidEntity(KinematicEntity):
         """
         from genesis.engine.couplers import IPCCoupler
 
-        if isinstance(self.sim.coupler, IPCCoupler) and self.material.coup_type == "ipc_only":
+        if isinstance(self._solver.sim.coupler, IPCCoupler) and self.material.coup_type == "ipc_only":
             gs.raise_exception("This method is not supported for `coup_type='ipc_only'` entities.")
 
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)

@@ -196,7 +196,7 @@ def _sample_track_links_point_cloud_tensors(
         geom_chunks = get_mesh_geom_chunks(link, prefer_visual)
         if not geom_chunks:
             gs.raise_exception(f"No mesh geometry on tracked link index {link_idx}.")
-        for variant_mask, variant_chunks in _group_geoms_by_variant(geom_chunks, solver._B):
+        for variant_mask, variant_chunks in _group_geoms_by_variant(geom_chunks, solver.n_envs_):
             for n_geom_pts, (geom, verts, faces) in zip(_split_count_by_area(n_pts, variant_chunks), variant_chunks):
                 if n_geom_pts <= 0:
                     continue
@@ -211,7 +211,7 @@ def _sample_track_links_point_cloud_tensors(
                 link_idx_chunks.append(li)
                 pos_chunks.append(torch.tensor(pts_np, dtype=gs.tc_float, device=gs.device))
                 nrm_chunks.append(torch.tensor(nrm_np, dtype=gs.tc_float, device=gs.device))
-                active_chunks.append(variant_mask.expand(pts_np.shape[0], solver._B))
+                active_chunks.append(variant_mask.expand(pts_np.shape[0], solver.n_envs_))
 
     if not pos_chunks:
         gs.raise_exception("PointCloudTactile sensor produced an empty object point cloud.")
@@ -730,13 +730,13 @@ class ProximityTaxelSensor(
         self._shared_metadata.proximity_density_scale = concat_with_tensor(
             self._shared_metadata.proximity_density_scale,
             self._options.density_scalar / active_count,
-            expand=(1, self._manager._sim._B),
+            expand=(1, self._manager.n_envs_),
         )
         self._shared_metadata.taxel_signal_buf = torch.zeros(
-            (self._shared_metadata.total_n_probes, self._manager._sim._B), dtype=gs.tc_float, device=gs.device
+            (self._shared_metadata.total_n_probes, self._manager.n_envs_), dtype=gs.tc_float, device=gs.device
         )
         if self._idx == len(self._manager._sensors_by_type[type(self)]) - 1:
-            sums = ProximitySums(sizes=dict(taxels=self._shared_metadata.total_n_probes, envs=self._manager._sim._B))
+            sums = ProximitySums(sizes=dict(taxels=self._shared_metadata.total_n_probes, envs=self._manager.n_envs_))
             self._shared_metadata.proximity_query = ProximityPoints(
                 self._shared_metadata.points, sums, self._shared_metadata.solver.rigid_info.EPS
             )
@@ -940,7 +940,7 @@ def _collect_collision_geom_idx(solver, track_link_idx: np.ndarray) -> tuple[tor
         link = solver.links[link_i]
         for geom in link.geoms:
             geom_idx.append(int(geom.idx))
-            active_masks.append(_active_envs_mask_tensor(geom, solver._B))
+            active_masks.append(_active_envs_mask_tensor(geom, solver.n_envs_))
     if not geom_idx:
         gs.raise_exception("ElastomerTaxel tracked links must have collision geometry for SDF queries.")
     return torch.tensor(geom_idx, dtype=gs.tc_int, device=gs.device), torch.stack(active_masks, dim=0)
@@ -1690,7 +1690,7 @@ class ElastomerTaxelSensor(
         super().build()
 
         solver = self._shared_metadata.solver
-        B = self._manager._sim._B
+        B = self._manager.n_envs_
         if self._link is None:
             gs.raise_exception("ElastomerTaxel must be attached to a rigid link with collision geometry.")
         # The class-wide contact_depth_query backend is resolved by ContactDepthQuerySensorMixin.build.
@@ -2081,7 +2081,7 @@ class ElastomerTaxelSensor(
         def mask(batch_envs_idx):
             disp = self.read_ground_truth(batch_envs_idx)
             if self._options.history_length > 0:
-                disp = disp.select(1 if self._manager._sim.n_envs > 0 else 0, -1)
+                disp = disp.select(1 if self._manager.n_envs > 0 else 0, -1)
             return torch.linalg.norm(disp, dim=-1) >= gs.EPS
 
         nodes, *_ = self._draw_debug_probes(context, envs_idx, self._tactile_color_groups_fn(mask))

@@ -184,7 +184,7 @@ class KinematicLink(BuildableMixin, RBC):
 
         # For heterogeneous entities, compute AABB per-environment respecting active_envs_idx
         if self.entity._enable_heterogeneous:
-            envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+            envs_idx = self._solver.sim.sanitize_envs_idx(envs_idx)
             n_envs = len(envs_idx)
             aabb_min = torch.full((n_envs, 3), float("inf"), dtype=gs.tc_float, device=gs.device)
             aabb_max = torch.full((n_envs, 3), float("-inf"), dtype=gs.tc_float, device=gs.device)

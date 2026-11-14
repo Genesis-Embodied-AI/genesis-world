@@ -35,7 +35,9 @@ class DroneEntity(RigidEntity):
     def _build(self):
         super()._build()
 
-        self._propellers_revs = torch.zeros((self._n_propellers, self.solver._B), dtype=gs.tc_float, device=gs.device)
+        self._propellers_revs = torch.zeros(
+            (self._n_propellers, self.solver.n_envs_), dtype=gs.tc_float, device=gs.device
+        )
         self._prev_prop_t = None
 
     def set_propellers_rpm(self, propellers_rpm):
@@ -54,22 +56,22 @@ class DroneEntity(RigidEntity):
             If the method is called more than once per simulation step, or if the input shape
             does not match the number of propellers, or contains negative values.
         """
-        if self._prev_prop_t == self.sim.cur_step_global:
+        if self._prev_prop_t == self._solver.sim.cur_step_global:
             gs.raise_exception("`set_propellers_rpm` can only be called once per step.")
-        self._prev_prop_t = self.sim.cur_step_global
+        self._prev_prop_t = self._solver.sim.cur_step_global
 
         assert propellers_rpm is not None
         propellers_rpm, *_ = self._solver._sanitize_io_variables(
             propellers_rpm, self._propellers_link_idx, self._n_propellers, "propellers_link_idx"
         )
-        if self._scene.n_envs == 0:
+        if self._solver.n_envs == 0:
             propellers_rpm = propellers_rpm[None]
 
         # FIXME: This check is too expensive
         # if (propellers_rpm < 0.0).any():
         #     gs.raise_exception("`propellers_rpm` cannot be negative.")
 
-        self._propellers_revs = (self._propellers_revs + propellers_rpm.T) % (60 / self.solver.dt)
+        self._propellers_revs = (self._propellers_revs + propellers_rpm.T) % (60 / self.solver.sim.dt)
 
         self.solver.set_drone_rpm(
             self._propellers_link_idx, self.KF, self.KM, propellers_rpm, self._propellers_spin, self._model == "RACE"

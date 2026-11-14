@@ -220,8 +220,8 @@ class SPHSolver(ParticleSolver):
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: SPHOptions) -> None:
-        super().__init__(scene, sim, options)
+    def __init__(self, sim: "Simulator", options: SPHOptions) -> None:
+        super().__init__(sim, options)
 
         self._support_radius = options._support_radius
 
@@ -245,11 +245,11 @@ class SPHSolver(ParticleSolver):
         self.sph_config: SPHConfig | None = None
 
     @gs.assert_unbuilt
-    def build(self) -> None:
-        super().build()
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
 
         is_deterministic = requires_deterministic_accumulation()
-        sizes = dict(envs=self._B, particles=self._n_particles)
+        sizes = dict(envs=self.n_envs_, particles=self._n_particles)
         hash_grid_values = dict(cell_size=self._hash_grid_cell_size, grid_res=self._hash_grid_res)
         self.sph_state = SPHState(
             sizes=dict(
@@ -291,7 +291,7 @@ class SPHSolver(ParticleSolver):
                         BLOCK_LOG2_LANES, math.floor(math.log2((self._hash_grid_cell_size / self._particle_size) ** 3))
                     ),
                 )
-                if 0 < self._n_particles * self._B <= get_gpu_core_count()
+                if 0 < self._n_particles * self.n_envs_ <= get_gpu_core_count()
                 else 0
             ),
         )
@@ -366,7 +366,7 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
         desc: None = None,
     ) -> "SPHEntity":
         entity = SPHEntity(
-            scene=self.scene,
+            scene=self._sim.scene,
             solver=self,
             material=material,
             morph=morph,

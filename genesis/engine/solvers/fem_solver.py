@@ -532,7 +532,7 @@ class FEMData(Data):
             }
         super().__init__(
             sizes=dict(
-                envs=solver._B,
+                envs=solver.n_envs_,
                 vertices=solver.n_vertices,
                 elements=solver.n_elements,
                 vverts=solver.n_vverts,
@@ -573,8 +573,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: FEMOptions) -> None:
-        super().__init__(scene, sim, options)
+    def __init__(self, sim: "Simulator", options: FEMOptions) -> None:
+        super().__init__(sim, options)
 
         self._damping = options.damping
         self._use_implicit_solver = options.use_implicit_solver
@@ -613,10 +613,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self.data_manager: FEMData | None = None
 
     @gs.assert_unbuilt
-    def build(self) -> None:
-        super().build()
-
-        self._B = self.sim._B
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
 
         # The implicit solve adds up every term in a fixed order, so it is reproducible bitwise. On CPU, one thread runs
         # each environment, the environments filling the cores. On GPU, the lanes of a subgroup tile gather the terms
@@ -653,7 +651,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         is_pcg_solved_per_env_block = (
             self._use_implicit_solver
             and enable_cooperative_kernels
-            and 2 * self._B * get_gpu_cores_per_unit() >= get_gpu_core_count()
+            and 2 * self.n_envs_ * get_gpu_cores_per_unit() >= get_gpu_core_count()
         )
         self.fem_config = FEMConfig(
             use_implicit_solver=self._use_implicit_solver,
@@ -812,7 +810,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
             # Laid out environment-first like the arrays of the solve, whose blocks read the vertices of an environment
             self.vertex_constraints = FEMVertexConstraints(
-                sizes=dict(vertices=self.n_vertices, constraint_slots=self._max_vertex_constraints, envs=self._B),
+                sizes=dict(vertices=self.n_vertices, constraint_slots=self._max_vertex_constraints, envs=self.n_envs_),
                 env_first=True,
             )
             kernel_clear_vertex_constraints(self.vertex_constraints)
@@ -843,7 +841,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         desc: None = None,
     ) -> "FEMEntity":
         entity = FEMEntity(
-            scene=self._scene,
+            scene=self._sim.scene,
             solver=self,
             material=material,
             morph=morph,
@@ -1062,7 +1060,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         """
         if f is not None:
             warn_once(
-                self._scene,
+                self._sim.scene,
                 "The argument of 'get_state_render' is deprecated and ignored. Call 'get_state_render()' instead.",
             )
         if not self.is_active or self.n_vverts == 0:
@@ -1096,12 +1094,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def get_verts_pos(self, verts_idx=None, envs_idx=None):
         """Get the position of some vertices, the same in every environment (see 'set_verts_pos')."""
         tensor = self._read_data(self.fem_state.vertices.pos, envs_idx, verts_idx, copy=True)
-        return tensor[0] if self._scene.n_envs == 0 else tensor
+        return tensor[0] if self.n_envs == 0 else tensor
 
     def get_verts_vel(self, verts_idx=None, envs_idx=None):
         """Get the velocity of some vertices, the same in every environment (see 'set_verts_pos')."""
         tensor = self._read_data(self.fem_state.vertices.vel, envs_idx, verts_idx, copy=True)
-        return tensor[0] if self._scene.n_envs == 0 else tensor
+        return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
     @mutates(StateChange.DYNAMICS)
@@ -1215,7 +1213,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             link_init_quat = torch.zeros((len(envs_idx), 4), dtype=gs.tc_float, device=gs.device)
         else:
             rigid_solver = self._sim.rigid_solver
-            links_envs_idx = envs_idx if self._scene.n_envs > 0 else None
+            links_envs_idx = envs_idx if self.n_envs > 0 else None
             # The attachment is a configuration of the constraint, which carries no gradient
             with torch.no_grad():
                 link_init_pos = rigid_solver.get_links_pos(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]

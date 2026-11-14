@@ -143,7 +143,7 @@ class RigidGeom(BuildableMixin, RBC):
         """
         Visualizes the signed distance field (SDF) of the rigid geometry in the viewer.
         """
-        if self._solver.scene.viewer is None:
+        if self._solver.sim.scene.viewer is None:
             gs.raise_exception("Viewer is not available.")
 
         if self._solver.n_envs > 0:
@@ -162,14 +162,14 @@ class RigidGeom(BuildableMixin, RBC):
                 T = gu.trans_to_T(np.array(pos))
         else:
             T = np.array(T)
-        self._solver.scene.draw_debug_mesh(sdf_mesh, T=T)
+        self._solver.sim.scene.draw_debug_mesh(sdf_mesh, T=T)
 
         if show_axis:
             axis_mesh = trimesh.creation.axis(origin_size=0.01, axis_radius=0.005, axis_length=axis_length)
             axis_mesh.visual = trimesh.visual.ColorVisuals(
                 vertex_colors=np.tile(np.array([axis_color]), [len(axis_mesh.vertices), 1])
             )
-            self._solver.scene.draw_debug_mesh(axis_mesh, T=T)
+            self._solver.sim.scene.draw_debug_mesh(axis_mesh, T=T)
 
         if show_boundary:
             sdf_grid = self.desc.mesh.get_sdf_grid(self.desc.sdf)
@@ -180,7 +180,7 @@ class RigidGeom(BuildableMixin, RBC):
             boundary_mesh.visual = trimesh.visual.ColorVisuals(
                 vertex_colors=np.tile(np.array([boundary_color]), [len(boundary_mesh.vertices), 1])
             )
-            self._solver.scene.draw_debug_mesh(boundary_mesh, T=T)
+            self._solver.sim.scene.draw_debug_mesh(boundary_mesh, T=T)
 
     @gs.assert_built
     def set_friction(self, friction):

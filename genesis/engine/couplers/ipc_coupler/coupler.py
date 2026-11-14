@@ -1,5 +1,4 @@
 import logging
-import os
 import sys
 import tempfile
 import weakref
@@ -21,7 +20,14 @@ from genesis.engine.solvers.rigid.data import LinksState
 from genesis.options.solvers import IPCCouplerOptions, RigidOptions
 from genesis.repr_base import RBC
 from genesis.utils.data import ENVS, Data, DataKind, field
-from genesis.utils.misc import BuildableMixin, geometric_mean, harmonic_mean, qd_to_numpy, tensor_to_array
+from genesis.utils.misc import (
+    BatchedMixin,
+    BuildableMixin,
+    geometric_mean,
+    harmonic_mean,
+    qd_to_numpy,
+    tensor_to_array,
+)
 
 if TYPE_CHECKING:
     from genesis.engine.entities import FEMEntity, RigidEntity
@@ -121,7 +127,7 @@ class IPCCouplerState(Data, kind=DataKind.STATE):
     errno: qd.Tensor = field(int, shape=(ENVS,))
 
 
-class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
+class IPCCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
     """
     Coupler class for handling Incremental Potential Contact (IPC) simulation coupling.
 
@@ -218,10 +224,11 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
     # ============================================================
 
     @gs.assert_unbuilt
-    def build(self) -> None:
+    def build(self, n_envs: int) -> None:
         """Build IPC system"""
-        self.ipc_coupler_state = IPCCouplerState(sizes=dict(envs=self.sim._B))
-        self.build_errno(self.sim._B)
+        super().build(n_envs)
+        self.ipc_coupler_state = IPCCouplerState(sizes=dict(envs=self.n_envs_))
+        self.build_errno(self.n_envs_)
         self.register_errors(self.ipc_coupler_state.errno, {})
         # IPC coupler builds a single IPC scene shared across all envs, so it requires
         # identical geometry topology (links, joints, geoms) across environments.
@@ -342,9 +349,8 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
             uipc.Logger.set_level(uipc.Logger.Level.Error)
             uipc.Timer.disable_all()
 
-        # Create workspace directory for IPC output, named after scene UID.
-        workspace = os.path.join(tempfile.gettempdir(), f"genesis_ipc_{self.sim.scene.uid.full()}")
-        os.makedirs(workspace, exist_ok=False)
+        # Create a workspace directory of its own for IPC output
+        workspace = tempfile.mkdtemp(prefix="genesis_ipc_")
 
         # Note: gpu_device option may need to be set via CUDA environment variables (CUDA_VISIBLE_DEVICES)
         # before Genesis initialization, as libuipc Engine does not expose device selection in constructor
@@ -364,7 +370,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
         self._ipc_no_collision_contact = self._ipc_contact_tabular.create("no_collision_contact")
 
         # Set up sub-scenes for multi-environment to isolate per-environment contacts if batched
-        for env_idx in range(self.sim._B):
+        for env_idx in range(self.n_envs_):
             ipc_subscene = self._ipc_subscene_tabular.create(f"subscene_{env_idx}")
             for other_ipc_subscene in self._ipc_subscenes:
                 self._ipc_subscene_tabular.insert(other_ipc_subscene, ipc_subscene, False)
@@ -379,7 +385,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
         # Add rigid geoms and articulated entities to IPC based on per-entity coupling types
         if self.rigid_solver.is_active:
             links_pos, links_quat, _, _, joints_xanchor, joints_xaxis = compute_forward_kinematics(
-                self.rigid_solver.entities, n_envs=self.sim._B
+                self.rigid_solver.entities, n_envs=self.n_envs_
             )
             self._add_rigid_geoms_to_ipc(links_pos, links_quat)
             self._add_articulation_entities_to_ipc(joints_xanchor, joints_xaxis)
@@ -392,7 +398,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
 
         # Create constitutions based on entity types present
         entity: "FEMEntity"
-        for env_idx in range(self.sim._B):
+        for env_idx in range(self.n_envs_):
             for i_e, entity in enumerate(cast(list["FEMEntity"], self.fem_solver.entities)):
                 is_cloth = isinstance(entity.material, Cloth)
                 solver_type = "cloth" if is_cloth else "fem"
@@ -412,7 +418,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
 
                 # ---- Apply constitutions ----
                 # Add to contact subscene (only for multi-environment)
-                if self.sim.n_envs > 0:
+                if self.n_envs > 0:
                     self._ipc_subscenes[env_idx].apply_to(mesh)
 
                 # Apply per-entity contact element (created once per entity on first env iteration)
@@ -500,7 +506,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
                 gs.logger.debug(f"Fixed-merge: link {link.idx} ({link.name}) -> {target_link.idx} ({target_link.name})")
 
         # ========== Process each environment ==========
-        for env_idx in range(self.sim._B):
+        for env_idx in range(self.n_envs_):
             for target_link, source_links in target_groups.items():
                 entity = target_link.entity
                 entity_coup_type = self._coup_type_by_entity[entity]
@@ -530,7 +536,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
 
                             plane_obj = self._ipc_objects.create(f"rigid_plane_{geom.idx}_{env_idx}")
 
-                            if self.sim.n_envs > 0:
+                            if self.n_envs > 0:
                                 self._ipc_subscenes[env_idx].apply_to(plane_geom)
 
                             plane_obj.geometries().create(plane_geom)
@@ -578,7 +584,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
                 # ---- Apply constitutions ----
                 abd_obj = self._ipc_objects.create(f"rigid_link_{target_link.idx}_{env_idx}")
 
-                if self.sim.n_envs > 0:
+                if self.n_envs > 0:
                     self._ipc_subscenes[env_idx].apply_to(rigid_link_geom)
 
                 # Apply per-entity contact element or no-collision marker
@@ -694,7 +700,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
 
             # ---- Create joint geometries per environment ----
             articulation_geom_slots: list[GeometrySlot] = []
-            for env_idx in range(self.sim._B):
+            for env_idx in range(self.n_envs_):
                 joint_geom_slots: list[GeometrySlot] = []
                 for joint, joint_constitution, reverse_verts, parent_link, child_link in joints:
                     joint_axis = joints_xaxis[env_idx, joint.idx]
@@ -705,7 +711,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
                     vertices = np.array([v2, v1] if reverse_verts else [v1, v2], dtype=np.float64)
                     edges = np.array([[0, 1]], dtype=np.int32)
                     joint_geom = uipc.geometry.linemesh(vertices, edges)
-                    if self.sim.n_envs > 0:
+                    if self.n_envs > 0:
                         self._ipc_subscenes[env_idx].apply_to(joint_geom)
 
                     parent_abd_slot = self._abd_slots_by_link[parent_link][env_idx]
@@ -719,7 +725,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
                     joint_geom_slots.append(joint_geom_slot)
 
                 articulation_geom = self._ipc_eac.create_geometry(joint_geom_slots, [0] * len(joint_geom_slots))
-                if self.sim.n_envs > 0:
+                if self.n_envs > 0:
                     self._ipc_subscenes[env_idx].apply_to(articulation_geom)
 
                 mass_attr = articulation_geom["joint_joint"].find("mass")
@@ -734,13 +740,13 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
                 joints_child_link=[j.link for j, *_ in joints],
                 joints_q_idx_local=[j.qs_idx_local[0] for j, *_ in joints],
                 articulation_slots=articulation_geom_slots,
-                ref_dof_prev=np.zeros((self.sim._B, entity.n_qs), dtype=np.float64),
-                qpos_stored=np.zeros((self.sim._B, entity.n_qs), dtype=np.float64),
-                qpos_current=np.zeros((self.sim._B, entity.n_qs), dtype=np.float64),
-                qpos_new=np.zeros((self.sim._B, entity.n_qs), dtype=np.float64),
-                delta_theta_tilde=np.zeros((self.sim._B, len(joints)), dtype=np.float64),
-                delta_theta_ipc=np.zeros((self.sim._B, len(joints)), dtype=np.float64),
-                prev_links_transform=[[None for _ in range(self.sim._B)] for _ in joints],
+                ref_dof_prev=np.zeros((self.n_envs_, entity.n_qs), dtype=np.float64),
+                qpos_stored=np.zeros((self.n_envs_, entity.n_qs), dtype=np.float64),
+                qpos_current=np.zeros((self.n_envs_, entity.n_qs), dtype=np.float64),
+                qpos_new=np.zeros((self.n_envs_, entity.n_qs), dtype=np.float64),
+                delta_theta_tilde=np.zeros((self.n_envs_, len(joints)), dtype=np.float64),
+                delta_theta_ipc=np.zeros((self.n_envs_, len(joints)), dtype=np.float64),
+                prev_links_transform=[[None for _ in range(self.n_envs_)] for _ in joints],
             )
 
             # Add to cache list if non-fixed base for '_retrieve_rigid_states' in couple()
@@ -819,12 +825,12 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
         body_count = self._abd_state_feature.body_count()
 
         # Verify the count matches IPC's ABD body count
-        if body_count != n_abd_links * self.sim._B:
+        if body_count != n_abd_links * self.n_envs_:
             gs.raise_exception(f"ABD body count mismatch: got {body_count}.")
 
         # Pre-allocate rigid link transform
         for link in abd_links:
-            self._abd_transforms_by_link[link] = [np.eye(4, dtype=gs.np_float) for _ in range(self.sim._B)]
+            self._abd_transforms_by_link[link] = [np.eye(4, dtype=gs.np_float) for _ in range(self.n_envs_)]
 
         # Create state geometry for batch data transfer
         self._abd_state_geom = self._abd_state_feature.create_geometry()
@@ -839,7 +845,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
         self._abd_data_by_link = {
             link: [
                 ABDLinkEntry(transform=np.eye(4, dtype=gs.np_float), velocity=np.zeros((4, 4), dtype=gs.np_float))
-                for _ in range(self.sim._B)
+                for _ in range(self.n_envs_)
             ]
             for link in abd_links
             if link.entity in rigid_retrieve_entities
@@ -848,10 +854,10 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
         # Pre-allocate coupling data
         coupling_links = list(self._abd_data_by_link.keys())
         abd_body_idx_by_link = {
-            link: [env_idx * n_abd_links + abd_links.index(link) for env_idx in range(self.sim._B)]
+            link: [env_idx * n_abd_links + abd_links.index(link) for env_idx in range(self.n_envs_)]
             for link in coupling_links
         }
-        self._coupling_data = IPCCouplingData(coupling_links, abd_body_idx_by_link, self.sim._B)
+        self._coupling_data = IPCCouplingData(coupling_links, abd_body_idx_by_link, self.n_envs_)
 
         gs.logger.debug(f"IPC coupling data created: {len(coupling_links)} links.")
 
@@ -955,8 +961,8 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
     # ============================================================
 
     def _apply_base_link_velocity_from_ipc(self, entity):
-        envs_vel = np.empty((self.sim._B, 6), dtype=gs.np_float)
-        for env_idx in range(self.sim._B):
+        envs_vel = np.empty((self.n_envs_, 6), dtype=gs.np_float)
+        for env_idx in range(self.n_envs_):
             abd_entry = self._abd_data_by_link[entity.base_link][env_idx]
             envs_vel[env_idx, :3] = abd_entry.velocity[:3, 3]
 
@@ -969,7 +975,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
             )
 
         self.rigid_solver.set_dofs_velocity(
-            envs_vel if self.sim.n_envs > 0 else envs_vel[0],
+            envs_vel if self.n_envs > 0 else envs_vel[0],
             dofs_idx=slice(entity.dof_start, entity.dof_start + 6),
             skip_forward=True,
         )
@@ -994,7 +1000,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
             )
 
             # Update IPC geometry for each articulated entity
-            for env_idx in range(self.sim._B):
+            for env_idx in range(self.n_envs_):
                 articulation_slot = ad.articulation_slots[env_idx]
                 articulation_geom = articulation_slot.geometry()
 
@@ -1029,7 +1035,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
 
         for entity, ad in self._articulation_data_by_entity.items():
             # Read 'delta_theta_ipc' from IPC
-            for env_idx in range(self.sim._B):
+            for env_idx in range(self.n_envs_):
                 scene_art_geom = ad.articulation_slots[env_idx].geometry()
                 delta_theta_attr = scene_art_geom["joint"].find("delta_theta")
                 ad.delta_theta_ipc[env_idx] = delta_theta_attr.view()
@@ -1043,11 +1049,11 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
             qpos_new = ad.qpos_new.astype(dtype=gs.np_float, copy=(not entity.base_link.is_fixed))
             if not entity.base_link.is_fixed:
                 abd_entry = self._abd_data_by_link[entity.base_link]
-                for env_idx in range(self.sim._B):
+                for env_idx in range(self.n_envs_):
                     qpos_new[env_idx, :3], qpos_new[env_idx, 3:7] = gu.T_to_trans_quat(abd_entry[env_idx].transform)
 
             self.rigid_solver.set_qpos(
-                qpos_new if self.sim.n_envs > 0 else qpos_new[0],
+                qpos_new if self.n_envs > 0 else qpos_new[0],
                 qs_idx=slice(entity.q_start, entity.q_end),
                 skip_forward=False,
             )
@@ -1060,7 +1066,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
             ad.ref_dof_prev[:] = ad.qpos_new
 
             # Store current link transforms to prev_links_transform
-            for env_idx in range(self.sim._B):
+            for env_idx in range(self.n_envs_):
                 for child_link, prev_link_transform in zip(ad.joints_child_link, ad.prev_links_transform):
                     link_transform = self._abd_transforms_by_link[child_link][env_idx]
                     prev_link_transform[env_idx] = link_transform.copy()
@@ -1074,17 +1080,17 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
         if COUPLING_TYPE.IPC_ONLY not in self._entities_by_coup_type:
             return
 
-        envs_qpos = np.empty((self.sim._B, 7), dtype=gs.np_float)
+        envs_qpos = np.empty((self.n_envs_, 7), dtype=gs.np_float)
         for entity in self._entities_by_coup_type[COUPLING_TYPE.IPC_ONLY]:
             if entity.base_link.is_fixed:
                 continue
 
-            for env_idx in range(self.sim._B):
+            for env_idx in range(self.n_envs_):
                 abd_entry = self._abd_data_by_link[entity.base_link][env_idx]
                 envs_qpos[env_idx, :3], envs_qpos[env_idx, 3:7] = gu.T_to_trans_quat(abd_entry.transform)
 
             self.rigid_solver.set_qpos(
-                envs_qpos if self.sim.n_envs > 0 else envs_qpos[0],
+                envs_qpos if self.n_envs > 0 else envs_qpos[0],
                 qs_idx=slice(entity.q_start, entity.q_start + 7),
                 skip_forward=True,
             )
@@ -1107,7 +1113,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
 
         # Collect FEM and cloth geometries using metadata
         fem_positions_by_entity: dict["FEMEntity", list[np.ndarray]] = {
-            entity: [np.array([]) for _ in range(self.sim._B)] for entity in self.fem_solver.entities
+            entity: [np.array([]) for _ in range(self.n_envs_)] for entity in self.fem_solver.entities
         }
         for fem_geom_slot in visitor.geometries():
             if not isinstance(fem_geom_slot, SimplicialComplexSlot):
@@ -1130,7 +1136,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
         # Update FEM entities using filtered geometries
         for entity, geom_positions in fem_positions_by_entity.items():
             geom_positions = np.stack(geom_positions, axis=0, dtype=gs.np_float)
-            entity.set_verts_pos(geom_positions if self.sim.n_envs > 0 else geom_positions[0])
+            entity.set_verts_pos(geom_positions if self.n_envs > 0 else geom_positions[0])
 
     def _retrieve_rigid_states(self):
         """
@@ -1186,7 +1192,7 @@ class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
         links_quat = qd_to_numpy(self.rigid_solver.dyn_state.links.quat, transpose=True)
         links_transform = cast(np.ndarray, gu.trans_quat_to_T(links_pos, links_quat))
         for link, transforms in self._abd_transforms_by_link.items():
-            for env_idx in range(self.sim._B):
+            for env_idx in range(self.n_envs_):
                 transforms[env_idx][:] = links_transform[env_idx, link.idx]
 
     def _apply_abd_coupling_forces(self):

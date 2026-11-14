@@ -174,7 +174,7 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
                     _get_cross_axis_coupling_to_alignment_matrix(self._options.mag_cross_axis_coupling),
                 ]
             ),
-            expand=(self._manager._sim._B, 3, 3, 3),  # 3 sub-matrices after adding mag
+            expand=(self._manager.n_envs_, 3, 3, 3),  # 3 sub-matrices after adding mag
             dim=1,
         )
 
@@ -184,7 +184,7 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
             default_field = torch.tensor(default_field, device=gs.device, dtype=gs.tc_float)
 
         self._shared_metadata.magnetic_field_vector = concat_with_tensor(
-            self._shared_metadata.magnetic_field_vector, default_field, expand=(self._manager._sim._B, 1, 3), dim=1
+            self._shared_metadata.magnetic_field_vector, default_field, expand=(self._manager.n_envs_, 1, 3), dim=1
         )
 
         if self._options.draw_debug:
@@ -222,7 +222,7 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
         """Make arrows of the measured acceleration, angular velocity and magnetic field, in the first rendered env."""
         if 0 not in envs_idx:
             return []
-        env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
+        env_idx = context.rendered_envs_idx[0] if self._manager.n_envs > 0 else None
 
         quat = self._link.get_quat(env_idx, relative=False).reshape((4,))
         pos = self._link.get_pos(env_idx, relative=False).reshape((3,)) + gu.transform_by_quat(self.pos_offset, quat)

@@ -21,7 +21,13 @@ from genesis.engine.solvers.rigid.collider.data import ColliderState
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, LinksState, RigidErrorCode, RigidInfo
 from genesis.grad.bridge import no_grad
 from genesis.utils.data import DataItem, eoa, iter_data
-from genesis.utils.misc import assign_indexed_tensor, broadcast_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
+from genesis.utils.misc import (
+    assign_indexed_tensor,
+    broadcast_tensor,
+    indices_to_mask,
+    qd_to_numpy,
+    qd_to_torch,
+)
 
 from ..collider.contact import func_add_contacts_force_to_links
 from . import backward as backward_constraint_solver, linesearch, noslip as constraint_noslip
@@ -142,8 +148,6 @@ class ConstraintSolver:
     def __init__(self, rigid_solver: "RigidSolver"):
         self._solver = rigid_solver
         self._collider = rigid_solver.collider
-        self._B = rigid_solver._B
-        self._para_level = rigid_solver._para_level
 
         self._solver_type = rigid_solver._options.constraint_solver
         self._n_iterations = int(rigid_solver._options.iterations)
@@ -189,7 +193,7 @@ class ConstraintSolver:
         is_env_by_env = config.backend == gs.cpu or config.para_level < gs.PARA_LEVEL.ALL
         self.constraint_state = ConstraintState(
             sizes=dict(
-                envs=solver._B,
+                envs=solver.n_envs_,
                 dofs=solver.n_dofs_,
                 links=solver.n_links_,
                 trees=solver.n_trees_,
@@ -232,7 +236,7 @@ class ConstraintSolver:
             else None,
         )
         self.constraint_state.qd_n_equalities.from_numpy(
-            np.full((self._solver._B,), self._solver.n_equalities, dtype=gs.np_int)
+            np.full((self._solver.n_envs_,), self._solver.n_equalities, dtype=gs.np_int)
         )
 
         self._eq_const_info_cache = {}
@@ -318,7 +322,7 @@ class ConstraintSolver:
                 torch.mps.synchronize()
             return
 
-        envs_idx = self._solver._scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self._solver.sim.sanitize_envs_idx(envs_idx)
         constraint_solver_kernel_reset(envs_idx, self.constraint_state, self._solver.rigid_config)
 
     def clear(self, envs_idx=None):
@@ -358,7 +362,7 @@ class ConstraintSolver:
             return
 
         if not isinstance(envs_idx, torch.Tensor):
-            envs_idx = self._solver._scene._sanitize_envs_idx(envs_idx)
+            envs_idx = self._solver.sim.sanitize_envs_idx(envs_idx)
         if isinstance(envs_idx, torch.Tensor) and envs_idx.dtype == torch.bool:
             fn = constraint_solver_kernel_masked_clear
         else:
@@ -500,7 +504,7 @@ class ConstraintSolver:
     ):
         """Register a dynamic constraint between two links in the selected envs (see kernel_add_dynamic_constraint)."""
         # An env selected twice would pass the checks below twice against the same count, then be written twice.
-        envs_idx = torch.unique(self._solver._scene._sanitize_envs_idx(envs_idx))
+        envs_idx = torch.unique(self._solver.sim.sanitize_envs_idx(envs_idx))
         link1_idx, link2_idx = int(link1_idx), int(link2_idx)
         if link1_idx < 0 or link2_idx < 0 or link1_idx == link2_idx:
             gs.raise_exception("Dynamic constraints require two distinct links, the world is not a valid link.")
@@ -543,7 +547,7 @@ class ConstraintSolver:
         )
 
     def delete_dynamic_constraint(self, eq_type, link1_idx, link2_idx, envs_idx=None):
-        envs_idx = torch.unique(self._solver._scene._sanitize_envs_idx(envs_idx))
+        envs_idx = torch.unique(self._solver.sim.sanitize_envs_idx(envs_idx))
         self._eq_const_info_cache.clear()
         kernel_delete_dynamic_constraint(
             int(link1_idx),

@@ -64,13 +64,13 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
     then read and write.
     """
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: MPMOptions | PBDOptions | SPHOptions) -> None:
-        super().__init__(scene, sim, options)
+    def __init__(self, sim: "Simulator", options: MPMOptions | PBDOptions | SPHOptions) -> None:
+        super().__init__(sim, options)
 
         self._particle_size = options.particle_size
         self._upper_bound = np.array(options.upper_bound)
         self._lower_bound = np.array(options.lower_bound)
-        self._n_vvert_supports = scene.options.vis.n_support_neighbors
+        self._n_vvert_supports = sim.scene.options.vis.n_support_neighbors
         # The distance from the walls of the domain to the boundary confining the particles
         self.boundary_padding = 0.0
 
@@ -89,9 +89,8 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         self.vverts_render: VVertsRender | None = None
 
     @gs.assert_unbuilt
-    def build(self) -> None:
-        super().build()
-        self._B = self._sim._B
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
 
     def _build_render(self, has_vverts: bool) -> None:
         """
@@ -101,14 +100,14 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         """
         is_unused = not self.is_active
         self.particles_render = ParticlesRender(
-            sizes=dict(envs=self._B, particles=self._n_particles), env_first=False, unused=is_unused
+            sizes=dict(envs=self.n_envs_, particles=self._n_particles), env_first=False, unused=is_unused
         )
         if has_vverts:
             self._vverts_support = VVertsSupport(
                 sizes=dict(vverts=self._n_vverts, vvert_supports=self._n_vvert_supports), unused=is_unused
             )
             self.vverts_render = VVertsRender(
-                sizes=dict(envs=self._B, vverts=self._n_vverts), env_first=False, unused=is_unused
+                sizes=dict(envs=self.n_envs_, vverts=self._n_vverts), env_first=False, unused=is_unused
             )
 
     def add_vverts(
@@ -151,7 +150,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
     def get_particles_pos(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
         """Get the position of some particles, the same in every environment (see 'set_particles_pos')."""
         tensor = self._read_data(self._particles_pos, envs_idx, particles_idx, copy=True)
-        return tensor[0] if self._scene.n_envs == 0 else tensor
+        return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
     @mutates(StateChange.DYNAMICS)
@@ -166,7 +165,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
     def get_particles_vel(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
         """Get the velocity of some particles, the same in every environment (see 'set_particles_pos')."""
         tensor = self._read_data(self._particles_vel, envs_idx, particles_idx, copy=True)
-        return tensor[0] if self._scene.n_envs == 0 else tensor
+        return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
     @mutates(StateChange.GEOMETRY, differentiable=False)
@@ -181,14 +180,14 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
     def get_particles_active(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
         """Get whether some particles take part in the simulation (see 'set_particles_pos')."""
         tensor = self._read_data(self._particles_is_active, envs_idx, particles_idx, copy=True)
-        return tensor[0] if self._scene.n_envs == 0 else tensor
+        return tensor[0] if self.n_envs == 0 else tensor
 
     def get_particles_mass(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
         """Get the mass of some particles (see 'set_particles_pos')."""
         # The particles store their mass multiplied by 'particle_mass_scale', the same in every environment
-        masses = (qd_to_torch(self._particles_mass) / self.particle_mass_scale)[None].expand(self._B, -1)
+        masses = (qd_to_torch(self._particles_mass) / self.particle_mass_scale)[None].expand(self.n_envs_, -1)
         masses = masses[indices_to_mask(envs_idx, particles_idx, pair_rows=True)]
-        return masses[0] if self._scene.n_envs == 0 else masses
+        return masses[0] if self.n_envs == 0 else masses
 
     def _reset_particles(self, particles_idx: torch.Tensor, envs_idx: torch.Tensor, reset_deformation: bool) -> None:
         """

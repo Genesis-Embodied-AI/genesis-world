@@ -261,6 +261,20 @@ def assert_built(method: Callable | property) -> _BuildGuard:
     return _guard_member(method, is_built=True)
 
 
+class BatchedMixin:
+    """Record the parallel environments a component simulates, which its owner hands down when building it.
+
+    It is the last 'build' of the chain: the 'build' of each component using it calls 'super().build(n_envs)'.
+    """
+
+    def build(self, n_envs: int) -> None:
+        """Settle the parallel environments, 'n_envs' being their number, 0 for a scene without them."""
+        self.n_envs = n_envs
+        # The batch size, which a scene without parallel environments floors to one
+        self.n_envs_ = max(1, n_envs)
+        self._envs_idx = torch.arange(self.n_envs_, dtype=gs.tc_int, device=gs.device)
+
+
 def with_lock(method):
     """Acquire ``self._lock`` before running the wrapped method."""
 

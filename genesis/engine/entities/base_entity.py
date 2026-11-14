@@ -44,8 +44,10 @@ class Entity(BuildableMixin, RBC):
         # An entity is created from one morph. A kind of entity built from several passes the primary one here.
         if not isinstance(morph, Morph):
             gs.raise_exception(f"An entity is created from one morph, got {type(morph).__name__}.")
+        # A hybrid entity holds no solver of its own and creates its parts through the scene, which lists every entity
+        entities = solver.sim.entities if solver is not None else scene.entities
         uid = gs.UID()
-        while any(entity.uid.match(uid, short_only=True) for entity in scene.entities):
+        while any(entity.uid.match(uid, short_only=True) for entity in entities):
             uid = gs.UID()
         self._uid = uid
         self._idx = idx
@@ -54,12 +56,11 @@ class Entity(BuildableMixin, RBC):
         self._material = material
         self._morph = morph
         self._surface = surface
-        self._sim = scene.sim
 
         # Set entity name (auto-generate if not provided)
-        existing_names = {entity.name for entity in scene.entities if entity.name is not None}
+        names = {entity.name for entity in entities if entity.name is not None}
         if name is not None:
-            if name in existing_names:
+            if name in names:
                 gs.raise_exception(f"Entity name '{name}' already exists in scene.")
             self._name = name
         else:
@@ -87,10 +88,6 @@ class Entity(BuildableMixin, RBC):
     @property
     def scene(self):
         return self._scene
-
-    @property
-    def sim(self):
-        return self._sim
 
     @property
     def solver(self):
@@ -143,7 +140,7 @@ class Entity(BuildableMixin, RBC):
     @property
     def sensors(self) -> "gs.List[Sensor]":
         """List of sensors attached to this entity."""
-        return self._sim._sensor_manager.get_sensors_by_entity(self._idx)
+        return self._solver.sim.sensor_manager.get_sensors_by_entity(self._idx)
 
     @gs.assert_built
     def read_sensors(self, envs_idx=None) -> "dict[type[Sensor], torch.Tensor]":
@@ -164,7 +161,7 @@ class Entity(BuildableMixin, RBC):
             For each sensor class with at least one sensor on this entity, a tensor of shape
             (B, [history,] entity_cache_size_for_class).
         """
-        return self._sim._sensor_manager.read_sensors(entity_idx=self._idx, envs_idx=envs_idx)
+        return self._solver.sim.sensor_manager.read_sensors(entity_idx=self._idx, envs_idx=envs_idx)
 
     def _get_global_idx(self, idx_local, idx_local_max, idx_global_start=0, *, unsafe=False, batched_idx=False):
         if idx_local is None:

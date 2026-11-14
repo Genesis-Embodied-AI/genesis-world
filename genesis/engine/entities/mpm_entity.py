@@ -265,7 +265,7 @@ class MPMEntity(ParticleEntity):
             Spring stiffness for the constraint.
         """
         particles_mask = broadcast_tensor(
-            particles_mask, gs.tc_bool, (self._sim._B, self._n_particles), ("envs_idx", "particles_idx")
+            particles_mask, gs.tc_bool, (self._solver.n_envs_, self._n_particles), ("envs_idx", "particles_idx")
         )
         self._solver.set_particle_constraints(particles_mask, link_idx, stiffness, particles_start=self._particle_start)
 
@@ -282,7 +282,7 @@ class MPMEntity(ParticleEntity):
         particles_mask = broadcast_tensor(
             True if particles_mask is None else particles_mask,
             gs.tc_bool,
-            (self._sim._B, self._n_particles),
+            (self._solver.n_envs_, self._n_particles),
             ("envs_idx", "particles_idx"),
         )
         self._solver.remove_particle_constraints(particles_mask, particles_start=self._particle_start)

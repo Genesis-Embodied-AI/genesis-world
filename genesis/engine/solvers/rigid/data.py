@@ -657,7 +657,7 @@ class RigidData(Data):
         entities = solver.entities
         entity_dofs = max([entity.n_dofs for entity in entities], default=0)
         sizes = dict(
-            envs=solver._B,
+            envs=solver.n_envs_,
             qs=solver.n_qs_,
             dofs=solver.n_dofs_,
             links=solver.n_links_,
@@ -669,9 +669,9 @@ class RigidData(Data):
             custom_vverts=solver.n_custom_vverts_,
             vfaces=solver.n_vfaces_,
             vgeoms=solver.n_vgeoms_,
-            dofs_info_envs=solver._B if options.batch_dofs_info else (),
-            links_info_envs=solver._B if options.batch_links_info else (),
-            joints_info_envs=solver._B if options.batch_joints_info else (),
+            dofs_info_envs=solver.n_envs_ if options.batch_dofs_info else (),
+            links_info_envs=solver.n_envs_ if options.batch_links_info else (),
+            joints_info_envs=solver.n_envs_ if options.batch_joints_info else (),
             link_bw_slots=max([link.n_joints for link in solver.links], default=0) + 1 if solver._requires_grad else 1,
             entity_dofs=entity_dofs,
         )

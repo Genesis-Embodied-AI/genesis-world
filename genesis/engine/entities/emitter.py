@@ -99,7 +99,7 @@ class Emitter(RBC):
 
         if droplet_length is None:
             # Use the speed to determine the length of the droplet in the emitting direction
-            droplet_length = speed * self.solver.dt + self._acc_droplet_len
+            droplet_length = speed * self._entity.solver.sim.dt + self._acc_droplet_len
             if droplet_length < p_size:  # too short, so we should not emit
                 self._acc_droplet_len = droplet_length
                 droplet_length = 0.0

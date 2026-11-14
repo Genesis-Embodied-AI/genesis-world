@@ -284,7 +284,7 @@ class InteractiveScene:
                         and kwargs.get("visualize_contact", False) == desc.visualize_contact
                         and kwargs.get("vis_mode") in (None, desc.surface.vis_mode)
                     ):
-                        scene._sim._add_entity(desc=desc)
+                        scene.sim.add_entity(desc=desc)
                     else:
                         scene.add_entity(name=name, **kwargs)
                 for sensor_opts in self._sensors_kwargs:

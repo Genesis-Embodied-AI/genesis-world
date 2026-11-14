@@ -2,20 +2,23 @@ import importlib
 import pkgutil
 import sys
 import traceback
-from typing import ForwardRef, get_args, get_origin
+from typing import TYPE_CHECKING, ForwardRef, get_args, get_origin
 
 import torch
 
 import genesis as gs
 from genesis.options.sensors import types as _sensor_types_namespace
 from genesis.options.sensors.options import SensorOptions
+from genesis.utils.misc import BatchedMixin, BuildableMixin
 from genesis.utils.ring_buffer import TensorRingBuffer
-from genesis.utils.misc import BuildableMixin
 
 from .base_sensor import Sensor, SharedSensorContext, SharedSensorMetadata
 
+if TYPE_CHECKING:
+    from genesis.engine.simulator import Simulator
 
-class SensorManager(BuildableMixin):
+
+class SensorManager(BuildableMixin, BatchedMixin):
     # Maps sensor options class -> sensor class for runtime dispatch.
     SENSOR_TYPES_MAP: dict[type[SensorOptions], type["Sensor"]] = {}
 
@@ -57,7 +60,7 @@ class SensorManager(BuildableMixin):
         self._max_history_by_class: dict[type["Sensor"], int] = {}
 
     def create_sensor(self, sensor_options: "SensorOptions") -> "Sensor":
-        sensor_options.validate_scene(self._sim.scene)
+        sensor_options._validate(self._sim)
         sensor_cls = SensorManager._resolve_sensor_cls(type(sensor_options))
         self._sensors_by_type.setdefault(sensor_cls, [])
         if sensor_cls not in self._sensors_metadata:
@@ -140,7 +143,8 @@ class SensorManager(BuildableMixin):
         )
 
     @gs.assert_unbuilt
-    def build(self):
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
         self._sim.step_timer.add_phases(*(f"sensors/{sensor_cls.__name__}" for sensor_cls in self._sensors_by_type))
 
         # Sort each class by entity_idx so sensors attached to the same entity occupy a contiguous slice of the class
@@ -216,11 +220,11 @@ class SensorManager(BuildableMixin):
             dtype_uses_rings[dtype] = dtype_uses_rings.get(dtype, False) or sensor_cls.uses_ring_pipeline
 
         for dtype, total_cols in cache_size_per_dtype.items():
-            cache_shape = (self._sim._B, total_cols)
+            cache_shape = (self.n_envs_, total_cols)
             # Ground truth cache is stored transposed (cols, B) so that per-class row slices are C-contiguous, which is
             # required for kernel writes. The cache and ring buffer stay (B, cols) since they only receive data via
             # .copy_() / torch.lerp which handle non-contiguous targets.
-            gt_cache_shape = (total_cols, self._sim._B)
+            gt_cache_shape = (total_cols, self.n_envs_)
             self._ground_truth_intermediate_cache[dtype] = torch.zeros(gt_cache_shape, dtype=dtype, device=gs.device)
             self._intermediate_cache[dtype] = torch.zeros(cache_shape, dtype=dtype, device=gs.device)
             if dtype_uses_rings[dtype]:
@@ -250,7 +254,7 @@ class SensorManager(BuildableMixin):
             needs_ring = cls_delay_depth > 1 or cls_max_history > 0 or pp_overridden
             if needs_ring:
                 ring_n = max(cls_delay_depth, cls_max_history, 2 if pp_overridden else 1)
-                ring_shape = (self._sim._B, cls_size)
+                ring_shape = (self.n_envs_, cls_size)
                 self._ground_truth_return_timeline_ring[sensor_cls] = TensorRingBuffer(
                     ring_n, ring_shape, dtype=return_dtype
                 )
@@ -258,10 +262,10 @@ class SensorManager(BuildableMixin):
                     ring_n, ring_shape, dtype=return_dtype, idx=self._ground_truth_return_timeline_ring[sensor_cls]._idx
                 )
                 self._return_cache[sensor_cls] = torch.zeros(
-                    (self._sim._B, cls_size), dtype=return_dtype, device=gs.device
+                    (self.n_envs_, cls_size), dtype=return_dtype, device=gs.device
                 )
                 self._ground_truth_return_cache[sensor_cls] = torch.zeros(
-                    (self._sim._B, cls_size), dtype=return_dtype, device=gs.device
+                    (self.n_envs_, cls_size), dtype=return_dtype, device=gs.device
                 )
             else:
                 self._return_cache[sensor_cls] = self._intermediate_cache[intermediate_dtype][:, cls_slice]
@@ -294,7 +298,7 @@ class SensorManager(BuildableMixin):
         if not self._sensors_by_type:
             return
 
-        envs_idx = self._sim._scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self._sim.sanitize_envs_idx(envs_idx)
 
         for dtype in self._ground_truth_intermediate_cache.keys():
             self._ground_truth_intermediate_cache[dtype][:, envs_idx] = 0.0
@@ -459,7 +463,7 @@ class SensorManager(BuildableMixin):
         """
         # Sanitize envs_idx to a 1D tensor so fancy-indexing the batch axis always allocates a fresh tensor; this is
         # what gives the function its mutation-safe contract.
-        env_index = self._sim._scene._sanitize_envs_idx(envs_idx)
+        env_index = self._sim.sanitize_envs_idx(envs_idx)
 
         result: dict[int, torch.Tensor] = {}
         for sensor_cls, sensors in self._sensors_by_type.items():
@@ -483,7 +487,7 @@ class SensorManager(BuildableMixin):
                 )
                 tensor = return_cache[env_index, within_cls_slice]
 
-            if self._sim.n_envs == 0:
+            if self.n_envs == 0:
                 tensor = tensor[0]
             options_cls = type(sensors[0]._options)
             type_id = getattr(_sensor_types_namespace, options_cls.__name__)
@@ -499,6 +503,11 @@ class SensorManager(BuildableMixin):
             for sensor in sensor_list
             if sensor._options.entity_idx == target_eid
         )
+
+    @property
+    def sim(self) -> "Simulator":
+        """The simulator the sensors of the manager read."""
+        return self._sim
 
     @property
     def sensors(self):
