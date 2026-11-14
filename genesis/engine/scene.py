@@ -230,7 +230,7 @@ class Scene(BuildableMixin, RBC):
                 renderer=renderer,
             )
         if show_FPS is not None:
-            warn_once("Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
+            warn_once(self, "Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
             self.options.profiling.show_FPS = show_FPS
 
         # description
@@ -1935,7 +1935,7 @@ class Scene(BuildableMixin, RBC):
     @property
     def show_FPS(self):
         """Whether to print the frames per second (FPS) in the terminal."""
-        warn_once("Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
+        warn_once(self, "Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
         return self.options.profiling.show_FPS
 
     @property

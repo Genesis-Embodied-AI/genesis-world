@@ -1062,7 +1062,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         """
         if f is not None:
             warn_once(
-                "The argument of 'get_state_render' is deprecated and ignored. Call 'get_state_render()' instead."
+                self._scene,
+                "The argument of 'get_state_render' is deprecated and ignored. Call 'get_state_render()' instead.",
             )
         if not self.is_active or self.n_vverts == 0:
             return None, None, None

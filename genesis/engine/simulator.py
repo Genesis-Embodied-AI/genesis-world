@@ -637,7 +637,10 @@ class Simulator(BuildableMixin, RBC):
     @property
     def cur_substep_local(self):
         """The current substep within the step. Deprecated: use 'cur_substep_global % substeps' instead."""
-        warn_once("'cur_substep_local' is deprecated and will be removed. Use 'cur_substep_global % substeps' instead.")
+        warn_once(
+            self._scene,
+            "'cur_substep_local' is deprecated and will be removed. Use 'cur_substep_global % substeps' instead.",
+        )
         return self._cur_substep_global % self._substeps
 
     @property
