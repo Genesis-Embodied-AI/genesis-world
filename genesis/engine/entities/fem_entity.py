@@ -363,8 +363,10 @@ class FEMEntity(Entity):
             is_selected = np.ones(len(verts), dtype=np.bool_)
             for group in setting.selectors:
                 is_in_group = np.zeros(len(verts), dtype=np.bool_)
+                # A selector picks among the vertices selected so far, an ordinal counting those vertices alone
+                held_verts_idx = np.flatnonzero(is_selected)
                 for vertex_index in group:
-                    is_in_group[vertex_index.resolve(verts_pos_morph)] = True
+                    is_in_group[held_verts_idx[vertex_index.resolve(verts_pos_morph[held_verts_idx])]] = True
                 is_selected &= is_in_group
             if not is_selected.any():
                 gs.raise_exception(f"The selection {setting.selection_repr} holds no vertex of entity '{self.name}'.")

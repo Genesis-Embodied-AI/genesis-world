@@ -107,7 +107,8 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
     )
     caps = gs.indices.Geom.named("top_cap") | gs.indices.Geom.named("bottom_cap[[]1]")
     mixed_geoms_options.select(caps).set(gs.options.Geom(friction_torsional=0.05, friction_rolling=0.002))
-    mixed_geoms_options.select(gs.indices.Link.subtree("body")).select(gs.indices.Geom.named("tip")).set_friction(1.2)
+    # An ordinal under links counts the geoms of each link apart, so this selects the torus and the capsule
+    mixed_geoms_options.select(gs.indices.Link.subtree("body")).select(gs.indices.Geom.at(0)).set_friction(1.2)
     with mixed_geoms_options.select(gs.indices.Link.named("body")) as body:
         body.select(gs.indices.Geom.named("tor*")).set_friction(0.7)
         body.select(gs.indices.Geom.at(1)).set_friction(1.5)
@@ -207,7 +208,7 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
     with pytest.raises(gs.GenesisException, match="selects no valid geom among 1"):
         scene.add_entity(options=out_of_range_options)
     disjoint_options = arm.options.model_copy()
-    disjoint_options.select(gs.indices.Link.named("arm1")).select(gs.indices.Geom.at(1)).set_friction(1.0)
+    disjoint_options.select(gs.indices.Link.named("arm1") & gs.indices.Link.named("arm2")).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="holds no collision geom"):
         scene.add_entity(options=disjoint_options)
     unknown_link_options = arm.options.model_copy()

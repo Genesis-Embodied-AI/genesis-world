@@ -1493,14 +1493,21 @@ class KinematicEntityDescription(EntityDescription):
         for setting in self.options.settings:
             is_selected = np.ones(len(cg_infos), dtype=np.bool_)
             level = 0
+            is_link_scoped = False
             for group in setting.selectors:
                 is_in_group = np.zeros(len(cg_infos), dtype=np.bool_)
+                # A geom selector picks among the geoms selected so far, an ordinal counting the geoms of each selected
+                # link apart under a link selection and those of the whole entity otherwise
+                held_geoms_idx = np.flatnonzero(is_selected)
+                held_geoms_scope = geoms_link_idx[held_geoms_idx] if is_link_scoped else np.zeros_like(held_geoms_idx)
+                held_geoms_name = [geoms_name[i_g] for i_g in held_geoms_idx]
                 for selector in group:
                     if isinstance(selector, gs.indices.Link):
                         is_in_group |= np.isin(geoms_link_idx, selector.resolve(links_path))
                     else:
-                        is_in_group[selector.resolve(geoms_name)] = True
+                        is_in_group[held_geoms_idx[selector.resolve(held_geoms_name, held_geoms_scope)]] = True
                         level = 1
+                is_link_scoped |= isinstance(group[0], gs.indices.Link)
                 is_selected &= is_in_group
             if not is_selected.any():
                 gs.raise_exception(
