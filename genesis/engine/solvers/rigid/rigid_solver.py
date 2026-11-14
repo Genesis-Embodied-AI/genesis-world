@@ -2161,9 +2161,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if self.n_envs == 0:
                 qpos = qpos[None]
 
-            # Teleporting a sleeping body must revive it, otherwise the new pose is silently dropped. Nothing can be
-            # hibernated while the scene is still being built.
-            if self._use_hibernation and self.is_built:
+            # Teleporting a sleeping body must revive it, otherwise the new pose is silently dropped
+            if self._use_hibernation:
                 kernel_wake_up_entities_by_qs(
                     qs_idx,
                     envs_idx,
