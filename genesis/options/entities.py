@@ -148,7 +148,7 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
         return options
 
     def _check_selection_block(self, selection_block: SelectionBlock) -> None:
-        # Each selector selects at a finer level than the one before it
+        # Each selector selects at the level of the one before it or a finer one
         levels = []
         for selector in selection_block.selectors:
             if not isinstance(selector, self._selector_types):
@@ -156,8 +156,10 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
                     f"gs.entities.{type(self).__name__} selects no part with gs.{get_public_name(type(selector))}."
                 )
             levels.append(next(i for i, cls in enumerate(self._selector_types) if isinstance(selector, cls)))
-        if any(level <= previous_level for previous_level, level in zip(levels, levels[1:])):
-            gs.raise_exception(f"A selection selects at a finer level alone, got {selection_block.selection_repr}.")
+        if any(level < previous_level for previous_level, level in zip(levels, levels[1:])):
+            gs.raise_exception(
+                f"A selection selects at its own level or a finer one, got {selection_block.selection_repr}."
+            )
         if not isinstance(selection_block.block, self._block_types):
             gs.raise_exception(
                 f"gs.entities.{type(self).__name__} sets no gs.options.{type(selection_block.block).__name__} on its "
@@ -244,25 +246,69 @@ class _GeomSetters(_PartSelection[OptionsT]):
 class GeomSelection(_GeomSetters[OptionsT]):
     """A selection of collision geoms of an entity (see ``gs.entities.Rigid.select``)."""
 
+    def select(self, selector: indices.Geom) -> "GeomSelection[OptionsT]":
+        """Return the selection of the geoms of this selection that the selector holds, resolved among them.
 
-class LinkSelection(_GeomSetters[OptionsT]):
-    """A selection of links of an entity, whose geom setters apply to every geom of the links (see ``select``)."""
+        Two rules decide which value a field of a geom takes:
 
-    def select(self, selector: indices.Geom) -> GeomSelection[OptionsT]:
-        """Return the selection of the collision geoms of these links that the selector holds.
-
-        An ordinal counts the geoms of each selected link apart (see ``gs.indices.Geom.at``).
+        1. A value set on a finer level overrides one set on a coarser level: the material, then a link selection, then
+           a geom selection. The level is that of the finest selector, however the selection is written.
+        2. Between two selections of one level, the later call applies.
         """
         if not isinstance(selector, indices.Geom):
             gs.raise_exception(
-                "A link selection selects its geoms, with gs.indices.Geom alone, got "
-                f"gs.{get_public_name(type(selector))}."
+                f"A geom selection selects with gs.indices.Geom, got gs.{get_public_name(type(selector))}."
             )
         return GeomSelection(self._options, (*self._selectors, selector))
 
 
+class LinkSelection(_GeomSetters[OptionsT]):
+    """A selection of links of an entity, whose geom setters apply to every geom of the links (see ``select``)."""
+
+    @overload
+    def select(self, selector: indices.Link) -> "LinkSelection[OptionsT]": ...
+
+    @overload
+    def select(self, selector: indices.Geom) -> GeomSelection[OptionsT]: ...
+
+    def select(self, selector: indices.Link | indices.Geom) -> "LinkSelection[OptionsT] | GeomSelection[OptionsT]":
+        """Return the selection of the links, or the geoms, of this selection that the selector holds.
+
+        The selector resolves among the links of this selection, and a geom ordinal counts the geoms of each of them
+        apart (see ``gs.indices.Geom.at``).
+
+        Two rules decide which value a field of a geom takes:
+
+        1. A value set on a finer level overrides one set on a coarser level: the material, then a link selection, then
+           a geom selection. The level is that of the finest selector, however the selection is written.
+        2. Between two selections of one level, the later call applies.
+        """
+        if isinstance(selector, indices.Geom):
+            return GeomSelection(self._options, (*self._selectors, selector))
+        if not isinstance(selector, indices.Link):
+            gs.raise_exception(
+                "A link selection selects with gs.indices.Link or gs.indices.Geom, got "
+                f"gs.{get_public_name(type(selector))}."
+            )
+        return LinkSelection(self._options, (*self._selectors, selector))
+
+
 class VertexSelection(_PartSelection[OptionsT]):
     """A selection of vertices of a deformable entity (see ``gs.entities.FEM.select``)."""
+
+    def select(self, selector: indices.Vertex) -> "VertexSelection[OptionsT]":
+        """Return the selection of the vertices of this selection that the selector holds, resolved among them.
+
+        Two rules decide which value a field of a vertex takes:
+
+        1. A value set on a vertex selection overrides the material, however the selection is written.
+        2. Between two vertex selections, the later call applies.
+        """
+        if not isinstance(selector, indices.Vertex):
+            gs.raise_exception(
+                f"A vertex selection selects with gs.indices.Vertex, got gs.{get_public_name(type(selector))}."
+            )
+        return VertexSelection(self._options, (*self._selectors, selector))
 
     def set(self, *blocks: Vertex) -> Self:
         """Set on the selected vertices the fields each block gives explicitly, overriding an earlier call."""
@@ -301,13 +347,24 @@ class Rigid(BaseEntity["RigidEntity"]):
     def select(self, selector: indices.Link | indices.Geom) -> LinkSelection[Self] | GeomSelection[Self]:
         """Select the links, or the collision geoms, that the selector holds, to set the quantities of geoms on.
 
-        Selectors combine with ``|`` and ``&``, and a link selection narrows to its geoms by nesting:
-        ``options.select(fingers).select(gs.indices.Geom.named("pad*"))``.
+        Selectors combine with ``|`` and ``&``, each resolving over the whole entity. A selection selects again with
+        ``select``, at its own level or a finer one, the nested selector resolving among the parts the selection holds:
+        ``options.select(fingers).select(gs.indices.Geom.at(slice(1, 6)))`` holds geoms 1 to 5 of each finger, and
+        ``options.select(fingers).select(gs.indices.Geom.named("pad*")).select(gs.indices.Geom.at(0))`` the first pad of
+        each finger. A quantity set on links applies to every collision geom of those links.
 
-        A quantity set on links applies to every collision geom of those links. For each field of each geom, a value set
-        on a geom selection overrides a value set on links, which overrides the material. Between two selections of one
-        of these levels, the later one applies. A selection that holds no geom of the entity, or of one of its
-        heterogeneous variants, raises when the entity is added.
+        Two rules decide which value a field of a geom takes:
+
+        1. A value set on a finer level overrides one set on a coarser level: the material, then a link selection, then
+           a geom selection. The level is that of the finest selector of the selection, so how a selection is written
+           (nesting, ``|``, ``&``, several names) never makes it more specific.
+        2. Between two selections of one level, the later call applies, so the thumb here ends at 1.0::
+
+               options.select(gs.indices.Link.subtree("hand")).select(gs.indices.Link.named("thumb")).set_friction(2.0)
+               options.select(gs.indices.Link.subtree("hand")).set_friction(1.0)
+
+        A selection that holds no geom of the entity, or of one of its heterogeneous variants, raises when the entity is
+        added.
         """
         if not isinstance(selector, self._selector_types):
             gs.raise_exception(
@@ -356,8 +413,20 @@ class FEM(BaseEntity["FEMEntity"]):
     def select(self, selector: indices.Vertex) -> VertexSelection[Self]:
         """Select the vertices of the volume mesh that the selector holds, to set quantities on.
 
-        Selectors combine with ``|`` and ``&``. Between two selections setting one field of one vertex, the later one
-        applies. A selection that holds no vertex raises when the entity is added.
+        Selectors combine with ``|`` and ``&``, each resolving over the whole mesh. A selection selects again with
+        ``select``, the nested selector resolving among the vertices the selection holds. With
+        ``top = gs.indices.Vertex.in_box(lower, upper)`` and
+        ``near = gs.indices.Vertex.closest_to(clamp, max_distance=0.01)``, ``options.select(top).select(near)`` holds
+        the vertex of the top face nearest the clamp, where ``options.select(top & near)`` holds the vertex of the whole
+        mesh nearest the clamp, if it lies on the top face.
+
+        Two rules decide which value a field of a vertex takes:
+
+        1. A value set on a vertex selection overrides the material. Vertices are a single level, so how a selection is
+           written (nesting, ``|``, ``&``) never makes it more specific.
+        2. Between two vertex selections, the later call applies.
+
+        A selection that holds no vertex raises when the entity is added.
         """
         if not isinstance(selector, indices.Vertex):
             gs.raise_exception(

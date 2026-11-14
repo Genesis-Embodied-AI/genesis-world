@@ -92,14 +92,10 @@ class Link(_Selection):
         """
         return cls(names=names, is_subtree=True)
 
-    def resolve(self, links_path: list[tuple[str, ...]]) -> np.ndarray:
-        """Return the indices of the selected links, raising on a name matching no link.
-
-        'links_path' holds the names from the root of the kinematic tree down to each link.
-        """
+    def _resolve(self, links_path: list[tuple[str, ...]]) -> np.ndarray:
         if self.names is None:
             assert self.members is not None
-            return self._resolve_members([member.resolve(links_path) for member in self.members])
+            return self._resolve_members([member._resolve(links_path) for member in self.members])
         links_name = [link_path[-1] for link_path in links_path]
         unknown_names = [name for name in self.names if not any(fnmatchcase(l_name, name) for l_name in links_name)]
         if unknown_names:
@@ -186,14 +182,9 @@ class _NamedOrdinalIndex(_OrdinalIndex):
         """
         return cls(names=names)
 
-    def resolve(self, geoms_name: list[str], geoms_scope: np.ndarray) -> np.ndarray:
-        """Return the indices of the selected geoms among the given ones, raising on a name matching none of them.
-
-        'geoms_scope' gives the scope of each geom, the link it belongs to under a link selection, and an ordinal counts
-        the geoms of each scope apart.
-        """
+    def _resolve(self, geoms_name: list[str], geoms_scope: np.ndarray) -> np.ndarray:
         if self.members is not None:
-            return self._resolve_members([member.resolve(geoms_name, geoms_scope) for member in self.members])
+            return self._resolve_members([member._resolve(geoms_name, geoms_scope) for member in self.members])
         if self.names is None:
             scopes_geoms_idx = [np.flatnonzero(geoms_scope == scope) for scope in np.unique(geoms_scope)]
             return np.sort(
@@ -268,10 +259,9 @@ class Vertex(_OrdinalIndex):
         """Select the vertex closest to a point of the frame of the morph, which must lie within 'max_distance'."""
         return cls(closest_pos=pos, max_distance=max_distance)
 
-    def resolve(self, verts_pos: np.ndarray) -> np.ndarray:
-        """Return the sorted indices of the selected vertices, given their positions in the frame of the morph."""
+    def _resolve(self, verts_pos: np.ndarray) -> np.ndarray:
         if self.members is not None:
-            return self._resolve_members([member.resolve(verts_pos) for member in self.members])
+            return self._resolve_members([member._resolve(verts_pos) for member in self.members])
         if self.box is not None:
             # A vertex on a bound counts as inside, within a rounding error of its position that scales with the mesh
             tol = 1e-6 * max(np.ptp(verts_pos, axis=0).max(), 1.0)

@@ -198,6 +198,11 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         for solver in self._solvers:
             solver._add_force_field(force_field)
 
+    def post_build(self) -> None:
+        """Apply what the entity options set, through the public setters of the solvers, once the scene is built."""
+        for solver in self._active_solvers:
+            solver.post_build()
+
     @gs.assert_unbuilt
     def build(self, n_envs: int) -> None:
         super().build(n_envs)

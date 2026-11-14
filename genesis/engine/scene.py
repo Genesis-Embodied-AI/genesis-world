@@ -957,8 +957,7 @@ class Scene(BuildableMixin, RBC):
                 # reset state
                 self._reset()
 
-                # reset state
-                self._reset()
+                self._sim.post_build()
 
             with gs.logger.timer("Compiling simulation kernels..."):
                 self._sim.step()

@@ -671,6 +671,9 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
                 tensor_ = tensor_[None]
         return tensor_, inputs_idx_, envs_idx_
 
+    def post_build(self) -> None:
+        """Apply what the entity options of the solver set, through the public setters, once the scene is built."""
+
     @gs.assert_unbuilt
     def build(self, n_envs: int) -> None:
         """Settle the parallel environments the solver simulates and allocate its error flags.

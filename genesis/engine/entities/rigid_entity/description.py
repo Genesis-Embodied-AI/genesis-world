@@ -1505,10 +1505,11 @@ class KinematicEntityDescription(EntityDescription):
             is_selected = np.ones(len(cg_infos), dtype=np.bool_)
             geoms_scope = np.zeros(len(cg_infos), dtype=gs.np_int)
             level = 0
-            # The selectors go from the links to the geoms (see 'BaseEntity._check_selection_block')
+            # Each selector resolves among the parts the selectors before it hold, from the links to the geoms (see
+            # 'BaseEntity._check_selection_block')
             for selector in selection_block.selectors:
                 if isinstance(selector, gs.indices.Link):
-                    is_selected = np.isin(geoms_link_idx, selector.resolve(links_path))
+                    is_selected &= np.isin(geoms_link_idx, selector._resolve(links_path))
                     # A geom ordinal below a link selection counts the geoms of each selected link apart
                     geoms_scope = geoms_link_idx
                 else:
@@ -1517,7 +1518,7 @@ class KinematicEntityDescription(EntityDescription):
                     # A selection already empty stays empty, and raises below
                     if held_geoms_idx.size > 0:
                         held_geoms_name = [geoms_name[i_g] for i_g in held_geoms_idx]
-                        held_geoms_ordinal = selector.resolve(held_geoms_name, geoms_scope[held_geoms_idx])
+                        held_geoms_ordinal = selector._resolve(held_geoms_name, geoms_scope[held_geoms_idx])
                         is_selected[held_geoms_idx[held_geoms_ordinal]] = True
                     level = 1
             if not is_selected.any():
