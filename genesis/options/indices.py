@@ -163,8 +163,8 @@ class _NamedOrdinalIndex(_OrdinalIndex):
     def _check_single_selection(self) -> Self:
         if sum(selection is not None for selection in (self.ordinals, self.span, self.names, self.members)) != 1:
             gs.raise_exception(
-                f"gs.{get_public_name(type(self))} takes one of ordinals, a span, names and members combined with '|' or "
-                "'&'."
+                f"gs.{get_public_name(type(self))} takes one of ordinals, a span, names and members combined with "
+                "'|' or '&'."
             )
         return self
 
@@ -175,8 +175,9 @@ class _NamedOrdinalIndex(_OrdinalIndex):
         A name is matched against the names the asset gives its geoms, as an exact name or a glob pattern such as
         'pad*', case-sensitively whatever the platform. A literal '*', '?' or '[' in a geom name is matched by enclosing
         it in brackets, so 'pad[[]1]' selects the geom 'pad[1]'. A geom the asset leaves unnamed, such as an MJCF geom
-        stating a class alone or any URDF geom, cannot be selected by name, so select it by ordinal (see ``at``). A name
-        matching no geom of the entity raises when the entity is added.
+        stating a class alone or any URDF geom, cannot be selected by name, so select it by ordinal (see ``at``). USD
+        names a geom by its full prim path, so a pattern such as '*/collision' selects it. A name matching no geom of
+        the entity raises in ``add_entity``.
         """
         return cls(names=names)
 
@@ -213,11 +214,7 @@ class Geom(_NamedOrdinalIndex):
     the geoms as the asset states them, and selecting one selects every piece of it. Geoms whose values differ never
     fuse, so a value set on a selection never reaches a geom it does not hold.
 
-    A name is matched against the names the asset gives its collision geoms, as an exact name or a glob pattern,
-    case-sensitively whatever the platform, a literal '*', '?' or '[' being enclosed in brackets ('pad[[]1]' selects
-    'pad[1]'). MJCF states the name of a geom, while USD names a geom by its full prim path, so a pattern such as
-    '*/collision' selects it. A geom the asset leaves unnamed, such as an MJCF geom stating a class alone or any URDF
-    geom, is selected by ordinal alone.
+    Names match as ``named`` states.
     """
 
 

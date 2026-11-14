@@ -51,8 +51,6 @@ class Entity(RBC):
         self._surface = surface
         self._sim = scene.sim
 
-        # The entity holds a frozen copy of its options, which records its name, generated from its morph if they state
-        # none, so that later records on the options leave the entity as it is
         existing_names = {entity.name for entity in scene.entities if entity.name is not None}
         if options.name is not None:
             if options.name in existing_names:
