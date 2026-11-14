@@ -718,7 +718,6 @@ class RigidVisGeom(BuildableMixin, RBC):
                 self.vvert_start + custom_offset, self.vvert_end + custom_offset, envs_idx
             )
 
-        self._solver.update_vgeoms()
         vgeoms_pos = qd_to_torch(self._solver.dyn_state.vgeoms.pos, envs_idx, transpose=True, copy=None)
         vgeoms_quat = qd_to_torch(self._solver.dyn_state.vgeoms.quat, envs_idx, transpose=True, copy=None)
         init = torch.as_tensor(self.init_vverts, dtype=gs.tc_float, device=gs.device)

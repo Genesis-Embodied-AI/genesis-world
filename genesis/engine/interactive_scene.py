@@ -176,7 +176,6 @@ class InteractiveScene:
             ctx.remove_rigid_node(geom)
 
         entity.surface.vis_mode = mode
-        solver.update_vgeoms()
 
         is_visual = mode == "visual"
         geoms = entity.vgeoms if is_visual else entity.geoms

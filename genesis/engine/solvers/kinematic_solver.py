@@ -46,7 +46,6 @@ from .rigid.abd.forward_kinematics import (
     kernel_forward_velocity,
     kernel_masked_forward_kinematics,
     kernel_masked_forward_velocity,
-    kernel_update_vgeoms,
     kernel_update_vverts_for_vgeoms,
 )
 from .rigid.abd.misc import (
@@ -395,7 +394,7 @@ class KinematicSolver(Solver):
         )
         if opt_in_vgeoms_idx.size == 0:
             return
-        self.update_vgeoms()
+        kernel_forward_kinematics(self._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         self.update_vverts_for_vgeoms(opt_in_vgeoms_idx)
 
     def _build_config(self):
@@ -1233,9 +1232,6 @@ class KinematicSolver(Solver):
         if self.n_envs == 0 and self._options.batch_dofs_info:
             tensor = tensor[0]
         return tensor[..., 0], tensor[..., 1]
-
-    def update_vgeoms(self):
-        kernel_update_vgeoms(self.dyn_state, self.dyn_info, self.rigid_config)
 
     def update_forward_pos(self):
         """Run forward kinematics if links_state is not already up to date for the current pose."""

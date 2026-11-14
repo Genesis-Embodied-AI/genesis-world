@@ -1164,7 +1164,6 @@ def test_mesh_primitive_COM(show_viewer):
     rigid = scene.sim.rigid_solver
     for _ in range(50):
         scene.step()
-    scene.rigid_solver.update_vgeoms()
 
     _, bunny_COM, cube_COM, _ = rigid.get_links_pos(ref=gs.link_ref_frame.link_COM)
     _, root_bunny_COM, root_cube_COM, _ = rigid.get_links_pos(ref=gs.link_ref_frame.root_COM)

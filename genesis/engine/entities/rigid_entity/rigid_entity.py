@@ -1267,7 +1267,6 @@ class KinematicEntity(Entity):
         if self._morph.enable_custom_vverts:
             return self._solver.get_vverts(self._custom_vvert_start, self._custom_vvert_start + self.n_vverts, envs_idx)
 
-        self._solver.update_vgeoms()
         vgeoms_pos = qd_to_torch(self._solver.dyn_state.vgeoms.pos, envs_idx, transpose=True, copy=None)
         vgeoms_quat = qd_to_torch(self._solver.dyn_state.vgeoms.quat, envs_idx, transpose=True, copy=None)
         parts = []

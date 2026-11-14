@@ -602,8 +602,8 @@ def test_geom_pos_quat(n_envs, show_viewer):
     scene.build(n_envs=n_envs)
     batch_shape = (n_envs,) if n_envs > 0 else ()
 
+    # The visual geoms follow the pose of their link as soon as it is set
     box.set_dofs_position(np.random.rand(*batch_shape, 6))
-    scene.rigid_solver.update_vgeoms()
 
     for link in box.links:
         for vgeom, geom in zip(link.vgeoms, link.geoms):
@@ -615,6 +615,17 @@ def test_geom_pos_quat(n_envs, show_viewer):
             assert vgeom_quat.shape == (*batch_shape, 4)
             assert_allclose(geom_pos, vgeom_pos, atol=gs.EPS)
             assert_allclose(geom_quat, vgeom_quat, atol=gs.EPS)
+            assert_allclose(vgeom.get_vAABB(), geom.get_AABB(), atol=1e-6)
+
+    # Setting the pose of some environments moves their visual geoms alone
+    if n_envs > 0:
+        vgeom = box.vgeoms[0]
+        vgeom_pos_0, vgeom_quat_0 = vgeom.get_pos(), vgeom.get_quat()
+        box.set_dofs_position(np.random.rand(6), envs_idx=[0])
+        assert_allclose(vgeom.get_pos(envs_idx=[0]), box.geoms[0].get_pos(envs_idx=[0]), atol=gs.EPS)
+        assert_allclose(vgeom.get_quat(envs_idx=[0]), box.geoms[0].get_quat(envs_idx=[0]), atol=gs.EPS)
+        assert_allclose(vgeom.get_pos()[1:], vgeom_pos_0[1:], atol=gs.EPS)
+        assert_allclose(vgeom.get_quat()[1:], vgeom_quat_0[1:], atol=gs.EPS)
 
 
 @pytest.mark.slow  # ~200s

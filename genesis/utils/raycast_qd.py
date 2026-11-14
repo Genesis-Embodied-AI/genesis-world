@@ -743,7 +743,6 @@ class RaycastTarget:
         """Fit the top-level trees to the current poses of the geoms."""
         if self.is_visual:
             self.solver.update_forward_pos()
-            self.solver.update_vgeoms()
             dyn_info = self.solver.dyn_info
             kernel_fit_mesh_instances(
                 self.geoms_info.link_idx,

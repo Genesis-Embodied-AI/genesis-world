@@ -3239,7 +3239,13 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def update_drone_propeller_vgeoms(self, propellers_vgeom_idxs, propellers_revs, propellers_spin):
         kernel_update_drone_propeller_vgeoms(
-            propellers_vgeom_idxs, propellers_revs, propellers_spin, self.dyn_state, self.rigid_info, self.rigid_config
+            propellers_vgeom_idxs,
+            propellers_revs,
+            propellers_spin,
+            self.dyn_state,
+            self.dyn_info,
+            self.rigid_info,
+            self.rigid_config,
         )
 
     @mutates(differentiable=False)

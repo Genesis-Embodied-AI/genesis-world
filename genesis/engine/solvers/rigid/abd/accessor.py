@@ -1027,19 +1027,28 @@ def kernel_update_drone_propeller_vgeoms(
     propellers_revs: qd.types.ndarray(),
     propellers_spin: qd.types.ndarray(),
     dyn_state: DynState,
+    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """
-    Update the angle of the vgeom in the propellers of a drone entity.
+    Place the vgeom of each propeller of a drone entity on its link, turned by the angle its revolutions accumulated.
     """
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_pp, i_b in qd.ndrange(*propellers_revs.shape, axes=qd.static(eoa(dyn_state.vgeoms.quat))):
         i_vg = propellers_vgeom_idxs[i_pp]
         rad = propellers_revs[i_pp, i_b] * propellers_spin[i_pp] * rigid_info.substep_dt[None] * qd.math.pi / 30.0
+        i_l = dyn_info.vgeoms.link_idx[i_vg]
+        # Placed from the pose of its link rather than its stored pose, so that drawing twice turns it once
+        _, vgeom_quat = gu.qd_transform_pos_quat_by_trans_quat(
+            dyn_info.vgeoms.pos[i_vg],
+            dyn_info.vgeoms.quat[i_vg],
+            dyn_state.links.pos[i_l, i_b],
+            dyn_state.links.quat[i_l, i_b],
+        )
         dyn_state.vgeoms.quat[i_vg, i_b] = gu.qd_transform_quat_by_quat(
-            gu.qd_rotvec_to_quat(qd.Vector([0.0, 0.0, rad], dt=gs.qd_float)), dyn_state.vgeoms.quat[i_vg, i_b]
+            gu.qd_rotvec_to_quat(qd.Vector([0.0, 0.0, rad], dt=gs.qd_float)), vgeom_quat
         )
 
 

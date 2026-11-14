@@ -288,7 +288,6 @@ class Visualizer(BuildableMixin, RBC):
         for solver in self._scene.sim.active_solvers if solvers is None else solvers:
             # The rigid solver derives from the kinematic one
             if isinstance(solver, gs.engine.solvers.KinematicSolver):
-                solver.update_vgeoms()
                 # drone propellers
                 for entity in solver.entities:
                     if isinstance(entity, gs.engine.entities.DroneEntity):
