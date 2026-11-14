@@ -230,9 +230,6 @@ def main():
     scene.add_entity(
         gs.morphs.Plane(),
     )
-    # The variants to switch between, named and each the size of the dynamic texture: the texture of the asset, a flat
-    # color, vertical stripes and the texture of the asset with skin, lips, dark brown hair and eyes, glasses and a navy
-    # shirt, then the paint, one image per environment starting from the texture of the asset
     width, height = TEXTURE_RESOLUTION
     is_stripe = np.broadcast_to(np.arange(width) // 32 % 2 == 0, (height, width))
     variants = {
