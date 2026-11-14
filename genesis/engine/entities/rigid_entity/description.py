@@ -391,8 +391,6 @@ class Resolution:
     options: Options
     is_mujoco_compatible: bool
     links_inertial_info: list[list[LinkInertialInfo]] = field(default_factory=list)
-    # Indices of the links to which the settings of the entity give a density, among the links of a morph
-    links_idx_with_density: set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -1280,7 +1278,7 @@ class KinematicEntityDescription(EntityDescription):
                 inertial_info = []
                 explicit_mass_flags = set()
                 for i_l in subtree:
-                    props, is_mass_explicit, _ = resolution.links_inertial_info[i_l][i_v]
+                    props, is_mass_explicit, _, _ = resolution.links_inertial_info[i_l][i_v]
                     # The stash holds the unit-density estimate, so a mass however small is a body of the composite, and
                     # only a link without geometry or authored mass is left out.
                     if props.mass <= 0.0:
@@ -1380,7 +1378,7 @@ class KinematicEntityDescription(EntityDescription):
                     root.quat = gu.transform_quat_by_quat(principal_quat, root.quat)
 
             # Densities set on links or geoms may move the center of mass off the anchor, so the body is unaligned
-            if not resolution.links_idx_with_density.isdisjoint(subtree):
+            if any(info.has_set_density for i_l in subtree for info in resolution.links_inertial_info[i_l]):
                 root.is_aligned = False
                 gs.logger.warning(
                     f"A density set on links or geoms of the body of link '{root.name}' may move its center of mass "
@@ -1524,19 +1522,13 @@ class KinematicEntityDescription(EntityDescription):
             for i_g in np.flatnonzero(geoms_blocks_rank.max(axis=0) >= 0):
                 value = blocks_values[geoms_blocks_rank[:, i_g].argmax()][name]
                 g_info = cg_infos[i_g]
-                if name == "rho":
-                    resolution.links_idx_with_density.add(int(geoms_link_idx[i_g]))
                 if value is not None:
                     g_info[name] = value
                 elif name == "rho":
                     # The density of the asset, or else a None standing for the default density of the solver, which
                     # depends on the link (see '_resolve_inertial')
                     g_info.pop("density", None)
-                    g_info.pop("rho", None)
-                    if geoms_asset_values[i_g]["density"] is not None:
-                        g_info["density"] = geoms_asset_values[i_g]["density"]
-                    else:
-                        g_info["rho"] = None
+                    g_info["rho"] = geoms_asset_values[i_g]["density"]
                 else:
                     # The coefficient of the asset, or the solver default when it states none
                     asset_value = geoms_asset_values[i_g][name]
@@ -1635,7 +1627,8 @@ class KinematicEntityDescription(EntityDescription):
         props = finalize_inertial(
             explicit_mass, explicit_com, explicit_quat, explicit_inertia, *hint, clamp_min_mass=False
         )
-        if explicit_mass is not None and explicit_mass > 0.0:
+        is_mass_given = explicit_mass is not None and explicit_mass > 0.0
+        if is_mass_given:
             is_mass_explicit = True
         else:
             geoms_with_density = sum(g_info.get("density") is not None for g_info in cg_infos)
@@ -1666,7 +1659,9 @@ class KinematicEntityDescription(EntityDescription):
                 {**g_info, "density": g_info["rho"]} if "rho" in g_info else g_info for g_info in (cg_infos or vg_infos)
             ]
             dynamics_hint = compose_inertial_from_g_infos(dynamics_g_infos, rho)
-        return LinkInertialInfo(props, is_mass_explicit, dynamics_hint)
+        # A density set on a geom changes nothing where the asset gives the mass of the link
+        has_set_density = not is_mass_given and any("rho" in g_info for g_info in cg_infos)
+        return LinkInertialInfo(props, is_mass_explicit, dynamics_hint, has_set_density)
 
     def _align_link(self, l_info, j_infos, cg_infos, vg_infos, morph, resolution: Resolution):
         """Carry the morph pose offset into a root link, record the offset it leaves, and resolve its inertia.

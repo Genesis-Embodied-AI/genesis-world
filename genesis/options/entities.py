@@ -410,7 +410,7 @@ class FEM(BaseEntity["FEMEntity"]):
     Parameters
     ----------
     material : gs.materials.FEM.Base
-        The material of the entity, ``gs.materials.FEM.Elastic``, ``Muscle`` or ``Cloth``, which takes no selection.
+        One of ``gs.materials.FEM.Elastic``, ``Muscle`` or ``Cloth``, a Cloth entity alone refusing any selection.
     """
 
     _selector_types = (indices.Vertex,)
