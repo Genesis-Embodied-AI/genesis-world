@@ -40,10 +40,10 @@ class StateChange(enum.Enum):
 
 
 class Subscriber:
-    """A unique handle for the solver state changes whose category is in `to`.
+    """A unique handle for the state changes whose category is in `to`.
 
-    A consumer constructs a Subscriber and registers it with a solver via Solver.subscribe. The mode is fixed at
-    construction by whether a callback is given:
+    A consumer constructs a Subscriber and passes it to the 'subscribe' method of whatever it follows the changes of.
+    The mode is fixed at construction by whether a callback is given:
       - eager (callback given): each matching change immediately calls callback(change, envs_idx);
       - lazy (no callback): matching changes accumulate into `pending` until the owner calls clear() - e.g. a sensor
         that rebuilds a cache on its next update rather than on every set_pos.

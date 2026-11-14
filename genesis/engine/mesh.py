@@ -313,10 +313,28 @@ class Mesh(RBC, serialization.SerializationMixin):
 
     def clear_visuals(self):
         """
-        Clear the mesh's visual attributes by resetting the surface to gs.surfaces.Default().
+        Clear the mesh's visual attributes by resetting the surface to gs.surfaces.Default() and dropping its uvs.
         """
         self._surface = gs.surfaces.Default()
         self._surface.update_texture()
+        self._uvs = None
+
+    def _check_uvs(self) -> None:
+        if self._uvs is None and any(
+            isinstance(texture, gs.textures.DynamicTexture)
+            or (isinstance(texture, (gs.textures.ColorTexture, gs.textures.ImageTexture)) and texture.is_batched)
+            for texture in (self._surface.texture, self._surface.emission)
+        ):
+            gs.raise_exception(
+                "A dynamic or batched texture requires a mesh with texture coordinates, which this mesh lacks."
+            )
+        if self._surface.requires_uv and self._uvs is None:
+            if "mesh_path" in self._metadata:
+                gs.logger.warning(
+                    f"Texture given but asset missing uv info (or failed to load): {self._metadata['mesh_path']}"
+                )
+            else:
+                gs.logger.warning("Texture given but asset missing uv info (or failed to load).")
 
     @property
     def tmesh_hash(self) -> str:
@@ -525,7 +543,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             else:
                 # TODO: support vertex/face colors in luisa
                 color_factor = tuple(np.array(visual.main_color, dtype=np.float32) / 255.0)
-        elif isinstance(surface.texture, gs.textures.ColorTexture):
+        elif isinstance(surface.texture, gs.textures.ColorTexture) and not surface.texture.is_batched:
             color_factor = surface.texture.color
         elif (isinstance(visual, trimesh.visual.color.ColorVisuals) and visual.defined) or (
             isinstance(visual, trimesh.visual.color.VertexColor) and visual.vertex_colors.size > 0
@@ -660,7 +678,8 @@ class Mesh(RBC, serialization.SerializationMixin):
         """Replace the surface of the mesh, the textures the given surface leaves unset keeping their current images.
 
         Every other field takes the value of the given surface, its defaults included, so a surface of another type
-        renders as that type does. A mesh being made takes the surface as given, and keeps the visual of its asset.
+        renders as that type does. A dynamic texture of the given surface shows the texture of the asset that its map
+        held. A mesh being made takes the surface as given, and keeps the visual of its asset.
         """
         if self._surface is None:
             # The meshes of an asset share its surface, so that the images of its textures are held once
@@ -673,6 +692,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             for name, value in surface:
                 if name in surface.model_fields_set:
                     (shortcuts if surface_fields[name].exclude else fields)[name] = value
+            slots_texture = dict(self._surface)
             for name, value in self._surface:
                 if (
                     name in surface_fields
@@ -681,6 +701,9 @@ class Mesh(RBC, serialization.SerializationMixin):
                     and isinstance(value, gs.textures.Texture)
                 ):
                     fields[name] = value
+            for name, texture in fields.items():
+                if isinstance(texture, gs.textures.DynamicTexture):
+                    fields[name] = texture.resolve_asset_texture(slots_texture.get(name))
             self._surface = type(surface)(**fields).model_copy(update=shortcuts)
             self.update_trimesh_visual()
         if self._surface.requires_uv and self._uvs is None:

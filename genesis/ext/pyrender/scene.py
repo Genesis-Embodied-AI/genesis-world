@@ -82,6 +82,8 @@ class Scene(object):
         self._bounds = None
 
         self._meshes_updated = False
+        # The textures whose source changed since the last render, which the renderer uploads before drawing
+        self.updated_textures = set()
 
         # Transform tree
         self._digraph = nx.DiGraph()
