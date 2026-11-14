@@ -1505,7 +1505,9 @@ class KinematicEntityDescription(EntityDescription):
                     if isinstance(selector, gs.indices.Link):
                         is_in_group |= np.isin(geoms_link_idx, selector.resolve(links_path))
                     else:
-                        is_in_group[held_geoms_idx[selector.resolve(held_geoms_name, held_geoms_scope)]] = True
+                        # A selection already empty stays empty, and raises below
+                        if held_geoms_idx.size > 0:
+                            is_in_group[held_geoms_idx[selector.resolve(held_geoms_name, held_geoms_scope)]] = True
                         level = 1
                 is_link_scoped |= isinstance(group[0], gs.indices.Link)
                 is_selected &= is_in_group
