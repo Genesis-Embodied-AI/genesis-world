@@ -288,8 +288,7 @@ class LinkSelection(_GeomSetters[OptionsT]):
     def select(self, selector: indices.Link | indices.Geom) -> "LinkSelection[OptionsT] | GeomSelection[OptionsT]":
         """Return the selection of the links, or the geoms, of this selection that the selector holds.
 
-        The selector resolves among the links of this selection, and a geom ordinal counts the geoms of each of them
-        apart (see ``gs.indices.Geom.at``).
+        The selector resolves among these links, and a geom ordinal counts each link apart (see ``gs.indices.Geom.at``).
 
         Two rules decide which value a field of a geom takes:
 
@@ -411,8 +410,7 @@ class FEM(BaseEntity["FEMEntity"]):
     Parameters
     ----------
     material : gs.materials.FEM.Base
-        The material of the entity, one of ``gs.materials.FEM.Elastic``, ``Cloth`` or ``Muscle``. A Cloth material
-        takes no settings.
+        The material of the entity, ``gs.materials.FEM.Elastic``, ``Muscle`` or ``Cloth``, which takes no selection.
     """
 
     _selector_types = (indices.Vertex,)
@@ -456,8 +454,7 @@ class MPM(BaseEntity["MPMEntity"]):
     Parameters
     ----------
     material : gs.materials.MPM.Base
-        The material of the entity, one of ``gs.materials.MPM.Elastic``, ``ElastoPlastic``, ``Liquid``, ``Sand``,
-        ``Snow`` or ``Muscle``.
+        One of ``gs.materials.MPM.Elastic``, ``ElastoPlastic``, ``Liquid``, ``Sand``, ``Snow`` or ``Muscle``.
     """
 
     material: materials.MPM.Base

@@ -22,9 +22,8 @@ class Geom(_FrozenOptions):
     """Quantities of the collision geoms of a rigid entity, set on a selection of its links or geoms.
 
     A field given explicitly overrides, for the selected geoms, the material and the coarser selections (see
-    ``Rigid.select``). Given as None, it takes the value the asset states, or the default of the solver where the asset
-    states none. A field left unset keeps the value of the coarser levels. Every field is unset by default. The IPC
-    coupler rejects every block.
+    ``Rigid.select``). Given as None, it takes the value the asset states, else the solver default. A field left unset,
+    as every field is by default, keeps the value of the coarser levels. The IPC coupler rejects every block.
 
     Parameters
     ----------
@@ -52,10 +51,9 @@ class Vertex(_FrozenOptions):
     ----------
     is_fixed : bool, optional
         Whether the vertices stay at their initial positions, as a hard constraint the solver enforces at every
-        substep. It holds an entity in place by a few vertices, such as a soft pad clamped by one face. The vertices are
-        vertex constraints from the build on, which ``FEMEntity.remove_vertex_constraints`` releases like any other. A
-        Cloth material takes no fixed vertices, since the IPC coupler simulating it has no vertex constraints. Default is
-        False.
+        substep, such as a soft pad clamped by one face. They are vertex constraints from the build on, which
+        ``FEMEntity.remove_vertex_constraints`` releases like any other. A Cloth material takes no fixed vertices, since
+        the IPC coupler simulating it has no vertex constraints. Default is False.
     """
 
     is_fixed: StrictBool = False

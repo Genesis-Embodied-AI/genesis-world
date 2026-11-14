@@ -807,8 +807,7 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
                 scene.draw_debug_spheres(poss=target_poss, radius=0.005, color=(1, 0, 1, 0.8))
             scene.visualizer.update(force=False, auto=True)
 
-    # The fixed vertices, on the face at the top of each box in the frame of its morph, hold the box while the opposite
-    # face sags under gravity
+    # The fixed vertices, on the top face of each box in the frame of its morph, hold it while the bottom face sags
     for fixed_box in (rotated_box, hanging_box):
         init_verts_pos = tensor_to_array(fixed_box.init_positions)
         morph = fixed_box.options.morph
