@@ -646,10 +646,9 @@ class RasterizerContext:
                     for key in material_keys:
                         vis_materials.setdefault(key, material)
 
-                    # A dynamic texture is the base color of the material when the surface draws it as its color, and
-                    # its emissive texture otherwise. A batched texture is the base color when it is the packed color
-                    # of the surface, and the emissive texture when the material composites its emission (see
-                    # 'surface_uvs_to_trimesh_visual').
+                    # A dynamic texture is the base color of the material when the surface draws it as its color, else
+                    # its emissive texture. A batched texture is the base color as the packed surface color, and the
+                    # emissive texture when the material composites the emission (see 'surface_uvs_to_trimesh_visual').
                     rgba = geom.surface.get_rgba()
                     layered_textures = [
                         (texture, texture.options, rgba is texture.options)

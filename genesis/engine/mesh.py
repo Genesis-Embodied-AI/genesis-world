@@ -678,8 +678,7 @@ class Mesh(RBC, serialization.SerializationMixin):
     def set_surface(self, surface: Surface):
         """Replace the surface of the mesh, the fields the given surface leaves unset keeping their current values.
 
-        A field keeps its value only where both surface types have it, so a surface of another type takes its own
-        defaults for the rest.
+        A field keeps its value only where both surface types have it, another type taking its own defaults.
         """
         surface_fields = type(surface).model_fields
         fields = {

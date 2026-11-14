@@ -1230,8 +1230,8 @@ class KinematicEntity(Entity):
         """Return the visual geoms of the entity that a selector holds, link after link.
 
         The selector resolves among the visual geoms of the whole entity, apart for each heterogeneous variant, as
-        ``select`` on the entity options does, so that the selection giving a visual geom its surface finds it again
-        (see ``gs.indices.VGeom``).
+        ``select`` on the entity options does (see ``gs.indices.VGeom``), so that a selection finds again the visual
+        geoms it gave a surface.
         """
         vgeoms = self.vgeoms
         vgeoms_name = [vgeom.name for vgeom in vgeoms]

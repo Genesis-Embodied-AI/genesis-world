@@ -74,8 +74,7 @@ class TexturePainterPlugin(RaycasterViewerPlugin):
         self.brush_radius = brush_radius
 
         self._canvases: dict[int, Canvas] = {}
-        # The mouse positions of the strokes, collected by the viewer thread and painted by the stepping one, a stroke
-        # ending at None
+        # Stroke positions the viewer thread collects and the stepping thread paints, None ending a stroke
         self._strokes_pos: list[tuple[int, int] | None] = []
         self._is_painting = False
         # The canvas, environment and pixel painted last, None at the start of a stroke
@@ -102,8 +101,7 @@ class TexturePainterPlugin(RaycasterViewerPlugin):
             width, height = texture.options.resolution
             pixels_pos = np.stack(np.meshgrid(np.arange(width) + 0.5, np.arange(height) + 0.5), axis=-1)
 
-            # Genesis keeps no pixels, so the painter follows the pixels drawn by others, from any thread, to paint
-            # over them
+            # Genesis keeps no pixels, so the painter follows those others draw, from any thread, to paint over them
             def copy_drawing(
                 i_variant: int, envs_idx: np.ndarray, image: torch.Tensor, images: np.ndarray = images
             ) -> None:

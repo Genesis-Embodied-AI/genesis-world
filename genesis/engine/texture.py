@@ -109,12 +109,10 @@ class Texture:
         environments, or a sequence of them, one per selected environment. Pixels are a ``ColorTexture``, an
         ``ImageTexture``, or an RGB or RGBA array of shape (height, width, channels) for all the selected environments
         or (len(envs_idx), height, width, channels) for one each. Pixels go into the batched variant the environment
-        shows. An environment showing another variant switches to the only batched variant of the texture, which
-        receives the pixels.
+        shows, an environment showing another variant switching to the only batched variant of the texture.
 
-        An array holds uint8 values, or floats where 1.0 stands for 255. In the diffuse map, the floats are sRGB values
-        clamped to [0, 1]. In the emissive map, they are linear values clamped only below at 0, so that an emission may
-        exceed 1.
+        An array holds uint8 values, or floats where 1.0 stands for 255: sRGB values clamped to [0, 1] in the diffuse
+        map, and linear values clamped only below at 0 in the emissive map, so that an emission may exceed 1.
         """
         envs_idx = tensor_to_array(self._scene._sanitize_envs_idx(envs_idx))
         if isinstance(texture, (ColorTexture, ImageTexture)):

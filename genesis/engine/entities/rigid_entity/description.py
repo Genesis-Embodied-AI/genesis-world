@@ -1446,10 +1446,9 @@ class KinematicEntityDescription(EntityDescription):
 
         A value set through ``select`` overrides that of the material, or the surface of the entity, which overrides
         that of the asset, and a field a block gives as None stands for the value of the asset, or the surface of the
-        entity. The values are written before post-processing, so that every convex piece of a geom takes them and
-        geoms of different values never fuse. 'links_path' holds the names from the root of the kinematic tree down to
-        each link. A selection that holds no geom of the morph raises, so that each heterogeneous variant holds what
-        the entity selects.
+        entity. The values are written before post-processing, so that every convex piece of a geom takes them and geoms
+        of different values never fuse. 'links_path' holds the names from the kinematic tree root down to each link. A
+        selection holding no geom of the morph raises, so each heterogeneous variant holds what the entity selects.
         """
         cg_infos, vg_infos, geoms_link_idx, vgeoms_link_idx = [], [], [], []
         for i_l, link_g_infos in enumerate(links_g_infos):

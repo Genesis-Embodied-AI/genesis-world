@@ -415,15 +415,13 @@ class Rigid(BaseEntity["RigidEntity"]):
         ``select``, at its own level or a finer one, the nested selector resolving among the parts the selection holds:
         ``options.select(fingers).select(gs.indices.Geom.at(slice(1, 6)))`` holds geoms 1 to 5 of each finger, and
         ``options.select(fingers).select(gs.indices.Geom.named("pad*")).select(gs.indices.Geom.at(0))`` the first pad of
-        each finger. A quantity set on links applies to every collision geom of those links, and a surface to every
-        visual geom of them.
+        each finger. A quantity set on links applies to every collision geom of them, a surface to every visual geom.
 
         Two rules decide which value a field of a geom takes:
 
-        1. A value set on a finer level overrides one set on a coarser level: the material, or the surface of the
-           entity, then a link selection, then a geom or visual geom selection. The level is that of the finest selector
-           of the selection, so how a selection is written (nesting, ``|``, ``&``, several names) never makes it more
-           specific.
+        1. A value set on a finer level overrides one set on a coarser level: the material or the entity surface, then a
+           link selection, then a geom or visual geom selection. The level is that of the finest selector of the
+           selection, so how a selection is written (nesting, ``|``, ``&``, several names) never makes it more specific.
         2. Between two selections of one level, the later call applies. The three calls here select links, so the thumb
            ends at 1.0::
 
@@ -469,8 +467,7 @@ class Kinematic(BaseEntity["KinematicEntity"]):
         """Select the links, or the visual geoms, that the selector holds, to set their surface on.
 
         Selectors combine with ``|`` and ``&``, and a selection selects again with ``select``, as for
-        ``gs.entities.Rigid.select``. A kinematic entity has no collision geoms, so its selections take ``set_surface``
-        alone.
+        ``gs.entities.Rigid.select``. A kinematic entity has no collision geoms, so its selections set surfaces alone.
 
         Two rules decide which surface a visual geom takes:
 
@@ -478,8 +475,7 @@ class Kinematic(BaseEntity["KinematicEntity"]):
            a visual geom selection. The level is that of the finest selector of the selection.
         2. Between two selections of one level, the later call applies.
 
-        A selection that holds no visual geom of the entity, or of one of its heterogeneous variants, raises when the
-        entity is added.
+        A selection holding no visual geom of the entity, or of a heterogeneous variant, raises in ``add_entity``.
         """
         if isinstance(selector, indices.VGeom):
             return VGeomSelection(self, (selector,))
