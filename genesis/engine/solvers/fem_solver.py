@@ -1,6 +1,6 @@
 from collections.abc import Iterator, Sequence
 from enum import IntEnum, auto
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 import numpy as np
 import torch
@@ -566,6 +566,8 @@ class FEMData(Data):
 
 
 class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
+    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]] = gs.entities.FEM
+
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
 

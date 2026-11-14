@@ -1,6 +1,6 @@
 import math
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 
@@ -171,6 +171,8 @@ class PBDConfig(Config):
 
 
 class PBDSolver(ParticleSolver):
+    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]] = gs.entities.PBD
+
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
 

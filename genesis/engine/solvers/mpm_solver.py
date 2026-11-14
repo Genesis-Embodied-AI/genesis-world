@@ -1,6 +1,6 @@
 from collections.abc import Iterator, Sequence
 from enum import auto
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -361,6 +361,8 @@ class MPMMaterials:
 
 
 class MPMSolver(ParticleSolver):
+    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]] = gs.entities.MPM
+
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
 
