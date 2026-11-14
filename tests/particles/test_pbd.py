@@ -167,7 +167,7 @@ def test_cloth_attach_fixed_point(n_envs, material_type, show_viewer, tol):
     assert_allclose(vels[..., 2].mean(dim=-1), 0.0, tol=1e-3)
 
     # Release cloth
-    cloth_2.release_particle(particle_idx)
+    cloth_2.release_particles(particle_idx)
     for i in range(30):
         scene.step()
 
@@ -256,7 +256,7 @@ def test_cloth_attach_rigid_link(show_viewer):
 
     # Release cloth and restore box's speed
     box.set_dofs_velocity(vel, dofs_idx_local=[0, 1, 2])
-    cloth.release_particle(particles_idx)
+    cloth.release_particles(particles_idx)
     for _ in range(15):
         scene.step()
 

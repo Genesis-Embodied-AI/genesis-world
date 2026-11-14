@@ -69,7 +69,7 @@ class PBDBaseEntity(ParticleEntity):
         self._solver.fix_particles(particles_idx, envs_idx)
 
     @gs.assert_built
-    def release_particle(
+    def release_particles(
         self,
         particles_idx_local: IndexType | None = None,
         envs_idx: IndexType | None = None,
