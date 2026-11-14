@@ -372,9 +372,11 @@ class Rigid(BaseEntity["RigidEntity"]):
         1. A value set on a finer level overrides one set on a coarser level: the material, then a link selection, then
            a geom selection. The level is that of the finest selector of the selection, so how a selection is written
            (nesting, ``|``, ``&``, several names) never makes it more specific.
-        2. Between two selections of one level, the later call applies, so the thumb here ends at 1.0::
+        2. Between two selections of one level, the later call applies. The three calls here select links, so the thumb
+           ends at 1.0::
 
                options.select(gs.indices.Link.subtree("hand")).select(gs.indices.Link.named("thumb")).set_friction(2.0)
+               options.select(gs.indices.Link.subtree("hand") & gs.indices.Link.named("thumb")).set_friction(3.0)
                options.select(gs.indices.Link.subtree("hand")).set_friction(1.0)
 
         A selection that holds no geom of the entity, or of one of its heterogeneous variants, raises when the entity is
