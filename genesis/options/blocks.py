@@ -5,6 +5,7 @@ from typing import Annotated, Self
 from pydantic import ConfigDict, Field, StrictBool, model_validator
 
 import genesis as gs
+from genesis.engine.materials.rigid import FrictionRollingType, FrictionTorsionalType, FrictionType
 from genesis.repr_base import get_public_name
 from genesis.typing import ValidFloat
 
@@ -41,9 +42,9 @@ class Geom(_FrozenOptions):
     """
 
     rho: ValidFloat | None = None
-    friction: Annotated[ValidFloat, Field(ge=0.01, le=5.0)] | None = None
-    friction_torsional: Annotated[ValidFloat, Field(ge=0.0)] | None = None
-    friction_rolling: Annotated[ValidFloat, Field(ge=0.0)] | None = None
+    friction: FrictionType | None = None
+    friction_torsional: FrictionTorsionalType | None = None
+    friction_rolling: FrictionRollingType | None = None
 
 
 class Vertex(_FrozenOptions):
