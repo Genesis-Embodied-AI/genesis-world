@@ -23,14 +23,14 @@ class Geom(_FrozenOptions):
 
     A field given explicitly overrides, for the selected geoms, the material and the coarser selections (see
     ``Rigid.select``). Given as None, it takes the value the asset states, or the default of the solver where the asset
-    states none. A field left unset keeps the value of the coarser levels. Every field is unset by default.
+    states none. A field left unset keeps the value of the coarser levels. Every field is unset by default. The IPC
+    coupler rejects every block.
 
     Parameters
     ----------
     rho : float | None, optional
         The density (kg/m^3). It estimates the mass and the inertia of a link the asset states none for, or of every
         moving link under the 'recompute_inertia' option of the morph. An aligned body is then simulated unaligned.
-        The IPC coupler rejects it.
     friction : float | None, optional
         The sliding friction coefficient of the contacts of the geoms (see ``gs.materials.Rigid.friction``).
     friction_torsional : float | None, optional

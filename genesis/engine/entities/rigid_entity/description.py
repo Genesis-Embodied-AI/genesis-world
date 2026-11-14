@@ -1466,9 +1466,8 @@ class KinematicEntityDescription(EntityDescription):
             for g_info in cg_infos
         ]
 
-        # An explicitly set material value overrides the one the asset states for each geom. Dropping the density up
-        # front keeps the align anchor, its all-or-none source check, and the build-time inertial estimate consistently
-        # uniform-density.
+        # A material value overrides the one each geom of the asset states. Dropping the density up front keeps the
+        # align anchor, its all-or-none source check and the inertia estimate uniform-density.
         for material_value, name in (
             (self.options.material.rho, "density"),
             (self.options.material.friction, "friction"),
@@ -1482,9 +1481,8 @@ class KinematicEntityDescription(EntityDescription):
         if not self.options.selection_blocks:
             return
 
-        # A block set on a geom selection overrides one set on links, and the later of two blocks of one level
-        # applies. The density set on a geom is kept apart from the one the asset states, since it weighs in the
-        # estimate of the inertia alone (see '_resolve_inertial').
+        # A block on a geom selection overrides one on links, and the later of two blocks of one level applies. A
+        # density set on a geom stays apart from the asset's, since only the inertia estimate reads it.
         geoms_link_idx = np.array(
             [
                 i_l
@@ -1532,16 +1530,19 @@ class KinematicEntityDescription(EntityDescription):
                         continue
                     geoms_field_level[(i_g, name)] = level
                     g_info = cg_infos[i_g]
+                    if name == "rho":
+                        resolution.links_idx_with_density.add(int(geoms_link_idx[i_g]))
                     if value is not None:
                         g_info[name] = value
-                        if name == "rho":
-                            resolution.links_idx_with_density.add(int(geoms_link_idx[i_g]))
                     elif name == "rho":
-                        # The density of the asset, or none, the geom then taking the density of its link
-                        g_info.pop("rho", None)
+                        # The density of the asset, or else a None standing for the default density of the solver,
+                        # which the inertia estimate resolves per link (see '_resolve_inertial')
                         g_info.pop("density", None)
+                        g_info.pop("rho", None)
                         if geoms_asset_values[i_g]["density"] is not None:
                             g_info["density"] = geoms_asset_values[i_g]["density"]
+                        else:
+                            g_info["rho"] = None
                     else:
                         # The coefficient of the asset, or the solver default when it states none
                         asset_value = geoms_asset_values[i_g][name]
@@ -1653,18 +1654,20 @@ class KinematicEntityDescription(EntityDescription):
 
         dynamics_hint = None
         if isinstance(self.options.material, gs.materials.Rigid):
-            rho = self.options.material.rho
-            if rho is None:
-                if resolution.is_mujoco_compatible:
-                    rho = RHO_MUJOCO
-                else:
-                    rho = RHO_ROBOT if is_robot else RHO_OBJECT
+            if resolution.is_mujoco_compatible:
+                default_rho = RHO_MUJOCO
+            else:
+                default_rho = RHO_ROBOT if is_robot else RHO_OBJECT
+            rho = default_rho if self.options.material.rho is None else self.options.material.rho
 
             # The estimate comes from the collision geometry of the link when it has any, and from its visual
             # geometry otherwise. A link with neither contributes nothing, so only the asset's values remain. The
             # density set on a geom weighs in the estimate alone (see '_resolve_geoms_values').
             dynamics_g_infos = [
-                {**g_info, "density": g_info["rho"]} if "rho" in g_info else g_info for g_info in (cg_infos or vg_infos)
+                {**g_info, "density": default_rho if g_info["rho"] is None else g_info["rho"]}
+                if "rho" in g_info
+                else g_info
+                for g_info in (cg_infos or vg_infos)
             ]
             dynamics_hint = compose_inertial_from_g_infos(dynamics_g_infos, rho)
         return LinkInertialInfo(props, is_mass_explicit, dynamics_hint)

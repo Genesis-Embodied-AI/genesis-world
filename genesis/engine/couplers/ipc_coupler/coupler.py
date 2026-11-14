@@ -373,7 +373,7 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
         for entity in cast(list["FEMEntity"], self.fem_solver.entities):
             if entity.options.selection_blocks:
                 gs.raise_exception(
-                    f"Entity '{entity.name}' fixes selected vertices, which the IPC coupler does not support."
+                    f"Entity '{entity.name}' sets quantities on selected vertices, which the IPC coupler does not support."
                 )
 
         # Create constitutions based on entity types present
