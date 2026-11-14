@@ -162,8 +162,7 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
             size=(0.1, 0.1, 0.1),
         ),
     )
-    box_options.select(gs.indices.Geom.at(0)).set_friction(2.0)
-    box_options.select(gs.indices.Geom.at([0])).set_friction(1.0)
+    box_options.select(gs.indices.Geom.at(0)).set_friction(2.0).end().select(gs.indices.Geom.at([0])).set_friction(1.0)
     box = scene.add_entity(options=box_options)
     box_options.select(gs.indices.Geom.at(0)).set_friction(3.0)
     with pytest.raises(gs.GenesisException, match="frozen"):
