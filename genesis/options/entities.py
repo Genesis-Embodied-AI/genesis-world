@@ -199,7 +199,8 @@ class _PartSelection(Generic[OptionsT]):
     """A selection of parts of an entity, recording into its entity options the quantities set on it.
 
     It holds the entity options and the selector of each level leading to the parts, and owns no data. Every setter
-    returns the selection, so that calls chain on it, and ``with`` binds the selection to a name for a block.
+    returns the selection, so that calls chain on it, ``end`` returns the entity options to start another selection
+    from, and ``with`` binds the selection to a name for a block.
     """
 
     def __init__(self, options: OptionsT, selectors: tuple[indices.Link | indices.Geom | indices.Vertex, ...]) -> None:
@@ -213,6 +214,14 @@ class _PartSelection(Generic[OptionsT]):
         self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None
     ) -> None:
         return None
+
+    def end(self) -> OptionsT:
+        """Return the entity options this selection records into, however deeply it is nested.
+
+        It ends a chain inline, so that one expression configures several selections and gives the options to
+        ``add_entity``: ``options.select(top).set_is_fixed(True).end().select(bottom).set_is_fixed(True).end()``.
+        """
+        return self._options
 
     def _set(self, blocks: tuple[Geom | Vertex, ...]) -> Self:
         self._options._record(tuple(SelectionBlock(selectors=self._selectors, block=block) for block in blocks))
