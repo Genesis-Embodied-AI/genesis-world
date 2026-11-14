@@ -130,9 +130,13 @@ class _OrdinalIndex(_Selection):
     def at(cls, idx: "int | slice | np.typing.ArrayLike") -> Self:
         """Select the elements a numpy index picks: an ordinal, ordinals or a slice.
 
-        The index counts the elements of the whole entity, whichever selection it is selected in, in the order the
-        entity lists them: its collision geoms link after link in the order of ``entity.links``, as the asset states
-        them before post-processing (see ``Geom``), or the vertices of its volume mesh.
+        The index is local to the selection it is selected in, as the ``*_idx_local`` arguments of the entity getters
+        are local to the entity. Selected on the entity options, it counts the elements of the whole entity. Selected on
+        a link selection, it counts the collision geoms of each selected link apart, so
+        ``options.select(fingers).select(gs.indices.Geom.at(0))`` selects the first geom of every finger. Selected on a
+        vertex selection, it counts the selected vertices. The elements count in the order the entity lists them: its
+        collision geoms link after link in the order of ``entity.links``, as the asset states them before
+        post-processing (see ``Geom``), or the vertices of its volume mesh.
         """
         if isinstance(idx, slice):
             return cls(span=(idx.start, idx.stop, idx.step))
@@ -145,7 +149,7 @@ class _OrdinalIndex(_Selection):
         return cls(ordinals=tuple(idx.tolist()))
 
     def _resolve_ordinals(self, n: int, domain: str) -> np.ndarray:
-        """Return the sorted ordinals selected among 'n' elements, raising on an ordinal out of range or no match."""
+        """Return the sorted ordinals selected among 'n' elements, raising on an ordinal out of range."""
         if self.span is not None:
             idx = slice(*self.span)
         else:
@@ -154,8 +158,6 @@ class _OrdinalIndex(_Selection):
             ordinals = np.unique(np.arange(n, dtype=gs.np_int)[idx])
         except (IndexError, ValueError) as e:
             gs.raise_exception_from(f"gs.{get_public_name(type(self))} selects no valid {domain} among {n}: {self}.", e)
-        if ordinals.size == 0:
-            gs.raise_exception(f"gs.{get_public_name(type(self))} selects no {domain}: {self}.")
         return ordinals
 
 
@@ -185,12 +187,24 @@ class _NamedOrdinalIndex(_OrdinalIndex):
         """
         return cls(names=names)
 
-    def resolve(self, geoms_name: list[str]) -> np.ndarray:
-        """Return the ordinals of the selected geoms, given the names of every geom, raising on a name matching none."""
+    def resolve(self, geoms_name: list[str], geoms_scope: np.ndarray) -> np.ndarray:
+        """Return the indices of the selected geoms among the given ones, raising on a name matching none of them.
+
+        'geoms_scope' gives the scope of each geom, the link it belongs to under a link selection, and an ordinal counts
+        the geoms of each scope apart.
+        """
         if self.members is not None:
-            return self._resolve_members([member.resolve(geoms_name) for member in self.members])
+            return self._resolve_members([member.resolve(geoms_name, geoms_scope) for member in self.members])
         if self.names is None:
-            return self._resolve_ordinals(len(geoms_name), "geom")
+            scopes_geoms_idx = [np.flatnonzero(geoms_scope == scope) for scope in np.unique(geoms_scope)]
+            return np.sort(
+                np.concatenate(
+                    [
+                        scope_geoms_idx[self._resolve_ordinals(len(scope_geoms_idx), "geom")]
+                        for scope_geoms_idx in scopes_geoms_idx
+                    ]
+                )
+            ).astype(gs.np_int, copy=False)
         # An unnamed geom, whose name is empty, matches no pattern, not even '*'
         unknown_names = [
             name for name in self.names if not any(g_name and fnmatchcase(g_name, name) for g_name in geoms_name)
@@ -206,10 +220,11 @@ class _NamedOrdinalIndex(_OrdinalIndex):
 class Geom(_NamedOrdinalIndex):
     """Select collision geoms by their ordinal in the asset or by name.
 
-    An ordinal counts the collision geoms of the whole entity (see ``at``). Post-processing splits a geom into convex
-    pieces and fuses geoms with identical properties, which renumbers them in ``entity.geoms``, so the ordinal counts
-    the collision geoms as the asset states them, and selecting one selects every piece it is split into. Geoms whose
-    values differ are never fused, so a value set on a selection never reaches a geom it does not hold.
+    An ordinal counts the collision geoms of the selection it is selected in (see ``at``). Post-processing splits a geom
+    into convex pieces and fuses geoms with identical properties, which renumbers them in ``entity.geoms``, so the
+    ordinal counts the collision geoms as the asset states them, and selecting one selects every piece it is split
+    into. Geoms whose values differ are never fused, so a value set on a selection never reaches a geom it does not
+    hold.
 
     A name is matched against the names the asset gives its collision geoms, as an exact name or a glob pattern,
     case-sensitively whatever the platform, a literal '*', '?' or '[' being enclosed in brackets ('pad[[]1]' selects

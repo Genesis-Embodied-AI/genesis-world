@@ -318,7 +318,8 @@ class Rigid(BaseEntity["RigidEntity"]):
         The selectors of one call are of one type, and a call on a selection keeps the parts both hold, so links and
         geoms select together by nesting: ``options.select(fingers).select(gs.indices.Geom.named("pad*"))``.
 
-        A quantity set on links applies to every collision geom of those links. For each field of each geom, a value
+        A quantity set on links applies to every collision geom of those links, and a geom ordinal selected on links
+        counts the geoms of each link apart (see ``gs.indices.Geom.at``). For each field of each geom, a value
         set on a geom selection overrides a value set on links, which overrides the material. Between two selections of
         one of these levels, the later one applies. A selection that holds no geom of the entity, or of one of its
         heterogeneous variants, raises when the entity is added.
@@ -365,8 +366,9 @@ class FEM(BaseEntity["FEMEntity"]):
     def select(self, *selectors: indices.Vertex) -> VertexSelection[Self]:
         """Select the vertices of the volume mesh that any of the selectors holds, to set quantities on.
 
-        A call on a selection keeps the vertices both hold. Between two selections setting one field of one vertex, the
-        later one applies. A selection that holds no vertex raises when the entity is added.
+        A call on a selection keeps the vertices both hold, an ordinal counting the vertices of that selection. Between
+        two selections setting one field of one vertex, the later one applies. A selection that holds no vertex raises
+        when the entity is added.
         """
         _get_selector_type(selectors, self._selector_types)
         return VertexSelection(self, (selectors,))
