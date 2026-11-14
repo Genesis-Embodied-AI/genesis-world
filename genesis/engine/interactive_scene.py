@@ -275,7 +275,8 @@ class InteractiveScene:
                 scene.__dict__.pop("_desc_digest", None)
                 # Re-register the pre-step callback: the in-place re-init cleared Scene's callback list.
                 scene.register_pre_step_callback(self._pre_step)
-                # The fields compared by identity, and the name, which the entity records into its options
+                # The fields compared by identity, and the name, which the entity records into its options. The other
+                # fields compare with what was given explicitly, since a block field given as None differs from unset.
                 objects_fields = {"morph", "material", "surface", "name"}
                 for name, kwargs in self._entities_kwargs.items():
                     options = kwargs["options"] if "options" in kwargs else get_entity_options(**kwargs)
@@ -293,8 +294,8 @@ class InteractiveScene:
                         and all(morph is desc_morph for morph, desc_morph in zip(options.morphs, desc.options.morphs))
                         and options.material is desc.options.material
                         and options.surface is desc.options.surface
-                        and options.model_dump(exclude=objects_fields)
-                        == desc.options.model_dump(exclude=objects_fields)
+                        and options.model_dump(exclude=objects_fields, exclude_unset=True)
+                        == desc.options.model_dump(exclude=objects_fields, exclude_unset=True)
                     ):
                         scene._sim._add_entity(desc=desc)
                     else:

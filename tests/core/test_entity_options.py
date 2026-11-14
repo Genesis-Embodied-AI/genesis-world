@@ -169,6 +169,20 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
     # A density given as None stands for that of the asset, and the box states none, so the default density applies
     box_options.select(gs.indices.Geom.at(0)).set(gs.options.Geom(rho=None))
     box = scene.add_entity(options=box_options)
+    # A fixed link estimates its inertia once a moving parent carries it, with the density its geoms resolved to
+    fixed_box_options = gs.entities.Rigid(
+        morph=gs.morphs.Box(
+            pos=(5.0, 0.0, 0.2),
+            size=(0.1, 0.1, 0.1),
+            fixed=True,
+        ),
+        material=gs.materials.Rigid(
+            rho=500.0,
+        ),
+    )
+    fixed_box_options.select(gs.indices.Geom.at(0)).set(gs.options.Geom(rho=None))
+    fixed_box = scene.add_entity(options=fixed_box_options)
+    fixed_box.attach(box, box.base_link.name, pos=(0.0, 0.0, 0.2))
     box_options.select(gs.indices.Geom.at(0)).set_friction(3.0)
     with pytest.raises(gs.GenesisException, match="frozen"):
         box.options.select(gs.indices.Geom.at(0)).set_friction(3.0)
@@ -277,6 +291,7 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
     assert_allclose(box.geoms[0].get_friction(), 1.0, tol=gs.EPS)
     # The default density of an object, 600 kg/m^3, times the volume of the box, 0.1^3 m^3
     assert_allclose(box.get_mass(), 600.0 * 0.1**3, tol=tol)
+    assert_allclose(fixed_box.get_mass(), 600.0 * 0.1**3, tol=tol)
     for geom in arm.geoms:
         assert_allclose(geom.get_friction_torsional(), 0.02, tol=gs.EPS)
         assert_allclose(geom.get_friction_rolling(), 0.003, tol=gs.EPS)
