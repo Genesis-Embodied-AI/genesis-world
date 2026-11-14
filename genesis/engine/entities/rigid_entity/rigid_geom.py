@@ -11,6 +11,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.mesh import Mesh
 from genesis.repr_base import RBC
+from genesis.typing import FArrayType
 from genesis.utils.misc import DeprecationError, qd_to_torch, tensor_to_array
 
 from .description import RigidGeomDescription, RigidVisGeomDescription
@@ -290,14 +291,12 @@ class RigidGeom(RBC):
         verts = self.get_verts()
         return torch.stack((verts.min(dim=-2).values, verts.max(dim=-2).values), dim=-2)
 
-    def set_sol_params(self, sol_params):
+    @gs.assert_built
+    def set_sol_params(self, sol_params: "FArrayType | torch.Tensor") -> None:
         """
         Set the solver parameters of this geometry.
         """
-        if self._solver.is_built:
-            self._solver.set_sol_params(sol_params, geoms_idx=self._idx, envs_idx=None)
-        else:
-            self.desc.sol_params = sol_params
+        self._solver.set_sol_params(sol_params, geoms_idx=self._idx, envs_idx=None)
 
     @gs.assert_built
     def get_sol_params(self):

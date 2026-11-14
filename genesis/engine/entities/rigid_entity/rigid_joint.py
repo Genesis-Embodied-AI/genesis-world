@@ -1,9 +1,11 @@
 import numpy as np
+import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
 from genesis.repr_base import RBC
+from genesis.typing import FArrayType
 from genesis.utils.misc import DeprecationError, tensor_to_array
 
 from .description import RigidJointDescription
@@ -84,14 +86,12 @@ class RigidJoint(RBC):
         """
         return self._solver.get_joints_anchor_axis(self._idx)[..., 0, :]
 
-    def set_sol_params(self, sol_params):
+    @gs.assert_built
+    def set_sol_params(self, sol_params: "FArrayType | torch.Tensor") -> None:
         """
         Set the solver parameters of this joint.
         """
-        if self._solver.is_built:
-            self._solver.set_sol_params(sol_params, joints_idx=self._idx, envs_idx=None)
-        else:
-            self.desc.sol_params = sol_params
+        self._solver.set_sol_params(sol_params, joints_idx=self._idx, envs_idx=None)
 
     @gs.assert_built
     def get_sol_params(self):

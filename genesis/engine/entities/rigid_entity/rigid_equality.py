@@ -1,5 +1,9 @@
+import torch
+
 import genesis as gs
 from genesis.repr_base import RBC
+from genesis.typing import FArrayType
+
 from .description import RigidEqualityDescription
 
 
@@ -23,14 +27,12 @@ class RigidEquality(RBC):
     # -------------------------------- real-time state -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def set_sol_params(self, sol_params):
+    @gs.assert_built
+    def set_sol_params(self, sol_params: "FArrayType | torch.Tensor") -> None:
         """
         Set the solver parameters of this equality constraint.
         """
-        if self._solver.is_built:
-            self._solver.set_sol_params(sol_params, eqs_idx=self._idx, envs_idx=None)
-        else:
-            self.desc.sol_params = sol_params
+        self._solver.set_sol_params(sol_params, eqs_idx=self._idx, envs_idx=None)
 
     @gs.assert_built
     def get_sol_params(self):
