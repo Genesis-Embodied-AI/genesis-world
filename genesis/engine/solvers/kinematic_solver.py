@@ -241,15 +241,13 @@ class KinematicSolver(Solver):
     # ------------------------------------ build -----------------------------------------
     # ------------------------------------------------------------------------------------
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         super().build()
 
         self.n_envs = self.sim.n_envs
         self._B = self.sim._B
         self._para_level = self.sim._para_level
-
-        for entity in self._entities:
-            entity._build()
 
         # Resolve the link-reach structures of @mutates notifications; see Solver.__init__.
         self._articulated_links_idx = np.array([link.idx for link in self.links if not link.is_fixed])
@@ -383,6 +381,12 @@ class KinematicSolver(Solver):
         self._init_vfaces_raycast_mask()
 
         self._init_vverts_state()
+
+        # The entities, their links, joints and geoms read the data of the solver, which exists from now on. The rest
+        # of the build of the rigid solver calls their accessors, and theirs alike.
+        for entity in self._entities:
+            entity._build()
+        self._is_built = True
 
     def _init_vverts_state(self):
         # Seed vverts_state.pos with one FK pass so opt-in entities show their initial pose from frame 0 even before

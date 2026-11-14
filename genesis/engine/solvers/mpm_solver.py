@@ -415,6 +415,7 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         self._mpm_materials: MPMMaterials | None = None
         self._is_constrained = False
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         super().build()
 
@@ -468,6 +469,8 @@ Please decrease the simulation timestep or adjust the material parameters."""
                 )
 
         self._build_gravity(self.mpm_info.gravity)
+
+        self._is_built = True
 
     def reset_grad(self) -> None:
         if self._requires_grad:

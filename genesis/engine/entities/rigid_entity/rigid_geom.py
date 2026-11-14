@@ -12,7 +12,7 @@ import genesis.utils.geom as gu
 from genesis.engine.mesh import Mesh
 from genesis.repr_base import RBC
 from genesis.typing import FArrayType
-from genesis.utils.misc import DeprecationError, qd_to_torch, tensor_to_array
+from genesis.utils.misc import BuildableMixin, DeprecationError, qd_to_torch, tensor_to_array
 
 from .description import RigidGeomDescription, RigidVisGeomDescription
 
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 NUM_VERTS_VISUAL_GEOM_AABB = 200
 
 
-class RigidGeom(RBC):
+class RigidGeom(BuildableMixin, RBC):
     """
     A `RigidGeom` is the basic building block of a `RigidEntity` for collision checking. It is usually constructed
     from a single mesh. This can be accessed via `link.geoms`.
@@ -89,8 +89,12 @@ class RigidGeom(RBC):
         self.vert_neighbors, self.vert_n_neighbors, self.vert_neighbor_start = mesh.get_vert_adjacency()
         assert self.n_verts == len(self.vert_n_neighbors)
 
-    def _build(self):
-        pass
+    @gs.assert_unbuilt
+    def _build(self) -> None:
+        self._is_built = True
+
+    def _destroy(self) -> None:
+        self._is_built = False
 
     @property
     def trimesh(self):
@@ -566,13 +570,6 @@ class RigidGeom(RBC):
         return self.n_edges + self.edge_start
 
     @property
-    def is_built(self):
-        """
-        Whether the rigid entity the geom belongs to is built.
-        """
-        return self.entity.is_built
-
-    @property
     def is_free(self):
         raise DeprecationError("This property has been removed.")
 
@@ -591,7 +588,7 @@ class RigidGeom(RBC):
         return f"{self.__repr_name__()}: {self._uid}, idx: {self._idx} (from entity {self._entity.uid}, link {self._link.uid})"
 
 
-class RigidVisGeom(RBC):
+class RigidVisGeom(BuildableMixin, RBC):
     """
     A `RigidVisGeom` is a counterpart of `RigidGeom`, but for visualization purposes. This can be accessed via `link.vis_geoms`.
     """
@@ -618,8 +615,12 @@ class RigidVisGeom(RBC):
         self.active_envs_mask: torch.Tensor | None = None
         self.active_envs_idx: np.ndarray | None = None
 
-    def _build(self):
-        pass
+    @gs.assert_unbuilt
+    def _build(self) -> None:
+        self._is_built = True
+
+    def _destroy(self) -> None:
+        self._is_built = False
 
     @property
     def trimesh(self):
@@ -866,13 +867,6 @@ class RigidVisGeom(RBC):
         Get the ending index of the vgeom's faces in the rigid solver.
         """
         return self.n_vfaces + self.vface_start
-
-    @property
-    def is_built(self):
-        """
-        Whether the rigid entity the vgeom belongs to is built.
-        """
-        return self.entity.is_built
 
     @property
     def is_free(self):

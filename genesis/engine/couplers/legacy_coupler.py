@@ -52,7 +52,7 @@ from genesis.utils.geom import (
     qd_transform_by_quat,
     qd_transform_by_trans_quat,
 )
-from genesis.utils.misc import get_gpu_core_count, qd_from_torch, qd_to_numpy, tensor_to_array
+from genesis.utils.misc import BuildableMixin, get_gpu_core_count, qd_from_torch, qd_to_numpy, tensor_to_array
 from genesis.utils.raycast_qd import triangle_face_normal
 from genesis.utils.sdf import SDFInfo
 from genesis.utils.simt import (
@@ -326,7 +326,7 @@ def clip_triangles(tris_verts_pos: np.ndarray, tris_verts_dist: np.ndarray) -> n
     return np.concatenate([parts_verts_pos[is_kept] for is_kept, parts_verts_pos in clipped_parts])
 
 
-class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
+class LegacyCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
     """
     This class handles all the coupling between different solvers. LegacyCoupler will be deprecated in the future.
     """
@@ -423,6 +423,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             ]
         )
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         has_rigid_mpm, _, has_rigid_pbd, has_rigid_fem = self.rigid_couplings
         has_mpm_sph = self.mpm_solver.is_active and self.sph_solver.is_active and self.options.mpm_sph
@@ -477,6 +478,10 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
 
         if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
             kernel_reset_mpm_rigid_normal(self.sim.scene._sanitize_envs_idx(None), self.mpm_solver.mpm_state)
+        self._is_built = True
+
+    def destroy(self) -> None:
+        self._is_built = False
 
     def _build_sph_boundaries(self, rigid_sph_geoms: list["RigidGeom"]) -> tuple[bool, bool]:
         """

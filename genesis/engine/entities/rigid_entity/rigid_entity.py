@@ -221,7 +221,6 @@ class KinematicEntity(Entity):
         self._custom_vvert_start = solver.n_custom_vverts
         self._custom_vface_start = solver.n_custom_vfaces
 
-        self._is_built: bool = False
         self._is_attached: bool = False
         self._is_vverts_overridden: bool = False
 
@@ -288,11 +287,21 @@ class KinematicEntity(Entity):
         # Gathered once every variant is added, since the visual geoms of the variants of a link follow its own
         self._vgeoms = gs.List([vgeom for link in self._links for vgeom in link.vgeoms])
 
+    @gs.assert_unbuilt
     def _build(self) -> None:
         for link in self._links:
             link._build()
+        for joint in self.joints:
+            joint._build()
 
         self._is_built = True
+
+    def _destroy(self) -> None:
+        for link in self._links:
+            link._destroy()
+        for joint in self.joints:
+            joint._destroy()
+        super()._destroy()
 
     def _create_joints(
         self, j_descs: Sequence[RigidJointDescription], link_idx: int, joint_start: int
@@ -1077,13 +1086,6 @@ class KinematicEntity(Entity):
     # ------------------------------------------------------------------------------------
 
     @property
-    def is_built(self):
-        """
-        Whether this rigid entity is built.
-        """
-        return self._is_built
-
-    @property
     def is_attached(self):
         """
         Whether this rigid entity has already been attached to another one.
@@ -1828,22 +1830,12 @@ class RigidEntity(KinematicEntity):
 
         return link, joints
 
+    @gs.assert_unbuilt
     def _build(self) -> None:
-        # A link the world carries holds None where its asset states nothing (see 'RigidLinkDescription'). The solver
-        # stores a value for every link, and the inertial of such a link never enters the dynamics, so zero it is.
-        for link in self._links:
-            if link.is_fixed:
-                desc = link.desc
-                if desc.mass is None:
-                    desc.mass = 0.0
-                if desc.inertial_pos is None:
-                    desc.inertial_pos = gu.zero_pos()
-                if desc.inertial_quat is None:
-                    desc.inertial_quat = gu.identity_quat()
-                if desc.inertia is None:
-                    desc.inertia = np.zeros((3, 3), dtype=gs.np_float)
-
         super()._build()
+
+        for equality in self._equalities:
+            equality._build()
 
         verts_start = 0
         free_verts_idx_local, fixed_verts_idx_local = [], []
@@ -1858,6 +1850,11 @@ class RigidEntity(KinematicEntity):
             self._free_verts_idx_local = torch.cat(free_verts_idx_local)
         if fixed_verts_idx_local:
             self._fixed_verts_idx_local = torch.cat(fixed_verts_idx_local)
+
+    def _destroy(self) -> None:
+        for equality in self._equalities:
+            equality._destroy()
+        super()._destroy()
 
     def _add_equality(self, desc: RigidEqualityDescription):
         match desc.type:

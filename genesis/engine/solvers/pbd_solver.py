@@ -206,6 +206,7 @@ class PBDSolver(ParticleSolver):
         self.pbd_info: PBDInfo | None = None
         self.pbd_config: PBDConfig | None = None
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         super().build()
 
@@ -265,6 +266,8 @@ class PBDSolver(ParticleSolver):
                 entity._add_to_solver()
 
         self._build_gravity(self.pbd_info.gravity)
+
+        self._is_built = True
 
     def add_uvs_and_faces(self, vvert_start: int, vface_start: int, uvs: np.ndarray, faces: np.ndarray) -> None:
         """

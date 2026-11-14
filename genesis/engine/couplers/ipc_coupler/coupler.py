@@ -21,7 +21,7 @@ from genesis.engine.solvers.rigid.data import LinksState
 from genesis.options.solvers import IPCCouplerOptions, RigidOptions
 from genesis.repr_base import RBC
 from genesis.utils.data import ENVS, Data, DataKind, field
-from genesis.utils.misc import geometric_mean, harmonic_mean, qd_to_numpy, tensor_to_array
+from genesis.utils.misc import BuildableMixin, geometric_mean, harmonic_mean, qd_to_numpy, tensor_to_array
 
 if TYPE_CHECKING:
     from genesis.engine.entities import FEMEntity, RigidEntity
@@ -121,7 +121,7 @@ class IPCCouplerState(Data, kind=DataKind.STATE):
     errno: qd.Tensor = field(int, shape=(ENVS,))
 
 
-class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
+class IPCCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
     """
     Coupler class for handling Incremental Potential Contact (IPC) simulation coupling.
 
@@ -217,6 +217,7 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
     # Section 1: Configuration API
     # ============================================================
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         """Build IPC system"""
         self.ipc_coupler_state = IPCCouplerState(sizes=dict(envs=self.sim._B))
@@ -255,6 +256,32 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
 
         if self.options._show_ipc_gui:
             self._init_ipc_gui()
+        self._is_built = True
+
+    def destroy(self) -> None:
+        # uipc frees what it allocated with the last reference to it, so the objects derived from the IPC scene are
+        # dropped first, then the scene, the world and the engine in reverse creation order
+        self._ipc_gui = None
+        self._abd_state_feature = None
+        self._abd_state_geom = None
+        self._ipc_no_collision_contact = None
+        for contacts in (
+            self._ipc_fem_contacts,
+            self._ipc_cloth_contacts,
+            self._ipc_abd_contacts,
+            self._ipc_ground_contacts,
+        ):
+            contacts.clear()
+        self._ipc_subscenes.clear()
+        self._ipc_animator = None
+        self._ipc_objects = None
+        self._ipc_subscene_tabular = None
+        self._ipc_contact_tabular = None
+        self._ipc_constitution_tabular = None
+        self._ipc_scene = None
+        self._ipc_world = None
+        self._ipc_engine = None
+        self._is_built = False
 
     def _setup_coupling_config(self):
         """Read coup_type, coup_links, and collision settings from entity materials."""

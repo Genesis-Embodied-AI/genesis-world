@@ -126,6 +126,7 @@ class RaycasterSensor(
         self.ray_starts: torch.Tensor = torch.empty((0, 3), device=gs.device, dtype=gs.tc_float)
         self.ray_dirs: torch.Tensor = torch.empty((0, 3), device=gs.device, dtype=gs.tc_float)
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 

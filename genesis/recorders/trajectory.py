@@ -520,6 +520,7 @@ class TrajectoryFileWriter(BaseFileWriter):
     a record of their own.
     """
 
+    @gs.assert_unbuilt
     def build(self):
         self._source: TrajectorySource = self._data_func()
         sim = self._source.sim

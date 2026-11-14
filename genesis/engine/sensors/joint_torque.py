@@ -58,6 +58,7 @@ class JointTorqueSensor(SimpleSensor[JointTorqueOptions, None, JointTorqueSensor
     def _get_cache_dtype(cls) -> torch.dtype:
         return gs.tc_float
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 

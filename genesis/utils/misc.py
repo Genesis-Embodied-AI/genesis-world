@@ -213,24 +213,52 @@ def assert_initialized(cls):
     return cls
 
 
-def assert_unbuilt(method):
-    @functools.wraps(method)
+class BuildableMixin:
+    """Record whether the component is built, for the guards 'assert_built' and 'assert_unbuilt' of its own methods."""
+
+    _is_built: bool = False
+
+
+class _BuildGuard:
+    """Check at class creation that the class holding a guarded method records its built state, then step aside.
+
+    The class attribute becomes the guarded function itself, so calling the method costs an ordinary function lookup.
+    """
+
+    def __init__(self, member: Callable | property) -> None:
+        self.member = member
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        if not issubclass(owner, BuildableMixin):
+            raise_exception(
+                f"'{owner.__name__}.{name}' is guarded by its built state, which only a subclass of BuildableMixin records."
+            )
+        setattr(owner, name, self.member)
+
+
+def _guard_member(method: Callable | property, is_built: bool) -> _BuildGuard:
+    # A guard placed above '@property' guards its getter, the property itself being a class attribute
+    func = method.fget if isinstance(method, property) else method
+
+    @functools.wraps(func)
     def wrapper(self, *args, **kwargs):
-        if self.is_built:
-            gs.raise_exception("Scene is already built.")
-        return method(self, *args, **kwargs)
+        if self._is_built is not is_built:
+            gs.raise_exception(f"{type(self).__name__} is {'not built yet' if is_built else 'already built'}.")
+        return func(self, *args, **kwargs)
 
-    return wrapper
+    if isinstance(method, property):
+        return _BuildGuard(property(wrapper, method.fset, method.fdel, method.__doc__))
+    return _BuildGuard(wrapper)
 
 
-def assert_built(method):
-    @functools.wraps(method)
-    def wrapper(self, *args, **kwargs):
-        if not self.is_built:
-            gs.raise_exception(f"{type(self).__name__} is not built yet.")
-        return method(self, *args, **kwargs)
+def assert_unbuilt(method: Callable | property) -> _BuildGuard:
+    """Refuse a call once the component is built. The class holding the method must subclass BuildableMixin."""
+    return _guard_member(method, is_built=False)
 
-    return wrapper
+
+def assert_built(method: Callable | property) -> _BuildGuard:
+    """Refuse a call until the component is built. The class holding the method must subclass BuildableMixin."""
+    return _guard_member(method, is_built=True)
 
 
 def with_lock(method):

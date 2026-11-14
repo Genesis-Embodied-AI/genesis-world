@@ -88,6 +88,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         self.particles_render: ParticlesRender | None = None
         self.vverts_render: VVertsRender | None = None
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         super().build()
         self._B = self._sim._B

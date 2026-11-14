@@ -341,7 +341,8 @@ class HybridEntity(Entity):
     # ----------------------------------- instantiation ----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def build(self):
+    @gs.assert_unbuilt
+    def _build(self):
         """
         Finalize the hybrid entity setup during simulation build.
         """
@@ -351,6 +352,8 @@ class HybridEntity(Entity):
                 muscle_group=torch.tensor(self._muscle_group_cache, dtype=gs.tc_int, device=gs.device)
                 # no muscle direction as the soft body is actuated by rigid parts
             )
+
+        self._is_built = True
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

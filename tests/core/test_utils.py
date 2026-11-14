@@ -1428,5 +1428,14 @@ def test_warn_once_with_empty_message(clear_seen_fixture):
             mock_warning.assert_called_once_with("")
 
 
+def test_build_guard_requires_buildable_mixin():
+    with pytest.raises(gs.GenesisException, match="only a subclass of BuildableMixin"):
+
+        class Unbuildable:
+            @gs.assert_built
+            def step(self):
+                pass
+
+
 if __name__ == "__main__":
     globals()[sys.argv[1]](sys.argv[2:])

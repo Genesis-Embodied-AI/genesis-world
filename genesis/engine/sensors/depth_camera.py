@@ -1,5 +1,6 @@
 import torch
 
+import genesis as gs
 from genesis.options.sensors import DepthCamera as DepthCameraOptions
 
 from .base_sensor import Sensor
@@ -11,6 +12,7 @@ from .raycaster import RaycastContext, RaycasterReturnType, RaycasterSensor, Ray
 class DepthCameraSensor(
     RaycasterSensor, Sensor[DepthCameraOptions, RaycastContext, RaycasterSharedMetadata, RaycasterReturnType]
 ):
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 

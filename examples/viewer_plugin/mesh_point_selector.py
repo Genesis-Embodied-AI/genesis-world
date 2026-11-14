@@ -140,7 +140,7 @@ class MeshPointSelectorPlugin(RaycasterViewerPlugin):
     @override
     def on_draw(self) -> None:
         super().on_draw()
-        if self.scene._visualizer is not None and self.scene._visualizer.is_built:
+        if self.scene.visualizer is not None and self.scene.visualizer.is_built:
             self.scene.clear_debug_objects()
             mouse_ray = self._screen_position_to_ray(*self._prev_mouse_pos)
 

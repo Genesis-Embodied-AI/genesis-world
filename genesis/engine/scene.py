@@ -51,7 +51,7 @@ from genesis.repr_base import RBC
 from genesis.typing import IndexType
 from genesis.utils import serialization
 from genesis.utils.data import Namespace, namespace
-from genesis.utils.misc import sanitize_index, tensor_to_array
+from genesis.utils.misc import BuildableMixin, sanitize_index, tensor_to_array
 from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME, pixel_less_textures
 from genesis.utils.tools import RunningMean
 from genesis.utils.warnings import warn_once
@@ -139,7 +139,7 @@ def description_digest(desc: SceneDescription) -> str:
 
 
 @gs.assert_initialized
-class Scene(RBC):
+class Scene(BuildableMixin, RBC):
     """
     A ``genesis.Scene`` object wraps all components in a simulation environment, including a simulator (containing multiple physics solvers), entities, and a visualizer (controlling both the viewer and all the cameras).
     Basically, everything happens inside a scene.
@@ -261,7 +261,6 @@ class Scene(RBC):
         self._emitters = gs.List()
 
         self._uid = gs.UID()
-        self._is_built = False
         self._pre_step_callbacks: list = []
 
         gs.logger.info(f"Scene ~~~<{self._uid}>~~~ created.")
@@ -282,6 +281,8 @@ class Scene(RBC):
             if getattr(self, "_recorder_manager", None) is not None and self._recorder_manager.is_recording:
                 self.stop_recording()
         finally:
+            if getattr(self, "_recorder_manager", None) is not None:
+                self._recorder_manager.destroy()
             self._recorder_manager = None
 
             if getattr(self, "_visualizer", None) is not None:
@@ -862,36 +863,44 @@ class Scene(RBC):
 
         gs._scene_registry.append(weakref.ref(self, _destroy_callback))
 
-        with gs.logger.timer(f"Building scene ~~~<{self._uid}>~~~..."):
-            self._parallelize(n_envs, env_spacing, n_envs_per_row, center_envs_at_origin)
+        # A failed build destroys the scene, so that it never stays half built
+        is_done = False
+        try:
+            with gs.logger.timer(f"Building scene ~~~<{self._uid}>~~~..."):
+                self._parallelize(n_envs, env_spacing, n_envs_per_row, center_envs_at_origin)
 
-            with namespace(self._namespace):
-                self._sim.build()
+                with namespace(self._namespace):
+                    self._sim.build()
 
-            # reset state
-            self._reset()
+                # reset state
+                self._reset()
+
+            with gs.logger.timer("Compiling simulation kernels..."):
+                self._sim.step()
+                try:
+                    self._sim.check_errno()
+                except gs.GenesisException as e:
+                    gs.logger.warning(
+                        "The initial state is invalid. Register a valid one with 'scene.reset(state)', or overwrite it "
+                        "manually following 'scene.build' and every call to 'scene.reset()', otherwise stepping will "
+                        f"fail with: {e}"
+                    )
+                self._sim.reset(self._init_state)
+                self._restart()
+
+            # visualizer
+            with gs.logger.timer("Building visualizer..."):
+                self._visualizer.build()
+
+            # recorders, which lay out the phases a step times once (see 'StepTimer.add_phases')
+            self._sim.step_timer.add_phases("recorders", "rendering", "video")
+            self._recorder_manager.build()
 
             self._is_built = True
-
-        with gs.logger.timer("Compiling simulation kernels..."):
-            self._sim.step()
-            try:
-                self._sim.check_errno()
-            except gs.GenesisException as e:
-                gs.logger.warning(
-                    "The initial state is invalid. Register a valid one with 'scene.reset(state)', or overwrite it "
-                    "manually following 'scene.build' and every call to 'scene.reset()', otherwise stepping will fail "
-                    f"with: {e}"
-                )
-            self._reset()
-
-        # visualizer
-        with gs.logger.timer("Building visualizer..."):
-            self._visualizer.build()
-
-        # recorders, which lay out the phases a step times once (see 'StepTimer.add_phases')
-        self._sim.step_timer.add_phases("recorders", "rendering", "video")
-        self._recorder_manager.build()
+            is_done = True
+        finally:
+            if not is_done:
+                self.destroy()
 
     def _parallelize(
         self,

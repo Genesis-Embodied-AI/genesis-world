@@ -83,7 +83,7 @@ from genesis.utils.data import (
     field,
     iter_data,
 )
-from genesis.utils.misc import get_gpu_block_shared_memory_bytes, qd_to_numpy, tensor_to_array
+from genesis.utils.misc import BuildableMixin, get_gpu_block_shared_memory_bytes, qd_to_numpy, tensor_to_array
 from genesis.utils.raycast_qd import get_solver_meshes
 
 if TYPE_CHECKING:
@@ -1276,7 +1276,7 @@ def compute_pressure_field(depth: np.ndarray, modulus: float) -> np.ndarray:
     return depth / depth_max * modulus
 
 
-class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
+class SAPCoupler(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
     """
     This class handles all the coupling between different solvers using the
     Semi-Analytic Primal (SAP) contact solver used in Drake.
@@ -1321,6 +1321,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         # The handlers as the kernels take them, one argument each (see SAPHandlers)
         self.handlers: SAPHandlers | None = None
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         self._B = self.sim._B
         # Distinct FEM entities always collide, an entity with itself on demand
@@ -1793,6 +1794,10 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config = get_bvh_data(
             self.sim._B, n_tets, is_active=has_fem_tet_tree
         )
+        self._is_built = True
+
+    def destroy(self) -> None:
+        self._is_built = False
 
     def reset(self, envs_idx=None):
         # The state of the coupler, its errors included, is written back by 'set_state', which precedes the restart

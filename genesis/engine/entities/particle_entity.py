@@ -172,6 +172,8 @@ class ParticleEntity(Entity):
         if self._need_skinning:
             self._add_vverts_to_solver()
 
+        self._is_built = True
+
     def _add_particles_to_solver(self):
         raise NotImplementedError
 

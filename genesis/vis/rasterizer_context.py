@@ -13,7 +13,7 @@ import genesis.utils.particle as pu
 from genesis.engine.state_change import StateChange, Subscriber
 from genesis.ext import pyrender
 from genesis.ext.pyrender.jit_render import JITRenderer
-from genesis.utils.misc import qd_to_numpy, sanitize_index, tensor_to_array
+from genesis.utils.misc import BuildableMixin, qd_to_numpy, sanitize_index, tensor_to_array
 
 if TYPE_CHECKING:
     from genesis.engine.sensors.base_sensor import Sensor
@@ -171,7 +171,7 @@ class SegmentationColorMap:
             self.idxc_to_color = rgb
 
 
-class RasterizerContext:
+class RasterizerContext(BuildableMixin):
     def __init__(self, options):
         self.show_world_frame = options.show_world_frame
         self.world_frame_size = options.world_frame_size
@@ -234,6 +234,7 @@ class RasterizerContext:
         )
         self.link_frame_mesh.vertices *= self.link_frame_size
 
+    @gs.assert_unbuilt
     def build(self, scene):
         self.scene = scene
         self.sim = scene.sim
@@ -282,8 +283,10 @@ class RasterizerContext:
 
         # segmentation mapping
         self.seg_color_map.generate_seg_colors()
+        self._is_built = True
 
     def destroy(self):
+        self._is_built = False
         self.clear_dynamic_nodes(only_outdated=False)
         for node_list in self.tracked_nodes.values():
             node_list.clear()

@@ -33,6 +33,7 @@ from genesis.utils.data import (
     fill_data,
 )
 from genesis.utils.misc import (
+    BuildableMixin,
     assign_indexed_tensor,
     broadcast_tensor,
     data_to_array,
@@ -471,7 +472,7 @@ class CheckpointMixin:
         self.load_checkpoint(state)
 
 
-class GravityMixin:
+class GravityMixin(BuildableMixin):
     """Gravity of one solver: the buffer storing it, and the accessors reading and writing it.
 
     Mixed into every solver whose options carry a gravity vector.
@@ -549,7 +550,7 @@ class GravityMixin:
         return tensor[0] if self._sim.n_envs == 0 else tensor
 
 
-class Solver(ErrnoMixin, CheckpointMixin, RBC):
+class Solver(BuildableMixin, ErrnoMixin, CheckpointMixin, RBC):
     # The material of the entities this solver simulates, None for a solver holding no entity of its own
     material_cls: type[Material] | None = None
     # Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must
@@ -678,6 +679,7 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
                 tensor_ = tensor_[None]
         return tensor_, inputs_idx_, envs_idx_
 
+    @gs.assert_unbuilt
     def build(self):
         self._B = self._sim._B
         self.build_errno(self._B)
@@ -689,6 +691,11 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
                     "to differentiate over this horizon: shorten it, or decrease the simulation timestep."
                 ),
             }
+
+    def destroy(self) -> None:
+        for entity in self._entities:
+            entity._destroy()
+        self._is_built = False
 
     # ------------------------------------------------------------------------------------
     # ------------------------------ differentiable simulation ---------------------------
@@ -867,10 +874,6 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
     def options(self) -> "Options":
         """The options the solver was created with."""
         return self._options
-
-    @property
-    def is_built(self):
-        return self._scene._is_built
 
     @property
     def entities(self) -> list[Entity]:

@@ -6,7 +6,7 @@ import torch
 import genesis as gs
 from genesis.repr_base import RBC
 from genesis.constants import IMAGE_TYPE
-from genesis.utils.misc import qd_to_torch
+from genesis.utils.misc import BuildableMixin, qd_to_torch
 
 from .camera import Camera
 from .rasterizer_context import SegmentationColorMap
@@ -31,7 +31,7 @@ def _make_tensor(data, *, dtype: torch.dtype = torch.float32):
     return torch.tensor(data, dtype=dtype, device=gs.device)
 
 
-class GenesisGeomRetriever:
+class GenesisGeomRetriever(BuildableMixin):
     def __init__(self, rigid_solver, seg_level):
         self.rigid_solver = rigid_solver
         self.seg_color_map = SegmentationColorMap(to_torch=True)
@@ -41,6 +41,7 @@ class GenesisGeomRetriever:
         self.default_geom_group = 2
         self.default_enabled_geom_groups = np.array([self.default_geom_group], dtype=np.int32)
 
+    @gs.assert_unbuilt
     def build(self):
         self.n_vgeoms = self.rigid_solver.n_vgeoms
         self.geom_idxc = []
@@ -51,6 +52,8 @@ class GenesisGeomRetriever:
             self.geom_idxc.append(seg_idxc)
         self.geom_idxc = torch.tensor(self.geom_idxc, dtype=torch.int32, device=gs.device)
         self.seg_color_map.generate_seg_colors()
+
+        self._is_built = True
 
     def get_seg_key(self, vgeom):
         if self.seg_level == "geom":
@@ -63,6 +66,7 @@ class GenesisGeomRetriever:
             gs.raise_exception(f"Unsupported segmentation level: {self.seg_level}")
 
     # FIXME: Use a kernel to do it efficiently
+    @gs.assert_built
     def retrieve_rigid_meshes_static(self):
         args = {}
         vgeoms = self.rigid_solver.vgeoms
@@ -201,6 +205,7 @@ class GenesisGeomRetriever:
         return args
 
     # FIXME: Use a kernel to do it efficiently
+    @gs.assert_built
     def retrieve_rigid_property_torch(self, num_worlds):
         geom_rgb = torch.empty((0, self.n_vgeoms), dtype=torch.uint32, device=gs.device)
         geom_mat_ids = torch.full((num_worlds, self.n_vgeoms), -1, dtype=torch.int32, device=gs.device)
@@ -209,6 +214,7 @@ class GenesisGeomRetriever:
         return geom_mat_ids, geom_rgb, geom_sizes
 
     # FIXME: Use a kernel to do it efficiently
+    @gs.assert_built
     def retrieve_rigid_state_torch(self):
         geom_pos = qd_to_torch(self.rigid_solver.dyn_state.vgeoms.pos)
         geom_rot = qd_to_torch(self.rigid_solver.dyn_state.vgeoms.quat)
@@ -265,7 +271,7 @@ class Light:
         return self._attenuation
 
 
-class BatchRenderer(RBC):
+class BatchRenderer(BuildableMixin, RBC):
     """
     This class is used to manage batch rendering
     """
@@ -282,6 +288,7 @@ class BatchRenderer(RBC):
     def add_light(self, pos, dir, color, intensity, directional, castshadow, cutoff, attenuation):
         self._lights.append(Light(pos, dir, color, intensity, directional, castshadow, cutoff, attenuation))
 
+    @gs.assert_unbuilt
     def build(self):
         """
         Build all cameras in the batch and initialize Moderona renderer
@@ -339,6 +346,7 @@ class BatchRenderer(RBC):
             lights_attenuation_tensor=_make_tensor([light.attenuation for light in self._lights]),
             lights_intensity_tensor=_make_tensor([light.intensity for light in self._lights]),
         )
+        self._is_built = True
 
     def update_scene(self, force_render: bool = False):
         self._visualizer._context.update(force_render)
@@ -447,6 +455,7 @@ class BatchRenderer(RBC):
         return self._geom_retriever.seg_color_map.colorize_seg_idxc_arr(seg_idxc_arr)
 
     def destroy(self):
+        self._is_built = False
         self._lights.clear()
         self._data_cache.clear()
         if self._renderer is not None:

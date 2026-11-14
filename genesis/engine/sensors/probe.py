@@ -10,7 +10,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.options.sensors.tactile import TactileProbeSensorOptionsMixin
-from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
+from genesis.utils.misc import BuildableMixin, concat_with_tensor, make_tensor_field, tensor_to_array
 
 if TYPE_CHECKING:
     from genesis.ext.pyrender.mesh import Mesh
@@ -83,7 +83,7 @@ def get_measured_bufs(
     return measured_slot, shared_metadata.measured_scratch_T
 
 
-class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin]:
+class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin](BuildableMixin):
     """Shared logic for registering this sensor's probes in ``ProbeSensorMetadataMixin`` fields."""
 
     # Number of channel groups per probe in the cache layout. Used by the per-cache-col probe-index builder.
@@ -104,6 +104,7 @@ class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin]:
         self._probe_local_pos = raw_pos.reshape(self._n_probes, 3).contiguous()
         super().__init__(options, idx, shared_context, shared_metadata, manager)
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         super().build()
         self._shared_metadata.sensor_probe_start = concat_with_tensor(
@@ -513,6 +514,7 @@ class ProbesWithNormalSensorMixin[ProbesWithNormalSensorSharedMetadataT: ProbesW
         else:
             self._probe_local_normal = raw_normal.reshape(self._n_probes, 3).contiguous()
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         super().build()
         self._shared_metadata.probe_local_normal = concat_with_tensor(

@@ -16,7 +16,7 @@ import genesis.utils.geom as gu
 from genesis.ext import pyrender
 from genesis.ext.pyrender.overlay import ImGuiOverlayPlugin
 from genesis.repr_base import RBC
-from genesis.utils.misc import redirect_libc_stderr, tensor_to_array
+from genesis.utils.misc import BuildableMixin, redirect_libc_stderr, tensor_to_array
 from genesis.utils.tools import Rate
 from genesis.vis.keybindings import Key, KeyAction, Keybind, KeyMod
 from genesis.vis.viewer_plugins import DefaultControlsPlugin
@@ -37,9 +37,8 @@ class ViewerLock:
         self._pyrender_viewer.render_lock.release()
 
 
-class Viewer(RBC):
+class Viewer(BuildableMixin, RBC):
     def __init__(self, options: "ViewerOptions", context):
-        self._is_built = False
         self._res = options.res
         self._run_in_thread = options.run_in_thread
         self._refresh_rate = options.refresh_rate
@@ -76,6 +75,7 @@ class Viewer(RBC):
         self._last_refresh_time = None
         self._step_pacer = None
 
+    @gs.assert_unbuilt
     def build(self, scene):
         self.scene = scene
 
@@ -188,6 +188,10 @@ class Viewer(RBC):
     def stop(self):
         if self._pyrender_viewer is not None and self._pyrender_viewer.is_active:
             self._pyrender_viewer.close()
+
+    def destroy(self):
+        self.stop()
+        self._is_built = False
 
     def is_alive(self):
         if self._pyrender_viewer is None:
@@ -449,7 +453,7 @@ class Viewer(RBC):
         # is only recorded once it has successfully attached. The render lock serializes the attach with the viewer
         # thread when running in a thread; it is reentrant, so this is a no-op when called from a render callback
         # (e.g. the overlay Plugins tab) that already holds it.
-        if self.is_built:
+        if self._is_built:
             with self._pyrender_viewer.render_lock:
                 self._pyrender_viewer.register_plugin(plugin)
         self._plugins.append(plugin)
@@ -466,7 +470,7 @@ class Viewer(RBC):
         """
         if plugin in self._plugins:
             self._plugins.remove(plugin)
-        if self.is_built and plugin in self._pyrender_viewer.plugins:
+        if self._is_built and plugin in self._pyrender_viewer.plugins:
             # Hold the (reentrant) render lock so the detach is serialized with the viewer thread, then drop the
             # plugin via copy-on-write so a dispatch loop already iterating self.plugins finishes on its snapshot.
             with self._pyrender_viewer.render_lock:
@@ -496,10 +500,6 @@ class Viewer(RBC):
     def plugins(self):
         """The registered viewer plugins, read-only; use ``add_plugin`` to register one."""
         return tuple(self._plugins)
-
-    @property
-    def is_built(self):
-        return self._is_built
 
     @property
     def res(self):

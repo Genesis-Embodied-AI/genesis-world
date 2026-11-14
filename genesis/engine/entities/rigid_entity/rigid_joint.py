@@ -6,12 +6,12 @@ import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
 from genesis.repr_base import RBC
 from genesis.typing import FArrayType
-from genesis.utils.misc import DeprecationError, tensor_to_array
+from genesis.utils.misc import BuildableMixin, DeprecationError, tensor_to_array
 
 from .description import RigidJointDescription
 
 
-class RigidJoint(RBC):
+class RigidJoint(BuildableMixin, RBC):
     """
     Joint class for rigid body entities. Each RigidLink is connected to its parent link via a RigidJoint.
     """
@@ -42,6 +42,13 @@ class RigidJoint(RBC):
                 getter = getattr(self, f"_{name_old}")
                 return getter()
         raise AttributeError
+
+    @gs.assert_unbuilt
+    def _build(self) -> None:
+        self._is_built = True
+
+    def _destroy(self) -> None:
+        self._is_built = False
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- real-time state -----------------------------------
@@ -383,13 +390,6 @@ class RigidJoint(RBC):
                     perp.append(np.linalg.norm(geom_verts - np.outer(geom_verts @ axis, axis), axis=1).max())
                 lengths[i_d] = body_radius(perp)
         return lengths
-
-    @property
-    def is_built(self):
-        """
-        Returns whether the entity the joint belongs to is built.
-        """
-        return self.entity.is_built
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- repr ----------------------------------------

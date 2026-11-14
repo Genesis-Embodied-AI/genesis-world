@@ -519,6 +519,7 @@ class TemperatureGridSensor(
         self._debug_t_range: float = self._options.debug_temperature_range[1] - self._debug_t_min
         self._debug_cell_local_positions: np.ndarray = np.array([])  # set in build
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 

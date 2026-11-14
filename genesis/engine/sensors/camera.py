@@ -420,6 +420,7 @@ class RasterizerCameraSensor(
 
     # ========================== Sensor Lifecycle ==========================
 
+    @gs.assert_unbuilt
     def build(self):
         """Initialize the rasterizer and register this camera."""
         super().build()
@@ -576,6 +577,7 @@ class RaytracerCameraSensor(
         self._options: RaytracerCameraOptions
         self._camera_obj = None
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         """Register a raytracer camera that reuses the visualizer pipeline."""
         super().build()
@@ -730,6 +732,7 @@ class BatchRendererCameraSensor(
         self._options: BatchRendererCameraOptions
         self._camera_obj = None
 
+    @gs.assert_unbuilt
     def build(self):
         """Initialize the batch renderer and register this camera."""
         super().build()

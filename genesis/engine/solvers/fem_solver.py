@@ -612,6 +612,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self.vertex_constraints: FEMVertexConstraints | None = None
         self.data_manager: FEMData | None = None
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         super().build()
 
@@ -817,6 +818,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             kernel_clear_vertex_constraints(self.vertex_constraints)
 
         self._build_gravity(self.fem_info.gravity)
+
+        self._is_built = True
 
     def reset_grad(self) -> None:
         if self._requires_grad:

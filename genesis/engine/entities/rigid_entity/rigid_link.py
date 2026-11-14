@@ -7,10 +7,9 @@ import genesis as gs
 from genesis.constants import link_ref_frame
 from genesis.repr_base import RBC
 from genesis.typing import LaxPositiveFArrayType
-from genesis.utils.misc import DeprecationError, qd_to_torch
+from genesis.utils.misc import BuildableMixin, DeprecationError, qd_to_torch
 
 from .description import KinematicLinkDescription, RigidGeomDescription, RigidLinkDescription, RigidVisGeomDescription
-from .inertial import LinkInertial
 from .rigid_geom import RigidGeom, RigidVisGeom
 
 if TYPE_CHECKING:
@@ -20,7 +19,7 @@ if TYPE_CHECKING:
     from .rigid_joint import RigidJoint
 
 
-class KinematicLink(RBC):
+class KinematicLink(BuildableMixin, RBC):
     """
     Kinematic class. One KinematicEntity consists of multiple KinematicLinks, each of which is a rigid body and could
     consist of multiple RigidVisGeoms (`link.vgeoms` for visualization).
@@ -83,9 +82,17 @@ class KinematicLink(RBC):
         prev_end = self._variant_vgeom_ranges[-1][1]
         self._variant_vgeom_ranges.append((prev_end, prev_end + n_new_vgeoms))
 
-    def _build(self):
+    @gs.assert_unbuilt
+    def _build(self) -> None:
         for vgeom in self._vgeoms:
             vgeom._build()
+
+        self._is_built = True
+
+    def _destroy(self) -> None:
+        for vgeom in self._vgeoms:
+            vgeom._destroy()
+        self._is_built = False
 
     def _add_vgeom(self, desc: RigidVisGeomDescription):
         vgeom = RigidVisGeom(
@@ -390,13 +397,6 @@ class KinematicLink(RBC):
         """
         return sum([vgeom.n_vfaces for vgeom in self._vgeoms])
 
-    @property
-    def is_built(self) -> bool:
-        """
-        Whether the entity the link belongs to is built.
-        """
-        return self.entity.is_built
-
     # ------------------------------------------------------------------------------------
     # -------------------------------------- repr ----------------------------------------
     # ------------------------------------------------------------------------------------
@@ -463,22 +463,17 @@ class RigidLink(KinematicLink):
         prev_geom_end = self._variant_geom_ranges[-1][1]
         self._variant_geom_ranges.append((prev_geom_end, prev_geom_end + n_new_geoms))
 
+    def _destroy(self) -> None:
+        for geom in self._geoms:
+            geom._destroy()
+        super()._destroy()
+
+    @gs.assert_unbuilt
     def _build(self):
         super()._build()
 
         for geom in self._geoms:
             geom._build()
-
-        # Compute per-variant inertial for heterogeneous links
-        if self._variant_geom_ranges is not None:
-            self._variant_inertial = [
-                LinkInertial(self.desc.mass, self.desc.inertial_pos, self.desc.inertial_quat, self.desc.inertia)
-            ]
-            for variant in self.entity._desc.variants[1:]:
-                v_l_desc = variant.links[self.idx - self.entity._link_start]
-                self._variant_inertial.append(
-                    LinkInertial(v_l_desc.mass, v_l_desc.inertial_pos, v_l_desc.inertial_quat, v_l_desc.inertia)
-                )
 
     def _add_geom(self, desc: RigidGeomDescription, needs_coup=False):
         geom = RigidGeom(

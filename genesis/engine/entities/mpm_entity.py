@@ -107,8 +107,8 @@ class MPMEntity(ParticleEntity):
         """
         self.set_particles_actu(actus, envs_idx=envs_idx)
 
-    @assert_muscle
     @gs.assert_built
+    @assert_muscle
     def set_particles_actu(self, actus, particles_idx_local=None, envs_idx=None):
         """
         Set particle actuation values.

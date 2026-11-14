@@ -567,6 +567,7 @@ class PointCloudTactileSensorMixin[PointCloudTactileSensorMetadataMixinT: PointC
         self._probe_start_idx = -1
         self._debug_pc_chunks: list[tuple[int, torch.Tensor, torch.Tensor]] | None = None
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
         self._probe_start_idx = int(self._shared_metadata.sensor_probe_start[self._idx].item())
@@ -707,6 +708,7 @@ class ProximityTaxelSensor(
         # Resolve the grid frame for spatial crosstalk (flat pos/normals are already populated by the base mixins).
         self._setup_crosstalk_grid(options)
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
         if self._options.is_crosstalk_enabled and self._use_grid_crosstalk:
@@ -1683,6 +1685,7 @@ class ElastomerTaxelSensor(
                 "tangents); FFT dilation will use averaged spacing and normal as a best-fit approximation."
             )
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 

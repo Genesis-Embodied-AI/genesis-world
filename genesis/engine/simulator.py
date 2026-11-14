@@ -11,7 +11,13 @@ from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.data import ArrayItem, DataItem, DataKind, check_data, iter_data
-from genesis.utils.misc import indices_to_mask, qd_destroy_data, qd_to_numpy, qd_to_torch
+from genesis.utils.misc import (
+    BuildableMixin,
+    indices_to_mask,
+    qd_destroy_data,
+    qd_to_numpy,
+    qd_to_torch,
+)
 from genesis.utils.tools import StepTimer
 from genesis.utils.warnings import warn_once
 
@@ -48,7 +54,7 @@ def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SolverChec
         torch.mps.synchronize()
 
 
-class Simulator(RBC):
+class Simulator(BuildableMixin, RBC):
     """
     A simulator is a scene-level simulation manager, which manages all simulation-related operations in the scene, including multiple solvers and the inter-solver coupler.
 
@@ -187,6 +193,7 @@ class Simulator(RBC):
         for solver in self._solvers:
             solver._add_force_field(force_field)
 
+    @gs.assert_unbuilt
     def build(self):
         self.n_envs = self.scene.n_envs
         self._B = self.scene._B
@@ -310,8 +317,16 @@ class Simulator(RBC):
         self._step_timer.add_phases("physics", "sensors")
         self._sensor_manager.build()
 
+        self._is_built = True
+
     def destroy(self):
+        self._is_built = False
         self._sensor_manager.destroy()
+        for solver in self._solvers:
+            solver.destroy()
+        self._coupler.destroy()
+        if self._rigid_mpm_hybrid is not None:
+            self._rigid_mpm_hybrid.destroy()
 
         # The ndarrays of a solver are freed with its scene, whatever still references them, or else by 'qd.reset'.
         # They are gathered first, since 'data' reads the gradient of an array after yielding it, and once each, since
@@ -325,6 +340,8 @@ class Simulator(RBC):
                 }
                 for array in arrays.values():
                     qd_destroy_data(array)
+        # A scene destroyed again after a failed build frees nothing twice
+        self._active_systems.clear()
 
     def reset(self, state: SimState, envs_idx=None):
         """Put the given environments back in a state 'get_state' returned, all of them if None.

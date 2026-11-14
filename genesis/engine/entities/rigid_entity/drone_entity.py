@@ -31,6 +31,7 @@ class DroneEntity(RigidEntity):
         self._propellers_spin = torch.tensor(morph.propellers_spin, dtype=gs.tc_float, device=gs.device)
         self._model = morph.model
 
+    @gs.assert_unbuilt
     def _build(self):
         super()._build()
 

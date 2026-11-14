@@ -83,7 +83,7 @@ def test_lazy_sensor_discovery(show_viewer, tmp_path):
                 pass
 
             def build(self):
-                pass
+                super().build()
         """
         )
     )

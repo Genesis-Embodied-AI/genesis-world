@@ -156,6 +156,7 @@ class ContactSensor(SimpleSensor[ContactSensorOptions, None, ContactSensorMetada
 
         self._link: "RigidLink | None" = None
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -249,6 +250,7 @@ class ContactForceSensor(
     Sensor that returns the total contact force being applied to the associated RigidLink in its local frame.
     """
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 

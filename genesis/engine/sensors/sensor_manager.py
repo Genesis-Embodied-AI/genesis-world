@@ -10,11 +10,12 @@ import genesis as gs
 from genesis.options.sensors import types as _sensor_types_namespace
 from genesis.options.sensors.options import SensorOptions
 from genesis.utils.ring_buffer import TensorRingBuffer
+from genesis.utils.misc import BuildableMixin
 
 from .base_sensor import Sensor, SharedSensorContext, SharedSensorMetadata
 
 
-class SensorManager:
+class SensorManager(BuildableMixin):
     # Maps sensor options class -> sensor class for runtime dispatch.
     SENSOR_TYPES_MAP: dict[type[SensorOptions], type["Sensor"]] = {}
 
@@ -138,6 +139,7 @@ class SensorManager:
             + "".join(f"\nSkipped for a missing dependency: {error}" for error in skipped_modules_error)
         )
 
+    @gs.assert_unbuilt
     def build(self):
         self._sim.step_timer.add_phases(*(f"sensors/{sensor_cls.__name__}" for sensor_cls in self._sensors_by_type))
 
@@ -272,9 +274,10 @@ class SensorManager:
         for sensor_cls, sensors in self._sensors_by_type.items():
             for sensor in sensors:
                 sensor.build()
-                sensor._is_built = True
+        self._is_built = True
 
     def destroy(self):
+        self._is_built = False
         for context in self._shared_contexts.values():
             context.destroy()
         self._shared_contexts.clear()
@@ -282,6 +285,9 @@ class SensorManager:
             if sensors_metadata is not None:
                 sensors_metadata.destroy()
         self._sensors_metadata.clear()
+        for sensors in self._sensors_by_type.values():
+            for sensor in sensors:
+                sensor.destroy()
         self._sensors_by_type.clear()
 
     def reset(self, envs_idx=None):

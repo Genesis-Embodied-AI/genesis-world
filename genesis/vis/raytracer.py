@@ -10,6 +10,7 @@ import genesis.utils.mesh as mu
 import genesis.utils.misc as miscu
 import genesis.utils.particle as pu
 from genesis.engine import entities
+from genesis.utils.misc import BuildableMixin
 
 try:
     sys.path.append(os.path.join(miscu.get_src_dir(), "ext/LuisaRender/build/bin"))
@@ -120,7 +121,7 @@ class MeshLight(ShapeLight):
         renderer.update_rigid(self.name, self.transform)
 
 
-class Raytracer:
+class Raytracer(BuildableMixin):
     def __init__(self, options, vis_options):
         self.logging_level = options.logging_level
         self.state_limit = options.state_limit
@@ -210,6 +211,7 @@ class Raytracer:
             )
         )
 
+    @gs.assert_unbuilt
     def build(self, scene):
         # Note that surfaces and entities added after building may not be included in LuisaRender
         self.scene = scene
@@ -336,6 +338,8 @@ class Raytracer:
                 if fem_entity.surface.vis_mode == "visual":
                     for vgeom in fem_entity.vgeoms:
                         self.add_deformable(str(vgeom.uid))
+
+        self._is_built = True
 
     def get_transform(self, matrix):
         if matrix is None:
@@ -656,6 +660,7 @@ class Raytracer:
     def reset(self):
         self._t = -1
 
+    @gs.assert_built
     def update_scene(self, force_render: bool = False):
         if not force_render and self._t >= self.scene.sim.cur_step_global:
             if self.camera_updated:
@@ -770,6 +775,7 @@ class Raytracer:
         self._scene.update_scene(time=self._t)
         self.camera_updated = False
 
+    @gs.assert_built
     def render_camera(self, camera):
         b = self._scene.render_frame(camera=self._cameras[str(camera.uid)])
         img = np.frombuffer(b, dtype=np.uint8).reshape(camera.res[1], camera.res[0], 4)[:, :, :3]
@@ -779,6 +785,7 @@ class Raytracer:
         self._shapes = dict()
         self._cameras = dict()
         LuisaRenderPy.destroy()
+        self._is_built = False
 
     @property
     def cameras(self):

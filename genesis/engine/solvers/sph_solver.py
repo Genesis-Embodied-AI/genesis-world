@@ -244,6 +244,7 @@ class SPHSolver(ParticleSolver):
         self.sph_info: SPHInfo | None = None
         self.sph_config: SPHConfig | None = None
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         super().build()
 
@@ -347,6 +348,8 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
                 )
 
         self._build_gravity(self.sph_info.gravity)
+
+        self._is_built = True
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------

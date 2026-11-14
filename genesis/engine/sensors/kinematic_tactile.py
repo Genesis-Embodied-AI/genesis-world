@@ -710,6 +710,7 @@ class KinematicTactileSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadat
     own metadata.
     """
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
         self._shared_metadata.append_filter(self._options.filter_link_idx)
@@ -749,6 +750,7 @@ class ContactDepthProbeSensor(
     Returns contact depth in meters per probe.
     """
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
         # Re-allocate the per-(env, sensor) contact prefilter buffers to absorb the newly-registered sensor.
@@ -876,6 +878,7 @@ class ContactProbeSensor(
     cleanly with the env (the manager zeros the ring on reset).
     """
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
         self._shared_metadata.contact_threshold = concat_with_tensor(
@@ -985,6 +988,7 @@ class KinematicTaxelSensor(
         # Resolve the grid frame for spatial crosstalk (flat pos/normals are already populated by the base mixins).
         self._setup_crosstalk_grid(options)
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 

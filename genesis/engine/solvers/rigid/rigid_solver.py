@@ -318,7 +318,22 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._n_free_verts, self._n_fixed_verts = n_free_verts, n_fixed_verts
         return entity
 
+    @gs.assert_unbuilt
     def build(self) -> None:
+        # A link the world carries holds None where its asset states nothing (see 'RigidLinkDescription'). The solver
+        # stores a value for every link, and the inertial of such a link never enters the dynamics, so zero it is.
+        for link in self.links:
+            if link.is_fixed:
+                desc = link.desc
+                if desc.mass is None:
+                    desc.mass = 0.0
+                if desc.inertial_pos is None:
+                    desc.inertial_pos = gu.zero_pos()
+                if desc.inertial_quat is None:
+                    desc.inertial_quat = gu.identity_quat()
+                if desc.inertia is None:
+                    desc.inertia = np.zeros((3, 3), dtype=gs.np_float)
+
         # The simulator settles the substep shared by every solver before building them, possibly at the rate another
         # solver asks for, so the time constants are floored against it here rather than at construction.
         self._sol_min_timeconst = TIME_CONSTANT_SAFETY_FACTOR * self._substep_dt
@@ -490,6 +505,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         ):
             self._geoms_offset_pos = torch.from_numpy(geoms_offset_pos).to(device=gs.device, dtype=gs.tc_float)
             self._geoms_offset_quat = torch.from_numpy(geoms_offset_quat).to(device=gs.device, dtype=gs.tc_float)
+
+        self._is_built = True
 
     def _resolve_broadphase_traversal(self):
         if self._options.broadphase_traversal is not None:
@@ -1051,8 +1068,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         Dispatch per-environment geom/vgeom ranges and inertial properties for heterogeneous links.
 
         Extends the base class (which handles vgeom-only dispatch) to also dispatch collision geom
-        ranges and per-variant inertial properties. Per-variant inertial is pre-computed during
-        link._build() from actual geom objects, using analytic formulas for primitives.
+        ranges and per-variant inertial properties, which the description of each variant states.
         """
         for link in self.links:
             if link._variant_vgeom_ranges is None:
@@ -1067,11 +1083,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             vgeom_starts = np.array([link._variant_vgeom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
             vgeom_ends = np.array([link._variant_vgeom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
 
-            # Build per-env inertial arrays from pre-computed per-variant inertial
-            links_inertial_mass = np.array([link._variant_inertial[v][0] for v in variant_idx], dtype=gs.np_float)
-            links_inertial_pos = np.array([link._variant_inertial[v][1] for v in variant_idx], dtype=gs.np_float)
-            links_inertial_quat = np.array([link._variant_inertial[v][2] for v in variant_idx], dtype=gs.np_float)
-            links_inertial_i = np.array([link._variant_inertial[v][3] for v in variant_idx], dtype=gs.np_float)
+            # Build per-env inertial arrays from the description of the link in each variant, its own coming first
+            variants_desc = [link.desc, *(variant.links[link.idx_local] for variant in link.entity.desc.variants[1:])]
+            links_inertial_mass = np.array([variants_desc[v].mass for v in variant_idx], dtype=gs.np_float)
+            links_inertial_pos = np.array([variants_desc[v].inertial_pos for v in variant_idx], dtype=gs.np_float)
+            links_inertial_quat = np.array([variants_desc[v].inertial_quat for v in variant_idx], dtype=gs.np_float)
+            links_inertial_i = np.array([variants_desc[v].inertia for v in variant_idx], dtype=gs.np_float)
 
             # Update links_info with per-environment values
             # Note: when batch_links_info is True, the shape is (n_links, B)

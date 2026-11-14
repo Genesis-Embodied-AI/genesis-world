@@ -93,13 +93,11 @@ def test_destroy_after_aborted_camera_build(monkeypatch, raise_before_build):
         )
     )
 
-    # Capture the shared metadata reference now; SensorManager.destroy() drops its dict entry,
-    # but the dataclass instance itself stays alive through our local reference so we can
-    # inspect its fields after teardown.
+    # The shared metadata outlives its entry in the sensor manager through this reference, so its fields stay readable
     shared_metadata = camera._shared_metadata
 
-    # Inject a bug either at build entry (no metadata population) or after the original build
-    # has populated renderer / context / sensors / image_cache.
+    # Inject a bug either at build entry (no metadata population) or after the original build populated the renderer,
+    # the context, the sensors and the image cache.
     original_build = RasterizerCameraSensor.build
 
     def buggy_build(self):
@@ -109,21 +107,8 @@ def test_destroy_after_aborted_camera_build(monkeypatch, raise_before_build):
 
     monkeypatch.setattr(RasterizerCameraSensor, "build", buggy_build)
 
-    with pytest.raises(RuntimeError, match="injected camera build failure"):
-        scene.build()
-
-    if raise_before_build:
-        assert shared_metadata.renderer is None
-    else:
-        assert shared_metadata.renderer is not None
-        assert shared_metadata.context is not None
-        assert shared_metadata.sensors is not None
-        assert shared_metadata.image_cache is not None
-
-    # Track shared_metadata.destroy() invocations via instance-level shadow. Assigning to the
-    # instance __dict__ takes precedence over class-level lookup for this instance only, so
-    # neither the class nor any other metadata instance is affected. The `del` reverts the
-    # instance to plain class-level lookup before any finalizer can fire.
+    # Count the teardowns of the shared metadata through an instance-level shadow, which leaves the class and every other
+    # metadata instance untouched, and is removed before any finalizer can fire.
     original_destroy = shared_metadata.destroy
     destroy_call_count = [0]
 
@@ -133,15 +118,20 @@ def test_destroy_after_aborted_camera_build(monkeypatch, raise_before_build):
 
     shared_metadata.destroy = tracked_destroy
     try:
+        # The aborted build is torn down at once, from whatever state it reached
+        with pytest.raises(RuntimeError, match="injected camera build failure"):
+            scene.build()
+        assert destroy_call_count[0] == 1
+        assert shared_metadata.renderer is None
+        assert shared_metadata.context is None
+        assert shared_metadata.sensors is None
+        assert shared_metadata.image_cache is None
+
+        # Destroying the scene afterwards tears nothing down twice
         scene.destroy()
     finally:
         del shared_metadata.destroy
-
     assert destroy_call_count[0] == 1
-    assert shared_metadata.renderer is None
-    assert shared_metadata.context is None
-    assert shared_metadata.sensors is None
-    assert shared_metadata.image_cache is None
 
 
 @pytest.mark.required

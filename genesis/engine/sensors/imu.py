@@ -158,6 +158,7 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
 
     # ================================ internal methods ================================
 
+    @gs.assert_unbuilt
     def build(self):
         """
         Initialize all shared metadata needed to update all IMU sensors.

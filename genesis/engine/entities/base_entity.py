@@ -8,6 +8,7 @@ import genesis as gs
 from genesis.engine.materials.base import Material
 from genesis.options.morphs import Morph
 from genesis.repr_base import RBC
+from genesis.utils.misc import BuildableMixin
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
@@ -25,7 +26,7 @@ class EntityDescription:
     material: Material
 
 
-class Entity(RBC):
+class Entity(BuildableMixin, RBC):
     """
     Base class for all types of entities.
     """
@@ -116,9 +117,8 @@ class Entity(RBC):
     def material(self):
         return self._material
 
-    @property
-    def is_built(self):
-        return self._solver._scene._is_built
+    def _destroy(self) -> None:
+        self._is_built = False
 
     def _repr_brief(self):
         return f"{self.__repr_name__()}, idx: {self.idx}, morph: {self._repr_morph()}, material: {self.material}"
