@@ -791,9 +791,13 @@ def _postprocess_collision_geoms_impl(
                         first_g_info["type"] not in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN)
                         and all(first_g_info.get(name) == g_info.get(name) for name in ("contype", "conaffinity"))
                         and all(
-                            np.allclose(first_g_info.get(name, np.nan), g_info.get(name, np.nan), equal_nan=True)
+                            np.allclose(
+                                *(np.nan if info.get(name) is None else info[name] for info in (first_g_info, g_info)),
+                                equal_nan=True,
+                            )
                             # A fused mesh carries one value of each quantity a geom takes from its asset or a
-                            # selection block (see 'gs.options.Geom'), so geoms differing in any stay separate.
+                            # selection block (see 'gs.options.Geom'), so geoms differing in any stay separate. A
+                            # quantity left unset, or given as None, compares as missing.
                             for name in (*gs.options.Geom.model_fields, "density", "sol_params")
                         )
                     ):
