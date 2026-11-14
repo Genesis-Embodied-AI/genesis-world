@@ -21,24 +21,22 @@ class _FrozenOptions(Options):
 class Geom(_FrozenOptions):
     """Quantities of the collision geoms of a rigid entity, set on a selection of its links or geoms.
 
-    The fields given explicitly override those of the entity material for the selected geoms (see ``Rigid.select``).
-    The fields left unset keep theirs.
+    A field given explicitly overrides, for the selected geoms, the material and the coarser selections (see
+    ``Rigid.select``). Given as None, it takes the value the asset states, or the default of the solver where the asset
+    states none. A field left unset keeps the value of the coarser levels. Every field is unset by default.
 
     Parameters
     ----------
     rho : float | None, optional
         The density (kg/m^3). It estimates the mass and the inertia of a link the asset states none for, or of every
         moving link under the 'recompute_inertia' option of the morph. An aligned body is then simulated unaligned.
-        The IPC coupler rejects it. If None, the geoms keep the density of the material. Default is None.
+        The IPC coupler rejects it.
     friction : float | None, optional
-        The sliding friction coefficient of the contacts of the geoms (see ``gs.materials.Rigid.friction``). If None,
-        the geoms keep that of the material. Default is None.
+        The sliding friction coefficient of the contacts of the geoms (see ``gs.materials.Rigid.friction``).
     friction_torsional : float | None, optional
-        The torsional friction coefficient (see ``gs.materials.Rigid.friction_torsional``). If None, the geoms keep
-        that of the material. Default is None.
+        The torsional friction coefficient (see ``gs.materials.Rigid.friction_torsional``).
     friction_rolling : float | None, optional
-        The rolling friction coefficient (see ``gs.materials.Rigid.friction_rolling``). If None, the geoms keep that of
-        the material. Default is None.
+        The rolling friction coefficient (see ``gs.materials.Rigid.friction_rolling``).
     """
 
     rho: ValidFloat | None = None

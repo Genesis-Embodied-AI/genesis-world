@@ -109,7 +109,7 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
     _block_types: ClassVar[tuple[type[Geom | Vertex], ...]] = ()
 
     # Checked by instance alone, since validation would run the validators of 'Morph' on the sequence of morphs
-    morph: InstanceOf[Morph] | Annotated[tuple[InstanceOf[Morph], ...], Field(strict=False)] | None = None
+    morph: InstanceOf[Morph] | Annotated[tuple[InstanceOf[Morph], ...], Field(min_length=1, strict=False)] | None = None
     surface: Surface | None = None
     name: str | None = None
     selection_blocks: tuple[SelectionBlock, ...] = ()
@@ -141,9 +141,14 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
             self._check_selection_block(selection_block)
         return self
 
+    # A copy records again, frozen or not
     def __copy__(self) -> Self:
         options = super().__copy__()
-        # A copy records again, frozen or not
+        options._is_frozen = False
+        return options
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
+        options = super().__deepcopy__(memo)
         options._is_frozen = False
         return options
 
