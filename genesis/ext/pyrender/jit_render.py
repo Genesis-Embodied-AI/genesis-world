@@ -1,9 +1,9 @@
 import contextlib
 import os
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
-import numpy as np
 import numba as nb
+import numpy as np
 
 import OpenGL.GL as GL
 import OpenGL.constant as GL_constant
@@ -13,6 +13,9 @@ from .light import DirectionalLight, PointLight, SpotLight
 from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
 from .numba_gl_wrapper import GLWrapper
 from .scene import CORNER_INDICES
+
+if TYPE_CHECKING:
+    from .node import Node
 
 
 _DISABLE_OFFSCREEN_MARKERS = "GS_DISABLE_OFFSCREEN_MARKERS" in os.environ
@@ -39,6 +42,7 @@ def load_const(const_name):
 GL_TRUE = load_const("GL_TRUE")
 GL_TEXTURE0 = load_const("GL_TEXTURE0")
 GL_TEXTURE_2D = load_const("GL_TEXTURE_2D")
+GL_TEXTURE_2D_ARRAY = load_const("GL_TEXTURE_2D_ARRAY")
 GL_TEXTURE_CUBE_MAP = load_const("GL_TEXTURE_CUBE_MAP")
 GL_BLEND = load_const("GL_BLEND")
 GL_SRC_ALPHA = load_const("GL_SRC_ALPHA")
@@ -109,6 +113,15 @@ def set_uniform_1f(pid, name, value, gl):
         gl.glUniform1f(loc, value)
     else:
         print("uniform not found:", name)
+
+
+@nb.jit(nopython=True, cache=True)
+def set_texture_layers(pid, tex_flags, layers, gl):
+    """Set the layers that the base color (0) and the emissive (1) texture arrays of a material are sampled at."""
+    if tex_flags & (8 << 8):
+        set_uniform_1f(pid, "material.base_color_layer", layers[0], gl)
+    if tex_flags & (4 << 8):
+        set_uniform_1f(pid, "material.emissive_layer", layers[1], gl)
 
 
 @nb.jit(nopython=True, cache=True)
@@ -522,7 +535,15 @@ class JITRenderer:
         self.vao_id = np.zeros(n, np.int32)
         self.program_id = {}
         self.pose = np.zeros((n, 4, 4), np.float32)
-        self.textures = np.zeros((n, 8), np.int32)  # 0: flag, 1-7: texture id
+        # 0: flags, bit i set for texture slot i, and bit i + 8 for one that is a texture array, 1-7: texture id
+        self.textures = np.zeros((n, 8), np.int32)
+        # Row i of texture_layers holds, for each rendered environment, the layer of the base color (0) and emissive (1)
+        # texture arrays that a layered primitive samples (see 'Primitive.texture_layers').
+        # texture_layers_idx maps each primitive to its row, or -1 for a primitive sampling no texture array.
+        is_layered = np.array([primitive.texture_layers is not None for primitive in primitive_list], np.bool_)
+        self.texture_layers_idx = np.full(n, -1, np.int32)
+        self.texture_layers_idx[is_layered] = np.arange(np.count_nonzero(is_layered))
+        self.texture_layers = np.zeros((np.count_nonzero(is_layered), max(len(self.envs_offset), 1), 2), np.float32)
         self.pbr_mat = np.zeros((n, 9), np.float32)  # base_color <- 4, metallic <- 1, roughness <- 1, emissive <- 3
         self.spec_mat = np.zeros((n, 11), np.float32)  # diffuse <- 4, specular <- 3, glossiness <- 1, emissive <- 3
         self.render_flags = np.zeros(
@@ -616,6 +637,13 @@ class JITRenderer:
                 self.textures[i, 6] = material.diffuseTexture._texid
             if tf & 64:
                 self.textures[i, 7] = material.specularGlossinessTexture._texid
+            if tf & 4 and material.emissiveTexture.tex_type == GL_TEXTURE_2D_ARRAY:
+                self.textures[i, 0] |= 4 << 8
+            if tf & 8 and material.baseColorTexture.tex_type == GL_TEXTURE_2D_ARRAY:
+                self.textures[i, 0] |= 8 << 8
+            i_layers = self.texture_layers_idx[i]
+            if i_layers >= 0:
+                self.texture_layers[i_layers, : len(primitive.texture_layers)] = primitive.texture_layers
 
             if isinstance(material, MetallicRoughnessMaterial):
                 self.pbr_mat[i, :4] = material.baseColorFactor
@@ -736,6 +764,8 @@ class JITRenderer:
                 nb.float32,
                 nb.boolean[:],
                 nb.int32,
+                nb.float32[:, :, :],
+                nb.int32[:],
                 self.gl.wrapper_type,
             ),
             cache=True,
@@ -771,6 +801,8 @@ class JITRenderer:
             env_offset_scale,
             is_env_instanced,
             env_offset_buffer,
+            texture_layers,
+            texture_layers_idx,
             gl,
         ):
             is_rgba = not (flags & RenderFlags_DEPTH_ONLY or flags & RenderFlags_SEG)
@@ -837,10 +869,15 @@ class JITRenderer:
                         "diffuse_texture",
                         "specular_glossiness_texture",
                     ]
+                    # An unset sampler reads unit 0. Keep texture arrays off unit 0, since a sampler2D and a
+                    # sampler2DArray reading one unit make the draw invalid.
+                    if tf >> 8 and active_texture == 0:
+                        active_texture = 1
                     for i in range(7):
                         if tf & (1 << i):
                             gl.glActiveTexture(GL_TEXTURE0 + active_texture)
-                            gl.glBindTexture(GL_TEXTURE_2D, textures[id, i + 1])
+                            is_array = tf & (1 << (i + 8))
+                            gl.glBindTexture(GL_TEXTURE_2D_ARRAY if is_array else GL_TEXTURE_2D, textures[id, i + 1])
                             set_uniform_1i(pid, "material." + texture_list[i], active_texture, gl)
                             active_texture += 1
 
@@ -890,13 +927,23 @@ class JITRenderer:
                         continue
                     set_uniform_3fv(pid, "color", color_list[id], gl)
 
+                # A texture array is sampled at the layer of the environment drawn, which a pass drawing every
+                # environment sets per instance below
+                i_layers = texture_layers_idx[id]
+                is_layer_set = i_layers >= 0 and is_rgba and not flags & RenderFlags_FLAT
+                if is_layer_set and env_idx >= 0:
+                    set_texture_layers(pid, textures[id, 0], texture_layers[i_layers, env_idx], gl)
+
                 if render_flags[id, 7] or env_idx == -1:
-                    if render_flags[id, 8] and env_idx == -1:
+                    if (render_flags[id, 8] or is_layer_set) and env_idx == -1:
                         # Combined draw-all of a heterogeneous variant: draw only the environments it is active in,
-                        # otherwise the variant would be drawn in every environment's instance.
+                        # otherwise the variant would be drawn in every environment's instance. A primitive sampling a
+                        # texture array is drawn one environment at a time as well, each at its own layer.
                         for k in range(n_instances[id]):
                             if not env_active[id, k]:
                                 continue
+                            if is_layer_set:
+                                set_texture_layers(pid, textures[id, 0], texture_layers[i_layers, k], gl)
                             if IS_OPENGL_42_AVAILABLE:
                                 if n_indices[id] > 0:
                                     gl.glDrawElementsInstancedBaseInstance(
@@ -1381,6 +1428,8 @@ class JITRenderer:
                 0.0 if is_env_pass(flags) else 1.0,
                 self.is_env_instanced,
                 self.env_offset_buffer if self.env_offset_buffer is not None else 0,
+                self.texture_layers,
+                self.texture_layers_idx,
                 self.gl.wrapper_instance,
             )
         if flags & RenderFlags.SKIP_MARKERS:
@@ -1451,6 +1500,14 @@ class JITRenderer:
             if self._update_normal_flat is None:
                 self.gen_func_ptr()
             return self._update_normal_flat(vertices.reshape((-1, 3, 3)))
+
+    def update_texture_layers(self, node: "Node", layers: np.ndarray) -> None:
+        """Set the texture array layers each rendered environment of a node samples (see 'Primitive.texture_layers')."""
+        primitive = node.mesh.primitives[0]
+        primitive.texture_layers[:] = layers
+        i = self._primitive_index.get(primitive)
+        if i is not None and self.texture_layers_idx[i] >= 0:
+            self.texture_layers[self.texture_layers_idx[i], : len(layers)] = layers
 
     def update_buffer(self, node, buffer_name, data):
         """Queue a single buffer update to be flushed during the next render pass.

@@ -1,6 +1,6 @@
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import torch
@@ -11,6 +11,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.urdf as uu
 from genesis.ext.urdfpy.urdf import URDF
+from genesis.options.surfaces import Surface
 from genesis.utils.hybrid import (
     check_graph,
     compute_graph_attribute,
@@ -23,6 +24,9 @@ from genesis.utils.hybrid import (
 from genesis.utils.mesh import load_mesh
 
 from .base_entity import Entity
+
+if TYPE_CHECKING:
+    from genesis.engine.scene import Scene
 
 
 class MPMHybridPart(NamedTuple):
@@ -53,18 +57,23 @@ class HybridEntity(Entity):
         The index of the entity within the scene.
     scene : genesis.Scene
         The simulation scene where the entity is added.
-    material : genesis.materials.Hybrid
-        The hybrid material that includes both rigid and soft sub-materials,
-        and defines coupling behavior.
-    morph : genesis.morphs.Morph
-        The shape/morphology of the entity. Must be either a `URDF` or `Mesh`.
+    options : gs.entities.Hybrid
+        The entity options the entity is constructed from, whose morph, a URDF or a Mesh, gives its shape.
     surface : genesis.surfaces.Surface
         The surface properties applied to the soft part of the entity.
     """
 
-    def __init__(self, idx, scene, material, morph, surface, name: str | None = None):
-        super().__init__(idx, scene, morph, None, material, surface, name=name)
+    def __init__(
+        self,
+        idx: int,
+        scene: "Scene",
+        surface: Surface,
+        options: "gs.entities.Hybrid",
+    ) -> None:
+        super().__init__(idx, scene, None, surface, options)
 
+        morph = options.morph
+        material = options.material
         material_rigid = material.material_rigid
         material_soft = material.material_soft
 

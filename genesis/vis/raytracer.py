@@ -212,6 +212,8 @@ class Raytracer:
 
     def build(self, scene):
         # Note that surfaces and entities added after building may not be included in LuisaRender
+        if scene.dynamic_textures:
+            gs.raise_exception("The raytracer does not draw dynamic textures. Render them with the rasterizer.")
         self.scene = scene
         self.sim = scene.sim
         self.visualizer = scene.visualizer
@@ -346,6 +348,8 @@ class Raytracer:
     def get_texture(self, texture):
         if texture is None:
             return None
+        if isinstance(texture, (gs.textures.ColorTexture, gs.textures.ImageTexture)) and texture.is_batched:
+            gs.raise_exception("The raytracer does not draw batched textures. Render them with the rasterizer.")
 
         if isinstance(texture, gs.textures.ColorTexture):
             return LuisaRenderPy.ColorTexture(color=texture.color)

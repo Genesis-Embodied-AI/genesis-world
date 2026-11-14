@@ -7,7 +7,6 @@ import torch
 import genesis as gs
 from genesis.engine.solvers.base_solver import BackwardErrorCode
 from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
-from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.data import ArrayItem, DataItem, DataKind, check_data, iter_data
@@ -37,6 +36,7 @@ if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity, EntityDescription
     from genesis.engine.scene import Scene
     from genesis.options.scene import SceneOptions
+    from genesis.options.surfaces import Surface
 
 
 def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SolverCheckpoint]]) -> None:
@@ -122,6 +122,11 @@ class Simulator(RBC):
                 self.fem_solver,
             ]
         )
+        # The solver simulating the entities of each class of entity options, a subclass going where its base goes
+        self._solvers_by_options_cls: dict[type[gs.entities.BaseEntity], "Solver"] = {
+            solver.entity_options_cls: solver for solver in self._solvers
+        }
+        assert len(self._solvers_by_options_cls) == len(self._solvers)
 
         self._active_solvers: list["Solver"] = gs.List()
         # What runs in the scene in its own right: the active solvers, then the coupler when one is active
@@ -150,34 +155,26 @@ class Simulator(RBC):
 
     def _add_entity(
         self,
-        morph: Morph | None = None,
-        material=None,
-        surface=None,
-        visualize_contact=False,
-        name: str | None = None,
+        surface: "Surface | None" = None,
+        options: "gs.entities.BaseEntity | None" = None,
         desc: "EntityDescription | None" = None,
-    ):
+    ) -> "Entity":
         if desc is not None:
-            material = desc.material
-        if visualize_contact and not isinstance(material, gs.materials.Rigid):
-            gs.raise_exception("'visualize_contact' only applies to rigid entities.")
-        if isinstance(material, gs.materials.Hybrid):
-            # Note that adding to solver is handled in the hybrid entity
-            entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, name=name)
+            options = desc.options
+        if isinstance(options, gs.entities.Hybrid):
+            # A hybrid entity adds its parts to the scene itself, as entities of their own
+            entity = HybridEntity(self.n_entities, self.scene, surface, options)
         else:
-            # Several solvers may declare a class the material belongs to, since 'Rigid' derives from 'Kinematic'. The
-            # one declaring the most derived class simulates it (see 'Solver.material_cls').
-            solver = None
-            for candidate in self._solvers:
-                if candidate.material_cls is None or not isinstance(material, candidate.material_cls):
-                    continue
-                if solver is None or issubclass(candidate.material_cls, solver.material_cls):
-                    solver = candidate
-            if solver is None:
-                gs.raise_exception(f"No solver simulates entities of material {type(material).__name__}.")
-            entity = solver.add_entity(
-                self.n_entities, material, morph, surface, visualize_contact, name=name, desc=desc
+            solver = next(
+                (
+                    self._solvers_by_options_cls[options_cls]
+                    for options_cls in type(options).__mro__
+                    if options_cls in self._solvers_by_options_cls
+                ),
+                None,
             )
+            assert solver is not None
+            entity = solver.add_entity(self.n_entities, surface, options, desc)
         self._entities.append(entity)
         if entity.desc is not None:
             self.scene._desc.entities.append(entity.desc)
@@ -186,6 +183,11 @@ class Simulator(RBC):
     def _add_force_field(self, force_field):
         for solver in self._solvers:
             solver._add_force_field(force_field)
+
+    def post_build(self) -> None:
+        """Apply what the entity options set, through the public setters of the solvers, once the scene is built."""
+        for solver in self._active_solvers:
+            solver.post_build()
 
     def build(self):
         self.n_envs = self.scene.n_envs

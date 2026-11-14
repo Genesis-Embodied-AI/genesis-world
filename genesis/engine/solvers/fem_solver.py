@@ -1,6 +1,6 @@
 from collections.abc import Iterator, Sequence
 from enum import IntEnum, auto
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 import numpy as np
 import torch
@@ -38,6 +38,8 @@ from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.grad.bridge import custom_backward, no_grad
 from genesis.options.solvers import FEMOptions
+from genesis.options.surfaces import Surface
+from genesis.typing import IndexType
 from genesis.utils.data import (
     ENVS,
     Config,
@@ -75,6 +77,7 @@ from .base_solver import (
 )
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -563,10 +566,11 @@ class FEMData(Data):
 
 
 class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
+    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]] = gs.entities.FEM
+
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
 
-    material_cls = FEM.Base
     is_differentiable = True
 
     # ------------------------------------------------------------------------------------
@@ -802,6 +806,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     continue
                 array.from_numpy(values.astype(gs.np_float if array.dtype == gs.qd_float else gs.np_int, copy=False))
 
+            # The vertices that the entity options fix take slots on top of 'max_vertex_constraints'
+            self._max_vertex_constraints = self._options.max_vertex_constraints + sum(
+                entity._fixed_verts_idx_local.size for entity in self._entities
+            )
             # Laid out environment-first like the arrays of the solve, whose blocks read the vertices of an environment
             self.vertex_constraints = FEMVertexConstraints(
                 sizes=dict(vertices=self.n_vertices, constraint_slots=self._max_vertex_constraints, envs=self._B),
@@ -810,6 +818,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             kernel_clear_vertex_constraints(self.vertex_constraints)
 
         self._build_gravity(self.fem_info.gravity)
+
+    def post_build(self) -> None:
+        """Hold the vertices that the entity options fix at their initial positions, as vertex constraints."""
+        for entity in self._entities:
+            if entity._fixed_verts_idx_local.size > 0:
+                entity.set_vertex_constraints(entity._fixed_verts_idx_local)
 
     def reset_grad(self) -> None:
         if self._requires_grad:
@@ -823,13 +837,15 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         return self.n_elements > 0
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self,
+        idx: int,
+        surface: Surface,
+        options: "gs.entities.FEM",
+        desc: "EntityDescription | None" = None,
     ) -> "FEMEntity":
         entity = FEMEntity(
             scene=self._scene,
             solver=self,
-            material=material,
-            morph=morph,
             surface=surface,
             idx=idx,
             v_start=self.n_vertices,
@@ -837,7 +853,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             s_start=self.n_surfaces,
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
-            name=name,
+            options=options,
         )
         self._entities.append(entity)
         return entity
@@ -1180,8 +1196,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     @gs.assert_built
     @mutates(StateChange.MODEL)
     def set_vertex_constraints(
-        self, verts_idx=None, target_poss=None, link_idx=-1, is_soft_constraint=False, stiffness=0.0, envs_idx=None
-    ):
+        self,
+        verts_idx: IndexType | None = None,
+        target_poss: np.typing.ArrayLike | torch.Tensor | None = None,
+        link_idx: int = -1,
+        is_soft_constraint: bool = False,
+        stiffness: float = 0.0,
+        envs_idx: IndexType | None = None,
+    ) -> None:
         """
         Constrain some vertices to target positions, or to follow a rigid link.
 
@@ -1242,7 +1264,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if (envs_n_constraints + is_new_vert.sum(dim=-1) > self._max_vertex_constraints).any():
             gs.raise_exception(
                 "No room left for these vertex constraints. Please increase the value of "
-                f"{type(self).__name__}'s option 'max_vertex_constraints' ({self._max_vertex_constraints})."
+                f"{type(self).__name__}'s option 'max_vertex_constraints' ({self._options.max_vertex_constraints})."
             )
 
         kernel_set_vertex_constraints(

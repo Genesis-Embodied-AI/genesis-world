@@ -1,5 +1,6 @@
 from functools import wraps
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -11,10 +12,15 @@ import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.entities.rigid_entity import RigidLink
+from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
 from genesis.utils.misc import broadcast_tensor, tensor_to_array, unique_rows
 
 from .base_entity import Entity
+
+if TYPE_CHECKING:
+    from genesis.engine.scene import Scene
+    from genesis.engine.solvers.fem_solver import FEMSolver
 
 
 class FEMVisGeom(RBC):
@@ -127,10 +133,8 @@ class FEMEntity(Entity):
         The simulation scene that this entity belongs to.
     solver : Solver
         The physics solver instance used for simulation.
-    material : Material
-        The material properties defining elasticity, density, etc.
-    morph : Morph
-        The morph specification that defines the entity's shape.
+    options : gs.entities.FEM
+        The entity options the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         The surface mesh associated with the entity (for rendering or collision).
     idx : int
@@ -149,20 +153,18 @@ class FEMEntity(Entity):
 
     def __init__(
         self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        idx,
-        v_start=0,
-        el_start=0,
-        s_start=0,
-        vvert_start=0,
-        vface_start=0,
-        name: str | None = None,
-    ):
-        super().__init__(idx, scene, morph, solver, material, surface, name=name)
+        scene: "Scene",
+        solver: "FEMSolver",
+        surface: Surface,
+        idx: int,
+        options: "gs.entities.FEM",
+        v_start: int = 0,
+        el_start: int = 0,
+        s_start: int = 0,
+        vvert_start: int = 0,
+        vface_start: int = 0,
+    ) -> None:
+        super().__init__(idx, scene, solver, surface, options)
 
         self._v_start = v_start  # offset for vertex index of elements
         self._el_start = el_start  # offset for element index
@@ -353,6 +355,25 @@ class FEMEntity(Entity):
         if not init_positions.shape[0] > 0:
             gs.raise_exception("Entity has zero vertices.")
 
+        # The blocks select vertices as the morph states them, relative to its position before its rotation. The later
+        # of two blocks setting one vertex applies.
+        verts_pos_morph = verts - self._morph.pos
+        verts_is_fixed = np.zeros(len(verts), dtype=np.bool_)
+        for selection_block in self._options.selection_blocks:
+            # Each selector resolves among the vertices the selectors before it hold, an ordinal counting those alone
+            verts_idx = np.arange(len(verts))
+            for vertex_index in selection_block.selectors:
+                if verts_idx.size == 0:
+                    break
+                verts_idx = verts_idx[vertex_index._resolve(verts_pos_morph[verts_idx])]
+            if verts_idx.size == 0:
+                gs.raise_exception(
+                    f"The selection {selection_block.selection_repr} holds no vertex of entity '{self.name}'."
+                )
+            if "is_fixed" in selection_block.block.model_fields_set:
+                verts_is_fixed[verts_idx] = selection_block.block.is_fixed
+        self._fixed_verts_idx_local = np.flatnonzero(verts_is_fixed).astype(gs.np_int, copy=False)
+
         self.init_positions = torch.tensor(init_positions, dtype=gs.tc_float, device=gs.device)
         self.init_positions_COM_offset = torch.tensor(
             init_positions - (verts_COM + offset_shift), dtype=gs.tc_float, device=gs.device
@@ -428,7 +449,7 @@ class FEMEntity(Entity):
         else:
             elems_np = self.elems.astype(gs.np_int, copy=False)
             self._solver.add_elements(
-                material=self._material,
+                material=self.material,
                 v_start=self._v_start,
                 el_start=self._el_start,
                 s_start=self._s_start,

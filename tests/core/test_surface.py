@@ -62,10 +62,10 @@ def test_surface_shortcut_resolution():
 @pytest.mark.required
 def test_packed_rgba_resolves_batched_fallback_per_environment():
     # Base-over-emissive selection and its black-base fallback are exercised end to end by the rasterizer emissive
-    # test. Per-environment (batched) textures, however, are consumed only by the batch renderer, so their behaviour is
-    # asserted here on the packed RGBA directly. A black base entry defers to its emissive while a nonblack entry in
-    # the same batch keeps its base; blackness is the effective texel x factor, so a green texture masked to black by
-    # a red-only factor still defers. A batch with no fallback keeps a stable identity so the packed-RGBA cache hits.
+    # test, and per-environment (batched) textures are asserted here on the packed RGBA directly. A black base entry
+    # defers to its emissive while a nonblack entry in the same batch keeps its base; blackness is the effective texel x
+    # factor, so a green texture masked to black by a red-only factor still defers. A batch with no fallback keeps a
+    # stable identity so the packed-RGBA cache hits. Batch textures and batched textures resolve alike.
     base = gs.textures.ImageTexture(image_array=np.full((4, 4, 3), (201, 166, 105), dtype=np.uint8))
     emissive = gs.textures.ImageTexture(image_array=np.full((4, 4, 3), (76, 122, 64), dtype=np.uint8))
     masked_black = gs.textures.ImageTexture(
@@ -80,6 +80,26 @@ def test_packed_rgba_resolves_batched_fallback_per_environment():
 
     stable_surface = gs.surfaces.BSDF(diffuse_texture=gs.textures.BatchTexture(textures=[base, base]))
     assert stable_surface.get_rgba(batch=True) is stable_surface.get_rgba(batch=True)
+    base_batch = gs.textures.ImageTexture(
+        image_array=[masked_black.image_array, base.image_array],
+        image_color=(1.0, 0.0, 0.0),
+        is_batched=True,
+    )
+    emissive_batch = gs.textures.ImageTexture(
+        image_array=[emissive.image_array, emissive.image_array],
+        is_batched=True,
+    )
+    rgba = gs.surfaces.BSDF(diffuse_texture=base_batch, emissive_texture=emissive_batch).get_rgba()
+    assert_equal(rgba.image_array[0, ..., :3], emissive.image_array)
+    assert_equal(rgba.image_array[1, ..., :3], (201, 0, 0))
+
+    stable_surface = gs.surfaces.BSDF(
+        diffuse_texture=gs.textures.ImageTexture(
+            image_array=[base.image_array, base.image_array],
+            is_batched=True,
+        )
+    )
+    assert stable_surface.get_rgba() is stable_surface.get_rgba()
 
 
 @pytest.mark.required
