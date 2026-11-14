@@ -512,14 +512,14 @@ class RasterizerCameraSensor(
             dir = light_config.get("dir", (0.0, 0.0, -1.0))
             return DirectionalLight(dir=dir, color=color, intensity=intensity)
 
-    def _update_camera_pose(self):
+    def _update_camera_pose(self) -> None:
         """Update camera pose based on options."""
         pos = torch.tensor(self._options.pos, dtype=gs.tc_float, device=gs.device)
         lookat = torch.tensor(self._options.lookat, dtype=gs.tc_float, device=gs.device)
         up = torch.tensor(self._options.up, dtype=gs.tc_float, device=gs.device)
 
-        # If attached to a link and the link is built, pos is relative to link frame
-        if self._link is not None and self._link.is_built:
+        # If attached to a link, pos is relative to link frame
+        if self._link is not None:
             # Convert pos from link-relative to world coordinates
             link_pos = self._link.get_pos(relative=False)
             link_quat = self._link.get_quat(relative=False)
@@ -527,10 +527,6 @@ class RasterizerCameraSensor(
             # Apply pos directly as offset from link
             pos_world = transform_by_quat(pos, link_quat) + link_pos
             pos = pos_world
-        elif self._link is not None:
-            # Link exists but not built yet - use configured pose as-is (treat as world coordinates for now) This will
-            # be corrected when move_to_attach is called
-            pass
 
         transform = pos_lookat_up_to_T(pos, lookat, up)
         self._camera_wrapper.transform = tensor_to_array(transform)
@@ -580,7 +576,7 @@ class RaytracerCameraSensor(
         self._options: RaytracerCameraOptions
         self._camera_obj = None
 
-    def build(self):
+    def build(self) -> None:
         """Register a raytracer camera that reuses the visualizer pipeline."""
         super().build()
 
@@ -612,16 +608,15 @@ class RaytracerCameraSensor(
         # Add lights from options as mesh lights to the scene
         scene = self._manager._sim.scene
         for light_config in self._options.lights:
-            if not scene.is_built:
-                self._add_light_as_mesh_light(scene, light_config)
+            self._add_light_as_mesh_light(scene, light_config)
 
         # Compute world pose for the camera
         pos = torch.tensor(self._options.pos, dtype=gs.tc_float, device=gs.device)
         lookat = torch.tensor(self._options.lookat, dtype=gs.tc_float, device=gs.device)
         up = torch.tensor(self._options.up, dtype=gs.tc_float, device=gs.device)
 
-        # If attached to a link and the link is built, transform pos to world coordinates
-        if self._link is not None and self._link.is_built:
+        # If attached to a link, transform pos to world coordinates
+        if self._link is not None:
             link_pos = self._link.get_pos(relative=False).squeeze(0)
             link_quat = self._link.get_quat(relative=False).squeeze(0)
 
@@ -631,10 +626,6 @@ class RaytracerCameraSensor(
             # Transform lookat and up (no rotation offset since rotation is defined by lookat/up)
             lookat = transform_by_trans_quat(lookat, link_pos, link_quat)
             up = transform_by_quat(up, link_quat)
-        elif self._link is not None:
-            # Link exists but not built yet - use configured pose as-is (treat as world coordinates for now) This will
-            # be corrected when move_to_attach is called
-            pass
 
         self._camera_obj = visualizer.add_camera(
             res=self._options.res,
