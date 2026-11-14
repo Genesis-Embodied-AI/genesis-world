@@ -1536,7 +1536,7 @@ class KinematicEntityDescription(EntityDescription):
                         g_info[name] = value
                     elif name == "rho":
                         # The density of the asset, or else a None standing for the default density of the solver,
-                        # which the inertia estimate resolves per link (see '_resolve_inertial')
+                        # which depends on the link (see '_resolve_inertial')
                         g_info.pop("density", None)
                         g_info.pop("rho", None)
                         if geoms_asset_values[i_g]["density"] is not None:
@@ -1663,11 +1663,13 @@ class KinematicEntityDescription(EntityDescription):
             # The estimate comes from the collision geometry of the link when it has any, and from its visual
             # geometry otherwise. A link with neither contributes nothing, so only the asset's values remain. The
             # density set on a geom weighs in the estimate alone (see '_resolve_geoms_values').
+            # A geom whose density was set to None takes the default density, written into it so that its description
+            # keeps the value a later recomputation of the inertia reads
+            for g_info in cg_infos:
+                if "rho" in g_info and g_info["rho"] is None:
+                    g_info["rho"] = default_rho
             dynamics_g_infos = [
-                {**g_info, "density": default_rho if g_info["rho"] is None else g_info["rho"]}
-                if "rho" in g_info
-                else g_info
-                for g_info in (cg_infos or vg_infos)
+                {**g_info, "density": g_info["rho"]} if "rho" in g_info else g_info for g_info in (cg_infos or vg_infos)
             ]
             dynamics_hint = compose_inertial_from_g_infos(dynamics_g_infos, rho)
         return LinkInertialInfo(props, is_mass_explicit, dynamics_hint)
