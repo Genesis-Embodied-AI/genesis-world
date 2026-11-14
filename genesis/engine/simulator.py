@@ -201,9 +201,9 @@ class Simulator(RBC):
         ]
         # A solver given an interval asks for a rate of its own, whatever that interval works out to. A solver left
         # unset takes the rate the shorthand of SimOptions decides, and has nothing to reconcile.
-        asking_solvers = [solver for solver in integrating_solvers if "dt" in solver._options.model_fields_set]
+        asking_solvers = [solver for solver in integrating_solvers if "dt" in solver.options.model_fields_set]
         for solver in asking_solvers:
-            interval = solver._options.dt
+            interval = solver.options.dt
             n_substeps = solver.substeps
             if abs(n_substeps * interval - self._dt) > gs.EPS * self._dt:
                 gs.raise_exception(
@@ -220,7 +220,7 @@ class Simulator(RBC):
         if len(rates) > 1:
             gs.raise_exception(
                 "Solvers integrating at different rates are not supported yet, got "
-                + ", ".join(f"{type(solver).__name__} at dt={solver._options.dt}" for solver in asking_solvers)
+                + ", ".join(f"{type(solver).__name__} at dt={solver.options.dt}" for solver in asking_solvers)
                 + "."
             )
         substeps = next(iter(rates), self._substeps)

@@ -416,10 +416,9 @@ class Camera(RBC):
 
         Note
         ----
-        The segmentation mask can be colorized, and if not colorized, it will store an object index in each pixel based
-        on the segmentation level specified in `VisOptions.segmentation_level`.
-        For example, if `segmentation_level='link'`, the segmentation mask will store `link_idx`, which can then be
-        used to retrieve the actual link objects using `scene.rigid_solver.links[link_idx]`.
+        The segmentation mask can be colorized, and if not colorized, it will store a segmentation index in each pixel
+        based on the segmentation level specified in `VisOptions.segmentation_level`. `scene.segmentation_idx_dict` maps
+        each index to its entity, (entity, link) or (entity, link, geom).
 
         Note
         ----

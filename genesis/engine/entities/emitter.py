@@ -4,7 +4,7 @@ import torch
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.particle as pu
-from genesis.engine.entities.particle_entity import check_particles_inside_boundary
+from genesis.engine.entities.particle_entity import ParticleEntity, check_particles_inside_boundary
 from genesis.repr_base import RBC
 
 
@@ -17,36 +17,24 @@ class Emitter(RBC):
 
     Parameters
     ----------
+    entity : ParticleEntity
+        The entity holding the particles the emitter releases.
     max_particles : int
         The maximum number of particles that this emitter can handle.
     """
 
-    def __init__(self, max_particles):
+    def __init__(self, entity: "ParticleEntity", max_particles: int) -> None:
         self._uid = gs.UID()
-        self._entity = None
-
+        self._entity = entity
         self._max_particles = max_particles
+        self._next_particle = 0
 
         self._acc_droplet_len = 0.0  # accumulated droplet length to be emitted
 
         gs.logger.info(
-            f"Creating ~<{self.__repr_name__()}>~. id: ~~~<{self._uid}>~~~, max_particles: ~<{max_particles}>~."
+            f"Creating ~<{self.__repr_name__()}>~. id: ~~~<{self._uid}>~~~, max_particles: ~<{max_particles}>~, "
+            f"entity: ~<{entity._repr_briefer()}>~."
         )
-
-    def set_entity(self, entity):
-        """
-        Assign an entity to the emitter and initialize relevant simulation and solver references.
-
-        Parameters
-        ----------
-        entity : Entity
-            The entity to associate with the emitter. This entity should contain the solver, simulation context, and particle sampler.
-        """
-        self._entity = entity
-        self._sim = entity.sim
-        self._solver = entity.solver
-        self._next_particle = 0
-        gs.logger.info(f"~<{self._repr_briefer()}>~ created using ~<{entity._repr_briefer()}>~.")
 
     def reset(self):
         """
@@ -111,7 +99,7 @@ class Emitter(RBC):
 
         if droplet_length is None:
             # Use the speed to determine the length of the droplet in the emitting direction
-            droplet_length = speed * self._solver.substep_dt * self._sim.substeps + self._acc_droplet_len
+            droplet_length = speed * self.solver.dt + self._acc_droplet_len
             if droplet_length < p_size:  # too short, so we should not emit
                 self._acc_droplet_len = droplet_length
                 droplet_length = 0.0
@@ -153,7 +141,7 @@ class Emitter(RBC):
                 gu.z_up_to_R(direction) @ gu.axis_angle_to_R(np.array([0.0, 0.0, 1.0], dtype=gs.np_float), theta),
             )
 
-            check_particles_inside_boundary(positions, self._solver.boundary_lower, self._solver.boundary_upper)
+            check_particles_inside_boundary(positions, self.solver.boundary_lower, self.solver.boundary_upper)
 
             n_particles = len(positions)
 
@@ -219,7 +207,7 @@ class Emitter(RBC):
         )
         positions = pos + positions_
 
-        check_particles_inside_boundary(positions, self._solver.boundary_lower, self._solver.boundary_upper)
+        check_particles_inside_boundary(positions, self.solver.boundary_lower, self.solver.boundary_upper)
 
         dists = np.linalg.norm(positions_, axis=1)
         positions[dists < gs.EPS] = gs.EPS
@@ -266,7 +254,7 @@ class Emitter(RBC):
     @property
     def solver(self):
         """The solver used by the emitter's associated entity."""
-        return self._solver
+        return self._entity.solver
 
     @property
     def next_particle(self):

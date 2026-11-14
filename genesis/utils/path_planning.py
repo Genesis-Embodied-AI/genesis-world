@@ -102,7 +102,7 @@ class PathPlanner(ABC):
         Planning is refused for the joints whose coordinates are not their degrees of freedom, which are the free and
         the ball joint, so the limits of the degrees of freedom are the limits of the coordinates sampled here.
         """
-        is_batched = self._solver._options.batch_dofs_info
+        is_batched = self._solver.options.batch_dofs_info
         lower, upper = self._entity.get_dofs_limit(envs_idx=envs_idx if is_batched else None)
         is_goal_out_of_limit = ((qpos_goal < lower) | (qpos_goal > upper)).any(dim=-1)
         # One row per environment, laid out rather than broadcast: the limits come as a strided view of the pair they

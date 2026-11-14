@@ -710,9 +710,6 @@ def test_derived_substeps(show_viewer, tol):
         rigid_options=gs.options.RigidOptions(
             dt=0.01 / SUBSTEPS,
         ),
-        pbd_options=gs.options.PBDOptions(
-            dt=0.01 / SUBSTEPS,
-        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.5, 0.0, 1.0),
             camera_lookat=(0.0, 0.0, 0.5),
@@ -747,61 +744,49 @@ def test_derived_substeps(show_viewer, tol):
     expected_z = 1.0 + GRAVITY * solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
     assert_allclose(ball.get_pos()[2], expected_z, tol=tol)
 
-    assert_equal(scene.sim.pbd_solver.substeps, SUBSTEPS)
+    # The substep loop advances every active solver once per iteration, so the interval one of them asks for is the
+    # rate they all take, whether they asked for one or not.
+    assert_equal(scene.pbd_solver.substeps, SUBSTEPS)
 
-    # The substeps shorthand decides the rate when no solver asks for one of its own, which is settled as a solver is
-    # made rather than as a scene is built.
+    # The substeps shorthand decides the rate of every solver when none asks for one of its own
     scene_from_substeps = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
-            substeps=4,
+            gravity=(0.0, 0.0, GRAVITY),
+            substeps=SUBSTEPS,
         ),
         show_viewer=False,
     )
-    assert_equal(scene_from_substeps.rigid_solver.substeps, 4)
-    assert_allclose(scene_from_substeps.rigid_solver.substep_dt, 0.0025, tol=gs.EPS)
-
-    # The substep loop advances every active solver once per iteration, so the interval one of them asks for is the
-    # rate they all take, whether they asked for one or not.
-    scene_from_solver_dt = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=0.01,
-        ),
-        pbd_options=gs.options.PBDOptions(
-            dt=0.01 / SUBSTEPS,
-        ),
-        show_viewer=False,
-    )
-    ball_at_derived_rate = scene_from_solver_dt.add_entity(
+    ball_from_substeps = scene_from_substeps.add_entity(
         morph=gs.morphs.Sphere(
             pos=(0.0, 0.0, 1.0),
         ),
     )
-    scene_from_solver_dt.add_entity(
+    scene_from_substeps.add_entity(
         morph=gs.morphs.Box(
             pos=(1.0, 0.0, 1.0),
             size=(0.02, 0.02, 0.02),
         ),
         material=gs.materials.PBD.Particle(),
     )
-    scene_from_solver_dt.build()
-    assert_equal(scene_from_solver_dt.rigid_solver.substeps, SUBSTEPS)
-    assert_allclose(scene_from_solver_dt.rigid_solver.substep_dt, 0.01 / SUBSTEPS, tol=gs.EPS)
+    scene_from_substeps.build()
+    assert_equal(scene_from_substeps.rigid_solver.substeps, SUBSTEPS)
+    assert_allclose(scene_from_substeps.rigid_solver.substep_dt, 0.01 / SUBSTEPS, tol=gs.EPS)
 
     # The constraint time constant is floored against the substep the rigid solver integrates at, so the contacts are
     # as stiff as in a scene whose rigid solver asks for that rate itself.
-    timeconst, *_ = ball_at_derived_rate.geoms[0].get_sol_params()
+    timeconst, *_ = ball_from_substeps.geoms[0].get_sol_params()
     timeconst_ref, *_ = ball.geoms[0].get_sol_params()
-    assert timeconst + gs.EPS >= 2.0 * scene_from_solver_dt.rigid_solver.substep_dt
+    assert timeconst + gs.EPS >= 2.0 * scene_from_substeps.rigid_solver.substep_dt
     assert_allclose(timeconst, timeconst_ref, tol=gs.EPS)
 
-    # The interval reaches what integrates, not only what reports it: a solver settles its buffers as it builds, so a
-    # rate inherited afterwards would leave it stepping the scene interval as many times as the shorter one.
+    # The rate reaches what integrates, not only what reports it: a solver settles its buffers as it builds, so a rate
+    # settled afterwards would leave it stepping the scene interval as many times as the shorter one.
     for _ in range(N_STEPS):
-        scene_from_solver_dt.step()
+        scene_from_substeps.step()
     n_substeps = N_STEPS * SUBSTEPS
-    expected_z = 1.0 + GRAVITY * scene_from_solver_dt.rigid_solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
-    assert_allclose(ball_at_derived_rate.get_pos()[2], expected_z, tol=tol)
+    expected_z = 1.0 + GRAVITY * scene_from_substeps.rigid_solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
+    assert_allclose(ball_from_substeps.get_pos()[2], expected_z, tol=tol)
 
     # A differentiable scene replays the substeps of a step, as many as the rate a solver dt derives: the gradient of
     # the position over one step reaches the velocity it started from through every one of them.

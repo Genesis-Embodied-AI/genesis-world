@@ -132,10 +132,6 @@ class InteractiveScene:
         return self.scene.entities
 
     @property
-    def rigid_solver(self):
-        return self.scene.rigid_solver
-
-    @property
     def n_envs(self) -> int:
         return self.scene.n_envs
 
@@ -146,10 +142,6 @@ class InteractiveScene:
     @property
     def dt(self) -> float:
         return self.scene.sim.dt
-
-    @property
-    def is_built(self) -> bool:
-        return self._scene is not None and self._scene.is_built
 
     @property
     def _lock(self):

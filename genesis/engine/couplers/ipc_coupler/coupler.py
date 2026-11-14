@@ -226,7 +226,7 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
         # identical geometry topology (links, joints, geoms) across environments.
         # Batched info options allow per-env topology which is incompatible.
         if self.rigid_solver.is_active:
-            rigid_options = cast(RigidOptions, self.rigid_solver._options)
+            rigid_options = cast(RigidOptions, self.rigid_solver.options)
             if rigid_options.batch_links_info or rigid_options.batch_dofs_info or rigid_options.batch_joints_info:
                 gs.raise_exception(
                     "IPC coupler does not support batched rigid info (batch_links_info, batch_dofs_info, "
@@ -240,7 +240,7 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
         # never reads, and there is nothing to detect it by, the world being built long before the write.
         gravity_scene = self.sim.options.gravity
         for solver in (self.rigid_solver, self.fem_solver):
-            gravity_solver = solver._options.gravity
+            gravity_solver = solver.options.gravity
             if solver.is_active and not np.allclose(gravity_solver, gravity_scene, atol=gs.EPS):
                 gs.raise_exception(
                     f"{type(solver).__name__} specifies a gravity of {tuple(gravity_solver)}, which the IPC coupler "
@@ -570,7 +570,7 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
 
                 rho = entity.material.rho
                 if rho is None:
-                    if entity.solver._enable_mujoco_compatibility:
+                    if self.rigid_solver.options.enable_mujoco_compatibility:
                         rho = RHO_MUJOCO
                     else:
                         rho = RHO_ROBOT if target_link.desc.is_robot else RHO_OBJECT

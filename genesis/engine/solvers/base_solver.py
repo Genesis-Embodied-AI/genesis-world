@@ -51,6 +51,7 @@ from genesis.utils.misc import (
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
+    from genesis.options import Options
 
 
 # The bits of an errno: those of an int32 without its sign bit, the flags being int32 kernel literals
@@ -861,6 +862,11 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
     @property
     def sim(self):
         return self._sim
+
+    @property
+    def options(self) -> "Options":
+        """The options the solver was created with."""
+        return self._options
 
     @property
     def is_built(self):

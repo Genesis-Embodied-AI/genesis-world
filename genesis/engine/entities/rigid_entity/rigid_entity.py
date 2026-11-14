@@ -2720,6 +2720,30 @@ class RigidEntity(KinematicEntity):
         return self._solver.get_dofs_control_force(dofs_idx, envs_idx)
 
     @gs.assert_built
+    def get_dofs_actuator_force(self, dofs_idx_local=None, envs_idx=None):
+        """
+        Get the effort the last step transmitted to the entity's dofs at the actuator output, after gearbox losses.
+
+        It is the control force of the step minus the armature-inertia load, plus the dissipative frictionloss and
+        passive damping efforts, a torque for revolute dofs and a force for prismatic ones.
+
+        Parameters
+        ----------
+        dofs_idx_local : None | array_like, optional
+            The local indices of the dofs within the entity. If None, all the dofs of the entity are returned.
+            Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+
+        Returns
+        -------
+        actuator_force : torch.Tensor, shape (n_dofs,) or (n_envs, n_dofs)
+            The actuator force of the entity's dofs.
+        """
+        dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
+        return self._solver.get_dofs_actuator_force(dofs_idx, envs_idx)
+
+    @gs.assert_built
     def get_dofs_force(self, dofs_idx_local=None, envs_idx=None):
         """
         Get the smooth force on the entity's dofs over the last step.
@@ -2991,13 +3015,9 @@ class RigidEntity(KinematicEntity):
         The returned dict contains the following keys (a contact pair consists of two geoms: A and B):
 
         - 'geom_a'     : The global geom index of geom A in the contact pair.
-                        (actual geom object can be obtained by scene.rigid_solver.geoms[geom_a])
         - 'geom_b'     : The global geom index of geom B in the contact pair.
-                        (actual geom object can be obtained by scene.rigid_solver.geoms[geom_b])
         - 'link_a'     : The global link index of link A (that contains geom A) in the contact pair.
-                        (actual link object can be obtained by scene.rigid_solver.links[link_a])
         - 'link_b'     : The global link index of link B (that contains geom B) in the contact pair.
-                        (actual link object can be obtained by scene.rigid_solver.links[link_b])
         - 'position'   : The contact position in world frame.
         - 'force_a'    : The contact force applied to geom A.
         - 'force_b'    : The contact force applied to geom B.
