@@ -135,38 +135,41 @@ class GenesisGeomRetriever:
 
         for vgeom in vgeoms:
             geom_surface = vgeom.surface
-            geom_texture = geom_surface.get_rgba()
+            geom_textures = geom_surface.get_rgba(batch=True).textures
 
-            # Madrona shows environment i the entry i modulo the number of entries of a batched texture
             geom_texture_indices = []
-            if isinstance(geom_texture, gs.textures.ImageTexture) and geom_texture.image_array is not None:
-                assert geom_texture.channel == 4
-                images_array = geom_texture.image_array if geom_texture.is_batched else (geom_texture.image_array,)
-                for i_image, image_array in enumerate(images_array):
-                    texture_id = (id(geom_texture.image_array), i_image)
+            for geom_texture in geom_textures:
+                if isinstance(geom_texture, gs.textures.ImageTexture) and geom_texture.image_array is not None:
+                    texture_id = (
+                        ("path", geom_texture.image_path)
+                        if geom_texture.image_path is not None
+                        else ("image_array", id(geom_texture.image_array))
+                    )
                     if texture_id not in texture_indices:
                         texture_idx = num_textures
                         texture_indices[texture_id] = texture_idx
-                        texture_widths.append(image_array.shape[1])
-                        texture_heights.append(image_array.shape[0])
+                        texture_widths.append(geom_texture.image_array.shape[1])
+                        texture_heights.append(geom_texture.image_array.shape[0])
+                        assert geom_texture.channel == 4
                         texture_nchans.append(geom_texture.channel)
                         texture_offsets.append(total_texture_size)
-                        texture_data.append(image_array.flat)
+                        texture_data.append(geom_texture.image_array.flat)
                         num_textures += 1
-                        total_texture_size += image_array.size
+                        total_texture_size += geom_texture.image_array.size
                     else:
                         texture_idx = texture_indices[texture_id]
                     geom_texture_indices.append(texture_idx)
 
             # TODO: support batch rgba
-            if isinstance(geom_texture, gs.textures.ImageTexture):
-                geom_rgba = geom_texture.image_color
-            elif geom_texture.is_batched:
-                if not np.allclose(geom_texture.color, geom_texture.color[0], atol=gs.EPS):
+            geom_rgbas = [
+                geom_texture.image_color if isinstance(geom_texture, gs.textures.ImageTexture) else geom_texture.color
+                for geom_texture in geom_textures
+            ]
+            for i in range(1, len(geom_rgbas)):
+                if not np.allclose(geom_rgbas[0], geom_rgbas[i], atol=gs.EPS):
                     gs.logger.warning("Batch Color is not yet supported. Use the first texture's color instead.")
-                geom_rgba = geom_texture.color[0]
-            else:
-                geom_rgba = geom_texture.color
+                    break
+            geom_rgba = geom_rgbas[0]
 
             mat_id = None
             if len(geom_texture_indices) == 0:

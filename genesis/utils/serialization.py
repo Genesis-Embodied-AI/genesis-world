@@ -301,13 +301,23 @@ def declared_schema(expect: dict) -> dict:
     return layout
 
 
+def _surface_textures(surface: Options) -> Iterable[tuple[str, "gs.textures.ImageTexture"]]:
+    """Yield every image texture a surface holds, under the name of the field it stands in.
+
+    A batch texture holds textures of its own, so a batch created from images yields each of them.
+    """
+    textures = [(name, value) for name, value in dict(surface).items() if isinstance(value, gs.textures.Texture)]
+    while textures:
+        name, texture = textures.pop()
+        if isinstance(texture, gs.textures.ImageTexture):
+            yield name, texture
+        elif isinstance(texture, gs.textures.BatchTexture):
+            textures.extend((name, held) for held in texture.textures if held is not None)
+
+
 def pixel_less_textures(surface: Options) -> tuple[str, ...]:
     """Names each field of a surface holding a texture no file can carry, which is one read from an HDR or EXR file."""
-    return tuple(
-        name
-        for name, texture in dict(surface).items()
-        if isinstance(texture, gs.textures.ImageTexture) and texture.image_array is None
-    )
+    return tuple(name for name, texture in _surface_textures(surface) if texture.image_array is None)
 
 
 def source_digest() -> str:
