@@ -48,6 +48,7 @@ from genesis.options.surfaces import Surface
 from genesis.recorders import RecorderManager
 from genesis.recorders.trajectory import Trajectory, save_checkpoint
 from genesis.repr_base import RBC
+from genesis.typing import IndexType
 from genesis.utils import serialization
 from genesis.utils.data import Namespace, namespace
 from genesis.utils.misc import sanitize_index, tensor_to_array
@@ -966,7 +967,7 @@ class Scene(RBC):
         self._recorder_manager.reset(envs_idx)
         self._reset(state, envs_idx=envs_idx)
 
-    def _reset(self, state: SimState | None = None, *, envs_idx=None, keep_init: bool = False):
+    def _reset(self, state: SimState | None = None, *, envs_idx: IndexType | None = None, keep_init: bool = False):
         if self._is_built:
             if state is None:
                 state = self._init_state

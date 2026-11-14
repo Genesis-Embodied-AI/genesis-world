@@ -21,7 +21,7 @@ from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
-from genesis.typing import Vec2FType, Vec3FType
+from genesis.typing import FArrayType, IndexType, Vec2FType, Vec3FType
 from genesis.utils.data import ConfigItem, DataItem, is_opted_in
 from genesis.utils.misc import (
     DeprecationError,
@@ -2142,7 +2142,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         kernel_set_geoms_friction_ratio(geoms_idx, envs_idx, friction_ratio, self.dyn_state, self.rigid_config)
 
     @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
-    def set_qpos(self, qpos, qs_idx=None, envs_idx=None, *, skip_forward=False):
+    def set_qpos(
+        self,
+        qpos: torch.Tensor | FArrayType,
+        qs_idx: IndexType | None = None,
+        envs_idx: IndexType | None = None,
+        *,
+        skip_forward: bool = False,
+    ) -> None:
         if self.constraint_solver is not None:
             self.constraint_solver.reset(envs_idx)
 
