@@ -77,9 +77,8 @@ class Link(_Selection):
 
         A name is an exact link name or a glob pattern such as 'finger*', matched case-sensitively whatever the
         platform. A literal '*', '?' or '[' in a link name is matched by enclosing it in brackets, so 'arm[[]1]' selects
-        the link 'arm[1]'. A name matching no link of the entity raises when the entity is added. A link that the asset
-        parser merges into its parent has no name of its own, so keep it with the 'links_to_keep' option of the morph
-        to select it.
+        the link 'arm[1]'. A name matching no link raises in ``add_entity``. A link the asset parser merges into its
+        parent loses its name, so keep it with the 'links_to_keep' option of the morph to select it.
         """
         return cls(names=names)
 
@@ -115,8 +114,7 @@ class Link(_Selection):
 class _OrdinalIndex(_Selection):
     """Select elements by their ordinal, as numpy indexes a range of the number of elements.
 
-    The selection is ordinals or a span (a slice). Each subclass checks that a selection states exactly one of what it
-    admits.
+    The selection is ordinals or a span (a slice). Each subclass checks that a selection states exactly one.
     """
 
     ordinals: IArrayType | None = None
@@ -211,10 +209,9 @@ class Geom(_NamedOrdinalIndex):
     """Select collision geoms by their ordinal in the asset or by name.
 
     An ordinal counts the collision geoms of the selection it is selected in (see ``at``). Post-processing splits a geom
-    into convex pieces and fuses geoms with identical properties, which renumbers them in ``entity.geoms``, so the
-    ordinal counts the collision geoms as the asset states them, and selecting one selects every piece it is split
-    into. Geoms whose values differ are never fused, so a value set on a selection never reaches a geom it does not
-    hold.
+    into convex pieces and fuses geoms with identical properties, which renumbers ``entity.geoms``, so an ordinal counts
+    the geoms as the asset states them, and selecting one selects every piece of it. Geoms whose values differ never
+    fuse, so a value set on a selection never reaches a geom it does not hold.
 
     A name is matched against the names the asset gives its collision geoms, as an exact name or a glob pattern,
     case-sensitively whatever the platform, a literal '*', '?' or '[' being enclosed in brackets ('pad[[]1]' selects

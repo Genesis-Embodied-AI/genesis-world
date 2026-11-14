@@ -112,8 +112,7 @@ class Entity(RBC):
     def options(self) -> gs.entities.BaseEntity:
         """The frozen copy of the options this entity was constructed from, its name included.
 
-        They hold the morph and the surface given to the scene, the resolution of the entity writing its defaults into
-        the morph.
+        They hold the morph and the surface given to the scene, the morph taking the defaults the entity resolves.
         """
         return self._options
 

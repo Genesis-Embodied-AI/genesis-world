@@ -1214,8 +1214,7 @@ class KinematicEntityDescription(EntityDescription):
         # Exclude joints with 0 dofs to align with Mujoco
         links_j_infos = [[j_info for j_info in link_j_infos if j_info["n_dofs"] > 0] for link_j_infos in links_j_infos]
 
-        # The names from the root of the kinematic tree down to each link, which a 'gs.indices.Link' selects on. Every
-        # parent precedes its children.
+        # The names from the tree root down to each link, for 'gs.indices.Link'. Every parent precedes its children.
         for l_info in l_infos:
             parent_idx = l_info["parent_idx"]
             l_info["path"] = (*l_infos[parent_idx]["path"], l_info["name"]) if parent_idx >= 0 else (l_info["name"],)
@@ -1489,8 +1488,7 @@ class KinematicEntityDescription(EntityDescription):
         for i_b, selection_block in enumerate(selection_blocks):
             is_selected = blocks_is_selected[i_b]
             geoms_scope = np.zeros(len(cg_infos), dtype=gs.np_int)
-            # Each selector resolves among the parts the selectors before it hold, from the links to the geoms (see
-            # 'BaseEntity._check_selection_block')
+            # Each selector resolves among the parts the earlier ones hold (see 'BaseEntity._check_selection_block')
             for selector in selection_block.selectors:
                 if isinstance(selector, gs.indices.Link):
                     is_selected &= np.isin(geoms_link_idx, selector._resolve(links_path))
@@ -1824,8 +1822,7 @@ class RigidEntityDescription(KinematicEntityDescription):
     def _describe_geoms(self, cg_infos):
         """Resolve what a parse stated about each collision geom into the description the geom is built from.
 
-        A coefficient comes from the parsed geom (see '_resolve_geoms_values'), then the entity material, then the
-        solver default.
+        A coefficient comes from the parsed geom (see '_resolve_geoms_values'), else the material, else the default.
         """
         sdf_max_res = self.options.material.sdf_max_res
         if isinstance(self.options.morphs[0], gs.morphs.Primitive):

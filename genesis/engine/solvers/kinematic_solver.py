@@ -188,10 +188,9 @@ class KinematicSolver(Solver):
     ) -> "KinematicEntity":
         """Create an entity from its description.
 
-        Given no description, one is resolved from the entity options and the surface resolved from them (see
-        'KinematicEntityDescription'), the primary morph deciding the kind of entity among those the solver builds
-        ('_entity_classes'). The class of a given description says which kind it holds. Creation from a description
-        reads no asset.
+        Given no description, one is resolved from the entity options and their resolved surface (see
+        'KinematicEntityDescription'), the primary morph deciding the kind of entity ('_entity_classes'). A given
+        description says the kind by its class, and creating from it reads no asset.
         """
         if desc is None:
             entity_cls = next(
