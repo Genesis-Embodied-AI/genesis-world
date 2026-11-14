@@ -1400,12 +1400,12 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             # The rigid solver leaves its equality constraints to this coupler, unless constraints are disabled. The
             # joint equalities are those of the scene, while the slots of the equalities coupling two links also take
             # the ones added after the build (see 'RigidSolver.add_weld_constraint').
-            if not self.rigid_solver._options.disable_constraint:
+            if not self.rigid_solver.options.disable_constraint:
                 equalities_type = [equality.type for equality in self.rigid_solver.equalities]
                 self._has_joint_equalities = gs.EQUALITY_TYPE.JOINT in equalities_type
                 self._has_link_equalities = (
                     any([eq_type != gs.EQUALITY_TYPE.JOINT for eq_type in equalities_type])
-                    or self.rigid_solver._options.max_dynamic_constraints > 0
+                    or self.rigid_solver.options.max_dynamic_constraints > 0
                 )
 
         # The floor holds each FEM entity as a rigid half-space holds it in hydroelastic contact, the pressure growing
@@ -1720,7 +1720,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             has_fem_contacts=n_env_fem_entries > 0,
             has_link_constraints=has_link_constraints,
             enable_lagged_friction=self._enable_lagged_friction,
-            batch_links_info=self.rigid_solver._options.batch_links_info,
+            batch_links_info=self.rigid_solver.options.batch_links_info,
             enable_cooperative_kernels=enable_cooperative_kernels,
             chain_storage=chain_storage,
             n_max_chain_dofs=n_max_chain_dofs,
@@ -2882,7 +2882,6 @@ def kernel_init_sap_solve(
             fem_state.elements_energy.energy[i_e, i_b] = energy
             fem_state.elements_energy.stress[i_e, i_b] = -fem_info.elements.V[i_e] * gradient
         func_accumulate_vertices(
-            forces=None,
             envs_is_active=fem_state.envs_solve.is_active,
             pcg_counter=pcg_counter,
             fem_state=fem_state,
@@ -2890,7 +2889,6 @@ def kernel_init_sap_solve(
             vertex_constraints=vertex_constraints,
             fem_config=fem_config,
             gather_Ap=False,
-            gather_internal_force=False,
             update_loop_flag=False,
         )
         for i_v, i_b in qd.ndrange(*sap_state.fem_vertices.v.shape, axes=qd.static(eoa(sap_state.fem_vertices.v))):

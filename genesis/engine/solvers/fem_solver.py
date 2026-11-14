@@ -1067,35 +1067,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         kernel_update_vverts_render(self.fem_state, self.fem_info)
         return self.fem_state.vverts_render.pos, self.fem_info.vverts_uvs, self.fem_info.vfaces_indices
 
-    def get_forces(self):
-        """
-        Get the internal elastic force on every vertex, computed from the current state.
-
-        The force of each element follows the material model of the solver in use, and the forces of a body sum to zero.
-        Damping, gravity and contact forces are left out. With the incremental potential contact (IPC) coupler, which
-        simulates the FEM entities itself, it raises an exception.
-
-        Returns
-        -------
-        forces : torch.Tensor
-            The force on each vertex of each environment.
-        """
-        if not self.is_active:
-            return None
-        # Imported here to avoid a circular dependency (see 'substep_pre_coupling')
-        from genesis.engine.couplers import IPCCoupler
-
-        # The IPC coupler simulates the FEM entities with its own models, and leaves the elements of Cloth ones empty.
-        if isinstance(self._sim.coupler, IPCCoupler):
-            gs.raise_exception("The internal forces of FEM entities are not available with the IPC coupler.")
-
-        # The linear corotated model takes the rotation of each element from the current state
-        if self._use_implicit_solver:
-            kernel_precompute_material_data(self.fem_state, self.fem_info, self.fem_config)
-        forces = torch.zeros((self._B, self.n_vertices, 3), dtype=gs.tc_float, device=gs.device)
-        kernel_get_forces(forces, self.fem_state, self.fem_info, self.vertex_constraints, self.fem_config)
-        return forces
-
     @gs.assert_built
     @mutates(StateChange.GEOMETRY)
     def set_verts_pos(self, poss, verts_idx=None, envs_idx=None):
@@ -2190,7 +2161,6 @@ def func_accumulate_vertex(
     i_b: int,
     i_v: int,
     i_lane: int,
-    forces: qd.Tensor,
     envs_is_active: qd.Tensor,
     fem_state: FEMState,
     fem_info: FEMInfo,
@@ -2198,17 +2168,16 @@ def func_accumulate_vertex(
     fem_config: qd.template(),
     log2_n_lanes: qd.template(),
     gather_Ap: qd.template(),
-    gather_internal_force: qd.template(),
     clip_vertex: qd.template(),
 ):
     """
     Sum the elastic terms of a vertex in a fixed order.
 
-    The internal force alone goes into `forces` for every environment if asked, else Ap alone or the force and diagonal
-    block of the active environments. On CPU, the thread of an environment walks the corners of all its elements in
-    element order and adds each term to its vertex. On GPU, the 2**`log2_n_lanes` lanes of a vertex stride its corners
-    (see 'vertices_corners_idx'), then add up their sums in a fixed order, every lane of a subgroup tile taking part and
-    the lanes past the last vertex doing nothing when `clip_vertex` is set.
+    It sums Ap alone or the force and diagonal block of the active environments. On CPU, the thread of an environment
+    walks the corners of all its elements in element order and adds each term to its vertex. On GPU, the
+    2**`log2_n_lanes` lanes of a vertex stride its corners (see 'vertices_corners_idx'), then add up their sums in a
+    fixed order, every lane of a subgroup tile taking part and the lanes past the last vertex doing nothing when
+    `clip_vertex` is set.
     """
     is_serial = qd.static(not fem_config.enable_cooperative_kernels)
     n_lanes = qd.static(2**log2_n_lanes)
@@ -2219,15 +2188,13 @@ def func_accumulate_vertex(
     I_3 = qd.Matrix.identity(gs.qd_float, 3)
     vec_elastic = qd.Vector.zero(gs.qd_float, 3)
     mat_elastic = qd.Matrix.zero(gs.qd_float, 3, 3)
-    is_active = True
-    if qd.static(not gather_internal_force):
-        is_active = envs_is_active[i_b]
+    is_active = envs_is_active[i_b]
     if qd.static(clip_vertex):
         is_active = is_active and i_v < n_vertices
     if is_active:
         i_c_start = 0
         n_corners = 4 * n_elements
-        if qd.static(is_serial and not gather_internal_force):
+        if qd.static(is_serial):
             for i_v_ in range(n_vertices):
                 if qd.static(gather_Ap):
                     fem_state.vertices_solve.Ap[i_v_, i_b] = qd.Vector.zero(gs.qd_float, 3)
@@ -2241,7 +2208,6 @@ def func_accumulate_vertex(
         # On CPU the corners of an element follow each other, sharing its mapping matrix, stress or force
         S = qd.Matrix.zero(gs.qd_float, 4, 3)
         stress = qd.Matrix.zero(gs.qd_float, 3, 3)
-        force_internal = qd.Matrix.zero(gs.qd_float, 3, 4)
         for i_c_ in range((n_corners + n_lanes - 1) // n_lanes):
             i_c = i_c_ * n_lanes + i_lane
             if i_c < n_corners:
@@ -2256,26 +2222,19 @@ def func_accumulate_vertex(
                 if qd.static(is_serial):
                     is_new_element = i_k == 0
                 if is_new_element:
-                    if qd.static(gather_internal_force):
-                        force_internal = func_element_internal_force(i_e, i_b, fem_state, fem_info, fem_config)
-                    else:
-                        S = func_element_mapping_matrix(i_e, fem_info)
+                    S = func_element_mapping_matrix(i_e, fem_info)
                     if qd.static(gather_Ap and is_serial):
                         p = qd.Matrix.cols([fem_state.vertices_solve.p[i_vs[i_j], i_b] for i_j in qd.static(range(4))])
                         _, dP = func_elastic_product(i_e, i_b, S, p, fem_state, fem_info, fem_config)
                         stress = V * damping_beta_factor * dP
                 # On GPU, each element computes its stress once for all its corners (see 'FEMElementsEnergy')
-                if qd.static(not gather_internal_force and not (gather_Ap and is_serial)):
+                if qd.static(not (gather_Ap and is_serial)):
                     stress = fem_state.elements_energy.stress[i_e, i_b]
                 S_k = S[i_k, :]
 
-                vec_corner = qd.Vector.zero(gs.qd_float, 3)
+                vec_corner = stress @ S_k
                 mat_corner = qd.Matrix.zero(gs.qd_float, 3, 3)
-                if qd.static(gather_internal_force):
-                    vec_corner = force_internal[:, i_k]
-                else:
-                    vec_corner = stress @ S_k
-                if qd.static(not gather_Ap and not gather_internal_force):
+                if qd.static(not gather_Ap):
                     # Column j of the block is the force a unit displacement of the vertex along axis j induces on it
                     corner_k = qd.Matrix.identity(gs.qd_float, 4)[i_k, :]
                     for j in range(3):
@@ -2286,10 +2245,7 @@ def func_accumulate_vertex(
 
                 if qd.static(is_serial):
                     i_v_k = i_vs[i_k]
-                    if qd.static(gather_internal_force):
-                        for j in qd.static(range(3)):
-                            forces[i_b, i_v_k, j] = forces[i_b, i_v_k, j] + vec_corner[j]
-                    elif qd.static(gather_Ap):
+                    if qd.static(gather_Ap):
                         fem_state.vertices_solve.Ap[i_v_k, i_b] = fem_state.vertices_solve.Ap[i_v_k, i_b] + vec_corner
                     else:
                         force = fem_state.vertices_energy.force[i_v_k, i_b] + vec_corner
@@ -2302,17 +2258,11 @@ def func_accumulate_vertex(
     if qd.static(not is_serial):
         for i in qd.static(range(3)):
             vec_elastic[i] = su.qd_block_sum(vec_elastic[i], log2_n_lanes)
-            if qd.static(not gather_Ap and not gather_internal_force):
+            if qd.static(not gather_Ap):
                 for j in qd.static(range(3)):
                     mat_elastic[i, j] = su.qd_block_sum(mat_elastic[i, j], log2_n_lanes)
 
-    if qd.static(gather_internal_force):
-        # The first lane of a vertex writes its sum, which the walk over the corners adds up directly on CPU
-        if qd.static(not is_serial):
-            if i_lane == 0:
-                for j in qd.static(range(3)):
-                    forces[i_b, i_v, j] = vec_elastic[j]
-    elif is_active:
+    if is_active:
         # The inertia terms of the vertices this thread owns add to their elastic sums
         n_owned = 1 if i_lane == 0 else 0
         if qd.static(is_serial):
@@ -2347,7 +2297,6 @@ def func_accumulate_vertex(
 
 @qd.func
 def func_accumulate_vertices(
-    forces: qd.Tensor,
     envs_is_active: qd.Tensor,
     pcg_counter: qd.Tensor,
     fem_state: FEMState,
@@ -2355,7 +2304,6 @@ def func_accumulate_vertices(
     vertex_constraints: FEMVertexConstraints,
     fem_config: qd.template(),
     gather_Ap: qd.template(),
-    gather_internal_force: qd.template(),
     update_loop_flag: qd.template(),
 ):
     """Sum the elastic terms of every vertex of every environment (see 'func_accumulate_vertex')."""
@@ -2404,7 +2352,6 @@ def func_accumulate_vertices(
             i_b,
             i_v,
             i_lane,
-            forces,
             envs_is_active,
             fem_state,
             fem_info,
@@ -2412,7 +2359,6 @@ def func_accumulate_vertices(
             fem_config,
             log2_n_lanes,
             gather_Ap,
-            gather_internal_force,
             clip_vertex=False,
         )
 
@@ -2553,7 +2499,6 @@ def func_pcg_iter(
     n_threads = qd.static(BLOCK_DIM if fem_config.enable_cooperative_kernels else 1)
 
     func_accumulate_vertices(
-        forces=None,
         envs_is_active=fem_state.envs_solve.is_pcg_active,
         pcg_counter=pcg_counter,
         fem_state=fem_state,
@@ -2561,7 +2506,6 @@ def func_pcg_iter(
         vertex_constraints=vertex_constraints,
         fem_config=fem_config,
         gather_Ap=True,
-        gather_internal_force=False,
         update_loop_flag=True,
     )
     qd.loop_config(block_dim=qd.static(n_threads if n_threads > 1 else None))
@@ -2618,7 +2562,6 @@ def func_pcg_solve_per_env_block(
                     i_b=i_b,
                     i_v=i_item // n_lanes,
                     i_lane=i_item % n_lanes,
-                    forces=None,
                     envs_is_active=fem_state.envs_solve.is_pcg_active,
                     fem_state=fem_state,
                     fem_info=fem_info,
@@ -2626,7 +2569,6 @@ def func_pcg_solve_per_env_block(
                     fem_config=fem_config,
                     log2_n_lanes=LOG2_CORNER_LANES,
                     gather_Ap=True,
-                    gather_internal_force=False,
                     clip_vertex=True,
                 )
             qd.simt.grid.mem_fence()
@@ -2865,7 +2807,6 @@ def func_newton_head(
             fem_state.elements_energy.energy[i_e, i_b] = energy
             fem_state.elements_energy.stress[i_e, i_b] = -fem_info.elements.V[i_e] * gradient
     func_accumulate_vertices(
-        forces=None,
         envs_is_active=fem_state.envs_solve.is_active,
         pcg_counter=pcg_counter,
         fem_state=fem_state,
@@ -2873,7 +2814,6 @@ def func_newton_head(
         vertex_constraints=vertex_constraints,
         fem_config=fem_config,
         gather_Ap=False,
-        gather_internal_force=False,
         update_loop_flag=False,
     )
     func_init_pcg(pcg_counter, fem_state, fem_info, vertex_constraints, fem_config, is_adjoint=False)
@@ -3070,29 +3010,6 @@ def kernel_copy_next_to_curr(fem_state: FEMState):
     for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape, axes=qd.static(eoa(fem_state.vertices.pos))):
         fem_state.vertices.pos[i_v, i_b] = fem_state.vertices.pos_next[i_v, i_b]
         fem_state.vertices.vel[i_v, i_b] = fem_state.vertices.vel_next[i_v, i_b]
-
-
-@qd.kernel(fastcache=True)
-def kernel_get_forces(
-    forces: qd.types.ndarray(),
-    fem_state: FEMState,
-    fem_info: FEMInfo,
-    vertex_constraints: FEMVertexConstraints,
-    fem_config: qd.template(),
-):
-    """Gather the internal elastic force on every vertex, one row per environment."""
-    func_accumulate_vertices(
-        forces,
-        envs_is_active=None,
-        pcg_counter=None,
-        fem_state=fem_state,
-        fem_info=fem_info,
-        vertex_constraints=vertex_constraints,
-        fem_config=fem_config,
-        gather_Ap=False,
-        gather_internal_force=True,
-        update_loop_flag=False,
-    )
 
 
 # ------------------------------------------------------------------------------------
