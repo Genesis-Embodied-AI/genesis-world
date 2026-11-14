@@ -39,7 +39,7 @@ def main():
         .select(gs.indices.Link.named("left_finger", "right_finger"))
         .select(gs.indices.Geom.at(slice(1, 6)))
         .set_friction(1.5)
-        .end(),
+        .end(),  # Return the options after selecting
     )
 
     cube = scene.add_entity(
