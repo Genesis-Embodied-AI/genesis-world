@@ -11,6 +11,7 @@ from genesis.typing import ValidFloat
 
 from . import indices
 from .options import Options
+from .surfaces import Surface
 
 
 class _FrozenOptions(Options):
@@ -44,6 +45,20 @@ class Geom(_FrozenOptions):
     friction_rolling: FrictionRollingType | None = None
 
 
+class VGeom(_FrozenOptions):
+    """Appearance of the visual geoms of a rigid or kinematic entity, set on a selection of its links or visual geoms.
+
+    Parameters
+    ----------
+    surface : gs.surfaces.Surface | None, optional
+        The appearance of the selected visual geoms, which replaces the surface of the entity for them. The textures it
+        leaves unset keep those the asset and the surface of the entity give the geoms. If None, the geoms keep the
+        surface of the entity. Default is None.
+    """
+
+    surface: Surface | None = None
+
+
 class Vertex(_FrozenOptions):
     """Quantities of the vertices of a deformable entity, set on a selection of its vertices.
 
@@ -64,15 +79,17 @@ class SelectionBlock(_FrozenOptions):
 
     Parameters
     ----------
-    selectors : tuple[gs.indices.Link | gs.indices.Geom | gs.indices.Vertex, ...]
+    selectors : tuple[gs.indices.Link | gs.indices.Geom | gs.indices.VGeom | gs.indices.Vertex, ...]
         The selector of each level leading to the parts, from the coarsest to the finest, each resolving among the
         parts the previous one holds.
-    block : gs.options.Geom | gs.options.Vertex
+    block : gs.options.Geom | gs.options.VGeom | gs.options.Vertex
         The quantities set on the parts, of which the fields given explicitly apply.
     """
 
-    selectors: Annotated[tuple[indices.Link | indices.Geom | indices.Vertex, ...], Field(min_length=1, strict=False)]
-    block: Geom | Vertex
+    selectors: Annotated[
+        tuple[indices.Link | indices.Geom | indices.VGeom | indices.Vertex, ...], Field(min_length=1, strict=False)
+    ]
+    block: Geom | VGeom | Vertex
 
     @model_validator(mode="after")
     def _check_block(self) -> Self:

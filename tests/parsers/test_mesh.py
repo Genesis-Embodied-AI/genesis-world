@@ -666,14 +666,15 @@ def test_glb_multi_primitive_distinct_materials(tmp_path):
         surface=gs.surfaces.Default(),
     )
 
-    # One visual mesh per material rather than a single merged mesh, each keeping its own distinct base-color texture.
+    # One visual mesh per material rather than a single merged mesh, each keeping its own distinct base-color texture
+    # and the index of its material in the file, red for the first material and blue for the second.
     assert len(gs_meshes) == n_prims
-    dominant_channels = []
     for gs_mesh in gs_meshes:
         texture = gs_mesh.surface.texture
         assert isinstance(texture, gs.textures.ImageTexture)
-        dominant_channels.append(int(np.argmax(texture.image_array[..., :3].mean(axis=(0, 1)))))
-    assert sorted(dominant_channels) == [0, 2]
+        dominant_channel = np.argmax(texture.image_array[..., :3].mean(axis=(0, 1)))
+        assert dominant_channel == (0, 2)[gs_mesh.metadata["material_index"]]
+    assert sorted(gs_mesh.metadata["material_index"] for gs_mesh in gs_meshes) == [0, 1]
 
     scene = gs.Scene(show_viewer=False)
     entity = scene.add_entity(

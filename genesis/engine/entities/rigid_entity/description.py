@@ -1442,71 +1442,82 @@ class KinematicEntityDescription(EntityDescription):
         links_g_infos: list[list[dict[str, Any]]],
         resolution: Resolution,
     ) -> None:
-        """Write into the parsed geoms of one morph the density and the friction coefficients they take.
+        """Write into the parsed geoms of one morph the density, the friction coefficients and the surface they take.
 
-        A value set through ``gs.entities.Rigid.select`` overrides that of the material, which overrides that of the
-        asset, and a field a block gives as None stands for the value of the asset. The values are written before
-        post-processing, so that every convex piece of a geom takes them and geoms of different values never fuse.
-        'links_path' holds the names from the root of the kinematic tree down to each link. A selection that holds no
-        collision geom of the morph raises, so that each heterogeneous variant holds what the entity selects.
+        A value set through ``select`` overrides that of the material, or the surface of the entity, which overrides
+        that of the asset, and a field a block gives as None stands for the value of the asset, or the surface of the
+        entity. The values are written before post-processing, so that every convex piece of a geom takes them and
+        geoms of different values never fuse. 'links_path' holds the names from the root of the kinematic tree down to
+        each link. A selection that holds no geom of the morph raises, so that each heterogeneous variant holds what
+        the entity selects.
         """
-        if not isinstance(self.options.material, gs.materials.Rigid):
-            return
-
-        cg_infos, geoms_link_idx = [], []
+        cg_infos, vg_infos, geoms_link_idx, vgeoms_link_idx = [], [], [], []
         for i_l, link_g_infos in enumerate(links_g_infos):
             for g_info in link_g_infos:
-                if morph.collision and (g_info["contype"] or g_info["conaffinity"]):
+                is_col = g_info["contype"] or g_info["conaffinity"]
+                if morph.collision and is_col:
                     cg_infos.append(g_info)
                     geoms_link_idx.append(i_l)
+                if morph.visualization and not is_col:
+                    vg_infos.append(g_info)
+                    vgeoms_link_idx.append(i_l)
         # The values the asset states, which a field given as None on a block stands for, the asset stating a density
         # where a block sets 'rho'
         asset_names = ["density" if name == "rho" else name for name in gs.options.Geom.model_fields]
         geoms_asset_values = [{name: g_info.get(name) for name in asset_names} for g_info in cg_infos]
 
-        # A material value overrides the one each geom of the asset states. Dropping the density up front keeps the
-        # align anchor, its all-or-none source check and the inertia estimate uniform-density.
-        for material_value, name in (
-            (self.options.material.rho, "density"),
-            (self.options.material.friction, "friction"),
-            (self.options.material.friction_torsional, "friction_torsional"),
-            (self.options.material.friction_rolling, "friction_rolling"),
-        ):
-            if material_value is not None:
-                for link_g_infos in links_g_infos:
-                    for g_info in link_g_infos:
-                        g_info.pop(name, None)
+        if isinstance(self.options.material, gs.materials.Rigid):
+            # A material value overrides the one each geom of the asset states. Dropping the density up front keeps the
+            # align anchor, its all-or-none source check and the inertia estimate uniform-density.
+            for material_value, name in (
+                (self.options.material.rho, "density"),
+                (self.options.material.friction, "friction"),
+                (self.options.material.friction_torsional, "friction_torsional"),
+                (self.options.material.friction_rolling, "friction_rolling"),
+            ):
+                if material_value is not None:
+                    for link_g_infos in links_g_infos:
+                        for g_info in link_g_infos:
+                            g_info.pop(name, None)
         selection_blocks = self.options.selection_blocks
         if not selection_blocks:
             return
 
-        # Resolve each block once: the geoms it selects, and its level, 0 for links and 1 for geoms
+        # Resolve each block once: the geoms or visual geoms it selects, and its level, 0 for links and 1 for geoms
         geoms_link_idx = np.array(geoms_link_idx, dtype=gs.np_int)
+        vgeoms_link_idx = np.array(vgeoms_link_idx, dtype=gs.np_int)
         geoms_name = [g_info["mesh"].metadata.get("name", "") for g_info in cg_infos]
-        blocks_is_selected = np.ones((len(selection_blocks), len(cg_infos)), dtype=np.bool_)
+        vgeoms_name = [g_info["vmesh"].metadata.get("name", "") for g_info in vg_infos]
+        blocks_is_selected = np.zeros((len(selection_blocks), len(cg_infos)), dtype=np.bool_)
+        blocks_vgeoms_is_selected = np.zeros((len(selection_blocks), len(vg_infos)), dtype=np.bool_)
         blocks_level = np.zeros(len(selection_blocks), dtype=gs.np_int)
         for i_b, selection_block in enumerate(selection_blocks):
-            is_selected = blocks_is_selected[i_b]
-            geoms_scope = np.zeros(len(cg_infos), dtype=gs.np_int)
+            is_visual = isinstance(selection_block.block, gs.options.VGeom)
+            if is_visual:
+                is_selected, parts_link_idx, parts_name = blocks_vgeoms_is_selected[i_b], vgeoms_link_idx, vgeoms_name
+            else:
+                is_selected, parts_link_idx, parts_name = blocks_is_selected[i_b], geoms_link_idx, geoms_name
+            is_selected[:] = True
+            parts_scope = np.zeros(len(parts_name), dtype=gs.np_int)
             # Each selector resolves among the parts the earlier ones hold (see 'BaseEntity._check_selection_block')
             for selector in selection_block.selectors:
                 if isinstance(selector, gs.indices.Link):
-                    is_selected &= np.isin(geoms_link_idx, selector._resolve(links_path))
+                    is_selected &= np.isin(parts_link_idx, selector._resolve(links_path))
                     # A geom ordinal below a link selection counts the geoms of each selected link apart
-                    geoms_scope = geoms_link_idx
+                    parts_scope = parts_link_idx
                 else:
-                    held_geoms_idx = np.flatnonzero(is_selected)
+                    held_parts_idx = np.flatnonzero(is_selected)
                     is_selected[:] = False
                     # A selection already empty stays empty, and raises below
-                    if held_geoms_idx.size > 0:
-                        held_geoms_name = [geoms_name[i_g] for i_g in held_geoms_idx]
-                        held_geoms_ordinal = selector._resolve(held_geoms_name, geoms_scope[held_geoms_idx])
-                        is_selected[held_geoms_idx[held_geoms_ordinal]] = True
+                    if held_parts_idx.size > 0:
+                        held_parts_name = [parts_name[i_g] for i_g in held_parts_idx]
+                        held_parts_ordinal = selector._resolve(held_parts_name, parts_scope[held_parts_idx])
+                        is_selected[held_parts_idx[held_parts_ordinal]] = True
                     blocks_level[i_b] = 1
             if not is_selected.any():
                 gs.raise_exception(
-                    f"The selection {selection_block.selection_repr} holds no collision geom of {morph}. Existing "
-                    f"geoms: {geoms_name}."
+                    f"The selection {selection_block.selection_repr} holds no {'visual' if is_visual else 'collision'} "
+                    f"geom of {morph}. Existing geoms: {parts_name}."
                 )
 
         # Of the blocks setting a field of a geom, the one of the finest level applies, and the later one within a
@@ -1541,6 +1552,14 @@ class KinematicEntityDescription(EntityDescription):
                     # The coefficient of the asset, or the solver default when it states none
                     asset_value = geoms_asset_values[i_g][name]
                     g_info[name] = default_coefficients[name]() if asset_value is None else asset_value
+
+        # A selected surface keeps the asset and entity textures for the maps it leaves unset (see 'Mesh.set_surface'),
+        # and a surface given as None keeps that of the entity
+        vgeoms_blocks_rank = np.where(blocks_vgeoms_is_selected, blocks_rank[:, None], -1)
+        for i_g in np.flatnonzero(vgeoms_blocks_rank.max(axis=0) >= 0):
+            surface = selection_blocks[vgeoms_blocks_rank[:, i_g].argmax()].block.surface
+            if surface is not None:
+                vg_infos[i_g]["vmesh"].set_surface(surface)
 
     def _resolve_geoms(
         self, morph: Morph, g_infos: list[dict[str, Any]], is_robot: bool

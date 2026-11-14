@@ -119,8 +119,8 @@ def test_export_and_load_rigid(
             batch_fixed_verts=True,
         ),
         surface=gs.surfaces.Default(
-            diffuse_texture=gs.textures.BatchTexture.from_images(
-                image_paths=["textures/indoor_bright.png"],
+            diffuse_texture=gs.textures.ImageTexture(
+                image_path="textures/indoor_bright.png",
             ),
         ),
     )
@@ -151,7 +151,8 @@ def test_export_and_load_rigid(
             pos=(0.0, 0.5, 0.5),
         ),
     )
-    # A link whose frame is anchored on the geometry it holds, given a pose offset as well
+    # A link whose frame is anchored on the geometry it holds, given a pose offset as well. Its surface holds a batched
+    # texture and a dynamic texture, whose declarations travel.
     anchored = scene.add_entity(
         morph=gs.morphs.Mesh(
             file="meshes/duck.obj",
@@ -162,7 +163,20 @@ def test_export_and_load_rigid(
         ),
         surface=gs.surfaces.Default(
             diffuse_texture=gs.textures.ImageTexture(
-                image_path="textures/checker.png",
+                image_path=("textures/checker.png", "meshes/duck/material_0.png"),
+                is_batched=True,
+            ),
+            emissive_texture=gs.textures.DynamicTexture(
+                resolution=(4, 2),
+                variants=(
+                    gs.textures.ColorTexture(
+                        color=(0.0, 0.5, 0.0),
+                    ),
+                    gs.textures.ColorTexture(
+                        color=(0.5, 0.0, 0.0),
+                        is_batched=True,
+                    ),
+                ),
             ),
         ),
     )
@@ -339,8 +353,9 @@ def test_export_and_load_rigid(
     # A texture is drawn from its pixels, which travel, and the name of the image is all that is kept of its path.
     assert_equal(restored.entities[1].surface.diffuse_texture.image_array, box.surface.diffuse_texture.image_array)
     assert restored.entities[1].surface.diffuse_texture.image_path == "checker.png"
-    # A batch holds textures of its own, and each keeps the name of the image it was read from
-    assert restored.entities[2].surface.diffuse_texture.textures[0].image_path == "indoor_bright.png"
+    # A texture keeps the name of the image it was read from, and a batched texture that of each of its images
+    assert restored.entities[2].surface.diffuse_texture.image_path == "indoor_bright.png"
+    assert restored.entities[6].surface.diffuse_texture.image_path == ("checker.png", "material_0.png")
     # A texture holding a path rather than pixels stands for nothing, in the surface and in the meshes drawn with it
     assert restored.entities[14].surface.normal_texture is None
     assert restored.entities[14].vgeoms[0].vmesh.surface.normal_texture is None
@@ -348,6 +363,12 @@ def test_export_and_load_rigid(
     restored_visual = restored.entities[6].vgeoms[0].trimesh.visual
     assert restored_visual.kind == "texture"
     assert_equal(restored_visual.uv, anchored.vgeoms[0].trimesh.visual.uv)
+    restored_texture = restored.entities[6].vgeoms[0].vmesh.surface.emissive_texture
+    assert_equal(
+        restored_texture.get_variants_image(gs.TEXTURE_MAP_TYPE.EMISSIVE),
+        anchored.vgeoms[0].vmesh.surface.emissive_texture.get_variants_image(gs.TEXTURE_MAP_TYPE.EMISSIVE),
+    )
+    assert restored_texture.variants_is_batched == (False, True)
     # A morph names the asset it was created from, since the description stands for what was parsed out of it
     assert restored.entities[15].morph.file == "two_link.urdf.xacro"
     # A mesh states the asset it was read from by name, wherever that asset stood

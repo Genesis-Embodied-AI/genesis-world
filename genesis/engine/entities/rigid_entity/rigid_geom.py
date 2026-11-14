@@ -9,8 +9,11 @@ import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.constants import TEXTURE_MAP_TYPE
 from genesis.engine.mesh import Mesh
+from genesis.engine.texture import Texture, TextureValueType, get_dynamic_texture
 from genesis.repr_base import RBC
+from genesis.typing import IndexType
 from genesis.utils.misc import DeprecationError, qd_to_torch, tensor_to_array
 
 from .description import RigidGeomDescription, RigidVisGeomDescription
@@ -619,6 +622,9 @@ class RigidVisGeom(RBC):
         self.active_envs_mask: torch.Tensor | None = None
         self.active_envs_idx: np.ndarray | None = None
 
+        # The dynamic textures this visual geom draws, one per map at most, which the scene lists as it builds
+        self._dynamic_textures: list[Texture] = []
+
     def _build(self):
         pass
 
@@ -727,6 +733,31 @@ class RigidVisGeom(RBC):
         tensor = gu.transform_by_trans_quat(init, pos, quat)
         return tensor[0] if self._solver.n_envs == 0 else tensor
 
+    @gs.assert_built
+    def get_texture(
+        self, envs_idx: IndexType | None = None, *, texture_map_type: TEXTURE_MAP_TYPE | None = None
+    ) -> torch.Tensor:
+        """Return the variant each environment shows on a dynamic texture of this visual geom.
+
+        'texture_map_type' picks the texture filling that type of map, and may be None when the visual geom draws a
+        single one. See ``Texture.get_texture`` for 'envs_idx' and the returned value.
+        """
+        return get_dynamic_texture(self._dynamic_textures, texture_map_type).get_texture(envs_idx)
+
+    @gs.assert_built
+    def set_texture(
+        self,
+        texture: TextureValueType,
+        envs_idx: IndexType | None = None,
+        *,
+        texture_map_type: TEXTURE_MAP_TYPE | None = None,
+    ) -> None:
+        """Show a variant, or draw pixels, on a dynamic texture of this visual geom.
+
+        See ``get_texture`` for 'texture_map_type', and ``Texture.set_texture`` for 'texture' and 'envs_idx'.
+        """
+        get_dynamic_texture(self._dynamic_textures, texture_map_type).set_texture(texture, envs_idx)
+
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
@@ -762,6 +793,11 @@ class RigidVisGeom(RBC):
     @property
     def vmesh(self):
         return self.desc.vmesh
+
+    @property
+    def name(self) -> str:
+        """The name the asset gives the vgeom, empty when it gives none, which ``gs.indices.VGeom.named`` selects on."""
+        return self.desc.vmesh.metadata.get("name", "")
 
     @property
     def solver(self):

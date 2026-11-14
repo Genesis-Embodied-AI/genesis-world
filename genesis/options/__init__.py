@@ -1,4 +1,4 @@
-from .blocks import Geom, SelectionBlock, Vertex
+from .blocks import Geom, SelectionBlock, Vertex, VGeom
 from .misc import CoacdOptions, FoamOptions
 from .profiling import ProfilingOptions
 from .scene import SceneOptions
@@ -36,6 +36,7 @@ __all__ = [
     "SimOptions",
     "SPHOptions",
     "Vertex",
+    "VGeom",
     "ViewerOptions",
     "VisOptions",
 ]

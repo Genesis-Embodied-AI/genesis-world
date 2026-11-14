@@ -129,12 +129,16 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
         body.select(gs.indices.Geom.named("tor*")).set_friction(0.7)
         body.select(gs.indices.Geom.at(1)).set_friction(1.5)
         body.select(gs.indices.Geom.at(slice(1, 3))).set_friction_torsional(0.03)
+        # A visual geom selection overrides the surface of its link, whichever is set first
+        body.select(gs.indices.VGeom.named("top_cap")).set_surface(gs.surfaces.Default(color=(0.0, 1.0, 0.0)))
+        body.set_surface(gs.surfaces.Default(color=(1.0, 0.0, 0.0)))
     # A density given as None stands for the default density on geoms that still fuse with each other
     mixed_geoms_options.select(gs.indices.Link.named("body")).set(gs.options.Geom(rho=None))
     # A field given as None stands for the value of the asset, overriding the material
     mixed_geoms_options.select(gs.indices.Geom.named("bottom_cap[[]1]")).set(gs.options.Geom(friction=None))
-    # The fifth collision geom of the entity is the capsule of the second link
+    # The fifth collision geom, and the fifth visual geom, of the entity is the capsule of the second link
     mixed_geoms_options.select(gs.indices.Geom.at(4)).set_friction_rolling(0.001)
+    mixed_geoms_options.select(gs.indices.VGeom.at(4)).set_surface(gs.surfaces.Default(color=(0.0, 0.0, 1.0)))
     mixed_geoms_body = scene.add_entity(options=mixed_geoms_options)
     # Geom densities weigh in the mass of an aligned body alone, whose frame stays where its kinematic ghost puts it
     dense_body_options = gs.entities.Rigid(
@@ -200,6 +204,10 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
         box_link.select(gs.indices.Geom.at([0])).set_rho(1000.0)
         box_link.select(gs.indices.Geom.at(slice(0, 1))).set_friction_rolling(0.001)
     rigid_options.select(gs.indices.Geom.named("box*") | gs.indices.Geom.named("*")).set_friction(2.0)
+    rigid_options.select(gs.indices.Link.named("box_baselink")).set_surface(gs.surfaces.Default(color=(1.0, 0.0, 0.0)))
+    rigid_options.select(gs.indices.VGeom.at(0)).set(
+        gs.options.VGeom(surface=gs.surfaces.Emission(emissive=(0.0, 1.0, 0.0)))
+    )
     fem_options = gs.entities.FEM(
         morph=gs.morphs.Box(
             size=(0.1, 0.1, 0.1),
@@ -237,6 +245,10 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
         gs.entities.Rigid(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1))).select(gs.indices.Vertex.at(0)).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="got gs.indices.Link"):
         box_options.select(gs.indices.Geom.at(0)).select(gs.indices.Link.named("box_baselink"))
+    with pytest.raises(gs.GenesisException, match="on parts selected with gs.indices.VGeom"):
+        box_options.select(gs.indices.VGeom.at(0)).set(gs.options.Geom(friction=1.0))
+    with pytest.raises(gs.GenesisException, match="sets no gs.options.Geom"):
+        dense_body_ghost.options.model_copy().select(gs.indices.Link.named("body")).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="frozen"):
         box.options.name = "renamed_box"
     with pytest.raises(gs.GenesisException, match="frozen"):
@@ -259,6 +271,14 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
     unknown_link_options.select(gs.indices.Link.named("arm3")).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="links_to_keep"):
         scene.add_entity(options=unknown_link_options)
+    out_of_range_vgeom_options = arm.options.model_copy()
+    out_of_range_vgeom_options.select(gs.indices.VGeom.at(2)).set_surface(gs.surfaces.Default())
+    with pytest.raises(gs.GenesisException, match="selects no valid geom among 2"):
+        scene.add_entity(options=out_of_range_vgeom_options)
+    unknown_vgeom_options = mixed_geoms_body.options.model_copy()
+    unknown_vgeom_options.select(gs.indices.VGeom.named("lcd")).set_surface(gs.surfaces.Default())
+    with pytest.raises(gs.GenesisException, match="No geom matches"):
+        scene.add_entity(options=unknown_vgeom_options)
     rootless_options = arm.options.model_copy()
     rootless_options.select(gs.indices.Link.named("base")).select(gs.indices.Geom.at(0)).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="holds no collision geom"):
@@ -323,3 +343,14 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
             assert_allclose(geom.get_friction(), friction, tol=gs.EPS)
         assert_allclose(geom.get_friction_torsional(), friction_torsional, tol=gs.EPS)
         assert_allclose(geom.get_friction_rolling(), friction_rolling, tol=gs.EPS)
+    # The link surface colors the visual geoms of the body, the visual geom selection the cap it names over it, and the
+    # entity selection by ordinal the capsule of the child link
+    vgeoms_color = {
+        "torus": (1.0, 0.0, 0.0),
+        "top_cap": (0.0, 1.0, 0.0),
+        "bottom_cap[1]": (1.0, 0.0, 0.0),
+        "ring": (1.0, 0.0, 0.0),
+        "tip": (0.0, 0.0, 1.0),
+    }
+    for vgeom in mixed_geoms_body.vgeoms:
+        assert_allclose(vgeom.surface.get_rgba().color[:3], vgeoms_color[vgeom.metadata["name"]], tol=gs.EPS)
