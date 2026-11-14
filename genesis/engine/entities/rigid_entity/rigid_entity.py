@@ -1229,12 +1229,21 @@ class KinematicEntity(Entity):
     def get_vgeoms(self, selector: indices.VGeom) -> gs.List[RigidVisGeom]:
         """Return the visual geoms of the entity that a selector holds, link after link.
 
-        The selector resolves among the visual geoms of the whole entity, as ``select`` on the entity options does, so
-        that the selection giving a visual geom its surface finds it again (see ``gs.indices.VGeom``).
+        The selector resolves among the visual geoms of the whole entity, apart for each heterogeneous variant, as
+        ``select`` on the entity options does, so that the selection giving a visual geom its surface finds it again
+        (see ``gs.indices.VGeom``).
         """
         vgeoms = self.vgeoms
         vgeoms_name = [vgeom.name for vgeom in vgeoms]
-        vgeoms_idx = selector._resolve(vgeoms_name, np.zeros(len(vgeoms), dtype=gs.np_int))
+        # An ordinal counts the visual geoms of each variant apart, as the morph of each variant resolves on its own
+        vgeoms_variant = np.zeros(len(vgeoms), dtype=gs.np_int)
+        for i_vg, vgeom in enumerate(vgeoms):
+            variant_ranges = vgeom.link._variant_vgeom_ranges
+            if variant_ranges is not None:
+                vgeoms_variant[i_vg] = next(
+                    i_v for i_v, (start, end) in enumerate(variant_ranges) if start <= vgeom.idx < end
+                )
+        vgeoms_idx = selector._resolve(vgeoms_name, vgeoms_variant)
         vgeoms = gs.List(vgeoms[i_vg] for i_vg in vgeoms_idx)
         if not vgeoms:
             gs.raise_exception(f"No visual geom of entity '{self.name}' matches {selector}.")
