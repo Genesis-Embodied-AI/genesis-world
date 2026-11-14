@@ -369,8 +369,14 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
     def _add_fem_entities_to_ipc(self) -> None:
         """Add FEM entities to the existing IPC scene (includes both volumetric FEM and cloth)"""
 
-        # Create constitutions based on entity types present
         entity: "FEMEntity"
+        for entity in cast(list["FEMEntity"], self.fem_solver.entities):
+            if entity.options.selection_blocks:
+                gs.raise_exception(
+                    f"Entity '{entity.name}' fixes selected vertices, which the IPC coupler does not support."
+                )
+
+        # Create constitutions based on entity types present
         for env_idx in range(self.sim._B):
             for i_e, entity in enumerate(cast(list["FEMEntity"], self.fem_solver.entities)):
                 is_cloth = isinstance(entity.material, Cloth)
