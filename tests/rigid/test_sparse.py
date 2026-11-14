@@ -29,18 +29,22 @@ def test_noslip_resting_stability(show_viewer):
     )
 
     franka = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/panda_bullet/panda.urdf",
-            pos=(0, 0, TABLE_Z),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/panda_bullet/panda.urdf",
+                pos=(0, 0, TABLE_Z),
+                fixed=True,
+            ),
+        ),
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.5, 0, TABLE_Z / 2),
-            size=(0.8, 0.6, TABLE_Z / 2),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.5, 0, TABLE_Z / 2),
+                size=(0.8, 0.6, TABLE_Z / 2),
+                fixed=True,
+            ),
+        ),
     )
 
     boxes = []
@@ -49,19 +53,21 @@ def test_noslip_resting_stability(show_viewer):
         x = 0.4 + 0.12 * (i % 4)
         y = -0.25 + 0.12 * (i // 4)
         box = scene.add_entity(
-            material=gs.materials.Rigid(
-                friction=0.5,
+            options=gs.entities.Rigid(
+                # Drop from just above the resting height: a high drop makes the landing chaotic across precisions,
+                # while the point here is the stability of the resting contacts.
+                morph=gs.morphs.Box(
+                    pos=(x, y, 0.75 * TABLE_Z + 0.025),
+                    size=(0.04, 0.04, 0.04),
+                ),
+                surface=gs.surfaces.Default(
+                    color=(0.3 + 0.7 * (i % 4) / 3, 0.3 + 0.7 * (i // 4) / 3, 0.5, 1.0),
+                ),
+                material=gs.materials.Rigid(
+                    friction=0.5,
+                ),
+                visualize_contact=True,
             ),
-            # Drop from just above the resting height: a high drop makes the landing chaotic across precisions,
-            # while the point here is the stability of the resting contacts.
-            morph=gs.morphs.Box(
-                pos=(x, y, 0.75 * TABLE_Z + 0.025),
-                size=(0.04, 0.04, 0.04),
-            ),
-            surface=gs.surfaces.Default(
-                color=(0.3 + 0.7 * (i % 4) / 3, 0.3 + 0.7 * (i // 4) / 3, 0.5, 1.0),
-            ),
-            visualize_contact=True,
         )
         boxes.append(box)
 
@@ -96,8 +102,10 @@ def test_self_collision_sparse_dense_consistency(tol):
             show_viewer=False,
         )
         franka = scene.add_entity(
-            morph=gs.morphs.MJCF(
-                file="xml/franka_emika_panda/panda.xml",
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MJCF(
+                    file="xml/franka_emika_panda/panda.xml",
+                ),
             ),
         )
         scene.build()

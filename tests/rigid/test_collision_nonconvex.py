@@ -25,24 +25,28 @@ def test_collision(show_viewer):
         show_FPS=False,
     )
     tank = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/tank.obj",
-            scale=5.0,
-            fixed=True,
-            euler=(100, -10, 0),
-            convexify=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/tank.obj",
+                scale=5.0,
+                fixed=True,
+                euler=(100, -10, 0),
+                convexify=False,
+            ),
+            # vis_mode="collision",
         ),
-        # vis_mode="collision",
     )
     ball = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.05,
-            pos=(0.0, 0.0, 0.75),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.05,
+                pos=(0.0, 0.0, 0.75),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.5, 0.7, 0.9, 1.0),
+            ),
+            visualize_contact=True,
         ),
-        surface=gs.surfaces.Default(
-            color=(0.5, 0.7, 0.9, 1.0),
-        ),
-        visualize_contact=True,
     )
     scene.build()
 
@@ -75,24 +79,30 @@ def test_nonwatertight_collision(show_viewer):
     )
     asset_path = get_hf_dataset(pattern="spacecraft.obj")
     scene.add_entity(
-        gs.morphs.Mesh(
-            file=f"{asset_path}/spacecraft.obj",
-            pos=(-0.4, 0.0, -4.0),
-            euler=(90.0, 0.0, 0.0),
-            scale=3.0,
-            convexify=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/spacecraft.obj",
+                pos=(-0.4, 0.0, -4.0),
+                euler=(90.0, 0.0, 0.0),
+                scale=3.0,
+                convexify=False,
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     obj = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.5, 0.7, 0.9, 1.0),
+            ),
+            visualize_contact=True,
         ),
-        surface=gs.surfaces.Default(
-            color=(0.5, 0.7, 0.9, 1.0),
-        ),
-        visualize_contact=True,
     )
     scene.build(n_envs=64)
 
@@ -145,36 +155,42 @@ def test_inner_corner_multi_contact(obj_shape, show_viewer, tmp_path):
         show_FPS=False,
     )
     world = scene.add_entity(
-        gs.morphs.Mesh(
-            file=str(mesh_path),
-            pos=(0.0, 0.0, 0.0),
-            convexify=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=str(mesh_path),
+                pos=(0.0, 0.0, 0.0),
+                convexify=False,
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        visualize_contact=True,
-        vis_mode="collision",
     )
-    obj_surface = gs.surfaces.Default(color=(0.5, 0.7, 0.9, 1.0))
+    obj_surface = gs.surfaces.Default(color=(0.5, 0.7, 0.9, 1.0), vis_mode="collision")
     if obj_shape == "box":
         obj = scene.add_entity(
-            gs.morphs.Box(
-                size=(0.2, 0.2, 0.2),
-                pos=(0.8 - INIT_GAP, 0.0, 0.1 + INIT_GAP),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(0.2, 0.2, 0.2),
+                    pos=(0.8 - INIT_GAP, 0.0, 0.1 + INIT_GAP),
+                ),
+                surface=obj_surface,
             ),
-            surface=obj_surface,
-            vis_mode="collision",
         )
     else:
         sphere_radius = 0.1
         obj = scene.add_entity(
-            morph=gs.morphs.MeshSet(
-                files=(trimesh.creation.icosphere(radius=sphere_radius, subdivisions=3),),
-                pos=(0.8 - INIT_GAP, 0.0, sphere_radius + INIT_GAP),
-                decimate=False,
-                convexify=False,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MeshSet(
+                    files=(trimesh.creation.icosphere(radius=sphere_radius, subdivisions=3),),
+                    pos=(0.8 - INIT_GAP, 0.0, sphere_radius + INIT_GAP),
+                    decimate=False,
+                    convexify=False,
+                ),
+                surface=obj_surface,
             ),
-            surface=obj_surface,
-            vis_mode="collision",
         )
     scene.build()
 
@@ -242,23 +258,31 @@ def test_tunneling(show_viewer):
         show_FPS=False,
     )
     scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/tank.obj",
-            euler=(95, 0, 0),
-            scale=5.0,
-            fixed=True,
-            convexify=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/tank.obj",
+                euler=(95, 0, 0),
+                scale=5.0,
+                fixed=True,
+                convexify=False,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     rod = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/stirrer.obj",
-            pos=(0.0, 0.0, 0.2),
-            convexify=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/stirrer.obj",
+                pos=(0.0, 0.0, 0.2),
+                convexify=False,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        vis_mode="collision",
-        visualize_contact=True,
     )
     scene.build()
 
@@ -283,22 +307,30 @@ def test_overlap(show_viewer):
         show_FPS=False,
     )
     a = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/stirrer.obj",
-            pos=(-0.051, 0.0, 0.0),
-            convexify=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/stirrer.obj",
+                pos=(-0.051, 0.0, 0.0),
+                convexify=False,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     b = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/stirrer.obj",
-            pos=(+0.05, 0.0, 0.0),
-            euler=(0, 0, 90),
-            convexify=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/stirrer.obj",
+                pos=(+0.05, 0.0, 0.0),
+                euler=(0, 0, 90),
+                convexify=False,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        vis_mode="collision",
-        visualize_contact=True,
     )
     # Two compact solid meshes barely touching along their local OBB diagonal, away from the stirrers. The
     # closing-direction penetration floor must read the true submillimetric overlap along the axis; an OBB-projection
@@ -308,10 +340,12 @@ def test_overlap(show_viewer):
     for i_apple in range(2):
         apples.append(
             scene.add_entity(
-                gs.morphs.MJCF(
-                    file=f"{asset_path}/apple_15/model.xml",
-                    pos=(0.0, 0.5 + 0.2 * i_apple, 0.0),
-                    convexify=False,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.MJCF(
+                        file=f"{asset_path}/apple_15/model.xml",
+                        pos=(0.0, 0.5 + 0.2 * i_apple, 0.0),
+                        convexify=False,
+                    ),
                 ),
             )
         )
@@ -371,13 +405,17 @@ def test_shell_crossing_recovery(show_viewer):
     for i_cup in range(2):
         cups.append(
             scene.add_entity(
-                gs.morphs.MJCF(
-                    file=f"{asset_path}/cup_2/model.xml",
-                    pos=(0.0, 0.0, 0.5 * i_cup),
-                    convexify=False,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.MJCF(
+                        file=f"{asset_path}/cup_2/model.xml",
+                        pos=(0.0, 0.0, 0.5 * i_cup),
+                        convexify=False,
+                    ),
+                    surface=gs.surfaces.Default(
+                        vis_mode="collision",
+                    ),
+                    # visualize_contact=True,
                 ),
-                vis_mode="collision",
-                # visualize_contact=True,
             )
         )
     scene.build()
@@ -456,32 +494,44 @@ def test_concentric_contact(direction, show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     # Realistic steel density so the nut carries a real fastener's mass and inertia.
     steel = gs.materials.Rigid(rho=7850.0)
     scene.add_entity(
-        gs.morphs.Mesh(
-            # Head bottom rests on the plane (z = 0), head top at z = 11 mm, shaft tip at z = 43 mm.
-            pos=(0.0, 0.0, 0.011),
-            file="meshes/bolt_nut/bolt.stl",
-            decimate=False,
-            convexify=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                # Head bottom rests on the plane (z = 0), head top at z = 11 mm, shaft tip at z = 43 mm.
+                pos=(0.0, 0.0, 0.011),
+                file="meshes/bolt_nut/bolt.stl",
+                decimate=False,
+                convexify=False,
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            material=steel,
         ),
-        material=steel,
-        vis_mode="collision",
     )
     nut = scene.add_entity(
-        gs.morphs.Mesh(
-            # Pre-engaged near the top of the shaft (base ~24 mm) so it has the whole thread to travel.
-            pos=(0.0, 0.0, 0.024),
-            file="meshes/bolt_nut/nut.stl",
-            decimate=False,
-            convexify=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                # Pre-engaged near the top of the shaft (base ~24 mm) so it has the whole thread to travel.
+                pos=(0.0, 0.0, 0.024),
+                file="meshes/bolt_nut/nut.stl",
+                decimate=False,
+                convexify=False,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            material=steel,
+            # visualize_contact=True,
         ),
-        material=steel,
-        vis_mode="collision",
-        # visualize_contact=True,
     )
     scene.build()
 
@@ -585,23 +635,31 @@ def test_concave_slanted_wall(timestep, decimate, show_viewer):
         renderer=gs.renderers.Rasterizer(),
         show_viewer=show_viewer,
     )
-    scene.add_entity(morph=gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     asset_path = get_hf_dataset(pattern="glb/orange_plastic_bowl.glb")
     for i in range(NUM_BOWLS):
         # Independent yaws: the collision mesh seats on a few vertices, so under one shared orientation every nested
         # pair tilts by the same small angle in the same direction and the pile arcs by the sum of those tilts.
         # Independent orientations let the tilts average out, as in a real pile of bowls.
         scene.add_entity(
-            morph=gs.morphs.Mesh(
-                file=f"{asset_path}/glb/orange_plastic_bowl.glb",
-                pos=(0, 0, 0.0 + i * (BOWL_THICKNESS - 0.15 * timeconst)),
-                euler=(90, 0, np.random.uniform(0.0, 360.0)),
-                convexify=False,
-                decimate=decimate,
-                file_meshes_are_zup=True,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Mesh(
+                    file=f"{asset_path}/glb/orange_plastic_bowl.glb",
+                    pos=(0, 0, 0.0 + i * (BOWL_THICKNESS - 0.15 * timeconst)),
+                    euler=(90, 0, np.random.uniform(0.0, 360.0)),
+                    convexify=False,
+                    decimate=decimate,
+                    file_meshes_are_zup=True,
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
+                # visualize_contact=(i in (0, NUM_BOWLS - 1)),
             ),
-            vis_mode="collision",
-            # visualize_contact=(i in (0, NUM_BOWLS - 1)),
         )
     scene.build()
 
@@ -646,24 +704,32 @@ def test_mesh_repair(convexify, show_viewer, gjk_collision):
     )
     asset_path = get_hf_dataset(pattern="work_table.glb")
     scene.add_entity(
-        gs.morphs.Mesh(
-            file=f"{asset_path}/work_table.glb",
-            pos=(0.4, 0.0, -0.54),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/work_table.glb",
+                pos=(0.4, 0.0, -0.54),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     asset_path = get_hf_dataset(pattern="spoon.glb")
     obj = scene.add_entity(
-        gs.morphs.Mesh(
-            file=f"{asset_path}/spoon.glb",
-            pos=(0.3, 0, 0.009),
-            euler=(0.0, -2.5 if convexify else 0.0, 0.0),
-            convexify=convexify,
-            scale=1.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/spoon.glb",
+                pos=(0.3, 0, 0.009),
+                euler=(0.0, -2.5 if convexify else 0.0, 0.0),
+                convexify=convexify,
+                scale=1.0,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        vis_mode="collision",
-        visualize_contact=True,
     )
     scene.build()
 
@@ -726,25 +792,33 @@ def test_convexify(euler, show_viewer, gjk_collision):
         show_FPS=False,
     )
     box = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/blue_box/model.urdf",
-            fixed=True,
-            pos=(0.0, 1.0, 0.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/blue_box/model.urdf",
+                fixed=True,
+                pos=(0.0, 1.0, 0.0),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/tank.obj",
-            scale=5.0,
-            fixed=True,
-            pos=(0.05, -0.05, 0.0),
-            euler=euler,
-            # coacd_options=gs.options.CoacdOptions(
-            #     threshold=0.08,
-            # ),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/tank.obj",
+                scale=5.0,
+                fixed=True,
+                pos=(0.05, -0.05, 0.0),
+                euler=euler,
+                # coacd_options=gs.options.CoacdOptions(
+                #     threshold=0.08,
+                # ),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     objs = []
     for i, (asset_name, xml_file) in enumerate(
@@ -752,12 +826,16 @@ def test_convexify(euler, show_viewer, gjk_collision):
     ):
         asset_path = get_hf_dataset(pattern=f"{asset_name}/*")
         obj = scene.add_entity(
-            gs.morphs.MJCF(
-                file=f"{asset_path}/{asset_name}/{xml_file}",
-                pos=(OBJ_OFFSET_X * (1.5 - i), OBJ_OFFSET_Y * (i - 1.5), 0.1 if euler == (90, 0, 90) else 0.4),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MJCF(
+                    file=f"{asset_path}/{asset_name}/{xml_file}",
+                    pos=(OBJ_OFFSET_X * (1.5 - i), OBJ_OFFSET_Y * (i - 1.5), 0.1 if euler == (90, 0, 90) else 0.4),
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
+                visualize_contact=True,
             ),
-            vis_mode="collision",
-            visualize_contact=True,
         )
         objs.append(obj)
     # cam = scene.add_camera(
@@ -819,10 +897,12 @@ def test_convexify(euler, show_viewer, gjk_collision):
 def test_convexify_fusion_groups(convexify, watertighten, xml_path):
     scene = gs.Scene()
     entity = scene.add_entity(
-        gs.morphs.MJCF(
-            file=xml_path,
-            convexify=convexify,
-            watertighten=watertighten,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+                convexify=convexify,
+                watertighten=watertighten,
+            ),
         ),
     )
     scene.build()
@@ -885,14 +965,18 @@ def test_many_objects_collision(convexify, show_viewer, tol):
         show_viewer=show_viewer,
     )
     tank = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/tank.obj",
-            scale=5.0,
-            fixed=True,
-            euler=(90, 0, 90),
-            convexify=convexify,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/tank.obj",
+                scale=5.0,
+                fixed=True,
+                euler=(90, 0, 90),
+                convexify=convexify,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     assets = (("mug_1", "output.xml"), ("donut_0", "output.xml"), ("cup_2", "model.xml"), ("apple_15", "model.xml"))
     asset_files = {name: f"{get_hf_dataset(pattern=f'{name}/*')}/{name}/{xml}" for name, xml in assets}
@@ -905,13 +989,17 @@ def test_many_objects_collision(convexify, show_viewer, tol):
         base_pos = ((gx + 0.5 * (gz % 2)) * 0.1 - 0.18, (gy + 0.5 * (gz % 2)) * 0.145 - 0.265, 0.11 + gz * 0.08)
         objs.append(
             scene.add_entity(
-                gs.morphs.MJCF(
-                    file=asset_files[name],
-                    pos=base_pos + np.random.uniform(-2e-4, 2e-4, 3),
-                    euler=(90.0, 0.0, 0.0) + np.random.uniform(-0.2, 0.2, 3),
-                    convexify=convexify,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.MJCF(
+                        file=asset_files[name],
+                        pos=base_pos + np.random.uniform(-2e-4, 2e-4, 3),
+                        euler=(90.0, 0.0, 0.0) + np.random.uniform(-0.2, 0.2, 3),
+                        convexify=convexify,
+                    ),
+                    surface=gs.surfaces.Default(
+                        vis_mode="collision",
+                    ),
                 ),
-                vis_mode="collision",
             )
         )
     scene.build()

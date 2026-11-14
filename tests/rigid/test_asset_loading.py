@@ -25,7 +25,11 @@ def test_depth_first_link_ordering(xml_path, model_name, show_viewer):
     # equivalent separate entities.
     scene = gs.Scene(show_viewer=show_viewer)
     morph = gs.morphs.MJCF(file=xml_path) if model_name.endswith("mjcf") else gs.morphs.URDF(file=xml_path, fixed=True)
-    entity = scene.add_entity(morph)
+    entity = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=morph,
+        ),
+    )
     scene.build(n_envs=0)
 
     parents = [link.parent_idx for link in entity.links]
@@ -52,19 +56,25 @@ def test_mjcf_parsing_with_include():
         ),
     )
     robot1 = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file="xml/franka_emika_panda/scene.xml",
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/scene.xml",
+            ),
+        ),
     )
     robot2 = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+        ),
     )
     robot3 = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file="xml/franka_sim/franka_panda.xml",
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_sim/franka_panda.xml",
+            ),
+        ),
     )
     scene.build()
     assert_allclose(robot1.get_qpos(), robot2.get_qpos(), tol=gs.EPS)
@@ -77,9 +87,11 @@ def test_mjcf_include_rewrites_asset_mesh_and_skips_default_mesh(mjcf_include_de
 
     scene = gs.Scene()
     entity = scene.add_entity(
-        gs.morphs.MJCF(
-            file=scene_path,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=scene_path,
+            ),
+        ),
     )
     scene.build()
 
@@ -95,16 +107,20 @@ def test_ground_plane_preservation(box_plan):
 
     scene = gs.Scene()
     entity_with_ground = scene.add_entity(
-        gs.morphs.MJCF(
-            file=mjcf,
-            exclude_ground_plane=False,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=mjcf,
+                exclude_ground_plane=False,
+            ),
+        ),
     )
     entity_without_ground = scene.add_entity(
-        gs.morphs.MJCF(
-            file=mjcf,
-            exclude_ground_plane=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=mjcf,
+                exclude_ground_plane=True,
+            ),
+        ),
     )
     scene.build()
 
@@ -129,14 +145,18 @@ def test_urdf_parsing(show_viewer, tol):
         ((False, False), (False, True), (True, False), (True, True)),
     ):
         entity = scene.add_entity(
-            morph=gs.morphs.URDF(
-                file=f"{asset_path}/microwave/microwave.urdf",
-                fixed=fixed,
-                merge_fixed_links=merge_fixed_links,
-                pos=(0.0, (i - 1.5) * POS_OFFSET, 0.0),
-                quat=tuple(WOLRD_QUAT / np.linalg.norm(WOLRD_QUAT)),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file=f"{asset_path}/microwave/microwave.urdf",
+                    fixed=fixed,
+                    merge_fixed_links=merge_fixed_links,
+                    pos=(0.0, (i - 1.5) * POS_OFFSET, 0.0),
+                    quat=tuple(WOLRD_QUAT / np.linalg.norm(WOLRD_QUAT)),
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
             ),
-            vis_mode="collision",
         )
         entities[(fixed, merge_fixed_links)] = entity
     scene.build()
@@ -255,150 +275,188 @@ def test_parsing_inertia_defaults(
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     # merge_fixed_links=False keeps every fixed link as a link of its own, so the test can check its inertial.
     entity = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=degenerate_inertials,
-            pos=(0.0, 0.0, 0.1),
-            merge_fixed_links=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=degenerate_inertials,
+                pos=(0.0, 0.0, 0.1),
+                merge_fixed_links=False,
+            ),
         ),
     )
     # The same asset welded to the world, so that the links the world carries resolve without a geometry estimate.
     entity_welded = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=degenerate_inertials,
-            pos=(0.0, -4.0, 0.1),
-            fixed=True,
-            merge_fixed_links=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=degenerate_inertials,
+                pos=(0.0, -4.0, 0.1),
+                fixed=True,
+                merge_fixed_links=False,
+            ),
         ),
     )
     # The same asset welded and then attached to a moving link, so that the links the world carried resolve at attach.
     carrier_welded = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(0.0, -8.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(0.0, -8.0, 1.0),
+            ),
         ),
     )
     entity_mounted = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=degenerate_inertials,
-            pos=(0.0, -8.0, 1.3),
-            fixed=True,
-            batch_fixed_verts=True,
-            merge_fixed_links=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=degenerate_inertials,
+                pos=(0.0, -8.0, 1.3),
+                fixed=True,
+                batch_fixed_verts=True,
+                merge_fixed_links=False,
+            ),
         ),
     )
     entity_mounted.attach(carrier_welded, parent_link_name=carrier_welded.base_link.name, pos=(0.0, 0.0, 0.2))
     entity_zero_density = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=zero_density_marker_mjcf,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=zero_density_marker_mjcf,
+            ),
         ),
     )
     entity_chain_unmerged = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=implicit_inertial_origin_chain,
-            pos=(0.0, 2.0, 0.5),
-            merge_fixed_links=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=implicit_inertial_origin_chain,
+                pos=(0.0, 2.0, 0.5),
+                merge_fixed_links=False,
+            ),
         ),
     )
     # The two merged chains are built from one in-memory model, which parsing must leave intact for the second one.
     chain_root = ET.fromstring(implicit_inertial_origin_chain)
     chain_model = urdfpy.URDF._from_xml(chain_root, chain_root, get_assets_dir())
     entity_chain_merged = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=chain_model,
-            pos=(0.8, 2.0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=chain_model,
+                pos=(0.8, 2.0, 0.5),
+            ),
         ),
     )
     entity_chain_unmerged_unaligned = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=implicit_inertial_origin_chain,
-            pos=(0.8, 1.0, 0.5),
-            align=False,
-            merge_fixed_links=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=implicit_inertial_origin_chain,
+                pos=(0.8, 1.0, 0.5),
+                align=False,
+                merge_fixed_links=False,
+            ),
         ),
     )
     entity_chain_merged_unaligned = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=chain_model,
-            pos=(1.6, 1.0, 0.5),
-            align=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=chain_model,
+                pos=(1.6, 1.0, 0.5),
+                align=False,
+            ),
         ),
     )
     # The asset states no inertial for its base link. Attachment makes that base movable, so Genesis computes its
     # mass from geometry at robot density, the same value the free-standing copy gets.
     carrier = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(2.4, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(2.4, 0.0, 1.0),
+            ),
         ),
     )
     mounted_arm = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=undefined_inertia_arm,
-            pos=(2.4, 0.0, 1.3),
-            fixed=True,
-            batch_fixed_verts=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=undefined_inertia_arm,
+                pos=(2.4, 0.0, 1.3),
+                fixed=True,
+                batch_fixed_verts=True,
+            ),
         ),
     )
     mounted_arm.attach(carrier, parent_link_name=carrier.base_link.name, pos=(0.0, 0.0, 0.2))
     # A link with visual geometry only gets its mass from that geometry.
     mounted_drawn = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=undefined_inertia,
-            pos=(4.0, 0.0, 1.3),
-            collision=False,
-            fixed=True,
-            batch_fixed_verts=True,
-            align=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=undefined_inertia,
+                pos=(4.0, 0.0, 1.3),
+                collision=False,
+                fixed=True,
+                batch_fixed_verts=True,
+                align=False,
+            ),
         ),
     )
     mounted_drawn.attach(carrier, parent_link_name=carrier.base_link.name, pos=(0.8, 0.0, 0.2))
     free_arm = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=undefined_inertia_arm,
-            pos=(3.2, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=undefined_inertia_arm,
+                pos=(3.2, 0.0, 1.0),
+            ),
         ),
     )
     free_drawn = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=undefined_inertia,
-            pos=(4.8, 0.0, 1.0),
-            collision=False,
-            align=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=undefined_inertia,
+                pos=(4.8, 0.0, 1.0),
+                collision=False,
+                align=False,
+            ),
         ),
     )
     # An entity attached beneath another shares its root, so attaching that one onto a moving link makes both bases
     # movable at once. Each is estimated at the density of its own entity. The three stand consecutively, since an
     # entity created between attached ones is rejected.
     stacked_base = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(6.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(6.0, 0.0, 1.0),
+            ),
         ),
     )
     stacked_middle = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(6.0, 0.0, 1.3),
-            fixed=True,
-            batch_fixed_verts=True,
-        ),
-        material=gs.materials.Rigid(
-            rho=2000.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(6.0, 0.0, 1.3),
+                fixed=True,
+                batch_fixed_verts=True,
+            ),
+            material=gs.materials.Rigid(
+                rho=2000.0,
+            ),
         ),
     )
     stacked_tip = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(6.0, 0.0, 1.5),
-            fixed=True,
-            batch_fixed_verts=True,
-        ),
-        material=gs.materials.Rigid(
-            rho=8000.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(6.0, 0.0, 1.5),
+                fixed=True,
+                batch_fixed_verts=True,
+            ),
+            material=gs.materials.Rigid(
+                rho=8000.0,
+            ),
         ),
     )
     stacked_tip.attach(stacked_middle, parent_link_name=stacked_middle.base_link.name, pos=(0.0, 0.0, 0.2))
@@ -570,29 +628,33 @@ def test_urdf_parsing_merge_fixed_links(urdf_path, fixed, show_viewer, tol):
     urdf_rootdir = os.path.dirname(urdf_path)
     asset_path = get_hf_dataset(pattern=os.path.join(urdf_rootdir, "*") if urdf_rootdir else urdf_path)
     robot_1 = scene.add_entity(
-        gs.morphs.URDF(
-            file=os.path.join(asset_path, urdf_path),
-            pos=POS,
-            euler=EULER,
-            fixed=fixed,
-            recompute_inertia=True,
-            merge_fixed_links=False,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1, 0, 0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=os.path.join(asset_path, urdf_path),
+                pos=POS,
+                euler=EULER,
+                fixed=fixed,
+                recompute_inertia=True,
+                merge_fixed_links=False,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1, 0, 0, 0.5),
+            ),
         ),
     )
     robot_2 = scene.add_entity(
-        gs.morphs.URDF(
-            file=os.path.join(asset_path, urdf_path),
-            pos=POS,
-            euler=EULER,
-            fixed=fixed,
-            recompute_inertia=True,
-            merge_fixed_links=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0, 1, 0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=os.path.join(asset_path, urdf_path),
+                pos=POS,
+                euler=EULER,
+                fixed=fixed,
+                recompute_inertia=True,
+                merge_fixed_links=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0, 1, 0, 0.5),
+            ),
         ),
     )
     scene.build()
@@ -632,9 +694,11 @@ def test_mjcf_parsing_merge_fixed_links(xml_path, show_viewer):
 
     scene = gs.Scene(show_viewer=show_viewer)
     robot = scene.add_entity(
-        gs.morphs.MJCF(
-            file=xml_path,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+            ),
+        ),
     )
     scene.build()
 
@@ -686,13 +750,21 @@ def test_urdf_capsule(tmp_path, show_viewer, tol):
         )
 
     scene = gs.Scene(show_viewer=show_viewer)
-    scene.add_entity(gs.morphs.Plane())
-    robot = scene.add_entity(
-        gs.morphs.URDF(
-            file=urdf_path,
-            pos=(0.0, 0.0, 0.3),
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
         ),
-        vis_mode="collision",
+    )
+    robot = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=urdf_path,
+                pos=(0.0, 0.0, 0.3),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+        ),
     )
     scene.build()
 
@@ -722,10 +794,12 @@ def test_urdf_joint_dynamics(joint_damping, joint_friction, xml_path):
     # like an absent tag rather than reaching the solver as a null value.
     scene = gs.Scene()
     robot = scene.add_entity(
-        gs.morphs.URDF(
-            file=xml_path,
-            pos=(0, 0, 0.8),
-            convexify=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=xml_path,
+                pos=(0, 0, 0.8),
+                convexify=True,
+            ),
         ),
     )
     scene.build()
@@ -780,28 +854,54 @@ def test_default_armature(xml_path, trees_and_slider_mjcf, tol):
             enable_collision=False,
         ),
     )
-    robot = scene.add_entity(morph)
-    robot_without_armature = scene.add_entity(morph_without_armature)
-    robot_heterogeneous = scene.add_entity(morphs_heterogeneous)
+    robot = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=morph,
+        ),
+    )
+    robot_without_armature = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=morph_without_armature,
+        ),
+    )
+    robot_heterogeneous = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=morphs_heterogeneous,
+        ),
+    )
     # One entity holding three kinematic trees, only the first with a joint the default applies to.
     robot_trees = scene.add_entity(
-        gs.morphs.MJCF(
-            file=trees_and_slider_mjcf,
-            pos=(0.0, 3.0, 0.0),
-            default_armature=DEFAULT_ARMATURE,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=trees_and_slider_mjcf,
+                pos=(0.0, 3.0, 0.0),
+                default_armature=DEFAULT_ARMATURE,
+            ),
+        ),
     )
     robot_trees_reference = scene.add_entity(
-        gs.morphs.MJCF(
-            file=trees_and_slider_mjcf,
-            pos=(0.0, 4.0, 0.0),
-            default_armature=None,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=trees_and_slider_mjcf,
+                pos=(0.0, 4.0, 0.0),
+                default_armature=None,
+            ),
+        ),
     )
     carrier, carrier_reference = [], []
     for (carrier_morph, mounted_morph), pair in zip(carriers, (carrier, carrier_reference)):
-        pair.append(scene.add_entity(carrier_morph))
-        mounted_entity = scene.add_entity(mounted_morph)
+        pair.append(
+            scene.add_entity(
+                options=gs.entities.Rigid(
+                    morph=carrier_morph,
+                ),
+            )
+        )
+        mounted_entity = scene.add_entity(
+            options=gs.entities.Rigid(
+                morph=mounted_morph,
+            ),
+        )
         mounted_entity.attach(pair[0], parent_link_name=pair[0].base_link.name, pos=(0.0, 0.0, 0.5))
     (carrier,), (carrier_reference,) = carrier, carrier_reference
     scene.build(n_envs=2)
@@ -843,15 +943,21 @@ def test_xacro_loading(xacro_robot, show_viewer, tol):
         merge_fixed_links=False,
     )
 
-    entity = scene.add_entity(morph)
+    entity = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=morph,
+        ),
+    )
 
     # Load again with overridden mass via xacro_args
     heavy = scene.add_entity(
-        gs.morphs.URDF(
-            file=xacro_robot,
-            fixed=True,
-            merge_fixed_links=False,
-            xacro_args={"link_mass": "5.0"},
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=xacro_robot,
+                fixed=True,
+                merge_fixed_links=False,
+                xacro_args={"link_mass": "5.0"},
+            ),
         ),
     )
     scene.build()
@@ -882,57 +988,69 @@ def test_xacro_loading(xacro_robot, show_viewer, tol):
 def test_color_overwrite(overwrite, urdf_with_external_assets, show_viewer):
     scene = gs.Scene(show_viewer=show_viewer)
     box = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/blue_box/model.urdf",
-            convexify=False,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, 1.0) if overwrite else None,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/blue_box/model.urdf",
+                convexify=False,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.0, 0.0, 1.0) if overwrite else None,
+            ),
         ),
     )
     asset_path = get_hf_dataset(pattern="chain.urdf")
     chain = scene.add_entity(
-        gs.morphs.URDF(
-            file=f"{asset_path}/chain.urdf",
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0, 0, 1.0) if overwrite else None,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=f"{asset_path}/chain.urdf",
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0, 0, 1.0) if overwrite else None,
+            ),
         ),
     )
     axis = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/axis.obj",
-            convexify=False,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, 1.0) if overwrite else None,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/axis.obj",
+                convexify=False,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.0, 0.0, 1.0) if overwrite else None,
+            ),
         ),
     )
     asset_path = get_hf_dataset(pattern="work_table.glb")
     table = scene.add_entity(
-        gs.morphs.Mesh(
-            file=f"{asset_path}/work_table.glb",
-            convexify=False,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, 1.0) if overwrite else None,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/work_table.glb",
+                convexify=False,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.0, 0.0, 1.0) if overwrite else None,
+            ),
         ),
     )
     asset_path = get_hf_dataset(pattern="humanoid.xml")
     humanoid = scene.add_entity(
-        gs.morphs.MJCF(
-            file=f"{asset_path}/humanoid.xml",
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, 1.0) if overwrite else None,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=f"{asset_path}/humanoid.xml",
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.0, 0.0, 1.0) if overwrite else None,
+            ),
         ),
     )
     textured = scene.add_entity(
-        gs.morphs.URDF(
-            file=urdf_with_external_assets,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, 1.0) if overwrite else None,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=urdf_with_external_assets,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.0, 0.0, 1.0) if overwrite else None,
+            ),
         ),
     )
     if show_viewer:
@@ -1042,7 +1160,11 @@ def test_robot_scale_and_dofs_armature(xml_path, monkeypatch, tol):
                 morph = gs.morphs.MJCF(**morph_kwargs)
             else:
                 morph = gs.morphs.URDF(**morph_kwargs)
-            scene.add_entity(morph)
+            scene.add_entity(
+                options=gs.entities.Rigid(
+                    morph=morph,
+                ),
+            )
             robots_scale.append(scale)
     scene.build()
 
@@ -1125,28 +1247,40 @@ def test_mesh_primitive_COM(show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     bunny = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/bunny.obj",
-            pos=(-1.0, -1.0, 0.55),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/bunny.obj",
+                pos=(-1.0, -1.0, 0.55),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        vis_mode="collision",
-        visualize_contact=True,
     )
     cube = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.5, 0.5, 0.5),
-            pos=(1.0, 1.0, 0.55),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.5, 0.5, 0.5),
+                pos=(1.0, 1.0, 0.55),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        vis_mode="collision",
-        visualize_contact=True,
     )
     twin = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/bunny.obj",
-            pos=(-1.0, 1.0, 0.55),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/bunny.obj",
+                pos=(-1.0, 1.0, 0.55),
+            ),
         ),
     )
 
@@ -1198,7 +1332,11 @@ def test_align_mesh(show_viewer, tol):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     mango_morph = gs.morphs.Mesh(
         file=f"{mango_path}/glb/mango.glb",
         scale=0.045,
@@ -1206,16 +1344,21 @@ def test_align_mesh(show_viewer, tol):
         align=True,
     )
     mango = scene.add_entity(
-        mango_morph,
-        material=gs.materials.Rigid(
-            rho=1000.0,
+        options=gs.entities.Rigid(
+            morph=mango_morph,
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            material=gs.materials.Rigid(
+                rho=1000.0,
+            ),
+            visualize_contact=True,
         ),
-        vis_mode="collision",
-        visualize_contact=True,
     )
     ghost_mango = scene.add_entity(
-        mango_morph,
-        material=gs.materials.Kinematic(),
+        options=gs.entities.Kinematic(
+            morph=mango_morph,
+        ),
     )
     # Heterogeneous entity sharing one link across a bowl and a mango variant. Each variant must be aligned to its own
     # geometry (link origin at that variant's COM) and report its own offset per environment. The bowl carries a
@@ -1223,23 +1366,25 @@ def test_align_mesh(show_viewer, tol):
     # like the standalone mango above.
     HET_POS = (0.5, 0.0, 0.1)
     het_obj = scene.add_entity(
-        morph=(
-            gs.morphs.Mesh(
-                file=f"{bowl_path}/glb/orange_plastic_bowl.glb",
-                scale=0.5,
-                pos=HET_POS,
-                offset_euler=(30.0, 0.0, 0.0),
-                align=True,
+        options=gs.entities.Rigid(
+            morph=(
+                gs.morphs.Mesh(
+                    file=f"{bowl_path}/glb/orange_plastic_bowl.glb",
+                    scale=0.5,
+                    pos=HET_POS,
+                    offset_euler=(30.0, 0.0, 0.0),
+                    align=True,
+                ),
+                gs.morphs.Mesh(
+                    file=f"{mango_path}/glb/mango.glb",
+                    scale=0.045,
+                    pos=HET_POS,
+                    align=True,
+                ),
             ),
-            gs.morphs.Mesh(
-                file=f"{mango_path}/glb/mango.glb",
-                scale=0.045,
-                pos=HET_POS,
-                align=True,
+            material=gs.materials.Rigid(
+                rho=1000.0,
             ),
-        ),
-        material=gs.materials.Rigid(
-            rho=1000.0,
         ),
     )
     scene.build(n_envs=2)
@@ -1327,20 +1472,29 @@ def test_align_urdf(show_viewer, tol):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     fork_morph = gs.morphs.URDF(
         file=f"{asset_path}/fork/fork.urdf",
         pos=INIT_POS,
         euler=(0.0, 90.0, 0.0),
     )
     fork = scene.add_entity(
-        fork_morph,
-        vis_mode="collision",
-        visualize_contact=True,
+        options=gs.entities.Rigid(
+            morph=fork_morph,
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
+        ),
     )
     ghost_fork = scene.add_entity(
-        fork_morph,
-        material=gs.materials.Kinematic(),
+        options=gs.entities.Kinematic(
+            morph=fork_morph,
+        ),
     )
     scene.build()
 
@@ -1377,13 +1531,13 @@ def test_align_mixed_mass_raises():
         links_inertial=[{"mass": 1.0, "ixx": 0.01, "iyy": 0.01, "izz": 0.01, "origin_xyz": "0 0 0"}, None],
         joint_type="fixed",
     )
-    for material in (gs.materials.Rigid(), gs.materials.Kinematic()):
+    for options_cls in (gs.entities.Rigid, gs.entities.Kinematic):
         scene = gs.Scene(
             show_viewer=False,
             show_FPS=False,
         )
         with pytest.raises(gs.GenesisException, match="geometry-estimated link masses"):
-            scene.add_entity(gs.morphs.URDF(file=urdf, align=True, merge_fixed_links=False), material=material)
+            scene.add_entity(options=options_cls(morph=gs.morphs.URDF(file=urdf, align=True, merge_fixed_links=False)))
 
 
 @pytest.mark.required
@@ -1398,51 +1552,67 @@ def test_align_preserves_link_local_frames(aligned_link_frame_urdfs, show_viewer
         show_viewer=show_viewer,
     )
     entity_aligned = scene.add_entity(
-        morph=gs.morphs.URDF(
-            pos=(0.0, 0.0, 0.5),
-            offset_euler=OFFSET_EULER,
-            file=aligned_link_frame_urdfs[1],
-            align=True,
-            merge_fixed_links=False,
-        ),
-        vis_mode="collision",
-    )
-    entity_unaligned = scene.add_entity(
-        morph=gs.morphs.URDF(
-            pos=(1.0, 0.0, 0.5),
-            offset_euler=OFFSET_EULER,
-            file=aligned_link_frame_urdfs[1],
-            align=False,
-            merge_fixed_links=False,
-        ),
-        vis_mode="collision",
-    )
-    entity_heterogeneous_aligned = scene.add_entity(
-        morph=tuple(
-            gs.morphs.URDF(
-                pos=(2.0, 0.0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                pos=(0.0, 0.0, 0.5),
                 offset_euler=OFFSET_EULER,
-                file=file,
+                file=aligned_link_frame_urdfs[1],
                 align=True,
                 merge_fixed_links=False,
-            )
-            for file in aligned_link_frame_urdfs
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
+    )
+    entity_unaligned = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                pos=(1.0, 0.0, 0.5),
+                offset_euler=OFFSET_EULER,
+                file=aligned_link_frame_urdfs[1],
+                align=False,
+                merge_fixed_links=False,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+        ),
+    )
+    entity_heterogeneous_aligned = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=tuple(
+                gs.morphs.URDF(
+                    pos=(2.0, 0.0, 0.5),
+                    offset_euler=OFFSET_EULER,
+                    file=file,
+                    align=True,
+                    merge_fixed_links=False,
+                )
+                for file in aligned_link_frame_urdfs
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+        ),
     )
     # The unaligned twin of each aligned entity pins the authored behavior that alignment must preserve.
     entity_heterogeneous_unaligned = scene.add_entity(
-        morph=tuple(
-            gs.morphs.URDF(
-                pos=(3.0, 0.0, 0.5),
-                offset_euler=OFFSET_EULER,
-                file=file,
-                align=False,
-                merge_fixed_links=False,
-            )
-            for file in aligned_link_frame_urdfs
+        options=gs.entities.Rigid(
+            morph=tuple(
+                gs.morphs.URDF(
+                    pos=(3.0, 0.0, 0.5),
+                    offset_euler=OFFSET_EULER,
+                    file=file,
+                    align=False,
+                    merge_fixed_links=False,
+                )
+                for file in aligned_link_frame_urdfs
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     # A heterogeneous entity needs one environment per morph variant.
     scene.build(n_envs=2)
@@ -1692,7 +1862,11 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
         show_viewer=show_viewer,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     # align=True is requested but must be ignored for these articulated robots: a free base with a DOF-bearing child is
     # not a single rigid body, so its link frames and joint-space mass coupling must be left intact (aligning it would
     # misplace the moving child and drop the base coupling). The link-spacing and settling assertions below verify this.
@@ -1701,18 +1875,21 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
         gs.morphs.URDF(file=urdf_boxes, pos=(0, 0, 0.02), align=True),
     )
     het_obj = scene.add_entity(
-        morph=het_morph,
-        material=gs.materials.Rigid(
-            rho=200.0,
-            friction=1e-2,
+        options=gs.entities.Rigid(
+            morph=het_morph,
+            material=gs.materials.Rigid(
+                rho=200.0,
+                friction=1e-2,
+            ),
         ),
     )
     # Kinematic heterogeneous URDF entity (same variants, different positions)
     het_kin = scene.add_entity(
-        morph=het_morph,
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Default(
-            color=(0.0, 0.0, 1.0, 0.4),
+        options=gs.entities.Kinematic(
+            morph=het_morph,
+            surface=gs.surfaces.Default(
+                color=(0.0, 0.0, 1.0, 0.4),
+            ),
         ),
     )
     # Free-floating single-link URDF objects with different off-center COMs. Unlike the articulated robots above (whose
@@ -1723,16 +1900,19 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
         gs.morphs.URDF(file=_build_free_body_urdf("free_body_b", "0 0 0.03"), pos=FREE_POS, align=True),
     )
     free_het = scene.add_entity(
-        morph=free_morph,
-        material=gs.materials.Rigid(
-            rho=200.0,
+        options=gs.entities.Rigid(
+            morph=free_morph,
+            material=gs.materials.Rigid(
+                rho=200.0,
+            ),
         ),
     )
     # Kinematic counterpart of the aligned free bodies. The COM/principal anchoring is applied in the base entity, so
     # for the same qpos a kinematic visualization and the rigid body it tracks must place identical world geometry.
     free_kin = scene.add_entity(
-        morph=free_morph,
-        material=gs.materials.Kinematic(),
+        options=gs.entities.Kinematic(
+            morph=free_morph,
+        ),
     )
     # A free entity whose two variants are identical, so the solver resolves a single shared offset and takes the
     # broadcast path (the base link offset) rather than the per-env variant offset. That shared base offset must still
@@ -1742,8 +1922,9 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
         gs.morphs.URDF(file=_build_free_body_urdf("free_dup_b", "0.02 0 0"), pos=FREE_POS, align=True),
     )
     free_dup = scene.add_entity(
-        morph=dup_morph,
-        material=gs.materials.Rigid(),
+        options=gs.entities.Rigid(
+            morph=dup_morph,
+        ),
     )
     # Free bodies whose root link is empty and whose mass lives on a fixed child (merge_fixed_links=False keeps the
     # wrapper). The empty root reads the gs.EPS placeholder and the child its authored mass.
@@ -1763,7 +1944,9 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
         ),
     )
     free_wrapped = scene.add_entity(
-        morph=wrapped_morph,
+        options=gs.entities.Rigid(
+            morph=wrapped_morph,
+        ),
     )
     scene.build(n_envs=4, env_spacing=(0.0, 0.5))
 
@@ -1971,12 +2154,14 @@ def test_multi_root_offset(show_viewer, tol):
         show_FPS=False,
     )
     entity = scene.add_entity(
-        gs.morphs.MJCF(
-            file=ET.tostring(
-                create_two_free_bodies_mjcf("two_bodies", BODY_A_POS, GEOM_A_POS, BODY_B_POS, GEOM_B_POS),
-                encoding="unicode",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=ET.tostring(
+                    create_two_free_bodies_mjcf("two_bodies", BODY_A_POS, GEOM_A_POS, BODY_B_POS, GEOM_B_POS),
+                    encoding="unicode",
+                ),
+                align=True,
             ),
-            align=True,
         ),
     )
     scene.build()
@@ -2032,51 +2217,69 @@ def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypat
         show_viewer=show_viewer,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     franka = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/panda_bullet/panda_nohand.urdf",
-            merge_fixed_links=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/panda_bullet/panda_nohand.urdf",
+                merge_fixed_links=False,
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     hand = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/panda_bullet/hand.urdf",
-            euler=EULER_OFFSET,
-            fixed=is_fixed,
-            merge_fixed_links=merge_fixed_links,
-            batch_fixed_verts=is_fixed,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/panda_bullet/hand.urdf",
+                euler=EULER_OFFSET,
+                fixed=is_fixed,
+                merge_fixed_links=merge_fixed_links,
+                batch_fixed_verts=is_fixed,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     ghost_mount = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.05, 0.05, 0.05),
-            pos=GHOST_MOUNT_POS,
+        options=gs.entities.Kinematic(
+            morph=gs.morphs.Box(
+                size=(0.05, 0.05, 0.05),
+                pos=GHOST_MOUNT_POS,
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     ghost_tool = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.02, 0.02, 0.02),
-            pos=(2.0, 2.0, 2.0),
+        options=gs.entities.Kinematic(
+            morph=gs.morphs.Box(
+                size=(0.02, 0.02, 0.02),
+                pos=(2.0, 2.0, 2.0),
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     tool = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.005,
-            # A conflicting morph pose: the explicit mounting transform below must override it.
-            pos=(1.0, -2.0, 3.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.005,
+                # A conflicting morph pose: the explicit mounting transform below must override it.
+                pos=(1.0, -2.0, 3.0),
+            ),
         ),
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.02, 0.02, 0.02),
-            pos=(0.3, 0.0, 0.01),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.02, 0.02, 0.02),
+                pos=(0.3, 0.0, 0.01),
+            ),
         ),
     )
     with pytest.raises(gs.GenesisException):

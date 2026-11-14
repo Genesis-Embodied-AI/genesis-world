@@ -72,30 +72,38 @@ def measure_stiction(friction_cone, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(0.0, 0.0, 0.1),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(0.0, 0.0, 0.1),
+            ),
         ),
     )
     spinner = scene.add_entity(
-        gs.morphs.MJCF(
-            file=checkered_ball_mjcf(),
-            pos=(0.6, 0.0, RADIUS),
-        ),
-        material=gs.materials.Rigid(
-            friction_torsional=0.05,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=checkered_ball_mjcf(),
+                pos=(0.6, 0.0, RADIUS),
+            ),
+            material=gs.materials.Rigid(
+                friction_torsional=0.05,
+            ),
         ),
     )
     roller = scene.add_entity(
-        gs.morphs.MJCF(
-            file=checkered_ball_mjcf(),
-            pos=(1.2, 0.0, RADIUS),
-        ),
-        material=gs.materials.Rigid(
-            friction_rolling=0.05,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=checkered_ball_mjcf(),
+                pos=(1.2, 0.0, RADIUS),
+            ),
+            material=gs.materials.Rigid(
+                friction_rolling=0.05,
+            ),
         ),
     )
     scene.build()

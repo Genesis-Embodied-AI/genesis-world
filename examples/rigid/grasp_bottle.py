@@ -29,21 +29,29 @@ def main():
     )
 
     plane = scene.add_entity(
-        gs.morphs.URDF(file="urdf/plane/plane.urdf", fixed=True),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(file="urdf/plane/plane.urdf", fixed=True),
+        ),
     )
     bottle = scene.add_entity(
-        material=gs.materials.Rigid(
-            rho=300,
-        ),
-        morph=gs.morphs.URDF(
-            file="urdf/3763/mobility_vhacd.urdf",
-            scale=0.09,
-            pos=(0.65, 0.0, 0.036),
-            euler=(0, 90, 0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/3763/mobility_vhacd.urdf",
+                scale=0.09,
+                pos=(0.65, 0.0, 0.036),
+                euler=(0, 90, 0),
+            ),
+            material=gs.materials.Rigid(
+                rho=300,
+            ),
         ),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+        ),
     )
 
     scene.build(n_envs=args.num_envs, env_spacing=(1, 1))

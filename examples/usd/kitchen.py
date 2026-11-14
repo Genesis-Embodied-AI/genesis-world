@@ -57,7 +57,11 @@ def main():
         ),
         show_viewer=args.vis,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     if args.full:
         patterns = FULL_ROOM_ASSETS[1]
@@ -83,11 +87,15 @@ def main():
             gs.raise_exception(f"USD file not found: {usd_file}")
         gs.logger.info(f"Loading {rel_path} ...")
         entities = scene.add_stage(
-            morph=gs.morphs.USD(
-                file=usd_file,
-                fixed=fixed,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.USD(
+                    file=usd_file,
+                    fixed=fixed,
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision" if args.collision else "visual",
+                ),
             ),
-            vis_mode="collision" if args.collision else "visual",
         )
         for entity in entities:
             gs.logger.info(

@@ -66,22 +66,26 @@ def main():
     # Two fixed plates pinch the ball with a slight interpenetration that supplies the grip normal force.
     for i_side in range(2):
         scene.add_entity(
-            gs.morphs.Box(
-                size=(0.3, 0.02, 0.3),
-                pos=(0.0, (2 * i_side - 1) * 0.1095, 0.3),
-                fixed=True,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(0.3, 0.02, 0.3),
+                    pos=(0.0, (2 * i_side - 1) * 0.1095, 0.3),
+                    fixed=True,
+                ),
+                material=gs.materials.Rigid(
+                    friction_torsional=0.002,
+                ),
+            ),
+        )
+    ball = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=checkered_ball_mjcf(),
+                pos=(0.0, 0.0, 0.3),
             ),
             material=gs.materials.Rigid(
                 friction_torsional=0.002,
             ),
-        )
-    ball = scene.add_entity(
-        gs.morphs.MJCF(
-            file=checkered_ball_mjcf(),
-            pos=(0.0, 0.0, 0.3),
-        ),
-        material=gs.materials.Rigid(
-            friction_torsional=0.002,
         ),
     )
 

@@ -27,12 +27,16 @@ def main():
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     drone = scene.add_entity(
-        morph=gs.morphs.Drone(
-            file="urdf/drones/cf2x.urdf",
-            pos=(0.0, 0, 0.02),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Drone(
+                file="urdf/drones/cf2x.urdf",
+                pos=(0.0, 0, 0.02),
+            ),
         ),
     )
 

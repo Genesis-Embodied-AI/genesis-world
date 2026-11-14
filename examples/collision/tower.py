@@ -34,7 +34,11 @@ def main():
         show_viewer=args.vis,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     # create pyramid of boxes
     box_width, box_length, box_height = 0.25, 2.0, 0.1
@@ -50,9 +54,11 @@ def main():
             box_pos_1 = (0, +0.4 * box_length, i * (box_height - 1e-3) + 0.5 * box_height)
         for box_pos in (box_pos_0, box_pos_1):
             scene.add_entity(
-                gs.morphs.Box(
-                    size=box_size,
-                    pos=box_pos,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Box(
+                        size=box_size,
+                        pos=box_pos,
+                    ),
                 ),
             )
 
@@ -60,27 +66,33 @@ def main():
     if object_type == "duck":
         duck_scale = 0.8
         scene.add_entity(
-            morph=gs.morphs.Mesh(
-                file="meshes/duck.obj",
-                scale=duck_scale,
-                pos=(0, -0.1, num_stacks * box_height + 10 * duck_scale),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Mesh(
+                    file="meshes/duck.obj",
+                    scale=duck_scale,
+                    pos=(0, -0.1, num_stacks * box_height + 10 * duck_scale),
+                ),
             ),
         )
     elif object_type == "sphere":
         sphere_radius = 2.0
         scene.add_entity(
-            morph=gs.morphs.Sphere(
-                radius=sphere_radius,
-                pos=(0.0, 0.0, num_stacks * box_height + 5 * sphere_radius),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Sphere(
+                    radius=sphere_radius,
+                    pos=(0.0, 0.0, num_stacks * box_height + 5 * sphere_radius),
+                ),
             ),
         )
     elif object_type == "cylinder":
         cylinder_radius, cylinder_height = 2.0, 1.0
         scene.add_entity(
-            morph=gs.morphs.Cylinder(
-                radius=cylinder_radius,
-                height=cylinder_height,
-                pos=(0.0, 0.0, num_stacks * box_height + 5 * cylinder_height),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Cylinder(
+                    radius=cylinder_radius,
+                    height=cylinder_height,
+                    pos=(0.0, 0.0, num_stacks * box_height + 5 * cylinder_height),
+                ),
             ),
         )
 

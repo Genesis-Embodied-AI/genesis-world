@@ -34,25 +34,31 @@ def main():
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     cube = scene.add_entity(
-        material=gs.materials.MPM.Elastic(),
-        morph=gs.morphs.Box(
-            size=(0.04, 0.04, 0.04),
-            pos=(0.65, 0.0, 0.025),
-            euler=(0, 0, 0),
-        ),
-        surface=gs.surfaces.Default(
-            vis_mode="particle",
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                size=(0.04, 0.04, 0.04),
+                pos=(0.65, 0.0, 0.025),
+                euler=(0, 0, 0),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="particle",
+            ),
+            material=gs.materials.MPM.Elastic(),
         ),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-        ),
-        material=gs.materials.Rigid(
-            coup_friction=1.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+            material=gs.materials.Rigid(
+                coup_friction=1.0,
+            ),
         ),
     )
 

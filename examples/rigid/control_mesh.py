@@ -29,10 +29,12 @@ def main():
     )
 
     duck = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.1,
-            pos=(0, 0, 0.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.1,
+                pos=(0, 0, 0.0),
+            ),
         ),
     )
     scene.build()

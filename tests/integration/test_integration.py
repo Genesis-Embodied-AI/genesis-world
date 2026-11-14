@@ -50,33 +50,43 @@ def test_pick_and_place(mode, show_viewer):
         show_FPS=False,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     cube = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.05, 0.05, 0.05),
-            pos=(0.65, 0.0, 0.025),
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(1, 0, 0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.05, 0.05, 0.05),
+                pos=(0.65, 0.0, 0.025),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(1, 0, 0),
+            ),
         ),
     )
     scene.add_entity(
-        gs.morphs.Box(
-            size=(0.05, 0.05, 0.05),
-            pos=(0.4, 0.2, 0.025),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0, 1, 0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.05, 0.05, 0.05),
+                pos=(0.4, 0.2, 0.025),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0, 1, 0),
+            ),
         ),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        visualize_contact=True,
-        vis_mode="collision",
     )
     scene.build()
 
@@ -190,8 +200,10 @@ def test_hanging_rigid_cable(show_viewer, tol):
         show_FPS=False,
     )
     robot = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/cable.xml",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/cable.xml",
+            ),
         ),
     )
     scene.build()
@@ -241,15 +253,19 @@ def test_franka_panda_grasp_fem_entity(primitive_type, show_viewer):
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-        ),
-        material=gs.materials.Rigid(
-            friction=1.0,
-            coup_friction=1.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+            material=gs.materials.Rigid(
+                friction=1.0,
+                coup_friction=1.0,
+            ),
         ),
     )
     # Only allow finger contact to accelerate
@@ -259,28 +275,32 @@ def test_franka_panda_grasp_fem_entity(primitive_type, show_viewer):
             geom.desc.conaffinity = 0
     if primitive_type == "sphere":
         obj = scene.add_entity(
-            morph=gs.morphs.Sphere(
-                pos=(0.65, 0.0, 0.02),
-                radius=0.02,
-            ),
-            material=gs.materials.FEM.Elastic(
-                E=1e5,
-                nu=0.4,
-                friction_mu=1.0,
-                model="linear_corotated",
+            options=gs.entities.FEM(
+                morph=gs.morphs.Sphere(
+                    pos=(0.65, 0.0, 0.02),
+                    radius=0.02,
+                ),
+                material=gs.materials.FEM.Elastic(
+                    E=1e5,
+                    nu=0.4,
+                    friction_mu=1.0,
+                    model="linear_corotated",
+                ),
             ),
         )
     else:  # primitive_type == "box":
         asset_path = get_hf_dataset(pattern="meshes/cube8.obj")
         obj = scene.add_entity(
-            morph=gs.morphs.Mesh(
-                file=f"{asset_path}/meshes/cube8.obj",
-                pos=(0.65, 0.0, 0.02),
-                scale=0.02,
-            ),
-            material=gs.materials.FEM.Elastic(
-                friction_mu=1.0,
-                model="linear_corotated",
+            options=gs.entities.FEM(
+                morph=gs.morphs.Mesh(
+                    file=f"{asset_path}/meshes/cube8.obj",
+                    pos=(0.65, 0.0, 0.02),
+                    scale=0.02,
+                ),
+                material=gs.materials.FEM.Elastic(
+                    friction_mu=1.0,
+                    model="linear_corotated",
+                ),
             ),
         )
     scene.build()

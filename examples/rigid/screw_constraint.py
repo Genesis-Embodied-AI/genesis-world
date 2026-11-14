@@ -41,28 +41,36 @@ def main():
         show_viewer=args.vis,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     steel = gs.materials.Rigid(rho=7850.0)
 
     bolt = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/bolt_nut/bolt.stl",
-            pos=(0.0, 0.0, 0.05),
-            euler=(0.0, 90.0, 0.0),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/bolt_nut/bolt.stl",
+                pos=(0.0, 0.0, 0.05),
+                euler=(0.0, 90.0, 0.0),
+                fixed=True,
+            ),
+            material=steel,
         ),
-        material=steel,
     )
     nut = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/bolt_nut/nut.stl",
-            pos=NUT_START_POS,
-            euler=(0.0, 90.0, 0.0),
-        ),
-        material=steel,
-        surface=gs.surfaces.Default(
-            color=(0.85, 0.65, 0.25),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/bolt_nut/nut.stl",
+                pos=NUT_START_POS,
+                euler=(0.0, 90.0, 0.0),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.85, 0.65, 0.25),
+            ),
+            material=steel,
         ),
     )
 

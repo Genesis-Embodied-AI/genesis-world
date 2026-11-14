@@ -114,7 +114,11 @@ def test_lazy_sensor_discovery(show_viewer, tmp_path):
 
         # Verify it works end-to-end with a scene
         scene = gs.Scene(show_viewer=show_viewer)
-        scene.add_entity(gs.morphs.Plane())
+        scene.add_entity(
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Plane(),
+            ),
+        )
         sensor = scene.add_sensor(FakeSensorOptions())
         scene.build()
         scene.step()
@@ -291,7 +295,12 @@ def test_pipeline_contract(tol):
         ),
         show_viewer=False,
     )
-    scene.add_entity(gs.morphs.Plane())  # minimum scene; the sensors do not depend on any physics.
+    # minimum scene; the sensors do not depend on any physics.
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     sensor = scene.add_sensor(
         FakeOptions(
             physics_imp=tuple(P.tolist()),
@@ -439,7 +448,11 @@ def test_pipeline_contract_uint8_delay(tol):
         ),
         show_viewer=False,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     sensor = scene.add_sensor(FakeQuantizedOptions(delay=DELAY_STEPS * DT))
     scene.build()
     scene.reset()
@@ -462,18 +475,26 @@ def test_add_and_read_all_registered_sensors():
     from genesis.engine.sensors.sensor_manager import SensorManager
 
     scene = gs.Scene(show_viewer=False)
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(0.0, 0.0, 0.1),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(0.0, 0.0, 0.1),
+            ),
+        ),
     )
     sphere = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.1,
-            pos=(0.2, 0.0, 0.1),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.1,
+                pos=(0.2, 0.0, 0.1),
+            ),
+        ),
     )
 
     sensors = []
@@ -532,11 +553,17 @@ def test_sensor_history_length_contact_and_imu(show_viewer, tol, n_envs):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.2),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.2),
+            ),
         ),
     )
 
@@ -601,12 +628,18 @@ def test_shared_context(show_viewer):
     from genesis.engine.sensors.raycaster import RaycastContext
 
     scene = gs.Scene(show_viewer=show_viewer)
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.4, 0.4, 0.4),
-            pos=(0.0, 0.0, 1.0),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.4, 0.4, 0.4),
+                pos=(0.0, 0.0, 1.0),
+            ),
+        ),
     )
 
     raycaster = scene.add_sensor(
@@ -654,18 +687,24 @@ def test_read_sensors_bulk_api(show_viewer, n_envs):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     box_a = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.2),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.2),
+            ),
         ),
     )
     box_b = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.5, 0.0, 0.2),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.5, 0.0, 0.2),
+            ),
         ),
     )
 

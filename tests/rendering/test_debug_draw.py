@@ -121,14 +121,20 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
         show_viewer=True,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     floating_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.5),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.5),
+                fixed=True,
+            ),
+        ),
     )
     scene.add_sensor(
         gs.sensors.IMU(
@@ -139,12 +145,14 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
     )
 
     ground_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.4, 0.2, 0.1),
-            pos=(-0.25, 0.0, 0.05),
-        ),
-        material=gs.materials.Rigid(
-            rho=200.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.4, 0.2, 0.1),
+                pos=(-0.25, 0.0, 0.05),
+            ),
+            material=gs.materials.Rigid(
+                rho=200.0,
+            ),
         ),
     )
     scene.add_sensor(
@@ -251,13 +259,15 @@ def test_draw_debug_frustum_and_trajectory(n_envs, renderer_type, renderer, png_
 
     # Add a box inside the sensor camera frustum
     scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.4, 0.0, 0.7),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.6, 1.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.4, 0.0, 0.7),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.6, 1.0, 1.0),
+            ),
         ),
     )
 

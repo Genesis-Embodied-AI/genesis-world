@@ -17,24 +17,34 @@ def test_grid_sensor_contact_and_reset(show_viewer, tol, n_envs):
     DIFF_TEMP = 0.5
 
     scene = gs.Scene(show_viewer=show_viewer)
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     platform = scene.add_entity(
-        gs.morphs.Box(
-            size=(PLATFORM_SIZE, PLATFORM_SIZE, PLATFORM_SIZE),
-            pos=(0.0, 0.0, PLATFORM_SIZE / 2),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(PLATFORM_SIZE, PLATFORM_SIZE, PLATFORM_SIZE),
+                pos=(0.0, 0.0, PLATFORM_SIZE / 2),
+                fixed=True,
+            ),
+        ),
     )
     hot_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, PLATFORM_SIZE + BOX_SIZE / 2),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, PLATFORM_SIZE + BOX_SIZE / 2),
+            ),
+        ),
     )
     cold_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=FAR_POS,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=FAR_POS,
+            ),
         ),
     )
     TemperatureProperties = gs.sensors.TemperatureProperties
@@ -118,18 +128,26 @@ def test_grid_simulate_all_link_temps(show_viewer, tol, n_envs):
     COLD_BASE = BASE_TEMP - 80.0
 
     scene = gs.Scene(show_viewer=show_viewer)
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     hot_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, BOX_SIZE),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, BOX_SIZE),
+            ),
+        ),
     )
     cold_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, BOX_SIZE * 2 + 0.001),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, BOX_SIZE * 2 + 0.001),
+            ),
+        ),
     )
     hot_link_idx = hot_box.base_link_idx
     cold_link_idx = cold_box.base_link_idx

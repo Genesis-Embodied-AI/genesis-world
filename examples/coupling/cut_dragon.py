@@ -33,36 +33,41 @@ def main():
     )
 
     plane = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/plane/plane.urdf",
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/plane/plane.urdf",
+                fixed=True,
+            ),
         ),
-        material=gs.materials.Rigid(),
     )
     cutter = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/cross_cutter.obj",
-            scale=0.8,
-            pos=(0.0, 0.0, 0.3),
-            euler=(90, 0, 0),
-            fixed=True,
-            convexify=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/cross_cutter.obj",
+                scale=0.8,
+                pos=(0.0, 0.0, 0.3),
+                euler=(90, 0, 0),
+                fixed=True,
+                convexify=False,
+            ),
+            surface=gs.surfaces.Iron(),
         ),
-        surface=gs.surfaces.Iron(),
     )
     dragon = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/dragon/dragon.obj",
-            scale=0.007,
-            euler=(0, 0, 90),
-            pos=(0.3, -0.0, 1.3),
-        ),
-        material=gs.materials.MPM.Elastic(
-            sampler="pbs-64",
-        ),
-        surface=gs.surfaces.Rough(
-            color=(0.6, 1.0, 0.8, 1.0),
-            vis_mode="particle",
+        options=gs.entities.MPM(
+            morph=gs.morphs.Mesh(
+                file="meshes/dragon/dragon.obj",
+                scale=0.007,
+                euler=(0, 0, 90),
+                pos=(0.3, -0.0, 1.3),
+            ),
+            surface=gs.surfaces.Rough(
+                color=(0.6, 1.0, 0.8, 1.0),
+                vis_mode="particle",
+            ),
+            material=gs.materials.MPM.Elastic(
+                sampler="pbs-64",
+            ),
         ),
     )
     scene.build(n_envs=0)

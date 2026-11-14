@@ -402,9 +402,11 @@ def test_physics_material_friction_and_density(usd_scene, physics_material_usd):
         ),
     )
     entities = scene.add_stage(
-        morph=gs.morphs.USD(
-            file=physics_material_usd,
-            recompute_inertia=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.USD(
+                file=physics_material_usd,
+                recompute_inertia=True,
+            ),
         ),
     )
     scene.build()
@@ -427,19 +429,22 @@ def test_align_anchor_with_geom_densities(density_align_usd):
         ),
     )
     body = scene.add_entity(
-        gs.morphs.USD(
-            file=density_align_usd,
-            prim_path="/root/uniform_body",
-            align=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.USD(
+                file=density_align_usd,
+                prim_path="/root/uniform_body",
+                align=True,
+            ),
         ),
     )
     ghost = scene.add_entity(
-        gs.morphs.USD(
-            file=density_align_usd,
-            prim_path="/root/uniform_body",
-            align=True,
+        options=gs.entities.Kinematic(
+            morph=gs.morphs.USD(
+                file=density_align_usd,
+                prim_path="/root/uniform_body",
+                align=True,
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     scene.build()
     # Two unit cubes at x = -0.5 / +0.5 with densities 100 / 300: mass 400, center of mass at
@@ -467,19 +472,23 @@ def test_align_requires_all_or_none_geom_densities(density_align_usd, align, rho
     if align:
         with pytest.raises(gs.GenesisException, match="with and without an authored density"):
             scene.add_entity(
-                gs.morphs.USD(file=density_align_usd, prim_path="/root/mixed_body", align=align),
-                material=gs.materials.Rigid(rho=rho),
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.USD(file=density_align_usd, prim_path="/root/mixed_body", align=align),
+                    material=gs.materials.Rigid(rho=rho),
+                )
             )
         return
 
     body = scene.add_entity(
-        gs.morphs.USD(
-            file=density_align_usd,
-            prim_path="/root/mixed_body",
-            align=align,
-        ),
-        material=gs.materials.Rigid(
-            rho=rho,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.USD(
+                file=density_align_usd,
+                prim_path="/root/mixed_body",
+                align=align,
+            ),
+            material=gs.materials.Rigid(
+                rho=rho,
+            ),
         ),
     )
 
@@ -524,11 +533,13 @@ def test_collision_approximations(usd_scene, collision_approximation_usd):
         ),
     )
     entities = scene.add_stage(
-        morph=gs.morphs.USD(
-            file=collision_approximation_usd,
-            fixed=True,
-            convexify=False,
-            decimate=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.USD(
+                file=collision_approximation_usd,
+                fixed=True,
+                convexify=False,
+                decimate=True,
+            ),
         ),
     )
     scene.build()
@@ -550,20 +561,39 @@ def test_collision_filtering(collision_filtering_usd, show_viewer, caplog):
         ),
         show_viewer=show_viewer,
     )
-    plane = scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     with caplog.at_level("WARNING"):
         entities = scene.add_stage(
-            morph=gs.morphs.USD(
-                file=collision_filtering_usd,
-                pos=(0.0, 0.0, 0.05),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.USD(
+                    file=collision_filtering_usd,
+                    pos=(0.0, 0.0, 0.05),
+                ),
             ),
         )
-    scene.build()
-
     # The link pairs whose colliders are filtered in part alone are reported together, once
     partial_records = [record.getMessage() for record in caplog.records if "but not all of them" in record.getMessage()]
     assert len(partial_records) == 1
     assert "col_e" in partial_records[0] and "col_f" in partial_records[0]
+
+    ghosts = scene.add_stage(
+        options=gs.entities.Kinematic(
+            morph=gs.morphs.USD(
+                file=collision_filtering_usd,
+                pos=(0.0, 0.0, 0.5),
+            ),
+        ),
+    )
+    stage_options = gs.entities.Rigid(morph=gs.morphs.USD(file=collision_filtering_usd))
+    stage_options.select(gs.indices.Link.named("base")).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="select no part"):
+        scene.add_stage(options=stage_options)
+    scene.build()
+    ghosts_pos = [tensor_to_array(ghost.get_pos()) for ghost in ghosts]
 
     for _ in range(50):
         scene.step()
@@ -572,6 +602,10 @@ def test_collision_filtering(collision_filtering_usd, show_viewer, caplog):
     for entity in entities:
         aabb_min, _aabb_max = tensor_to_array(entity.get_AABB())
         assert -5e-4 < aabb_min[-1] < 0.0
+    # The same stage constructed from kinematic options keeps its pose, neither falling nor colliding
+    assert len(ghosts) == len(entities)
+    for ghost, pos in zip(ghosts, ghosts_pos):
+        assert_allclose(ghost.get_pos(), pos, tol=gs.EPS)
 
     # Every link rests on the ground. Among the links overlapping their base, those whose colliders are all filtered
     # against it never collide with it, and those filtered in part alone keep colliding.
@@ -604,14 +638,20 @@ def test_oriented_capsule(oriented_capsule_usd, show_viewer, tol):
     scene = gs.Scene(
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
-    capsule = scene.add_entity(
-        morph=gs.morphs.USD(
-            file=oriented_capsule_usd,
-            pos=(0, 0, 0.5),
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
         ),
-        material=gs.materials.Rigid(
-            rho=1000.0,
+    )
+    capsule = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.USD(
+                file=oriented_capsule_usd,
+                pos=(0, 0, 0.5),
+            ),
+            material=gs.materials.Rigid(
+                rho=1000.0,
+            ),
         ),
     )
     scene.build()
@@ -643,15 +683,21 @@ def test_ant_capsule_axis_collision(show_viewer):
     scene = gs.Scene(
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     asset_path = get_hf_dataset(pattern="usd/Ant/*")
     ant = scene.add_entity(
-        morph=gs.morphs.USD(
-            file=os.path.join(asset_path, "usd/Ant/ant.usd"),
-            pos=(0, 0, 0.75),
-        ),
-        material=gs.materials.Rigid(
-            rho=1000.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.USD(
+                file=os.path.join(asset_path, "usd/Ant/ant.usd"),
+                pos=(0, 0, 0.75),
+            ),
+            material=gs.materials.Rigid(
+                rho=1000.0,
+            ),
         ),
     )
     scene.build()

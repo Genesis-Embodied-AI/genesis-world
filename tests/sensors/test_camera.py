@@ -32,47 +32,54 @@ def test_rasterizer_non_batched(n_envs, show_viewer):
     # Finite plane sized and placed to sit fully inside raster_cam0's frustum: the Apple Software Renderer misrasterizes
     # any geometry with vertices outside the view, which would break the exact post-reset frame comparison below.
     scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(-1.75, 0.0, 0.0),
-            plane_size=(6.5, 6.0),
-        ),
-        surface=gs.surfaces.Rough(
-            color=(0.4, 0.4, 0.4),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(-1.75, 0.0, 0.0),
+                plane_size=(6.5, 6.0),
+            ),
+            surface=gs.surfaces.Rough(
+                color=(0.4, 0.4, 0.4),
+            ),
         ),
     )
 
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.5,
-            pos=(0.0, 0.0, 2.0),
-        ),
-        surface=gs.surfaces.Smooth(
-            color=(1.0, 0.5, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.5,
+                pos=(0.0, 0.0, 2.0),
+            ),
+            surface=gs.surfaces.Smooth(
+                color=(1.0, 0.5, 0.5),
+            ),
         ),
     )
 
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.3, 0.3, 0.3),
-            pos=(1.0, 1.0, 1.0),
-        ),
-        surface=gs.surfaces.Rough(
-            color=(0.5, 1.0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.3, 0.3, 0.3),
+                pos=(1.0, 1.0, 1.0),
+            ),
+            surface=gs.surfaces.Rough(
+                color=(0.5, 1.0, 0.5),
+            ),
         ),
     )
 
     # Kinematic mesh in addition to the rigid entities above, so the camera-mount path is exercised against both
     # entity kinds via raster_cam_attached_kin below.
     kin_box = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.3,
-            pos=(-1.0, 1.0, 1.0),
-            fixed=True,
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Rough(
-            color=(0.5, 0.5, 1.0),
+        options=gs.entities.Kinematic(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.3,
+                pos=(-1.0, 1.0, 1.0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Rough(
+                color=(0.5, 0.5, 1.0),
+            ),
         ),
     )
 
@@ -214,17 +221,21 @@ def test_rasterizer_batched(show_viewer, png_snapshot):
 
     scene = gs.Scene(show_viewer=show_viewer)
     scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(-2.0, 0.0, 0.0),
-            plane_size=(8.0, 3.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(-2.0, 0.0, 0.0),
+                plane_size=(8.0, 3.0),
+            ),
         ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.3,
-        ),
-        surface=gs.surfaces.Smooth(
-            color=(1.0, 0.5, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.3,
+            ),
+            surface=gs.surfaces.Smooth(
+                color=(1.0, 0.5, 0.5),
+            ),
         ),
     )
     camera = scene.add_sensor(
@@ -272,17 +283,21 @@ def test_rasterizer_attached_batched(show_viewer, png_snapshot, tol):
 
     # Add a plane
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
 
     # Add a sphere
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.3,
-            pos=(0.0, 0.0, 1.0),
-        ),
-        surface=gs.surfaces.Smooth(
-            color=(1.0, 0.5, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.3,
+                pos=(0.0, 0.0, 1.0),
+            ),
+            surface=gs.surfaces.Smooth(
+                color=(1.0, 0.5, 0.5),
+            ),
         ),
     )
 
@@ -372,15 +387,19 @@ def test_batch_renderer(n_envs, png_snapshot):
 
     scene = gs.Scene(show_viewer=False)
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.5,
-            pos=(0.0, 0.0, 1.0),
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.5, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.5,
+                pos=(0.0, 0.0, 1.0),
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.5, 0.5),
+            ),
         ),
     )
 
@@ -429,7 +448,9 @@ def test_batch_renderer_destroy():
     scene = gs.Scene(show_viewer=False)
     # FIXME: This test fails without any entities in the scene.
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     cam1 = scene.add_sensor(gs.sensors.BatchRendererCameraOptions(res=(64, 64), use_rasterizer=True))
     cam2 = scene.add_sensor(gs.sensors.BatchRendererCameraOptions(res=(64, 64), use_rasterizer=True))
@@ -469,15 +490,19 @@ def test_raytracer(n_envs, png_snapshot):
         show_viewer=False,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.5,
-            pos=(0.0, 0.0, 1.0),
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.5, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.5,
+                pos=(0.0, 0.0, 1.0),
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.5, 0.5),
+            ),
         ),
     )
 
@@ -538,10 +563,14 @@ def test_raytracer_attached_without_offset_T():
 
     scene = gs.Scene(renderer=gs.renderers.RayTracer())
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(),
+        ),
     )
 
     # Sensor camera attached WITHOUT offset_T - should use pos as offset.
@@ -628,17 +657,21 @@ def test_lookat_entity(show_viewer, png_snapshot):
     scene = gs.Scene(show_viewer=show_viewer)
 
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
 
     # Colored spheres at distinct locations so each camera sees different content
     attach_sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.5,
-            pos=(0.0, 0.0, 0.5),
-        ),
-        surface=gs.surfaces.Smooth(
-            color=(1.0, 0.2, 0.2),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.5,
+                pos=(0.0, 0.0, 0.5),
+            ),
+            surface=gs.surfaces.Smooth(
+                color=(1.0, 0.2, 0.2),
+            ),
         ),
     )
     for pos, color in (
@@ -647,12 +680,14 @@ def test_lookat_entity(show_viewer, png_snapshot):
         ((0.0, -1.5, 0.5), (1.0, 1.0, 0.0)),
     ):
         scene.add_entity(
-            morph=gs.morphs.Sphere(
-                radius=0.5,
-                pos=pos,
-            ),
-            surface=gs.surfaces.Smooth(
-                color=color,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Sphere(
+                    radius=0.5,
+                    pos=pos,
+                ),
+                surface=gs.surfaces.Smooth(
+                    color=color,
+                ),
             ),
         )
 
@@ -694,7 +729,9 @@ def test_lookat_entity(show_viewer, png_snapshot):
 def test_destroy_unbuilt_scene_with_camera():
     scene = gs.Scene(show_viewer=False)
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     scene.add_sensor(gs.sensors.RasterizerCameraOptions(res=(64, 64)))
 

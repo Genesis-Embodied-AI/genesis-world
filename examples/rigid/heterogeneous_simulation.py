@@ -52,10 +52,14 @@ def main():
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        ),
     )
 
     # Define 4 geometry variants - see module docstring for variant assignment rules
@@ -66,7 +70,9 @@ def main():
         gs.morphs.Sphere(radius=0.025, pos=(0.65, 0.0, 0.02)),  # Variant 3
     ]
     grasping_object = scene.add_entity(
-        morph=morphs_heterogeneous,
+        options=gs.entities.Rigid(
+            morph=morphs_heterogeneous,
+        ),
     )
     scene.build(n_envs=args.num_envs, env_spacing=(1, 1))
 

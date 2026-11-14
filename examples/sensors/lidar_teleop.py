@@ -44,7 +44,11 @@ def main():
         show_viewer=True,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     # create ring of obstacles to visualize raycaster sensor hits
     for i in range(NUM_CYLINDERS):
@@ -52,12 +56,14 @@ def main():
         x = CYLINDER_RING_RADIUS * np.cos(angle)
         y = CYLINDER_RING_RADIUS * np.sin(angle)
         scene.add_entity(
-            gs.morphs.Cylinder(
-                height=1.5,
-                radius=0.3,
-                pos=(x, y, 0.75),
-                fixed=True,
-            )
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Cylinder(
+                    height=1.5,
+                    radius=0.3,
+                    pos=(x, y, 0.75),
+                    fixed=True,
+                ),
+            ),
         )
 
     for i in range(NUM_BOXES):
@@ -65,11 +71,13 @@ def main():
         x = BOX_RING_RADIUS * np.cos(angle)
         y = BOX_RING_RADIUS * np.sin(angle)
         scene.add_entity(
-            gs.morphs.Box(
-                size=(0.5, 0.5, 2.0 * (i + 1) / NUM_BOXES),
-                pos=(x, y, 1.0),
-                fixed=False,
-            )
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(0.5, 0.5, 2.0 * (i + 1) / NUM_BOXES),
+                    pos=(x, y, 1.0),
+                    fixed=False,
+                ),
+            ),
         )
 
     entity_kwargs = dict(
@@ -80,18 +88,22 @@ def main():
 
     if args.use_box:
         robot = scene.add_entity(
-            gs.morphs.Box(
-                size=(0.1, 0.1, 0.1),
-                **entity_kwargs,
-            )
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(0.1, 0.1, 0.1),
+                    **entity_kwargs,
+                ),
+            ),
         )
         pos_offset = (0.0, 0.0, 0.2)
     else:
         robot = scene.add_entity(
-            gs.morphs.URDF(
-                file="urdf/go2/urdf/go2.urdf",
-                **entity_kwargs,
-            )
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file="urdf/go2/urdf/go2.urdf",
+                    **entity_kwargs,
+                ),
+            ),
         )
         pos_offset = (0.3, 0.0, 0.1)
 

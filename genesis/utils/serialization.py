@@ -28,6 +28,7 @@ from pydantic import AfterValidator, TypeAdapter, ValidationError, ValidationInf
 
 import genesis as gs
 from genesis.options.options import Options
+from genesis.repr_base import get_public_name
 
 # What every member of an archive is stamped with, so a file is the bytes its scene comes to and nothing else.
 EPOCH = (1980, 1, 1, 0, 0, 0)
@@ -148,14 +149,30 @@ def _field_check(cls: type, name: str) -> TypeAdapter:
     What a field constrains stands beside its type rather than in it, so the two are put back together here.
     """
     info = cls.model_fields[name]
-    admitted = typing.Annotated[tuple([info.annotation, *info.metadata])] if info.metadata else info.annotation
+    annotation = _bind_self(info.annotation, cls)
+    admitted = typing.Annotated[tuple([annotation, *info.metadata])] if info.metadata else annotation
     return TypeAdapter(admitted)
+
+
+def _bind_self(annotation, cls: type):
+    """Return a declared type with 'typing.Self' standing for the class declaring it, as pydantic reads it."""
+    if annotation is typing.Self:
+        return cls
+    origin, args = typing.get_origin(annotation), typing.get_args(annotation)
+    if not args:
+        return annotation
+    bound_args = tuple(_bind_self(arg, cls) for arg in args)
+    if origin is typing.Annotated:
+        return typing.Annotated[tuple([bound_args[0], *annotation.__metadata__])]
+    if origin in (types.UnionType, typing.Union):
+        return typing.Union[bound_args]
+    return origin[bound_args]
 
 
 def _declared_fields(cls: type) -> dict[str, type]:
     """Return the declared type of each field of a class. Those types drive how a value loads back."""
     if issubclass(cls, Options):
-        return {name: info.annotation for name, info in cls.model_fields.items()}
+        return {name: _bind_self(info.annotation, cls) for name, info in cls.model_fields.items()}
     return typing.get_type_hints(cls)
 
 
@@ -202,15 +219,21 @@ def _classes_by_name(expect) -> dict[str, type]:
 def _deduce_union(expect, value):
     """Returns the argument of a union declaration that holds this value, or the declaration itself.
 
-    A scale states one factor or one per axis, so only the argument the value stands in states what its items are.
+    A scale states one factor or one per axis, so only the argument the value stands in states what its items are. A
+    color states one color or one per entry, so a sequence also matches on whether its first item is one.
     """
     if typing.get_origin(expect) not in (types.UnionType, typing.Union):
         return expect
     args = [_unwrap_annotation(arg) for arg in _accepted_classes(expect)]
-    for arg in args:
-        if _is_sequence(typing.get_origin(arg) or arg) == _is_sequence(type(value)):
+    is_value_sequence = _is_sequence(type(value))
+    is_item_sequence = is_value_sequence and len(value) > 0 and _is_sequence(type(value[0]))
+    candidates = [arg for arg in args if _is_sequence(typing.get_origin(arg) or arg) == is_value_sequence]
+    for arg in candidates:
+        item_args = typing.get_args(arg) if is_value_sequence else ()
+        item_type = _unwrap_annotation(item_args[0]) if item_args else None
+        if item_type is None or _is_sequence(typing.get_origin(item_type) or item_type) == is_item_sequence:
             return arg
-    return args[0]
+    return candidates[0] if candidates else args[0]
 
 
 def _is_sequence(cls) -> bool:
@@ -246,7 +269,7 @@ def schema(classes: set[type]) -> dict:
     that gained a field since keeps loading while one whose fields moved is rejected by name. Sorted by name, so what
     a file holds follows from the classes alone rather than from the order they are met in.
     """
-    return {cls.__name__: _layout(cls) for cls in sorted(classes, key=lambda cls: cls.__name__)}
+    return {get_public_name(cls): _layout(cls) for cls in sorted(classes, key=get_public_name)}
 
 
 def declared_schema(expect: dict) -> dict:
@@ -267,13 +290,13 @@ def declared_schema(expect: dict) -> dict:
                 continue
             seen.add(declared)
             if issubclass(declared, (IntEnum, StrEnum)):
-                layout[declared.__name__] = _layout(declared)
+                layout[get_public_name(declared)] = _layout(declared)
             elif _has_declared_fields(declared):
                 for cls in _classes_by_name(declared).values():
                     if cls in seen and cls is not declared:
                         continue
                     seen.add(cls)
-                    layout[cls.__name__] = _layout(cls)
+                    layout[get_public_name(cls)] = _layout(cls)
                     declarations.extend(_declared_fields(cls).values())
     return layout
 
@@ -386,7 +409,10 @@ def _export_value(value, expect, exported: "Exported"):
             # are sorted, so exporting the same scene twice gives the same file.
             values = {"values": values, "given": sorted(value.model_fields_set)}
         return values if _accepted_classes(expect) == (type(value),) else {"@": type(value).__name__, **values}
-    expect = _deduce_union(expect, value)
+    # A union mixing an option with a sequence of them, such as one morph or several, exports as the argument it holds
+    deduced = _deduce_union(expect, value)
+    if deduced is not expect:
+        return _export_value(value, deduced, exported)
     origin = typing.get_origin(expect)
     if _is_sequence(origin):
         args = typing.get_args(expect)
@@ -498,7 +524,10 @@ def _load_value(raw, expect, loaded: list[np.ndarray]):
                     gs.raise_exception_from(f"A Genesis file states a '{name}' that {cls.__name__} rejects.", e)
             return cls.model_construct(_fields_set=set(raw["given"]), **values)
         return cls(**{name: _load_value(raw[name], declared[name], loaded) for name in declared if name in raw})
-    expect = _deduce_union(expect, raw)
+    # See '_export_value' for a union mixing an option with a sequence of them
+    deduced = _deduce_union(expect, raw)
+    if deduced is not expect:
+        return _load_value(raw, deduced, loaded)
     origin = typing.get_origin(expect)
     if _is_sequence(origin):
         args = typing.get_args(expect)
@@ -529,9 +558,9 @@ def _redact_paths(value, key=None):
     """Return the value with every path it holds reduced to the name of what the path points at.
 
     A directory belongs to the author's filesystem, so a file keeps the name alone. A path stands where a field or a
-    key names one, 'file' or a name ending in '_path' (a morph's file, a mesh's or a texture's path), and inside an
-    inline document as the value of an attribute. Every other string, a prim path or a joint name written with slashes
-    among them, is left as it is.
+    key names one, 'file' or a name ending in '_path' (a morph's file, a mesh's or a texture's path), alone or in a
+    list, and inside an inline document as the value of an attribute. Every other string, a prim path or a joint name
+    written with slashes among them, is left as it is.
     """
     if isinstance(value, str):
         try:
@@ -544,8 +573,8 @@ def _redact_paths(value, key=None):
                 if os.path.isabs(stated):
                     value = value.replace(stated, os.path.basename(stated))
         return value
-    if isinstance(value, list):
-        return [_redact_paths(item) for item in value]
+    if isinstance(value, (list, tuple)):
+        return [_redact_paths(item, key) for item in value]
     if isinstance(value, dict):
         if "@dict" in value:
             return {"@dict": [[k, _redact_paths(v, k if isinstance(k, str) else None)] for k, v in value["@dict"]]}

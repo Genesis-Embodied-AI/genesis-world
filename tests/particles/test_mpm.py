@@ -34,23 +34,31 @@ def test_particle_constraints(show_viewer, tol):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     rigid_box = scene.add_entity(
-        gs.morphs.Box(
-            pos=(0, 0, 0.55),
-            size=(0.12, 0.12, 0.05),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0, 0, 0.55),
+                size=(0.12, 0.12, 0.05),
+                fixed=True,
+            ),
         ),
     )
     mpm_cube = scene.add_entity(
-        material=gs.materials.MPM.Elastic(
-            E=5e4,
-            nu=0.3,
-            rho=RHO,
-        ),
-        morph=gs.morphs.Box(
-            pos=(0, 0, 0.35),
-            size=(0.15, 0.15, 0.15),
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0, 0, 0.35),
+                size=(0.15, 0.15, 0.15),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=5e4,
+                nu=0.3,
+                rho=RHO,
+            ),
         ),
     )
     # Two copies of one box offset along its local y axis, each placed with its own member pose
@@ -58,39 +66,47 @@ def test_particle_constraints(show_viewer, tol):
         extents=(0.04, 0.12, 0.04), transform=trimesh.transformations.translation_matrix((0.0, 0.1, 0.0))
     )
     mpm_mesh_set = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=(box, box),
-            poss=((0.5, 0.5, 0.3), (-0.5, 0.5, 0.3)),
-            eulers=((0.0, 0.0, 90.0), (90.0, 0.0, 0.0)),
-        ),
-        material=gs.materials.MPM.Elastic(
-            sampler="regular",
+        options=gs.entities.MPM(
+            morph=gs.morphs.MeshSet(
+                files=(box, box),
+                poss=((0.5, 0.5, 0.3), (-0.5, 0.5, 0.3)),
+                eulers=((0.0, 0.0, 90.0), (90.0, 0.0, 0.0)),
+            ),
+            material=gs.materials.MPM.Elastic(
+                sampler="regular",
+            ),
         ),
     )
     moving_box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, -0.5, 0.85),
-            size=(0.05, 0.05, 0.05),
-        ),
-        material=gs.materials.Rigid(
-            gravity_compensation=1.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, -0.5, 0.85),
+                size=(0.05, 0.05, 0.05),
+            ),
+            material=gs.materials.Rigid(
+                gravity_compensation=1.0,
+            ),
         ),
     )
     mpm_follower = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, -0.5, 0.7),
-            size=(0.05, 0.05, 0.05),
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0.0, -0.5, 0.7),
+                size=(0.05, 0.05, 0.05),
+            ),
+            material=gs.materials.MPM.Elastic(),
         ),
-        material=gs.materials.MPM.Elastic(),
     )
     # A block held by its middle slab, the particles on either side mirroring each other about it
     mpm_held_block = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.5, -0.5, 0.3),
-            size=(0.1, 0.05, 0.05),
-        ),
-        material=gs.materials.MPM.Elastic(
-            sampler="regular",
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0.5, -0.5, 0.3),
+                size=(0.1, 0.05, 0.05),
+            ),
+            material=gs.materials.MPM.Elastic(
+                sampler="regular",
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -199,27 +215,33 @@ def test_perf_dispatch(variant, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     elastic = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.1, 0.0, 0.2),
-            size=(0.08, 0.08, 0.08),
-        ),
-        material=gs.materials.MPM.Elastic(
-            E=3e5,
-            nu=0.2,
-            rho=200.0,
-            model=elastic_model,
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(-0.1, 0.0, 0.2),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=3e5,
+                nu=0.2,
+                rho=200.0,
+                model=elastic_model,
+            ),
         ),
     )
     liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.15, 0.0, 0.2),
-            size=(0.08, 0.08, 0.08),
-        ),
-        material=gs.materials.MPM.Liquid(
-            viscous=liquid_viscous,
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0.15, 0.0, 0.2),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.MPM.Liquid(
+                viscous=liquid_viscous,
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -261,12 +283,14 @@ def test_halt_on_nan(show_viewer):
         show_viewer=show_viewer,
     )
     block = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.3),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.MPM.Elastic(
-            E=1e9,
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.3),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=1e9,
+            ),
         ),
     )
     scene.build(n_envs=2)

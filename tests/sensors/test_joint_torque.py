@@ -77,9 +77,11 @@ def test_joint_torque(joint_torque_pendulums, show_viewer, tol, n_envs):
         show_viewer=show_viewer,
     )
     pendulums = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=joint_torque_pendulums,
-            default_armature=0.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=joint_torque_pendulums,
+                default_armature=0.0,
+            ),
         ),
     )
     sensor = scene.add_sensor(
@@ -149,17 +151,21 @@ def test_joint_torque_with_contact(joint_torque_contact_pendulum, show_viewer, t
         show_viewer=show_viewer,
     )
     pendulum = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=joint_torque_contact_pendulum,
-            default_armature=0.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=joint_torque_contact_pendulum,
+                default_armature=0.0,
+            ),
         ),
     )
     # Box face at x=0.75; the mass (sphere r=0.05) at theta=pi/4 sits at x=0.707, so contact is active from step 1.
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.85, 0.0, -0.70),
-            size=(0.2, 0.5, 0.2),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.85, 0.0, -0.70),
+                size=(0.2, 0.5, 0.2),
+                fixed=True,
+            ),
         ),
     )
     sensor = scene.add_sensor(

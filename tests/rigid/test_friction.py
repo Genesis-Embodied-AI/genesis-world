@@ -68,18 +68,26 @@ def test_frictionloss_advanced(show_viewer, tol):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     asset_path = get_hf_dataset(pattern="SO101/*")
     robot = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=f"{asset_path}/SO101/so101_new_calib.xml",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=f"{asset_path}/SO101/so101_new_calib.xml",
+            ),
+            # vis_mode="collision",
         ),
-        # vis_mode="collision",
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.1, 0.0, 0.62),
-            size=(0.025, 0.025, 0.025),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.1, 0.0, 0.62),
+                size=(0.025, 0.025, 0.025),
+            ),
         ),
     )
     scene.build()
@@ -190,17 +198,22 @@ def test_static_friction(mode, friction, n_boxes, solver, scale, mesh_boxes, sho
                 pos=(i * scale, 0, 0),
             )
         scene.add_entity(
-            morph,
-            material=gs.materials.Rigid(
-                rho=200.0,
-                friction=friction,
+            options=gs.entities.Rigid(
+                morph=morph,
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
+                material=gs.materials.Rigid(
+                    rho=200.0,
+                    friction=friction,
+                ),
+                visualize_contact=True,
             ),
-            vis_mode="collision",
-            visualize_contact=True,
         )
         scene.add_entity(
-            kinematic_morph,
-            material=gs.materials.Kinematic(),
+            options=gs.entities.Kinematic(
+                morph=kinematic_morph,
+            ),
         )
 
     boxes = scene.rigid_solver.entities
@@ -360,37 +373,45 @@ def test_static_hold_unaffected_by_press_on_separate_body(show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            friction=FRICTION,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Rigid(
+                friction=FRICTION,
+            ),
         ),
     )
     scene.add_entity(
-        gs.morphs.Box(
-            size=WALL,
-            pos=(0.0, 0.0, 0.5 * WALL[2]),
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(
-            friction=FRICTION,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=WALL,
+                pos=(0.0, 0.0, 0.5 * WALL[2]),
+                fixed=True,
+            ),
+            material=gs.materials.Rigid(
+                friction=FRICTION,
+            ),
         ),
     )
     held_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX, BOX, BOX),
-            pos=(0.5 * (WALL[0] + BOX), 0.0, 0.75 * WALL[2]),
-        ),
-        material=gs.materials.Rigid(
-            friction=FRICTION,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX, BOX, BOX),
+                pos=(0.5 * (WALL[0] + BOX), 0.0, 0.75 * WALL[2]),
+            ),
+            material=gs.materials.Rigid(
+                friction=FRICTION,
+            ),
         ),
     )
     presser = scene.add_entity(
-        gs.morphs.Box(
-            size=(PRESS_SIZE, PRESS_SIZE, PRESS_SIZE),
-            pos=(0.5, 0.0, 0.5 * PRESS_SIZE),
-        ),
-        material=gs.materials.Rigid(
-            friction=FRICTION,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(PRESS_SIZE, PRESS_SIZE, PRESS_SIZE),
+                pos=(0.5, 0.0, 0.5 * PRESS_SIZE),
+            ),
+            material=gs.materials.Rigid(
+                friction=FRICTION,
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -461,18 +482,22 @@ def test_elliptic_cone_coulomb_isotropy(sparse_solve, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            friction=MU,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Rigid(
+                friction=MU,
+            ),
         ),
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(0.0, 0.0, 0.1),
-        ),
-        material=gs.materials.Rigid(
-            friction=MU,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(0.0, 0.0, 0.1),
+            ),
+            material=gs.materials.Rigid(
+                friction=MU,
+            ),
         ),
     )
     scene.build(n_envs=N_ENVS)
@@ -558,9 +583,11 @@ def test_torsional_friction_spin_down_rate(friction_cone, n_envs, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            friction_torsional=0.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Rigid(
+                friction_torsional=0.0,
+            ),
         ),
     )
     spheres_friction_torsional = (0.0, 0.0001, 0.002, 0.005)
@@ -568,12 +595,14 @@ def test_torsional_friction_spin_down_rate(friction_cone, n_envs, show_viewer):
     for i_s, friction_torsional in enumerate(spheres_friction_torsional):
         spheres.append(
             scene.add_entity(
-                gs.morphs.Sphere(
-                    radius=RADIUS,
-                    pos=(0.5 * i_s, 0.0, RADIUS),
-                ),
-                material=gs.materials.Rigid(
-                    friction_torsional=friction_torsional,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Sphere(
+                        radius=RADIUS,
+                        pos=(0.5 * i_s, 0.0, RADIUS),
+                    ),
+                    material=gs.materials.Rigid(
+                        friction_torsional=friction_torsional,
+                    ),
                 ),
             )
         )
@@ -652,10 +681,12 @@ def test_rolling_friction_deceleration_rate(friction_cone, n_envs, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            friction_torsional=0.0,
-            friction_rolling=0.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Rigid(
+                friction_torsional=0.0,
+                friction_rolling=0.0,
+            ),
         ),
     )
     spheres_friction_rolling = (0.0, 0.001, 0.004)
@@ -663,12 +694,14 @@ def test_rolling_friction_deceleration_rate(friction_cone, n_envs, show_viewer):
     for i_s, friction_rolling in enumerate(spheres_friction_rolling):
         spheres.append(
             scene.add_entity(
-                gs.morphs.Sphere(
-                    radius=RADIUS,
-                    pos=(0.5 * i_s, 0.0, RADIUS),
-                ),
-                material=gs.materials.Rigid(
-                    friction_rolling=friction_rolling,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Sphere(
+                        radius=RADIUS,
+                        pos=(0.5 * i_s, 0.0, RADIUS),
+                    ),
+                    material=gs.materials.Rigid(
+                        friction_rolling=friction_rolling,
+                    ),
                 ),
             )
         )
@@ -772,9 +805,11 @@ def test_elliptic_cone_push_isotropy(is_box_mesh, scale, precision, show_viewer,
         show_viewer=show_viewer,
     )
     ground = scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            friction=FRICTION,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Rigid(
+                friction=FRICTION,
+            ),
         ),
     )
     # The box is swept over both geometries because they reach the support of a face normal, a direction where several
@@ -791,29 +826,35 @@ def test_elliptic_cone_push_isotropy(is_box_mesh, scale, precision, show_viewer,
             size=BOX_SIZE,
         )
     box = scene.add_entity(
-        box_morph,
-        material=gs.materials.Rigid(
-            friction=FRICTION,
+        options=gs.entities.Rigid(
+            morph=box_morph,
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            material=gs.materials.Rigid(
+                friction=FRICTION,
+            ),
+            visualize_contact=True,
         ),
-        visualize_contact=True,
-        vis_mode="collision",
     )
     # The pusher is a pillar with a triangular cross-section, standing on three corners fixed in its own frame; a
     # circular one rests on a degenerate manifold whose sampled points follow the world frame, anisotropic before the
     # box is ever touched.
     pusher = scene.add_entity(
-        gs.morphs.MeshSet(
-            files=(trimesh.creation.cylinder(radius=PILLAR_RADIUS, height=PILLAR_HEIGHT, sections=3),),
-            pos=PUSH_START_LOCAL,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MeshSet(
+                files=(trimesh.creation.cylinder(radius=PILLAR_RADIUS, height=PILLAR_HEIGHT, sections=3),),
+                pos=PUSH_START_LOCAL,
+            ),
+            surface=gs.surfaces.Default(
+                smooth=False,
+                vis_mode="collision",
+            ),
+            material=gs.materials.Rigid(
+                friction=FRICTION,
+            ),
+            visualize_contact=True,
         ),
-        material=gs.materials.Rigid(
-            friction=FRICTION,
-        ),
-        surface=gs.surfaces.Default(
-            smooth=False,
-        ),
-        visualize_contact=True,
-        vis_mode="collision",
     )
     scene.build(n_envs=N_ENVS, env_spacing=(0.3 * scale, 0.3 * scale))
 
@@ -988,20 +1029,24 @@ def test_kinetic_friction(n_envs, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            friction=0.01,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Rigid(
+                friction=0.01,
+            ),
         ),
     )
     # Spaced far enough apart never to interact, so each box is its own contact island.
     boxes = [
         scene.add_entity(
-            gs.morphs.Box(
-                pos=(0.0, 4.0 * SIZE * i_box, 0.5 * SIZE),
-                size=(SIZE, SIZE, SIZE),
-            ),
-            material=gs.materials.Rigid(
-                friction=friction,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    pos=(0.0, 4.0 * SIZE * i_box, 0.5 * SIZE),
+                    size=(SIZE, SIZE, SIZE),
+                ),
+                material=gs.materials.Rigid(
+                    friction=friction,
+                ),
             ),
         )
         for i_box, (friction, _) in enumerate(BOXES)

@@ -22,7 +22,9 @@ from ..utils.assertions import assert_allclose, assert_equal
 def test_scene_destroy_cleans_up_simulator():
     scene = gs.Scene(show_viewer=False)
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     scene.build()
     scene.step()
@@ -39,7 +41,9 @@ def test_scene_destroy_cleans_up_simulator():
 def test_scene_destroy_idempotent():
     scene = gs.Scene(show_viewer=False)
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     scene.build()
     scene.step()
@@ -55,9 +59,11 @@ def test_scene_destroy_idempotent():
 def test_rebuild_keeps_cached_data():
     scene = gs.Scene(show_viewer=False)
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck/duck.obj",
-            scale=0.001,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck/duck.obj",
+                scale=0.001,
+            ),
         ),
     )
     scene.build()
@@ -72,9 +78,11 @@ def test_rebuild_keeps_cached_data():
         scene = gs.Scene(show_viewer=False)
         gc.collect()
         scene.add_entity(
-            morph=gs.morphs.Mesh(
-                file="meshes/duck/duck.obj",
-                scale=0.001,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Mesh(
+                    file="meshes/duck/duck.obj",
+                    scale=0.001,
+                ),
             ),
         )
         enable_owned_cache_release()
@@ -150,39 +158,39 @@ def test_auto_and_user_names():
 
     # Auto-generated name
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+            ),
+        ),
     )
     assert box.name.startswith("box_")
 
     # Multiple identical entities should have unique names
     box2 = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+            ),
+        ),
     )
     assert box2.name.startswith("box_")
     assert box.name != box2.name
 
     # User-specified name
     sphere = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.1,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.1,
+            ),
+            name="my_sphere",
         ),
-        name="my_sphere",
     )
     assert sphere.name == "my_sphere"
 
     # Duplicate name raises error
     with pytest.raises(Exception, match="already exists"):
-        scene.add_entity(
-            gs.morphs.Cylinder(
-                radius=0.1,
-                height=0.2,
-            ),
-            name="my_sphere",
-        )
+        scene.add_entity(options=gs.entities.Rigid(morph=gs.morphs.Cylinder(radius=0.1, height=0.2), name="my_sphere"))
 
 
 @pytest.mark.required
@@ -190,10 +198,12 @@ def test_get_entity_by_name():
     scene = gs.Scene()
 
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+            ),
+            name="test_box",
         ),
-        name="test_box",
     )
     assert scene.get_entity(name="test_box") is box
 
@@ -207,9 +217,11 @@ def test_get_entity_by_uid():
     scene = gs.Scene()
 
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+            ),
+        ),
     )
 
     # Short UID lookup (7-character prefix shown in terminal)
@@ -226,16 +238,20 @@ def test_entity_names_property():
 
     # Use "B" then "A" to confirm insertion order (not sorted)
     scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+            ),
+            name="B",
         ),
-        name="B",
     )
     scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.1,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.1,
+            ),
+            name="A",
         ),
-        name="A",
     )
     assert tuple(scene.entity_names) == ("B", "A")
 
@@ -246,25 +262,31 @@ def test_urdf_mjcf_names_from_file():
 
     # URDF: plane.urdf has <robot name="plane">
     urdf_entity = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/plane/plane.urdf",
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/plane/plane.urdf",
+            ),
+        ),
     )
     assert urdf_entity.name.startswith("plane_")
 
     # MJCF: panda.xml has <mujoco model="panda">
     mjcf_entity = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+        ),
     )
     assert mjcf_entity.name.startswith("panda_")
 
     # Multiple URDF entities should have unique names
     urdf_entity2 = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/plane/plane.urdf",
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/plane/plane.urdf",
+            ),
+        ),
     )
     assert urdf_entity2.name.startswith("plane_")
     assert urdf_entity.name != urdf_entity2.name
@@ -470,21 +492,29 @@ def test_solver_state_change_subscribers(show_viewer, two_link_fixed_urdf):
     from genesis.engine.state_change import StateChange, Subscriber
 
     scene = gs.Scene(show_viewer=show_viewer)
-    plane = scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     # A fixed entity whose collision geometry lives on a fixed child link, the common URDF/MJCF layout: teleporting
     # it through its base link must reach subscribers watching the child.
     tower = scene.add_entity(
-        gs.morphs.URDF(
-            file=two_link_fixed_urdf,
-            pos=(2.0, 0.0, 0.0),
-            fixed=True,
-            merge_fixed_links=False,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=two_link_fixed_urdf,
+                pos=(2.0, 0.0, 0.0),
+                fixed=True,
+                merge_fixed_links=False,
+            ),
+        ),
     )
     cube = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(0.0, 0.0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(0.0, 0.0, 0.5),
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -600,19 +630,27 @@ def test_per_solver_gravity():
             ),
             show_viewer=False,
         )
-        scene.add_entity(gs.morphs.Plane())
         scene.add_entity(
-            gs.morphs.Box(
-                size=(0.4, 0.4, 0.4),
-                pos=(0.0, 0.0, 0.5),
-            )
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Plane(),
+            ),
         )
         scene.add_entity(
-            gs.morphs.Sphere(
-                pos=(0.0, 0.0, 0.5),
-                radius=0.1,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(0.4, 0.4, 0.4),
+                    pos=(0.0, 0.0, 0.5),
+                ),
             ),
-            material=gs.materials.MPM.Liquid(),
+        )
+        scene.add_entity(
+            options=gs.entities.MPM(
+                morph=gs.morphs.Sphere(
+                    pos=(0.0, 0.0, 0.5),
+                    radius=0.1,
+                ),
+                material=gs.materials.MPM.Liquid(),
+            ),
         )
         scene.build(n_envs=2)
 
@@ -659,8 +697,10 @@ def test_per_env_time(show_viewer, n_envs, tol):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, 1.0),
+            ),
         ),
     )
     scene.build(n_envs=n_envs)
@@ -720,16 +760,20 @@ def test_derived_substeps(show_viewer, tol):
         show_viewer=show_viewer,
     )
     ball = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, 1.0),
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(1.0, 0.0, 1.0),
-            size=(0.02, 0.02, 0.02),
+        options=gs.entities.PBD(
+            morph=gs.morphs.Box(
+                pos=(1.0, 0.0, 1.0),
+                size=(0.02, 0.02, 0.02),
+            ),
+            material=gs.materials.PBD.Particle(),
         ),
-        material=gs.materials.PBD.Particle(),
     )
     scene.build()
 
@@ -773,16 +817,20 @@ def test_derived_substeps(show_viewer, tol):
         show_viewer=False,
     )
     ball_at_derived_rate = scene_from_solver_dt.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, 1.0),
+            ),
         ),
     )
     scene_from_solver_dt.add_entity(
-        morph=gs.morphs.Box(
-            pos=(1.0, 0.0, 1.0),
-            size=(0.02, 0.02, 0.02),
+        options=gs.entities.PBD(
+            morph=gs.morphs.Box(
+                pos=(1.0, 0.0, 1.0),
+                size=(0.02, 0.02, 0.02),
+            ),
+            material=gs.materials.PBD.Particle(),
         ),
-        material=gs.materials.PBD.Particle(),
     )
     scene_from_solver_dt.build()
     assert_equal(scene_from_solver_dt.rigid_solver.substeps, SUBSTEPS)
@@ -817,8 +865,10 @@ def test_derived_substeps(show_viewer, tol):
         show_viewer=False,
     )
     ball_differentiable = scene_differentiable.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, 1.0),
+            ),
         ),
     )
     scene_differentiable.build()
@@ -837,8 +887,12 @@ def test_derived_substeps(show_viewer, tol):
             pbd_options=gs.options.PBDOptions(dt=0.0025),
             show_viewer=False,
         )
-        scene.add_entity(gs.morphs.Sphere(pos=(0.0, 0.0, 1.0)))
-        scene.add_entity(gs.morphs.Box(pos=(1.0, 0.0, 1.0), size=(0.02, 0.02, 0.02)), gs.materials.PBD.Particle())
+        scene.add_entity(options=gs.entities.Rigid(morph=gs.morphs.Sphere(pos=(0.0, 0.0, 1.0))))
+        scene.add_entity(
+            options=gs.entities.PBD(
+                morph=gs.morphs.Box(pos=(1.0, 0.0, 1.0), size=(0.02, 0.02, 0.02)), material=gs.materials.PBD.Particle()
+            )
+        )
         scene.build()
 
     # A rate is settled for the solvers the entities made active, and only for those: what an interval would imply for
@@ -866,7 +920,7 @@ def test_derived_substeps(show_viewer, tol):
                 rigid_options=gs.options.RigidOptions(dt=interval),
                 show_viewer=False,
             )
-            scene.add_entity(gs.morphs.Sphere(pos=(0.0, 0.0, 1.0)))
+            scene.add_entity(options=gs.entities.Rigid(morph=gs.morphs.Sphere(pos=(0.0, 0.0, 1.0))))
             scene.build()
 
     with pytest.raises(gs.GenesisException, match="conflicting with the requested substeps"):
@@ -875,7 +929,7 @@ def test_derived_substeps(show_viewer, tol):
             rigid_options=gs.options.RigidOptions(dt=0.002),
             show_viewer=False,
         )
-        scene.add_entity(gs.morphs.Sphere(pos=(0.0, 0.0, 1.0)))
+        scene.add_entity(options=gs.entities.Rigid(morph=gs.morphs.Sphere(pos=(0.0, 0.0, 1.0))))
         scene.build()
 
 
@@ -893,9 +947,11 @@ def test_warn_solver_numerical_stability(boxes_size, caplog):
     scene = gs.Scene(show_viewer=False)
     for i, size in enumerate(boxes_size):
         scene.add_entity(
-            gs.morphs.Box(
-                pos=(float(i), 0.0, 0.5 * size),
-                size=(size, size, size),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    pos=(float(i), 0.0, 0.5 * size),
+                    size=(size, size, size),
+                ),
             ),
         )
     with caplog.at_level("WARNING"):

@@ -56,32 +56,36 @@ def main():
     hand_pos_init = np.array([0.0, 0.0, 0.35], dtype=np.float32)
     hand_quat_init = gu.euler_to_quat((0.0, 0.0, -90.0))
     robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/shadow_hand/shadow_hand.urdf",
-            pos=hand_pos_init,
-            quat=hand_quat_init,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/shadow_hand/shadow_hand.urdf",
+                pos=hand_pos_init,
+                quat=hand_quat_init,
+            ),
         ),
     )
     duck = scene.add_entity(
-        material=gs.materials.Rigid(),
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.06,
-            pos=DUCK_POS,
-            quat=DUCK_QUAT,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.95, 0.75, 0.2, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.06,
+                pos=DUCK_POS,
+                quat=DUCK_QUAT,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.95, 0.75, 0.2, 1.0),
+            ),
         ),
     )
     box = scene.add_entity(
-        material=gs.materials.Rigid(),
-        morph=gs.morphs.Box(
-            size=(0.06, 0.06, 0.08),
-            pos=BOX_POS,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.3, 0.7, 0.4, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.06, 0.06, 0.08),
+                pos=BOX_POS,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.3, 0.7, 0.4, 1.0),
+            ),
         ),
     )
 

@@ -1,6 +1,6 @@
 from collections.abc import Iterator, Sequence
 from enum import auto
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -20,6 +20,7 @@ from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.grad.bridge import no_grad, register_custom_backward, reversed_with
 from genesis.options.solvers import MPMOptions
+from genesis.options.surfaces import Surface
 from genesis.utils.data import (
     ENVS,
     Config,
@@ -42,6 +43,7 @@ from .base_solver import ErrorCode, kernel_set_actu
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -359,10 +361,10 @@ class MPMMaterials:
 
 
 class MPMSolver(ParticleSolver):
+    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]] = gs.entities.MPM
+
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
-
-    material_cls = MPM.Base
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -479,22 +481,24 @@ Please decrease the simulation timestep or adjust the material parameters."""
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self,
+        idx: int,
+        surface: Surface,
+        options: "gs.entities.MPM",
+        desc: "EntityDescription | None" = None,
     ) -> "MPMEntity":
-        self.add_material(material)
+        self.add_material(options.material)
 
         entity = MPMEntity(
             scene=self._scene,
             solver=self,
-            material=material,
-            morph=morph,
             surface=surface,
             particle_size=self._particle_size,
             idx=idx,
             particle_start=self.n_particles,
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
-            name=name,
+            options=options,
         )
         self._entities.append(entity)
         return entity

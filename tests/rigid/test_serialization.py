@@ -42,28 +42,36 @@ def checkpoint_scene(mimic_hinges, requires_grad, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     # Lands on the plane within the first steps, so contacts and their warm start are part of the state
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.15),
-            size=(0.2, 0.2, 0.2),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.15),
+                size=(0.2, 0.2, 0.2),
+            ),
         ),
     )
     # Articulated, driven, and tied by an equality, so joints, control targets and constraints are all part of it
     scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=ET.tostring(mimic_hinges, encoding="unicode"),
-            pos=(0.6, 0.0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=ET.tostring(mimic_hinges, encoding="unicode"),
+                pos=(0.6, 0.0, 0.5),
+            ),
         ),
     )
     # A convex mesh, whose contacts with the plane go through the general narrowphase
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.05,
-            pos=(0.0, 0.6, 0.1),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.05,
+                pos=(0.0, 0.6, 0.1),
+            ),
         ),
     )
     # A kinematic entity, whose solver holds state of its own. The runtime crashes when it builds one with gradients
@@ -95,32 +103,38 @@ def test_export_and_load_rigid(
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.5),
-            size=(0.2, 0.2, 0.2),
-        ),
-        material=gs.materials.Rigid(
-            friction=0.7,
-        ),
-        surface=gs.surfaces.Default(
-            diffuse_texture=gs.textures.ImageTexture(
-                image_path="textures/checker.png",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.5),
+                size=(0.2, 0.2, 0.2),
+            ),
+            surface=gs.surfaces.Default(
+                diffuse_texture=gs.textures.ImageTexture(
+                    image_path="textures/checker.png",
+                ),
+            ),
+            material=gs.materials.Rigid(
+                friction=0.7,
             ),
         ),
     )
     payload = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.9),
-            size=(0.1, 0.1, 0.1),
-            fixed=True,
-            batch_fixed_verts=True,
-        ),
-        surface=gs.surfaces.Default(
-            diffuse_texture=gs.textures.BatchTexture.from_images(
-                image_paths=["textures/indoor_bright.png"],
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.9),
+                size=(0.1, 0.1, 0.1),
+                fixed=True,
+                batch_fixed_verts=True,
+            ),
+            surface=gs.surfaces.Default(
+                diffuse_texture=gs.textures.BatchTexture.from_images(
+                    image_paths=["textures/indoor_bright.png"],
+                ),
             ),
         ),
     )
@@ -130,100 +144,135 @@ def test_export_and_load_rigid(
         pos=(0.0, 0.0, 0.2),
     )
     brick = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=xml_path,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+            ),
         ),
     )
     # Articulated and tied by an equality, so the per-degree-of-freedom arrays and the constraints both travel
     # non-trivially.
     articulated = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=ET.tostring(mimic_hinges, encoding="unicode"),
-            pos=(-0.5, 0.0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=ET.tostring(mimic_hinges, encoding="unicode"),
+                pos=(-0.5, 0.0, 0.5),
+            ),
         ),
     )
     # Several meshes as one entity, which carries its geometry and no file at all
     pieces = [trimesh.creation.box(extents=(0.08, 0.08, 0.08)) for _ in range(2)]
     pieces[1].apply_translation((0.1, 0.0, 0.0))
     mesh_set = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=pieces,
-            pos=(0.0, 0.5, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MeshSet(
+                files=pieces,
+                pos=(0.0, 0.5, 0.5),
+            ),
         ),
     )
-    # A link whose frame is anchored on the geometry it holds, given a pose offset as well
+    # A link whose frame is anchored on the geometry it holds, given a pose offset as well. Its surface holds a batched
+    # texture and a dynamic texture, whose declarations travel.
     anchored = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.05,
-            pos=(0.0, -0.6, 0.7),
-            euler=(0.0, 0.0, 30.0),
-            align=True,
-        ),
-        surface=gs.surfaces.Default(
-            diffuse_texture=gs.textures.ImageTexture(
-                image_path="textures/checker.png",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.05,
+                pos=(0.0, -0.6, 0.7),
+                euler=(0.0, 0.0, 30.0),
+                align=True,
+            ),
+            surface=gs.surfaces.Default(
+                diffuse_texture=gs.textures.ImageTexture(
+                    image_path=("textures/checker.png", "meshes/duck/material_0.png"),
+                    is_batched=True,
+                ),
+                emissive_texture=gs.textures.DynamicTexture(
+                    resolution=(4, 2),
+                    variants=(
+                        gs.textures.ColorTexture(
+                            color=(0.0, 0.5, 0.0),
+                        ),
+                        gs.textures.ColorTexture(
+                            color=(0.5, 0.0, 0.0),
+                            is_batched=True,
+                        ),
+                    ),
+                ),
             ),
         ),
     )
     # A height field, coefficients only the asset states, and a variant per environment, none of it held by a link.
     # Placed away from the rest so none of them ever meets another.
     terrain = scene.add_entity(
-        morph=gs.morphs.Terrain(
-            horizontal_scale=1.0,
-            vertical_scale=0.2,
-            height_field=torch.zeros((8, 8)),
-            pos=(10.0, 10.0, 0.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Terrain(
+                horizontal_scale=1.0,
+                vertical_scale=0.2,
+                height_field=torch.zeros((8, 8)),
+                pos=(10.0, 10.0, 0.0),
+            ),
         ),
     )
     drone = scene.add_entity(
-        morph=gs.morphs.Drone(
-            file="urdf/drones/cf2x.urdf",
-            pos=(20.0, 20.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Drone(
+                file="urdf/drones/cf2x.urdf",
+                pos=(20.0, 20.0, 1.0),
+            ),
         ),
     )
     heterogeneous = scene.add_entity(
-        morph=(
-            gs.morphs.Box(
-                pos=(30.0, 30.0, 1.0),
-                size=(0.2, 0.2, 0.2),
-            ),
-            gs.morphs.Box(
-                pos=(30.0, 30.0, 1.0),
-                size=(0.3, 0.1, 0.2),
+        options=gs.entities.Rigid(
+            morph=(
+                gs.morphs.Box(
+                    pos=(30.0, 30.0, 1.0),
+                    size=(0.2, 0.2, 0.2),
+                ),
+                gs.morphs.Box(
+                    pos=(30.0, 30.0, 1.0),
+                    size=(0.3, 0.1, 0.2),
+                ),
             ),
         ),
     )
     kinematic_arm = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=ET.tostring(mimic_hinges, encoding="unicode"),
-            pos=(40.0, 40.0, 1.0),
+        options=gs.entities.Kinematic(
+            morph=gs.morphs.MJCF(
+                file=ET.tostring(mimic_hinges, encoding="unicode"),
+                pos=(40.0, 40.0, 1.0),
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     # A second entity from the same asset as 'anchored', so both share its geometry in the written file
     twin = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.05,
-            pos=(0.0, -1.4, 0.7),
-            euler=(0.0, 0.0, 30.0),
-            align=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.05,
+                pos=(0.0, -1.4, 0.7),
+                euler=(0.0, 0.0, 30.0),
+                align=True,
+            ),
         ),
     )
     # An entity attached to another is simulated as one tree with it, so a restored scene must hold the pair
     holder = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(50.0, 50.0, 1.0),
-            quat=(1.0, 0.0, 0.0, 1.0),
-            fixed=True,
-            size=(0.2, 0.2, 0.2),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(50.0, 50.0, 1.0),
+                quat=(1.0, 0.0, 0.0, 1.0),
+                fixed=True,
+                size=(0.2, 0.2, 0.2),
+            ),
         ),
     )
     mounted = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(50.0, 50.0, 1.3),
-            size=(0.1, 0.1, 0.1),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(50.0, 50.0, 1.3),
+                size=(0.1, 0.1, 0.1),
+            ),
         ),
     )
     mounted.attach(
@@ -236,47 +285,57 @@ def test_export_and_load_rigid(
     hdr_path = tmp_path / "sky.hdr"
     hdr_path.touch()
     stretched = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=Path(get_assets_dir()) / "meshes" / "sphere.obj",
-            scale=(0.05, 0.1, 0.15),
-            pos=(60.0, 60.0, 1.0),
-            enable_custom_vverts=True,
-        ),
-        surface=gs.surfaces.Default(
-            normal_texture=gs.textures.ImageTexture(
-                image_path=str(hdr_path),
-                encoding="linear",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=Path(get_assets_dir()) / "meshes" / "sphere.obj",
+                scale=(0.05, 0.1, 0.15),
+                pos=(60.0, 60.0, 1.0),
+                enable_custom_vverts=True,
+            ),
+            surface=gs.surfaces.Default(
+                normal_texture=gs.textures.ImageTexture(
+                    image_path=str(hdr_path),
+                    encoding="linear",
+                ),
             ),
         ),
     )
     # A XACRO is expanded at creation, so this morph holds the model its file was parsed into
     expanded = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=xacro_robot,
-            pos=(70.0, 70.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=xacro_robot,
+                pos=(70.0, 70.0, 1.0),
+            ),
         ),
     )
     # An asset may name a mesh outside its own directory, which the mesh states as an absolute path of its own
     urdf_node = ET.fromstring(urdf_with_external_assets)
     far_mesh = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=urdfpy.URDF._from_xml(urdf_node, urdf_node, path=str(tmp_path)),
-            pos=(80.0, 80.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=urdfpy.URDF._from_xml(urdf_node, urdf_node, path=str(tmp_path)),
+                pos=(80.0, 80.0, 1.0),
+            ),
         ),
     )
     # A GLTF file is Y-up, so a Z-up claim on it is held as a compensating offset orientation
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            pos=(90.0, 90.0, 1.0),
-            file="meshes/camera/camera.glb",
-            file_meshes_are_zup=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                pos=(90.0, 90.0, 1.0),
+                file="meshes/camera/camera.glb",
+                file_meshes_are_zup=True,
+            ),
         ),
     )
     # The same document given inline rather than as a model built in memory
     inline_urdf = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=urdf_with_external_assets,
-            pos=(100.0, 100.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=urdf_with_external_assets,
+                pos=(100.0, 100.0, 1.0),
+            ),
         ),
     )
     # A sensor and a recorder observe the scene rather than taking part in it, and a file holds no code to run.
@@ -339,8 +398,10 @@ def test_export_and_load_rigid(
     # A texture is drawn from its pixels, which travel, and the name of the image is all that is kept of its path.
     assert_equal(restored.entities[1].surface.diffuse_texture.image_array, box.surface.diffuse_texture.image_array)
     assert restored.entities[1].surface.diffuse_texture.image_path == "checker.png"
-    # A batch holds textures of its own, and each keeps the name of the image it was read from
+    # A batch holds textures of its own, and each keeps the name of the image it was read from, as a batched texture
+    # keeps that of each of its images
     assert restored.entities[2].surface.diffuse_texture.textures[0].image_path == "indoor_bright.png"
+    assert restored.entities[6].surface.diffuse_texture.image_path == ("checker.png", "material_0.png")
     # A texture holding a path rather than pixels stands for nothing, in the surface and in the meshes drawn with it
     assert restored.entities[14].surface.normal_texture is None
     assert restored.entities[14].vgeoms[0].vmesh.surface.normal_texture is None
@@ -348,6 +409,12 @@ def test_export_and_load_rigid(
     restored_visual = restored.entities[6].vgeoms[0].trimesh.visual
     assert restored_visual.kind == "texture"
     assert_equal(restored_visual.uv, anchored.vgeoms[0].trimesh.visual.uv)
+    restored_texture = restored.entities[6].vgeoms[0].vmesh.surface.emissive_texture
+    assert_equal(
+        restored_texture.get_variants_image(gs.TEXTURE_MAP_TYPE.EMISSIVE),
+        anchored.vgeoms[0].vmesh.surface.emissive_texture.get_variants_image(gs.TEXTURE_MAP_TYPE.EMISSIVE),
+    )
+    assert restored_texture.variants_is_batched == (False, True)
     # A morph names the asset it was created from, since the description stands for what was parsed out of it
     assert restored.entities[15].morph.file == "two_link.urdf.xacro"
     # A mesh states the asset it was read from by name, wherever that asset stood
@@ -519,7 +586,7 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
         members = {name: archive.read(name) for name in archive.namelist()}
     original = json.loads(members[MANIFEST_NAME])
     manifest = deepcopy(original)
-    manifest["schema"]["RigidLinkDescription"].append("inertial_frame")
+    manifest["schema"]["engine.entities.rigid_entity.description.RigidLinkDescription"].append("inertial_frame")
     members[MANIFEST_NAME] = json.dumps(manifest).encode()
     with zipfile.ZipFile(exported, "w") as archive:
         for name, content in members.items():
@@ -540,7 +607,7 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
     # A field a class gained since is not a mismatch: an option states which of its fields were given, and a
     # description field a file leaves out stands at the default it declares.
     manifest = deepcopy(original)
-    manifest["schema"]["RigidLinkDescription"].remove("invweight")
+    manifest["schema"]["engine.entities.rigid_entity.description.RigidLinkDescription"].remove("invweight")
     members[MANIFEST_NAME] = json.dumps(manifest).encode()
     with zipfile.ZipFile(exported, "w") as archive:
         for name, content in members.items():
@@ -604,7 +671,10 @@ def test_export_rejects_unsupported_physics(checkpoint_scene, tmp_path):
     # A scene holding what alters the simulation is rejected by name, since a file leaving it out would restore
     # other physics. No description carries a particle entity either.
     checkpoint_scene.add_entity(
-        morph=gs.morphs.Box(pos=(0.5, 0.5, 0.8), size=(0.1, 0.1, 0.1)), material=gs.materials.MPM.Elastic()
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(pos=(0.5, 0.5, 0.8), size=(0.1, 0.1, 0.1)),
+            material=gs.materials.MPM.Elastic(),
+        ),
     )
     checkpoint_scene.add_force_field(gs.force_fields.Wind(direction=(1.0, 0.0, 0.0)))
     with pytest.raises(gs.GenesisException, match="1 MPMEntity, 1 Wind cannot be exported"):

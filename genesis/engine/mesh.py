@@ -177,16 +177,9 @@ class Mesh(RBC, serialization.SerializationMixin):
             assert scale.ndim == 1 and scale.size in (1, 3)
             self._mesh.apply_scale(scale)
 
-        if self._surface.requires_uv:  # check uvs here
-            if self._uvs is None:
-                if "mesh_path" in self._metadata:
-                    gs.logger.warning(
-                        f"Texture given but asset missing uv info (or failed to load): {self._metadata['mesh_path']}"
-                    )
-                else:
-                    gs.logger.warning("Texture given but asset missing uv info (or failed to load).")
-        else:
-            self._uvs = None
+        # The uvs stay even when the surface samples no texture, since the surface of a visual geom may be replaced by
+        # one that does once its link options are known (see 'set_surface')
+        self._check_uvs()
 
         if convexify:
             self.convexify()
@@ -321,10 +314,28 @@ class Mesh(RBC, serialization.SerializationMixin):
 
     def clear_visuals(self):
         """
-        Clear the mesh's visual attributes by resetting the surface to gs.surfaces.Default().
+        Clear the mesh's visual attributes by resetting the surface to gs.surfaces.Default() and dropping its uvs.
         """
         self._surface = gs.surfaces.Default()
         self._surface.update_texture()
+        self._uvs = None
+
+    def _check_uvs(self) -> None:
+        if self._uvs is None and any(
+            isinstance(texture, gs.textures.DynamicTexture)
+            or (isinstance(texture, (gs.textures.ColorTexture, gs.textures.ImageTexture)) and texture.is_batched)
+            for texture in (self._surface.texture, self._surface.emission)
+        ):
+            gs.raise_exception(
+                "A dynamic or batched texture requires a mesh with texture coordinates, which this mesh lacks."
+            )
+        if self._surface.requires_uv and self._uvs is None:
+            if "mesh_path" in self._metadata:
+                gs.logger.warning(
+                    f"Texture given but asset missing uv info (or failed to load): {self._metadata['mesh_path']}"
+                )
+            else:
+                gs.logger.warning("Texture given but asset missing uv info (or failed to load).")
 
     @property
     def tmesh_hash(self) -> str:
@@ -533,7 +544,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             else:
                 # TODO: support vertex/face colors in luisa
                 color_factor = tuple(np.array(visual.main_color, dtype=np.float32) / 255.0)
-        elif isinstance(surface.texture, gs.textures.ColorTexture):
+        elif isinstance(surface.texture, gs.textures.ColorTexture) and not surface.texture.is_batched:
             color_factor = surface.texture.color
         elif (isinstance(visual, trimesh.visual.color.ColorVisuals) and visual.defined) or (
             isinstance(visual, trimesh.visual.color.VertexColor) and visual.vertex_colors.size > 0
@@ -662,6 +673,30 @@ class Mesh(RBC, serialization.SerializationMixin):
         color_texture = gs.textures.ColorTexture(color=tuple(color))
         opacity_texture = color_texture.check_dim(3)
         self._surface.update_texture(color_texture=color_texture, opacity_texture=opacity_texture, force=True)
+        self.update_trimesh_visual()
+
+    def set_surface(self, surface: Surface):
+        """Replace the surface of the mesh, the fields the given surface leaves unset keeping their current values.
+
+        A field keeps its value only where both surface types have it, another type taking its own defaults.
+        """
+        surface_fields = type(surface).model_fields
+        fields = {
+            name: value
+            for name, value in self._surface
+            if name in surface_fields
+            and not surface_fields[name].exclude
+            and name not in surface.model_fields_set
+            and value is not None
+        }
+        # A dynamic texture of the given surface shows the texture of the asset that its map held
+        slots_texture = dict(self._surface)
+        surface = surface.model_copy(update=fields)
+        for name, texture in dict(surface).items():
+            if isinstance(texture, gs.textures.DynamicTexture):
+                setattr(surface, name, texture.resolve_asset_texture(slots_texture.get(name)))
+        self._surface = surface
+        self._check_uvs()
         self.update_trimesh_visual()
 
     def update_trimesh_visual(self):

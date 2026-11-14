@@ -231,12 +231,20 @@ def make_go2(n_envs, solver=None, gjk=None, **scene_kwargs):
         **{"show_viewer": False, "show_FPS": False, **scene_kwargs},
     )
 
-    scene.add_entity(gs.morphs.Plane())
-    robot = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/go2/urdf/go2.urdf",
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
         ),
-        vis_mode="collision",
+    )
+    robot = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/go2/urdf/go2.urdf",
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+        ),
     )
     time_start = time.time()
     scene.build(n_envs=n_envs)
@@ -280,23 +288,30 @@ def make_anymal(n_envs, solver=None, gjk=None, control=None, with_kinematic=Fals
         **{"show_viewer": False, "show_FPS": False, **scene_kwargs},
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     robot = scene.add_entity(
-        gs.morphs.URDF(
-            **get_file_morph_options(
-                file="urdf/anymal_c/urdf/anymal_c.urdf",
-                pos=(0, 0, 0.8),
-            )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                **get_file_morph_options(
+                    file="urdf/anymal_c/urdf/anymal_c.urdf",
+                    pos=(0, 0, 0.8),
+                )
+            ),
         ),
     )
     ghost = None
     if with_kinematic:
         ghost = scene.add_entity(
-            gs.morphs.URDF(
-                file="urdf/anymal_c/urdf/anymal_c.urdf",
-                pos=(0, -0.5, 0.8),
+            options=gs.entities.Kinematic(
+                morph=gs.morphs.URDF(
+                    file="urdf/anymal_c/urdf/anymal_c.urdf",
+                    pos=(0, -0.5, 0.8),
+                ),
             ),
-            material=gs.materials.Kinematic(),
         )
     time_start = time.time()
     scene.build(n_envs=n_envs)
@@ -341,16 +356,24 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
         **{"show_viewer": False, "show_FPS": False, **scene_kwargs},
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     asset_path = get_hf_dataset(pattern="unitree_g1/*")
     robot = scene.add_entity(
-        gs.morphs.MJCF(
-            **get_file_morph_options(
-                file=f"{asset_path}/unitree_g1/g1_29dof_rev_1_0.xml",
-                pos=(0, 0, 1.0),
-            )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                **get_file_morph_options(
+                    file=f"{asset_path}/unitree_g1/g1_29dof_rev_1_0.xml",
+                    pos=(0, 0, 1.0),
+                )
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     time_start = time.time()
     scene.build(n_envs=n_envs)
@@ -446,19 +469,27 @@ def make_double_smplx(n_envs, solver=None, gjk=None, **scene_kwargs):
         **{"show_viewer": False, "show_FPS": False, **scene_kwargs},
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     asset_path = get_hf_dataset(pattern="smplx_humanoid/*")
     smplx_xml = f"{asset_path}/smplx_humanoid/smplx_humanoid.xml"
     robots = [
         scene.add_entity(
-            gs.morphs.MJCF(
-                **get_file_morph_options(
-                    file=smplx_xml,
-                    pos=pos,
-                    euler=INIT_EULER,
-                )
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MJCF(
+                    **get_file_morph_options(
+                        file=smplx_xml,
+                        pos=pos,
+                        euler=INIT_EULER,
+                    )
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
             ),
-            vis_mode="collision",
         )
         for pos in INIT_POSS
     ]
@@ -507,29 +538,35 @@ def make_shadow_hand_cubes(n_envs, solver=None, gjk=None, sparse_solve=None, **s
 
     # Two shadow hands placed horizontally, palms facing down
     scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/shadow_hand/shadow_hand.urdf",
-            pos=(-0.1, 0.30, 0.9 * TABLE_Z),
-            euler=(90, 0, 0),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/shadow_hand/shadow_hand.urdf",
+                pos=(-0.1, 0.30, 0.9 * TABLE_Z),
+                euler=(90, 0, 0),
+                fixed=True,
+            ),
+        ),
     )
     scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/shadow_hand/shadow_hand.urdf",
-            pos=(0.1, 0.30, 0.9 * TABLE_Z),
-            euler=(90, 0, 0),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/shadow_hand/shadow_hand.urdf",
+                pos=(0.1, 0.30, 0.9 * TABLE_Z),
+                euler=(90, 0, 0),
+                fixed=True,
+            ),
+        ),
     )
 
     # Table
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0, 0, TABLE_Z / 2),
-            size=(0.5, 0.5, TABLE_Z / 2),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0, 0, TABLE_Z / 2),
+                size=(0.5, 0.5, TABLE_Z / 2),
+                fixed=True,
+            ),
+        ),
     )
 
     # 25 cubes in a 5x5 grid on the table
@@ -537,12 +574,14 @@ def make_shadow_hand_cubes(n_envs, solver=None, gjk=None, sparse_solve=None, **s
         x = -0.10 + 0.05 * (i % 5)
         y = -0.05 + 0.05 * (i // 5)
         scene.add_entity(
-            material=gs.materials.Rigid(
-                friction=0.8,
-            ),
-            morph=gs.morphs.Box(
-                pos=(x, y, TABLE_Z + 0.01),
-                size=(0.02, 0.02, 0.02),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    pos=(x, y, TABLE_Z + 0.01),
+                    size=(0.02, 0.02, 0.02),
+                ),
+                material=gs.materials.Rigid(
+                    friction=0.8,
+                ),
             ),
         )
 
@@ -630,30 +669,36 @@ def make_dex_hand(n_envs, solver=None, gjk=None, **scene_kwargs):
     for cfg in hand_configs:
         urdf_path = str(shadow_hand_path / "shadow_hand" / cfg["urdf"])
         hand = scene.add_entity(
-            gs.morphs.URDF(
-                file=urdf_path,
-                pos=cfg["pos"],
-                quat=cfg["quat"],
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file=urdf_path,
+                    pos=cfg["pos"],
+                    quat=cfg["quat"],
+                ),
             ),
         )
         hands.append(hand)
 
     table_path = str(dex_path / "dex" / "table.glb")
     scene.add_entity(
-        gs.morphs.Mesh(
-            file=table_path,
-            pos=(0.1, 0.0, 0.485403),
-            euler=(0, 0, 90),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=table_path,
+                pos=(0.1, 0.0, 0.485403),
+                euler=(0, 0, 90),
+                fixed=True,
+            ),
+        ),
     )
     drill_path = str(dex_path / "dex" / "drill_1.glb")
     drill = scene.add_entity(
-        gs.morphs.Mesh(
-            file=drill_path,
-            pos=(0.15, 0.1, 0.87),
-            euler=(90, 0, 225),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=drill_path,
+                pos=(0.15, 0.1, 0.87),
+                euler=(90, 0, 225),
+            ),
+        ),
     )
 
     time_start = time.time()
@@ -714,8 +759,12 @@ def make_convexify(n_envs, solver=None, gjk=None, **scene_kwargs):
     )
 
     scene.add_entity(
-        gs.morphs.Mesh(file="meshes/tank.obj", scale=5.0, fixed=True, euler=(90, 0, 90)),
-        vis_mode="collision",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(file="meshes/tank.obj", scale=5.0, fixed=True, euler=(90, 0, 90)),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+        ),
     )
     # 80 auto-decomposed objects (mug/donut/cup/apple, CoACD) stacked in a 4x4x5 staggered grid that collapses
     # into the tank -- exercises the convex-decomposition collision path at a high contact count.
@@ -725,12 +774,16 @@ def make_convexify(n_envs, solver=None, gjk=None, **scene_kwargs):
         gx, gy, gz = i % 4, (i // 4) % 4, i // 16
         name = assets[(gx + gy + gz) % len(assets)][0]
         scene.add_entity(
-            gs.morphs.MJCF(
-                file=asset_files[name],
-                pos=((gx + 0.5 * (gz % 2)) * 0.1 - 0.18, (gy + 0.5 * (gz % 2)) * 0.145 - 0.265, 0.11 + gz * 0.08),
-                euler=(90.0, 0.0, 0.0),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MJCF(
+                    file=asset_files[name],
+                    pos=((gx + 0.5 * (gz % 2)) * 0.1 - 0.18, (gy + 0.5 * (gz % 2)) * 0.145 - 0.265, 0.11 + gz * 0.08),
+                    euler=(90.0, 0.0, 0.0),
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
             ),
-            vis_mode="collision",
         )
 
     time_start = time.time()
@@ -766,17 +819,25 @@ def make_nonconvex_spacecraft(n_envs, solver=None, gjk=None, **scene_kwargs):
     # Non-watertight, non-convex spacecraft hull (convexify disabled) with a grid of boxes settling against it.
     asset_path = get_hf_dataset(pattern="spacecraft.obj")
     scene.add_entity(
-        gs.morphs.Mesh(
-            file=f"{asset_path}/spacecraft.obj",
-            pos=(-0.4, 0.0, -4.0),
-            euler=(90.0, 0.0, 0.0),
-            scale=3.0,
-            convexify=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/spacecraft.obj",
+                pos=(-0.4, 0.0, -4.0),
+                euler=(90.0, 0.0, 0.0),
+                scale=3.0,
+                convexify=False,
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
-    obj = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1)))
+    obj = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)),
+        ),
+    )
 
     time_start = time.time()
     scene.build(n_envs=n_envs)
@@ -851,28 +912,45 @@ def _build_table_bussing_scene(n_envs, solver=None, gjk=None, **scene_kwargs):
         **{"show_viewer": False, "show_FPS": False, **scene_kwargs},
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     # work_table.glb bakes its part layout into glTF node transforms; the non-uniform scale (matching the original
     # digital twin) is applied by the mesh morph, lifting the tabletop well above the plane so the clutter settles.
     table_path = get_hf_dataset(pattern="work_table.glb")
     scene.add_entity(
-        gs.morphs.Mesh(
-            file=f"{table_path}/work_table.glb", scale=(1.14, 1.0, 1.445), pos=(0.597, 0.0, 0.0), fixed=True
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=f"{table_path}/work_table.glb", scale=(1.14, 1.0, 1.445), pos=(0.597, 0.0, 0.0), fixed=True
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
 
     robot_path = get_hf_dataset(pattern="dual_arms_primitives.urdf")
     robot = scene.add_entity(
-        gs.morphs.URDF(file=f"{robot_path}/dual_arms_primitives.urdf", pos=(0.0, 0.0, 1.13), fixed=True),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(file=f"{robot_path}/dual_arms_primitives.urdf", pos=(0.0, 0.0, 1.13), fixed=True),
+        ),
     )
 
     twin_path = get_hf_dataset(pattern="table_bussing/**/*")
     for k, (kind, rel, euler, spot) in enumerate(OBJECTS):
         pos = spot if len(spot) == 3 else (*spot, DROP_Z + 0.04 * k)
         morph = gs.morphs.URDF if kind == "urdf" else gs.morphs.Mesh
-        scene.add_entity(morph(file=f"{twin_path}/table_bussing/{rel}", pos=pos, euler=euler), vis_mode="collision")
+        scene.add_entity(
+            options=gs.entities.Rigid(
+                morph=morph(file=f"{twin_path}/table_bussing/{rel}", pos=pos, euler=euler),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
+            ),
+        )
 
     time_start = time.time()
     scene.build(n_envs=n_envs)

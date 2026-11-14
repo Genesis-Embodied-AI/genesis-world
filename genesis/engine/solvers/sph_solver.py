@@ -1,6 +1,6 @@
 import math
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -12,6 +12,7 @@ from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import SPHEntity
 from genesis.engine.materials import SPH
 from genesis.options.solvers import SPHOptions
+from genesis.options.surfaces import Surface
 from genesis.utils.data import ENVS, Config, ConfigItem, Data, DataItem, DataKind, eoa, field, is_opted_in, iter_data
 from genesis.utils.geom import (
     PARTICLES,
@@ -37,6 +38,7 @@ from .base_solver import SimulatorState
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -211,10 +213,10 @@ class SPHConfig(Config):
 
 
 class SPHSolver(ParticleSolver):
+    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]] = gs.entities.SPH
+
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
-
-    material_cls = SPH.Base
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -353,18 +355,20 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self,
+        idx: int,
+        surface: Surface,
+        options: "gs.entities.SPH",
+        desc: "EntityDescription | None" = None,
     ) -> "SPHEntity":
         entity = SPHEntity(
             scene=self.scene,
             solver=self,
-            material=material,
-            morph=morph,
             surface=surface,
             particle_size=self._particle_size,
             idx=idx,
             particle_start=self.n_particles,
-            name=name,
+            options=options,
         )
         self.entities.append(entity)
         return entity

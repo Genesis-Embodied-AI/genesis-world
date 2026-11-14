@@ -21,17 +21,21 @@ def main():
     )
 
     tank = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/tank.obj",
-            scale=5.0,
-            fixed=True,
-            euler=(90, 0, 0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/tank.obj",
+                scale=5.0,
+                fixed=True,
+                euler=(90, 0, 0),
+            ),
         ),
     )
     ball = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.1,
-            pos=(0.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.1,
+                pos=(0.0, 0.0, 1.0),
+            ),
         ),
     )
 

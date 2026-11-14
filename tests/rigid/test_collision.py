@@ -79,18 +79,26 @@ def test_plane_convex(show_viewer, tol):
             show_FPS=False,
         )
 
-        scene.add_entity(morph)
+        scene.add_entity(
+            options=gs.entities.Rigid(
+                morph=morph,
+            ),
+        )
 
         asset_path = get_hf_dataset(pattern="image_0000_segmented.glb")
         asset = scene.add_entity(
-            gs.morphs.Mesh(
-                file=f"{asset_path}/image_0000_segmented.glb",
-                scale=0.03196910891804585,
-                pos=(0.45184245, 0.05020455, 0.02),
-                quat=(0.51982231, 0.44427745, 0.49720965, 0.53402704),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Mesh(
+                    file=f"{asset_path}/image_0000_segmented.glb",
+                    scale=0.03196910891804585,
+                    pos=(0.45184245, 0.05020455, 0.02),
+                    quat=(0.51982231, 0.44427745, 0.49720965, 0.53402704),
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
+                visualize_contact=True,
             ),
-            vis_mode="collision",
-            visualize_contact=True,
         )
 
         scene.build()
@@ -115,14 +123,22 @@ def test_ellipsoid(xml_path, show_viewer):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
-    entity = scene.add_entity(
-        gs.morphs.MJCF(
-            file=xml_path,
-            pos=(0, 0, 0.2),
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
         ),
-        vis_mode="collision",
-        visualize_contact=True,
+    )
+    entity = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+                pos=(0, 0, 0.2),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
+        ),
     )
     scene.build()
 
@@ -207,17 +223,19 @@ def test_no_drift(gjk_collision, entity_kind, entity_type, ground_type, show_vie
         box_mesh = trimesh.creation.box(extents=(2.0 * BOX_HALF_EXTENT, 2.0 * BOX_HALF_EXTENT, HEIGHT))
         is_ground_convex = ground_type == "mesh"
         box = scene.add_entity(
-            morph=gs.morphs.MeshSet(
-                files=(box_mesh,),
-                pos=box_pos_world,
-                quat=tilt_quat,
-                convexify=is_ground_convex,
-                fixed=True,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MeshSet(
+                    files=(box_mesh,),
+                    pos=box_pos_world,
+                    quat=tilt_quat,
+                    convexify=is_ground_convex,
+                    fixed=True,
+                ),
+                surface=gs.surfaces.Default(
+                    smooth=False,
+                ),
+                visualize_contact=True,
             ),
-            surface=gs.surfaces.Default(
-                smooth=False,
-            ),
-            visualize_contact=True,
         )
         # Manually overwrite convex flag to forcibly exercise non-convex collision path
         box.geoms[0]._is_convex = is_ground_convex
@@ -225,35 +243,41 @@ def test_no_drift(gjk_collision, entity_kind, entity_type, ground_type, show_vie
         flat_hf = np.zeros((2, 2), dtype=np.float32)
         terrain_pos_world = R @ np.array([-BOX_HALF_EXTENT, -BOX_HALF_EXTENT, HEIGHT])
         scene.add_entity(
-            morph=gs.morphs.Terrain(
-                horizontal_scale=2.0 * BOX_HALF_EXTENT,
-                vertical_scale=2.0 * BOX_HALF_EXTENT,
-                height_field=flat_hf,
-                pos=terrain_pos_world,
-                quat=tilt_quat,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Terrain(
+                    horizontal_scale=2.0 * BOX_HALF_EXTENT,
+                    vertical_scale=2.0 * BOX_HALF_EXTENT,
+                    height_field=flat_hf,
+                    pos=terrain_pos_world,
+                    quat=tilt_quat,
+                ),
+                visualize_contact=True,
             ),
-            visualize_contact=True,
         )
     elif ground_type == "plane":
         plane_pos_world = R @ np.array([0.0, 0.0, HEIGHT])
         scene.add_entity(
-            morph=gs.morphs.Plane(
-                pos=plane_pos_world,
-                plane_size=(2.0 * BOX_HALF_EXTENT, 2.0 * BOX_HALF_EXTENT),
-                quat=tilt_quat,
-                fixed=True,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Plane(
+                    pos=plane_pos_world,
+                    plane_size=(2.0 * BOX_HALF_EXTENT, 2.0 * BOX_HALF_EXTENT),
+                    quat=tilt_quat,
+                    fixed=True,
+                ),
+                visualize_contact=True,
             ),
-            visualize_contact=True,
         )
     else:  # if ground_type == "prim":
         scene.add_entity(
-            morph=gs.morphs.Box(
-                pos=box_pos_world,
-                quat=tilt_quat,
-                size=(2.0 * BOX_HALF_EXTENT, 2.0 * BOX_HALF_EXTENT, HEIGHT),
-                fixed=True,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    pos=box_pos_world,
+                    quat=tilt_quat,
+                    size=(2.0 * BOX_HALF_EXTENT, 2.0 * BOX_HALF_EXTENT, HEIGHT),
+                    fixed=True,
+                ),
+                visualize_contact=True,
             ),
-            visualize_contact=True,
         )
 
     if entity_kind == "sphere":
@@ -275,27 +299,35 @@ def test_no_drift(gjk_collision, entity_kind, entity_type, ground_type, show_vie
                 sphere_mesh.apply_transform(trimesh.transformations.rotation_matrix(angle, cross_axis))
             is_entity_convex = entity_type == "mesh"
             entity = scene.add_entity(
-                morph=gs.morphs.MeshSet(
-                    files=(sphere_mesh,),
-                    convexify=is_entity_convex,
-                    decimate=False,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.MeshSet(
+                        files=(sphere_mesh,),
+                        convexify=is_entity_convex,
+                        decimate=False,
+                    ),
+                    surface=gs.surfaces.Default(
+                        vis_mode="collision",
+                    ),
+                    # visualize_contact=True,
                 ),
-                vis_mode="collision",
-                # visualize_contact=True,
             )
             # Manually overwrite convex flag to forcibly exercise non-convex collision path
             entity.geoms[0]._is_convex = is_entity_convex
         else:
             entity = scene.add_entity(
-                morph=gs.morphs.Sphere(
-                    radius=SMOOTH_RADIUS,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Sphere(
+                        radius=SMOOTH_RADIUS,
+                    ),
                 ),
             )
     elif entity_kind == "cylinder":
         entity = scene.add_entity(
-            morph=gs.morphs.Cylinder(
-                radius=SMOOTH_RADIUS,
-                height=CYLINDER_HEIGHT,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Cylinder(
+                    radius=SMOOTH_RADIUS,
+                    height=CYLINDER_HEIGHT,
+                ),
             ),
         )
     elif entity_kind == "capsule":
@@ -304,19 +336,23 @@ def test_no_drift(gjk_collision, entity_kind, entity_type, ground_type, show_vie
         # unstable regardless of the bias fix) and the full-length capsule (used by "horizontal-axis" envs, barrel
         # contact). MuJoCo rejects an exact zero length so we use a tiny positive value.
         entity = scene.add_entity(
-            morph=(
-                gs.morphs.MJCF(
-                    file=_capsule_mjcf_path(tmp_path, SMOOTH_RADIUS, gs.EPS, name="capsule_v"),
+            options=gs.entities.Rigid(
+                morph=(
+                    gs.morphs.MJCF(
+                        file=_capsule_mjcf_path(tmp_path, SMOOTH_RADIUS, gs.EPS, name="capsule_v"),
+                    ),
+                    gs.morphs.MJCF(
+                        file=_capsule_mjcf_path(tmp_path, SMOOTH_RADIUS, CYLINDER_HEIGHT, name="capsule_h"),
+                    ),
                 ),
-                gs.morphs.MJCF(
-                    file=_capsule_mjcf_path(tmp_path, SMOOTH_RADIUS, CYLINDER_HEIGHT, name="capsule_h"),
-                ),
-            )
+            ),
         )
     else:  # if entity_kind == "ellipsoid":
         entity = scene.add_entity(
-            morph=gs.morphs.MJCF(
-                file=_ellipsoid_mjcf_path(tmp_path, ELLIPSOID_SEMI_AXES),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MJCF(
+                    file=_ellipsoid_mjcf_path(tmp_path, ELLIPSOID_SEMI_AXES),
+                ),
             ),
         )
     scene.build(n_envs=N_ENVS)
@@ -394,37 +430,45 @@ def test_convex_on_primitive_at_rest(show_viewer, tol):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Cylinder(
-            pos=(0.0, 0.0, 0.1),
-            quat=tilt_quat,
-            fixed=True,
-            height=0.008,
-            radius=0.05,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Cylinder(
+                pos=(0.0, 0.0, 0.1),
+                quat=tilt_quat,
+                fixed=True,
+                height=0.008,
+                radius=0.05,
+            ),
         ),
     )
     scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.2, 0.0, 0.1),
-            quat=tilt_quat,
-            fixed=True,
-            size=(0.1, 0.1, 0.008),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.2, 0.0, 0.1),
+                quat=tilt_quat,
+                fixed=True,
+                size=(0.1, 0.1, 0.008),
+            ),
         ),
     )
     entity_on_cylinder = scene.add_entity(
-        gs.morphs.MeshSet(
-            pos=(0.0, 0.0, 0.1) + R @ (0.004, -0.003, 0.034),
-            quat=tilt_quat,
-            files=(cube_mesh,),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MeshSet(
+                pos=(0.0, 0.0, 0.1) + R @ (0.004, -0.003, 0.034),
+                quat=tilt_quat,
+                files=(cube_mesh,),
+            ),
+            visualize_contact=True,
         ),
-        visualize_contact=True,
     )
     entity_on_box = scene.add_entity(
-        gs.morphs.MeshSet(
-            pos=(0.2, 0.0, 0.1) + R @ (0.004, -0.003, 0.034),
-            quat=tilt_quat,
-            files=(cube_mesh,),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MeshSet(
+                pos=(0.2, 0.0, 0.1) + R @ (0.004, -0.003, 0.034),
+                quat=tilt_quat,
+                files=(cube_mesh,),
+            ),
+            visualize_contact=True,
         ),
-        visualize_contact=True,
     )
     scene.build(n_envs=2)
 
@@ -451,24 +495,28 @@ def test_mpr_thin_box_stack_no_lateral_phantom(show_viewer, tol):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.0, 0.0, 0.005),
-            size=(0.002, 0.02, 0.01),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0, 0, 1),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.005),
+                size=(0.002, 0.02, 0.01),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0, 0, 1),
+            ),
         ),
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.0, 0.0, 0.01495),
-            size=(0.002, 0.0199, 0.01),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.01495),
+                size=(0.002, 0.0199, 0.01),
+            ),
+            surface=gs.surfaces.Default(
+                color=(1, 0, 0),
+            ),
+            visualize_contact=True,
         ),
-        surface=gs.surfaces.Default(
-            color=(1, 0, 0),
-        ),
-        visualize_contact=True,
     )
     scene.build()
 
@@ -533,11 +581,15 @@ def test_box_contact_minimal_separation(detection, show_viewer, tol):
         pairs_boxes.append(
             [
                 scene.add_entity(
-                    morph=[
-                        gs.morphs.Box(pos=pair_pos + (0.0, 0.0, 3.0 * scale * i_box), size=scale * box_size)
-                        for box_size in boxes_size[i_box]
-                    ],
-                    vis_mode="collision",
+                    options=gs.entities.Rigid(
+                        morph=[
+                            gs.morphs.Box(pos=pair_pos + (0.0, 0.0, 3.0 * scale * i_box), size=scale * box_size)
+                            for box_size in boxes_size[i_box]
+                        ],
+                        surface=gs.surfaces.Default(
+                            vis_mode="collision",
+                        ),
+                    ),
                 )
                 for i_box in range(2)
             ]
@@ -742,10 +794,14 @@ def test_box_contact_true_penetration(show_viewer, tol):
     )
     box_1, box_2 = (
         scene.add_entity(
-            morph=gs.morphs.Box(
-                size=BOX_SIZE,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=BOX_SIZE,
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
             ),
-            vis_mode="collision",
         )
         for _ in range(2)
     )
@@ -822,21 +878,29 @@ def test_box_stacks_stability(detection, show_viewer, tol):
         view_x = 0.5 * (i_s - 0.5 * (len(SCALES) - 1))
         pile_pos = 5.0 * scale * np.array((view_x, 1.0, -0.1)) + (0.0, 0.0, scale * BASE_SIZE[2])
         base = scene.add_entity(
-            gs.morphs.Box(
-                pos=pile_pos - (0.0, 0.0, 0.5 * scale * BASE_SIZE[2]),
-                size=scale * BASE_SIZE,
-                fixed=True,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    pos=pile_pos - (0.0, 0.0, 0.5 * scale * BASE_SIZE[2]),
+                    size=scale * BASE_SIZE,
+                    fixed=True,
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
             ),
-            vis_mode="collision",
         )
         boxes = [
             scene.add_entity(
-                morph=[
-                    gs.morphs.Box(pos=(*pile_pos[:2], pile_pos[2] + (i_b + 1) * scale), size=scale * box_size)
-                    for box_size in np.random.permutation(BOXES_SIZE)
-                ],
-                visualize_contact=True,
-                vis_mode="collision",
+                options=gs.entities.Rigid(
+                    morph=[
+                        gs.morphs.Box(pos=(*pile_pos[:2], pile_pos[2] + (i_b + 1) * scale), size=scale * box_size)
+                        for box_size in np.random.permutation(BOXES_SIZE)
+                    ],
+                    surface=gs.surfaces.Default(
+                        vis_mode="collision",
+                    ),
+                    visualize_contact=True,
+                ),
             )
             for i_b in range(len(BOXES_SIZE))
         ]
@@ -1105,49 +1169,67 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
         show_viewer=show_viewer,
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.0, 0.0, 0.5 * BOX_SIZE),
-            euler=(0.0, 0.0, math.degrees(YAW)),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.5 * BOX_SIZE),
+                euler=(0.0, 0.0, math.degrees(YAW)),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                fixed=True,
+            ),
         ),
     )
     geom_grazing = scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.0, 0.0, 2.0 * BOX_SIZE),
-            size=(GEOM_SIZE, GEOM_SIZE, GEOM_SIZE),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 2.0 * BOX_SIZE),
+                size=(GEOM_SIZE, GEOM_SIZE, GEOM_SIZE),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        visualize_contact=True,
-        vis_mode="collision",
     )
     geom_pressed = scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.0, 0.0, 3.0 * BOX_SIZE),
-            size=(GEOM_SIZE, GEOM_SIZE, GEOM_SIZE),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 3.0 * BOX_SIZE),
+                size=(GEOM_SIZE, GEOM_SIZE, GEOM_SIZE),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        visualize_contact=True,
-        vis_mode="collision",
     )
     # The lamp spans a meter while the finger presses it by less than a millimeter, so the rounding errors of the
     # Minkowski difference reach the depth convergence tolerance and cut dents into the polytope that refines the depth.
     # The finger is placed where the search would end on a dent.
     finger = scene.add_entity(
-        gs.morphs.Mesh(
-            file=f"{asset_path}/meshes/inspire_finger_hull.obj",
-            pos=(0.2282334562357352, -0.24876064442406798, -3.140536243429785),
-            quat=(0.5830528595970937, 0.23922303491173352, -0.7549261541988322, 0.18140618564379823),
-            decimate=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/meshes/inspire_finger_hull.obj",
+                pos=(0.2282334562357352, -0.24876064442406798, -3.140536243429785),
+                quat=(0.5830528595970937, 0.23922303491173352, -0.7549261541988322, 0.18140618564379823),
+                decimate=False,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
-        visualize_contact=True,
-        vis_mode="collision",
     )
     lamp = scene.add_entity(
-        gs.morphs.Mesh(
-            file=f"{asset_path}/meshes/floor_lamp_hull.obj",
-            pos=(-0.13053986430168152, -0.09062329679727554, -3.08468234539032),
-            quat=(-0.04015674069523811, 0.15293818712234497, 0.14172174036502838, 0.9771961569786072),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/meshes/floor_lamp_hull.obj",
+                pos=(-0.13053986430168152, -0.09062329679727554, -3.08468234539032),
+                quat=(-0.04015674069523811, 0.15293818712234497, 0.14172174036502838, 0.9771961569786072),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     scene.build()
 
@@ -1188,15 +1270,21 @@ def test_robot_scaling_primitive_collision(show_viewer):
         show_FPS=False,
     )
     plane = scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     asset_path = get_hf_dataset(pattern="cross.xml")
     robot = scene.add_entity(
-        gs.morphs.MJCF(
-            file=f"{asset_path}/cross.xml",
-            scale=0.5,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=f"{asset_path}/cross.xml",
+                scale=0.5,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     scene.build()
 
@@ -1234,17 +1322,23 @@ def test_contact_forces(show_viewer):
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        ),
     )
     cube = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.04, 0.04, 0.04),
-            pos=(0.65, 0.0, 0.02),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.04, 0.04, 0.04),
+                pos=(0.65, 0.0, 0.02),
+            ),
+            # visualize_contact=True,
         ),
-        # visualize_contact=True,
     )
     scene.build(n_envs=5)
 
@@ -1338,23 +1432,27 @@ def test_contact_pruning(gjk_collision, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(GEOM_HALF_SIZE, 1.0, 1.0),
-            pos=(MARGIN - 1.5 * GEOM_HALF_SIZE, 0.0, 0.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1, 0, 0, 0.8),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(GEOM_HALF_SIZE, 1.0, 1.0),
+                pos=(MARGIN - 1.5 * GEOM_HALF_SIZE, 0.0, 0.0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1, 0, 0, 0.8),
+            ),
         ),
     )
 
     # The pruning groups the contacts by link pair, which must stay apart however large and close their indices, so the
     # box comes after a sphere apart from everything and two walls come after the box
     scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(10.0, 10.0, 10.0),
-            radius=0.01,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(10.0, 10.0, 10.0),
+                radius=0.01,
+                fixed=True,
+            ),
         ),
     )
     sub_meshes = []
@@ -1363,38 +1461,46 @@ def test_contact_pruning(gjk_collision, show_viewer):
         mesh.apply_translation((2 / 3 * sx * GEOM_HALF_SIZE, 2 / 3 * sy * GEOM_HALF_SIZE, 2 / 3 * sz * GEOM_HALF_SIZE))
         sub_meshes.append(mesh)
     box = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=sub_meshes,
-        ),
-        surface=gs.surfaces.Default(
-            smooth=False,
-        ),
-        visualize_contact=True,
-        vis_mode="collision",
-    )
-    scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(1.0, GEOM_HALF_SIZE, 1.0),
-            pos=(0.0, MARGIN - 1.5 * GEOM_HALF_SIZE, 0.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0, 1, 0, 0.8),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MeshSet(
+                files=sub_meshes,
+            ),
+            surface=gs.surfaces.Default(
+                smooth=False,
+                vis_mode="collision",
+            ),
+            visualize_contact=True,
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(1.0, 1.0, GEOM_HALF_SIZE),
-            pos=(0.0, 0.0, MARGIN - 1.5 * GEOM_HALF_SIZE),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0, 0, 1, 0.8),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(1.0, GEOM_HALF_SIZE, 1.0),
+                pos=(0.0, MARGIN - 1.5 * GEOM_HALF_SIZE, 0.0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0, 1, 0, 0.8),
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(0.0, 0.0, -0.3),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(1.0, 1.0, GEOM_HALF_SIZE),
+                pos=(0.0, 0.0, MARGIN - 1.5 * GEOM_HALF_SIZE),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0, 0, 1, 0.8),
+            ),
+        ),
+    )
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(0.0, 0.0, -0.3),
+            ),
         ),
     )
     meshes = []
@@ -1404,15 +1510,17 @@ def test_contact_pruning(gjk_collision, show_viewer):
         mesh.apply_transform(gu.trans_quat_to_T(trans=np.zeros(3), quat=quat))
         meshes.append(mesh)
     prism = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=meshes,
-            pos=(0.8, 0.0, 2.0),
-            decimate=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MeshSet(
+                files=meshes,
+                pos=(0.8, 0.0, 2.0),
+                decimate=False,
+            ),
+            surface=gs.surfaces.Default(
+                smooth=False,
+                vis_mode="collision",
+            ),
         ),
-        surface=gs.surfaces.Default(
-            smooth=False,
-        ),
-        vis_mode="collision",
     )
     scene.build(n_envs=2)
     # The box sits in the corner of the three walls in the first environment, and on the edge of the two walls after it
@@ -1517,18 +1625,26 @@ def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
         ),
         show_viewer=show_viewer,
     )
-    plane = scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     pole_pos = (0.0, 0.0, BASE_HEIGHT / 2)
     pole = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="tower/base_pole.urdf",
-            pos=pole_pos,
-            file_meshes_are_zup=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="tower/base_pole.urdf",
+                pos=pole_pos,
+                file_meshes_are_zup=True,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            material=gs.materials.Rigid(
+                rho=600.0,
+            ),
         ),
-        material=gs.materials.Rigid(
-            rho=600.0,
-        ),
-        vis_mode="collision",
     )
     poss_init = [pole_pos]
     rpys_init = [(0.0, 0.0, 0.0)]
@@ -1539,17 +1655,21 @@ def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
         # Alternate rotational offset along z-axis to avoid lateral contacts
         ring_yaw = 180 / N_WEDGES * (i % 2)
         ring = scene.add_entity(
-            morph=gs.morphs.URDF(
-                file=f"tower/ring_{ring_idx + 1:02d}.urdf",
-                pos=ring_pos,
-                euler=(0.0, 0.0, ring_yaw),
-                file_meshes_are_zup=True,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file=f"tower/ring_{ring_idx + 1:02d}.urdf",
+                    pos=ring_pos,
+                    euler=(0.0, 0.0, ring_yaw),
+                    file_meshes_are_zup=True,
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode="collision",
+                ),
+                material=gs.materials.Rigid(
+                    rho=600.0,
+                ),
+                visualize_contact=True,
             ),
-            material=gs.materials.Rigid(
-                rho=600.0,
-            ),
-            vis_mode="collision",
-            visualize_contact=True,
         )
         rings.append(ring)
         poss_init.append(ring_pos)
@@ -1557,15 +1677,19 @@ def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
         height += RING_HEIGHT - 1e-4
     ball_pos = (0.0, 0.0, height + BALL_HEIGHT)
     ball = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="tower/ball.urdf",
-            pos=ball_pos,
-            file_meshes_are_zup=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="tower/ball.urdf",
+                pos=ball_pos,
+                file_meshes_are_zup=True,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
+            material=gs.materials.Rigid(
+                rho=600.0,
+            ),
         ),
-        material=gs.materials.Rigid(
-            rho=600.0,
-        ),
-        vis_mode="collision",
     )
     poss_init.append(ball_pos)
     rpys_init.append((0.0, 0.0, 0.0))
@@ -1653,19 +1777,23 @@ def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(2 * BOX_HALFSIZE, 2 * BOX_HALFSIZE, HEIGHT),
-            pos=(0.0, 0.0, 0.5 * HEIGHT),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(2 * BOX_HALFSIZE, 2 * BOX_HALFSIZE, HEIGHT),
+                pos=(0.0, 0.0, 0.5 * HEIGHT),
+                fixed=True,
+            ),
+            visualize_contact=True,
         ),
-        visualize_contact=True,
     )
     entity = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=xml_path,
-        ),
-        surface=gs.surfaces.Default(
-            smooth=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+            ),
+            surface=gs.surfaces.Default(
+                smooth=False,
+            ),
         ),
     )
     scene.build(n_envs=N_ENVS)
@@ -1750,35 +1878,43 @@ def test_num_contact_overflow(
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     if scene_kind == "bowls":
         asset_path = get_hf_dataset(pattern="glb/orange_plastic_bowl.glb")
         for _ in range(N_BOWLS):
             scene.add_entity(
-                morph=gs.morphs.Mesh(
-                    file=f"{asset_path}/glb/orange_plastic_bowl.glb",
-                    pos=(0, 0, 0.5),
-                    euler=(90, 0, 0),
-                    convexify=True,
-                    file_meshes_are_zup=True,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Mesh(
+                        file=f"{asset_path}/glb/orange_plastic_bowl.glb",
+                        pos=(0, 0, 0.5),
+                        euler=(90, 0, 0),
+                        convexify=True,
+                        file_meshes_are_zup=True,
+                    ),
                 ),
             )
     else:
         # Non-contacting nonconvex mesh: makes the scene prunable so that the GPU cooperative kernel is exercised.
         scene.add_entity(
-            morph=gs.morphs.Mesh(
-                file="meshes/duck.obj",
-                scale=0.04,
-                pos=(5.0, 5.0, 5.0),
-                convexify=False,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Mesh(
+                    file="meshes/duck.obj",
+                    scale=0.04,
+                    pos=(5.0, 5.0, 5.0),
+                    convexify=False,
+                ),
             ),
         )
         for i in range(2):
             scene.add_entity(
-                morph=gs.morphs.Sphere(
-                    pos=(0.5 * i, 0.0, 0.0999),
-                    radius=0.1,
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Sphere(
+                        pos=(0.5 * i, 0.0, 0.0999),
+                        radius=0.1,
+                    ),
                 ),
             )
 
@@ -1864,22 +2000,28 @@ def test_filter_neutral_self_collisions(show_viewer):
         show_viewer=show_viewer,
     )
     robot = scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        ),
     )
     sphere = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.08,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.0, 2.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.08,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.0, 2.0, 0.0, 1.0),
+            ),
         ),
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.0, 0.0, 1.0),
+            ),
         ),
     )
     sphere.attach(robot, "hand")
@@ -1960,59 +2102,71 @@ def test_contype_conaffinity(xml_path, show_viewer, tol):
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(
-            pos=(0.0, 0.0, 0.0),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(0.0, 0.0, 0.0),
+            ),
+        ),
     )
     box1 = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.5, 0.5, 0.5),
-            pos=(0.0, 0.0, 0.5),
-            contype=3,
-            conaffinity=3,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.5, 0.5, 0.5),
+                pos=(0.0, 0.0, 0.5),
+                contype=3,
+                conaffinity=3,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.0, 0.0, 1.0),
+            ),
         ),
     )
     box2 = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.5, 0.5, 0.5),
-            pos=(0.0, 0.0, 1.0),
-            contype=2,
-            conaffinity=2,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.0, 1.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.5, 0.5, 0.5),
+                pos=(0.0, 0.0, 1.0),
+                contype=2,
+                conaffinity=2,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.0, 1.0, 0.0, 1.0),
+            ),
         ),
     )
     box3 = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.5, 0.5, 0.5),
-            pos=(0.0, 0.0, 1.5),
-            contype=1,
-            conaffinity=1,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.5, 0.5, 0.5),
+                pos=(0.0, 0.0, 1.5),
+                contype=1,
+                conaffinity=1,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.0, 0.0, 1.0, 1.0),
+            ),
+            visualize_contact=True,
         ),
-        surface=gs.surfaces.Default(
-            color=(0.0, 0.0, 1.0, 1.0),
-        ),
-        visualize_contact=True,
     )
     box4 = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.5, 0.5, 0.5),
-            pos=(0.0, 0.0, 2.0),
-            contype=0,
-            conaffinity=0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.5, 0.5, 0.5),
+                pos=(0.0, 0.0, 2.0),
+                contype=0,
+                conaffinity=0,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.8, 0.8, 0.8, 1.0),
+            ),
+            visualize_contact=True,
         ),
-        surface=gs.surfaces.Default(
-            color=(0.8, 0.8, 0.8, 1.0),
-        ),
-        visualize_contact=True,
     )
     free_bodies = scene.add_entity(
-        gs.morphs.MJCF(
-            file=xml_path,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+            ),
         ),
     )
     # Each variant of a heterogeneous entity excludes its own body pairs: the same bodies hinged on a world whose geom
@@ -2029,7 +2183,9 @@ def test_contype_conaffinity(xml_path, show_viewer, tol):
         mjcf.find("contact/exclude").attrib |= dict(zip(("body1", "body2"), excluded_bodies))
         hinged_mjcfs.append(ET.tostring(mjcf, encoding="unicode"))
     hinged_bodies = scene.add_entity(
-        morph=[gs.morphs.MJCF(file=hinged_mjcf, pos=(0.0, 2.0, 0.0)) for hinged_mjcf in hinged_mjcfs],
+        options=gs.entities.Rigid(
+            morph=[gs.morphs.MJCF(file=hinged_mjcf, pos=(0.0, 2.0, 0.0)) for hinged_mjcf in hinged_mjcfs],
+        ),
     )
     scene.build(n_envs=2)
     variants_excluded_links = [
@@ -2115,40 +2271,50 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
     scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="tower/base_pole.urdf",
-            pos=(0.0, 0.0, BASE_HEIGHT / 2),
-            file_meshes_are_zup=True,
-        ),
-        material=gs.materials.Rigid(
-            rho=600.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
         ),
     )
-    height = BASE_HEIGHT
-    for i, ring_idx in enumerate(RINGS_ORDER):
-        scene.add_entity(
+    scene.add_entity(
+        options=gs.entities.Rigid(
             morph=gs.morphs.URDF(
-                file=f"tower/ring_{ring_idx + 1:02d}.urdf",
-                pos=(0.0, 0.0, height + (RING_HEIGHT - 1e-4) / 2),
-                # Alternate rotational offset along z-axis to avoid lateral contacts
-                euler=(0.0, 0.0, 180 / N_WEDGES * (i % 2)),
+                file="tower/base_pole.urdf",
+                pos=(0.0, 0.0, BASE_HEIGHT / 2),
                 file_meshes_are_zup=True,
             ),
             material=gs.materials.Rigid(
                 rho=600.0,
             ),
+        ),
+    )
+    height = BASE_HEIGHT
+    for i, ring_idx in enumerate(RINGS_ORDER):
+        scene.add_entity(
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file=f"tower/ring_{ring_idx + 1:02d}.urdf",
+                    pos=(0.0, 0.0, height + (RING_HEIGHT - 1e-4) / 2),
+                    # Alternate rotational offset along z-axis to avoid lateral contacts
+                    euler=(0.0, 0.0, 180 / N_WEDGES * (i % 2)),
+                    file_meshes_are_zup=True,
+                ),
+                material=gs.materials.Rigid(
+                    rho=600.0,
+                ),
+            ),
         )
         height += RING_HEIGHT - 1e-4
     ball = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="tower/ball.urdf",
-            pos=(0.0, 0.0, height + BALL_HEIGHT),
-            file_meshes_are_zup=True,
-        ),
-        material=gs.materials.Rigid(
-            rho=600.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="tower/ball.urdf",
+                pos=(0.0, 0.0, height + BALL_HEIGHT),
+                file_meshes_are_zup=True,
+            ),
+            material=gs.materials.Rigid(
+                rho=600.0,
+            ),
         ),
     )
     scene.build()
@@ -2234,13 +2400,17 @@ def test_neutral_self_collision_masks_across_merged_entities(merged_overlapping_
         show_viewer=show_viewer,
     )
     arm = scene.add_entity(
-        gs.morphs.MJCF(
-            file=arm_xml,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=arm_xml,
+            ),
         ),
     )
     hand = scene.add_entity(
-        gs.morphs.MJCF(
-            file=hand_xml,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=hand_xml,
+            ),
         ),
     )
     hand.attach(arm, "tip")

@@ -27,18 +27,22 @@ def test_needs_coup():
         show_viewer=False,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            needs_coup=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Rigid(
+                needs_coup=False,
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0, 0, 0.5),
-        ),
-        material=gs.materials.Rigid(
-            needs_coup=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0, 0, 0.5),
+            ),
+            material=gs.materials.Rigid(
+                needs_coup=False,
+            ),
         ),
     )
     scene.build()
@@ -55,26 +59,34 @@ def test_auto_coup_type_from_dofs():
         show_viewer=False,
     )
     plane = scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     fixed_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.5),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.5),
+                fixed=True,
+            ),
         ),
     )
     free_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.5, 0.0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.5, 0.0, 0.5),
+            ),
         ),
     )
     robot = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/simple/two_cube_revolute.urdf",
-            pos=(0.0, 0.5, 0.2),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_cube_revolute.urdf",
+                pos=(0.0, 0.5, 0.2),
+                fixed=True,
+            ),
         ),
     )
     scene.build()
@@ -101,14 +113,16 @@ def test_link_filter_strict():
     )
 
     robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/simple/two_cube_revolute.urdf",
-            pos=(0, 0, 0.2),
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(
-            coup_type="two_way_soft_constraint",
-            coup_links=("moving",),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_cube_revolute.urdf",
+                pos=(0, 0, 0.2),
+                fixed=True,
+            ),
+            material=gs.materials.Rigid(
+                coup_type="two_way_soft_constraint",
+                coup_links=("moving",),
+            ),
         ),
     )
 
@@ -156,22 +170,26 @@ def test_find_target_links(coup_type, merge_fixed_links, show_viewer):
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            coup_friction=0.5,
-            coup_type="ipc_only",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Rigid(
+                coup_friction=0.5,
+                coup_type="ipc_only",
+            ),
         ),
     )
 
     robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/panda_bullet/panda_nohand.urdf",
-            pos=(0, 0, 1),
-            fixed=True,
-            merge_fixed_links=merge_fixed_links,
-        ),
-        material=gs.materials.Rigid(
-            coup_type=coup_type,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/panda_bullet/panda_nohand.urdf",
+                pos=(0, 0, 1),
+                fixed=True,
+                merge_fixed_links=merge_fixed_links,
+            ),
+            material=gs.materials.Rigid(
+                coup_type=coup_type,
+            ),
         ),
     )
 
@@ -216,31 +234,37 @@ def test_collision_delegation_ipc_vs_rigid(coup_type, enable_rigid_ground_contac
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            needs_coup=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Rigid(
+                needs_coup=False,
+            ),
         ),
     )
 
     # Non-IPC box — always handled by rigid solver
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.05, 0.05, 0.05),
-            pos=(1.0, 0.0, 0.2),
-        ),
-        material=gs.materials.Rigid(
-            needs_coup=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.05, 0.05, 0.05),
+                pos=(1.0, 0.0, 0.2),
+            ),
+            material=gs.materials.Rigid(
+                needs_coup=False,
+            ),
         ),
     )
 
     if coup_type == "two_way_soft_constraint":
         entity = scene.add_entity(
-            gs.morphs.MJCF(
-                file="xml/franka_emika_panda/panda_non_overlap.xml",
-            ),
-            material=gs.materials.Rigid(
-                coup_type="two_way_soft_constraint",
-                coup_links=("left_finger", "right_finger"),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MJCF(
+                    file="xml/franka_emika_panda/panda_non_overlap.xml",
+                ),
+                material=gs.materials.Rigid(
+                    coup_type="two_way_soft_constraint",
+                    coup_links=("left_finger", "right_finger"),
+                ),
             ),
         )
 
@@ -248,22 +272,21 @@ def test_collision_delegation_ipc_vs_rigid(coup_type, enable_rigid_ground_contac
     else:
         with pytest.raises(gs.GenesisException):
             entity = scene.add_entity(
-                gs.morphs.URDF(
-                    file="urdf/go2/urdf/go2.urdf",
-                    pos=(0.0, 0.0, 1.0),
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.URDF(file="urdf/go2/urdf/go2.urdf", pos=(0.0, 0.0, 1.0)),
+                    material=gs.materials.Rigid(coup_type="ipc_only"),
+                )
+            )
+
+        entity = scene.add_entity(
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(0.2, 0.2, 0.2),
+                    pos=(0.0, 0.0, 0.6),
                 ),
                 material=gs.materials.Rigid(
                     coup_type="ipc_only",
                 ),
-            )
-
-        entity = scene.add_entity(
-            morph=gs.morphs.Box(
-                size=(0.2, 0.2, 0.2),
-                pos=(0.0, 0.0, 0.6),
-            ),
-            material=gs.materials.Rigid(
-                coup_type="ipc_only",
             ),
         )
 
@@ -328,14 +351,16 @@ def test_coup_collision_links():
     )
 
     robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/simple/two_cube_revolute.urdf",
-            pos=(0, 0, 0.2),
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(
-            coup_type="two_way_soft_constraint",
-            coup_collision_links=("moving",),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_cube_revolute.urdf",
+                pos=(0, 0, 0.2),
+                fixed=True,
+            ),
+            material=gs.materials.Rigid(
+                coup_type="two_way_soft_constraint",
+                coup_collision_links=("moving",),
+            ),
         ),
     )
     scene.build()

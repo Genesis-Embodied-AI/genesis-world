@@ -32,39 +32,49 @@ def main():
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
 
     if args.comb == "urdf2urdf" or args.comb == "urdf2mjcf":
         gs.logger.info("loading URDF panda arm")
         franka = scene.add_entity(
-            gs.morphs.URDF(
-                file="urdf/panda_bullet/panda_nohand.urdf",
-                merge_fixed_links=False,
-                fixed=True,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file="urdf/panda_bullet/panda_nohand.urdf",
+                    merge_fixed_links=False,
+                    fixed=True,
+                ),
             ),
         )
     else:
         gs.logger.info("loading MJCF panda arm")
         franka = scene.add_entity(
-            gs.morphs.MJCF(
-                file="xml/franka_emika_panda/panda_nohand.xml",
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MJCF(
+                    file="xml/franka_emika_panda/panda_nohand.xml",
+                ),
             ),
         )
 
     if args.comb == "urdf2urdf" or args.comb == "mjcf2urdf":
         gs.logger.info("loading URDF panda hand")
         hand = scene.add_entity(
-            gs.morphs.URDF(
-                file="urdf/panda_bullet/hand.urdf",
-                merge_fixed_links=False,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(
+                    file="urdf/panda_bullet/hand.urdf",
+                    merge_fixed_links=False,
+                ),
             ),
         )
     else:
         gs.logger.info("loading MJCF panda hand")
         hand = scene.add_entity(
-            gs.morphs.MJCF(
-                file="xml/franka_emika_panda/hand.xml",
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MJCF(
+                    file="xml/franka_emika_panda/hand.xml",
+                ),
             ),
         )
 

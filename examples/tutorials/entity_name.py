@@ -24,28 +24,36 @@ def main():
 
     # Auto-generated names: {morph_type}_{uid_prefix}
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0, 0, 0.5),
-            size=(0.2, 0.2, 0.2),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0, 0, 0.5),
+                size=(0.2, 0.2, 0.2),
+            ),
         ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.5, 0, 0.5),
-            radius=0.1,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(0.5, 0, 0.5),
+                radius=0.1,
+            ),
         ),
     )
     print(f"Auto-generated: box='{box.name}', sphere='{sphere.name}'")
 
     # User-specified names
     ground = scene.add_entity(
-        morph=gs.morphs.Plane(),
-        name="ground",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            name="ground",
+        ),
     )
     robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/go2/urdf/go2.urdf",
-            pos=(0, 0.5, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/go2/urdf/go2.urdf",
+                pos=(0, 0.5, 0.5),
+            ),
         ),
     )
     print(f"User name: '{ground.name}', URDF auto-name: '{robot.name}'")

@@ -36,16 +36,20 @@ def main():
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(),
-        surface=gs.surfaces.Default(
-            diffuse_texture=gs.textures.BatchTexture.from_images(image_folder="textures"),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            surface=gs.surfaces.Default(
+                diffuse_texture=gs.textures.BatchTexture.from_images(image_folder="textures"),
+            ),
         ),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+            visualize_contact=True,
         ),
-        visualize_contact=True,
     )
 
     debug_cam = scene.add_camera(

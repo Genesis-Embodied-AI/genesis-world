@@ -28,52 +28,62 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
     )
 
     floor = scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
 
     # Add duck (with convex decomposition enabled) to offset geom index vs link index
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.04,
-            pos=(0.0, 1.0, 0.2),
-            euler=(90, 0, 90),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.04,
+                pos=(0.0, 1.0, 0.2),
+                euler=(90, 0, 90),
+            ),
         ),
     )
 
     box = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=free_box((0.5, 0.5, 0.5), 1),  # volume = 1 m^3, mass = 1.0 kg
-            pos=(0.0, 0.0, 0.55),
-            align=False,
-            default_armature=0.0,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=free_box((0.5, 0.5, 0.5), 1),  # volume = 1 m^3, mass = 1.0 kg
+                pos=(0.0, 0.0, 0.55),
+                align=False,
+                default_armature=0.0,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.0, 0.0, 1.0),
+            ),
         ),
     )
     box_2 = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),  # volume = 0.008 m^3
-            pos=(1.0, 0.0, 0.4),
-        ),
-        material=gs.materials.Rigid(
-            rho=100.0,  # mass = 0.8 kg
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.0, 1.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),  # volume = 0.008 m^3
+                pos=(1.0, 0.0, 0.4),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.0, 1.0, 0.0, 1.0),
+            ),
+            material=gs.materials.Rigid(
+                rho=100.0,  # mass = 0.8 kg
+            ),
         ),
     )
     box_3 = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),  # volume = 0.008 m^3
-            pos=(1.0, 0.0, 0.61),
-        ),
-        material=gs.materials.Rigid(
-            rho=25.0,  # mass = 0.2 kg
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.0, 0.0, 1.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),  # volume = 0.008 m^3
+                pos=(1.0, 0.0, 0.61),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.0, 0.0, 1.0, 1.0),
+            ),
+            material=gs.materials.Rigid(
+                rho=25.0,  # mass = 0.2 kg
+            ),
         ),
     )
 
@@ -181,18 +191,24 @@ def test_filter_link_idx(show_viewer, tol):
         show_viewer=show_viewer,
     )
     floor = scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     box_on_floor = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(0.0, 0.0, 0.1),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(0.0, 0.0, 0.1),
+            ),
         ),
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(0.0, 0.5, 0.1),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(0.0, 0.5, 0.1),
+            ),
         ),
     )
     sensor = scene.add_sensor(

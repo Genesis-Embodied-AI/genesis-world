@@ -394,15 +394,17 @@ def build_mjcf_scene(xml_path: str, scale: float):
     )
 
     mjcf_scene.add_entity(
-        gs.morphs.MJCF(
-            file=xml_path,
-            scale=scale,
-            convexify=False,
-            decimate=False,
-            align=False,
-        ),
-        material=gs.materials.Rigid(
-            rho=1000.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+                scale=scale,
+                convexify=False,
+                decimate=False,
+                align=False,
+            ),
+            material=gs.materials.Rigid(
+                rho=1000.0,
+            ),
         ),
     )
 
@@ -427,7 +429,7 @@ def build_usd_scene(
         show_viewer=show_viewer,
     )
 
-    kwargs = dict(
+    options = gs.entities.Rigid(
         morph=gs.morphs.USD(
             file=usd_file,
             scale=scale,
@@ -437,19 +439,21 @@ def build_usd_scene(
             watertighten=None,
             align=False,
         ),
+        surface=gs.surfaces.Default(
+            vis_mode=vis_mode,
+        ),
         material=gs.materials.Rigid(
             rho=1000.0,
         ),
-        vis_mode=vis_mode,
     )
 
     # A stage is read as authored rather than through baked assets an earlier run left on disk
     with pytest.MonkeyPatch.context() as patched:
         patched.setattr(UsdContext, "__init__", partialmethod(UsdContext.__init__, use_bake_cache=False))
         if is_stage:
-            scene.add_stage(**kwargs)
+            scene.add_stage(options=options)
         else:
-            scene.add_entity(**kwargs)
+            scene.add_entity(options=options)
 
     # Note that it is necessary to build the scene because spatial inertia of some geometries may not be specified.
     # In such a case, it will be estimated from the geometry during build (RigidLink._build to be specific).
@@ -477,9 +481,11 @@ def build_mesh_scene(mesh_file: str, scale: float):
         align=False,
     )
     mesh_scene.add_entity(
-        mesh_morph,
-        material=gs.materials.Rigid(
-            rho=1000.0,
+        options=gs.entities.Rigid(
+            morph=mesh_morph,
+            material=gs.materials.Rigid(
+                rho=1000.0,
+            ),
         ),
     )
     mesh_scene.build()

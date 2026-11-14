@@ -36,33 +36,37 @@ def main():
     # FEM bodies use StableNeoHookean constitution, Rigid bodies use ABD constitution
     # FEM entities (added to IPC as deformable bodies)
     blob = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.3, 0.0, 0.4),
-            radius=0.1,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e5,
-            nu=0.45,
-            rho=1000.0,
-            model="stable_neohookean",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=(0.3, 0.0, 0.4),
+                radius=0.1,
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1.0e5,
+                nu=0.45,
+                rho=1000.0,
+                model="stable_neohookean",
+            ),
         ),
     )
 
     # Rigid bodies (added to both Genesis rigid solver AND IPC as ABD objects)
     # This enables contact between rigid bodies and FEM bodies through IPC
     rigid_cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.4),
-            size=(0.1, 0.1, 0.1),
-            euler=(0, 0, 0),
-        ),
-        material=gs.materials.Rigid(
-            rho=1000,
-            friction=0.3,
-            coup_type="two_way_soft_constraint",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.8, 0.2, 0.2, 0.8),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.4),
+                size=(0.1, 0.1, 0.1),
+                euler=(0, 0, 0),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.8, 0.2, 0.2, 0.8),
+            ),
+            material=gs.materials.Rigid(
+                rho=1000,
+                friction=0.3,
+                coup_type="two_way_soft_constraint",
+            ),
         ),
     )
     scene.build()

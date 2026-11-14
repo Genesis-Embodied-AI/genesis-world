@@ -7,6 +7,7 @@ import torch
 import igl
 
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -22,14 +23,16 @@ def test_interior_tetrahedralized_vertex(cube_verts_and_faces, box_obj_path, sho
 
     scene = gs.Scene(show_viewer=show_viewer)
     fem = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            nobisect=False,
-            minratio=1.5,
-            verbose=1,
-            maxvolume=0.01,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                nobisect=False,
+                minratio=1.5,
+                verbose=1,
+                maxvolume=0.01,
+            ),
+            material=gs.materials.FEM.Muscle(),
         ),
-        material=gs.materials.FEM.Muscle(),
     )
     scene.build()
 
@@ -99,11 +102,13 @@ def test_multi_submesh_render_decoupling(n_envs, show_viewer):
     # simulation elements. The GLB asset holds 2 sub-meshes (bag and channel) with distinct materials.
     scene = gs.Scene(show_viewer=show_viewer)
     fem = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/trashbag_rope.glb",
-            group_by_material=True,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file="meshes/trashbag_rope.glb",
+                group_by_material=True,
+            ),
+            material=gs.materials.FEM.Cloth(),
         ),
-        material=gs.materials.FEM.Cloth(),
     )
     scene.build(n_envs=n_envs)
 
@@ -130,23 +135,27 @@ def test_maxvolume(box_obj_path, show_viewer):
 
     # Mesh without any maximum-element-volume constraint
     fem1 = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            nobisect=False,
-            verbose=1,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                nobisect=False,
+                verbose=1,
+            ),
+            material=gs.materials.FEM.Muscle(),
         ),
-        material=gs.materials.FEM.Muscle(),
     )
 
     # Mesh with maximum element volume limited to 0.01
     fem2 = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            nobisect=False,
-            maxvolume=0.01,
-            verbose=1,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                nobisect=False,
+                maxvolume=0.01,
+                verbose=1,
+            ),
+            material=gs.materials.FEM.Muscle(),
         ),
-        material=gs.materials.FEM.Muscle(),
     )
 
     assert len(fem1.elems) < len(fem2.elems), (
@@ -162,19 +171,23 @@ def test_offset_pos(box_obj_path, show_viewer):
 
     scene = gs.Scene(show_viewer=show_viewer)
     box = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            pos=POS,
-            offset_pos=OFFSET_POS,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                pos=POS,
+                offset_pos=OFFSET_POS,
+            ),
+            material=gs.materials.FEM.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     box_no_offset = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            pos=POS,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                pos=POS,
+            ),
+            material=gs.materials.FEM.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     scene.build()
 
@@ -193,11 +206,13 @@ def test_halt_on_nan(show_viewer):
         show_viewer=show_viewer,
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.05,
-            pos=(0.0, 0.0, 0.3),
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                radius=0.05,
+                pos=(0.0, 0.0, 0.3),
+            ),
+            material=gs.materials.FEM.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     scene.build(n_envs=2)
 
@@ -281,38 +296,46 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
         show_FPS=False,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=SPHERE_POS,
-            radius=SPHERE_RADIUS,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=SPHERE_E,
-            rho=SPHERE_RHO,
-            model=material_model,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=SPHERE_POS,
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=SPHERE_E,
+                rho=SPHERE_RHO,
+                model=material_model,
+            ),
         ),
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(BOX_SIZE * 2, BOX_SIZE * 2, BOX_SIZE * 2),
-            pos=BOX_POS,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE * 2, BOX_SIZE * 2, BOX_SIZE * 2),
+                pos=BOX_POS,
+            ),
+            material=gs.materials.FEM.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     # A bar hanging clear of the ground and of the other bodies, whose stiffness is far beyond what the explicit solver
     # keeps stable at this time step.
     bar = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=BAR_POS,
-            size=(BAR_WIDTH, BAR_WIDTH, BAR_LENGTH),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=BAR_E,
-            nu=0.0,
-            rho=BAR_RHO,
-            model="linear",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=BAR_POS,
+                size=(BAR_WIDTH, BAR_WIDTH, BAR_LENGTH),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=BAR_E,
+                nu=0.0,
+                rho=BAR_RHO,
+                model="linear",
+            ),
         ),
     )
 
@@ -442,12 +465,14 @@ def test_implicit_newton_dx_threshold(requires_grad, n_linesearch_iterations, sh
             show_viewer=show_viewer,
         )
         sphere = scene.add_entity(
-            morph=gs.morphs.Sphere(
-                pos=(0.0, 0.0, 0.5),
-                radius=0.1,
-            ),
-            material=gs.materials.FEM.Elastic(
-                model="linear_corotated",
+            options=gs.entities.FEM(
+                morph=gs.morphs.Sphere(
+                    pos=(0.0, 0.0, 0.5),
+                    radius=0.1,
+                ),
+                material=gs.materials.FEM.Elastic(
+                    model="linear_corotated",
+                ),
             ),
         )
         scene.build(n_envs=2)
@@ -483,24 +508,30 @@ def test_legacy_coupler_rigid_velocity_correction(show_viewer):
         show_viewer=show_viewer,
     )
     ground = scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     box_thrown = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, 0.5 * BOX_SIZE + GAP),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=SOFT_E,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, 0.5 * BOX_SIZE + GAP),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=SOFT_E,
+            ),
         ),
     )
     box_dropped = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.5, 0.0, 0.5 * BOX_SIZE + DROP_HEIGHT),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=SOFT_E,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.5, 0.0, 0.5 * BOX_SIZE + DROP_HEIGHT),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=SOFT_E,
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -588,46 +619,118 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
     )
     free_boxes = [
         scene.add_entity(
-            morph=gs.morphs.Box(
-                pos=(pos_x, 0.0, HEIGHT + BOX_SIZE / 2),
-                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            options=gs.entities.FEM(
+                morph=gs.morphs.Box(
+                    pos=(pos_x, 0.0, HEIGHT + BOX_SIZE / 2),
+                    size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                ),
+                material=free_material,
             ),
-            material=free_material,
         )
         for pos_x in (-0.5, -1.0)
     ]
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-BOX_SIZE / 2, BOX_SIZE / 2 + MOTION_RADIUS, HEIGHT + BOX_SIZE / 2),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.45,
-            rho=RHO,
-            model="linear_corotated" if use_implicit_solver else "stable_neohookean",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(-BOX_SIZE / 2, BOX_SIZE / 2 + MOTION_RADIUS, HEIGHT + BOX_SIZE / 2),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                nu=0.45,
+                rho=RHO,
+                model="linear_corotated" if use_implicit_solver else "stable_neohookean",
+            ),
         ),
     )
     vibrating_box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-1.5, 0.0, HEIGHT + BOX_SIZE / 2),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.45,
-            rho=RHO,
-            model="linear" if use_implicit_solver else "stable_neohookean",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(-1.5, 0.0, HEIGHT + BOX_SIZE / 2),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                nu=0.45,
+                rho=RHO,
+                model="linear" if use_implicit_solver else "stable_neohookean",
+            ),
         ),
     )
     anchor = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(10.0, 0.0, HEIGHT),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(10.0, 0.0, HEIGHT),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                fixed=True,
+            ),
         ),
-        material=gs.materials.Rigid(),
     )
+    # Vertices fixed through the entity options stay where they start. A box selects in the frame of the morph, which
+    # the rotation of the morph turns into a side face of the entity.
+    rotated_box_options = gs.entities.FEM(
+        morph=gs.morphs.Box(
+            pos=(1.0, 0.0, HEIGHT),
+            size=(2.0 * BOX_SIZE, 2.0 * BOX_SIZE, 2.0 * BOX_SIZE),
+            euler=(90.0, 0.0, 0.0),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1e4,
+        ),
+    )
+    rotated_box_options.select(gs.indices.Vertex.in_box(lower=(-0.1, -0.1, 0.1), upper=(0.1, 0.1, 0.1))).set_is_fixed(
+        True
+    )
+    rotated_box = scene.add_entity(options=rotated_box_options)
+    # The union of an ordinal selection of two top corners and of the vertices closest to the other two pins the whole
+    # top face. The ordinals come from the same box added to a scene that is not built.
+    probe_box = gs.Scene().add_entity(
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                size=(2.0 * BOX_SIZE, 2.0 * BOX_SIZE, 2.0 * BOX_SIZE),
+            ),
+            material=gs.materials.FEM.Elastic(),
+        ),
+    )
+    probe_verts_pos = tensor_to_array(probe_box.init_positions)
+    top_verts_idx = np.flatnonzero(probe_verts_pos[:, 2] > BOX_SIZE - 1e-6)
+    top_face_selection = gs.indices.Vertex.at(top_verts_idx[:2])
+    for pos in probe_verts_pos[top_verts_idx[2:]]:
+        top_face_selection = top_face_selection | gs.indices.Vertex.closest_to(pos, max_distance=1e-3)
+    hanging_box_options = gs.entities.FEM(
+        morph=gs.morphs.Box(
+            pos=(1.5, 0.0, HEIGHT),
+            size=(2.0 * BOX_SIZE, 2.0 * BOX_SIZE, 2.0 * BOX_SIZE),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1e4,
+        ),
+    )
+    hanging_box_options.select(top_face_selection).set_is_fixed(True)
+    hanging_box = scene.add_entity(options=hanging_box_options)
+
+    cloth_options = gs.entities.FEM(morph=gs.morphs.Sphere(), material=gs.materials.FEM.Cloth())
+    with pytest.raises(gs.GenesisException, match="vertices"):
+        cloth_options.select(gs.indices.Vertex.at(0)).set_is_fixed(True)
+    for vertex_index, match in (
+        (gs.indices.Vertex.closest_to(pos=(0.1, 0.1, 0.2), max_distance=0.05), "max_distance"),
+        (gs.indices.Vertex.in_box(lower=(0.2, 0.2, 0.2), upper=(0.3, 0.3, 0.3)), "No vertex"),
+        (gs.indices.Vertex.at(probe_verts_pos.shape[0]), "no valid vertex"),
+    ):
+        rejected_options = hanging_box.options.model_copy()
+        rejected_options.select(vertex_index).set_is_fixed(True)
+        with pytest.raises(gs.GenesisException, match=match):
+            gs.Scene().add_entity(options=rejected_options)
+    disjoint_options = hanging_box.options.model_copy()
+    disjoint_options.select(gs.indices.Vertex.at(0) & gs.indices.Vertex.at(1)).set_is_fixed(True)
+    with pytest.raises(gs.GenesisException, match="holds no vertex"):
+        gs.Scene().add_entity(options=disjoint_options)
+    # A nested ordinal counts the vertices of the selection alone
+    nested_options = hanging_box.options.model_copy()
+    nested_options.select(gs.indices.Vertex.at([0, 1])).select(gs.indices.Vertex.at(2)).set_is_fixed(True)
+    with pytest.raises(gs.GenesisException, match="no valid vertex among 2"):
+        gs.Scene().add_entity(options=nested_options)
+
     scene.build(n_envs=2)
     free_boxes_pos_0 = torch.stack([free_box.get_verts_pos() for free_box in free_boxes])
     substep_dt = DT / N_SUBSTEPS
@@ -740,6 +843,17 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
             if it % max(int(1e-3 / (MOTION_SPEED * DT)), 1) == 0:
                 scene.draw_debug_spheres(poss=target_poss, radius=0.005, color=(1, 0, 1, 0.8))
             scene.visualizer.update(force=False, auto=True)
+
+    # The fixed vertices, on the top face of each box in the frame of its morph, hold it while the bottom face sags
+    for fixed_box in (rotated_box, hanging_box):
+        init_verts_pos = tensor_to_array(fixed_box.init_positions)
+        morph = fixed_box.options.morph
+        morph_verts_pos = (init_verts_pos - morph.pos) @ gu.quat_to_R(np.array(morph.quat))
+        verts_pos = tensor_to_array(fixed_box.get_verts_pos())
+        is_fixed = morph_verts_pos[:, 2] > morph_verts_pos[:, 2].max() - 1e-3
+        assert_allclose(verts_pos[:, is_fixed], init_verts_pos[is_fixed], tol=1e-8)
+        is_opposite = morph_verts_pos[:, 2] < morph_verts_pos[:, 2].min() + 1e-3
+        assert (init_verts_pos[is_opposite, 2] - verts_pos[:, is_opposite, 2] > 1e-2).all()
 
     # Disable constraints
     box.remove_vertex_constraints()
@@ -887,28 +1001,34 @@ def test_soft_constraint(asset_tmp_path, show_viewer):
     igl.write_triangle_mesh(tet_path, tet_verts, tet_faces)
     # A material softer than the default keeps the explicit integration of these small elements stable
     tet_fixed = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=tet_path,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            rho=RHO,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=tet_path,
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                rho=RHO,
+            ),
         ),
     )
     tet_link = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=tet_path,
-            pos=(0.3, 0.0, 0.0),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            rho=RHO,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=tet_path,
+                pos=(0.3, 0.0, 0.0),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                rho=RHO,
+            ),
         ),
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.3, 0.3, 0.0),
-            size=(0.05, 0.05, 0.05),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.3, 0.3, 0.0),
+                size=(0.05, 0.05, 0.05),
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -967,12 +1087,14 @@ def test_stiffness_damping_spares_rigid_motion(coupler_type, precision, show_vie
         show_viewer=show_viewer,
     )
     block = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=BLOCK_SIZE,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                size=BLOCK_SIZE,
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                model="linear_corotated",
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -1031,60 +1153,72 @@ def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, SPHERE_RADIUS),
-            radius=SPHERE_RADIUS,
-        ),
-        material=gs.materials.FEM.Elastic(
-            friction_mu=1.0,
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, SPHERE_RADIUS),
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.FEM.Elastic(
+                friction_mu=1.0,
+                model="linear_corotated",
+            ),
         ),
     )
     asset_path = get_hf_dataset(pattern="meshes/cube8.obj")
     box = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/meshes/cube8.obj",
-            pos=(0.0, 0.0, 2 * SPHERE_RADIUS + BOX_SIZE),
-            scale=BOX_SIZE,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e4,
-            rho=50.0,
-            friction_mu=1.0,
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/meshes/cube8.obj",
+                pos=(0.0, 0.0, 2 * SPHERE_RADIUS + BOX_SIZE),
+                scale=BOX_SIZE,
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e4,
+                rho=50.0,
+                friction_mu=1.0,
+                model="linear_corotated",
+            ),
         ),
     )
     # A stack of two cubes resting on each other, clear of the sphere and the box
     bottom_cube, top_cube = [
         scene.add_entity(
-            morph=gs.morphs.Box(
-                pos=(0.3, -0.3, (2 * i + 1) * CUBE_HALFSIZE),
-                size=(2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE),
-            ),
-            material=gs.materials.FEM.Elastic(
-                rho=CUBE_RHO,
-                hydroelastic_modulus=CUBE_HYDROELASTIC_MODULUS,
+            options=gs.entities.FEM(
+                morph=gs.morphs.Box(
+                    pos=(0.3, -0.3, (2 * i + 1) * CUBE_HALFSIZE),
+                    size=(2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE),
+                ),
+                material=gs.materials.FEM.Elastic(
+                    rho=CUBE_RHO,
+                    hydroelastic_modulus=CUBE_HYDROELASTIC_MODULUS,
+                ),
             ),
         )
         for i in range(2)
     ]
     # A ball resting on a fixed rigid pedestal, the rigid solver holding no dofs
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.3, 0.3, PEDESTAL_HALFSIZE),
-            size=(2 * PEDESTAL_HALFSIZE, 2 * PEDESTAL_HALFSIZE, 2 * PEDESTAL_HALFSIZE),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(-0.3, 0.3, PEDESTAL_HALFSIZE),
+                size=(2 * PEDESTAL_HALFSIZE, 2 * PEDESTAL_HALFSIZE, 2 * PEDESTAL_HALFSIZE),
+                fixed=True,
+            ),
         ),
     )
     ball = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(-0.3, 0.3, 2 * PEDESTAL_HALFSIZE + BALL_RADIUS),
-            radius=BALL_RADIUS,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=(-0.3, 0.3, 2 * PEDESTAL_HALFSIZE + BALL_RADIUS),
+                radius=BALL_RADIUS,
+            ),
+            material=gs.materials.FEM.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     # A single entity of two cubes apart at rest, the upper one falling onto the lower one. Their surface is the one of
     # the cubes above, which the closed form of their overlap relies on.
@@ -1095,30 +1229,36 @@ def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show
     cubes_path = str(asset_tmp_path / "two_cubes.obj")
     igl.write_triangle_mesh(cubes_path, cubes_verts, np.concatenate([cube.faces, cube.faces + len(cube.vertices)]))
     cubes = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=cubes_path,
-            pos=(0.3, 0.3, 0.0),
-        ),
-        material=gs.materials.FEM.Elastic(
-            rho=CUBE_RHO,
-            hydroelastic_modulus=CUBE_HYDROELASTIC_MODULUS,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=cubes_path,
+                pos=(0.3, 0.3, 0.0),
+            ),
+            material=gs.materials.FEM.Elastic(
+                rho=CUBE_RHO,
+                hydroelastic_modulus=CUBE_HYDROELASTIC_MODULUS,
+            ),
         ),
     )
     # A rigid lid resting on a light cube whose vertices are all pinned, which hold the lid whatever their mass
     pinned_cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.3, -0.3, CUBE_HALFSIZE),
-            size=(2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE),
-        ),
-        material=gs.materials.FEM.Elastic(
-            rho=10.0,
-            hydroelastic_modulus=CUBE_HYDROELASTIC_MODULUS,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(-0.3, -0.3, CUBE_HALFSIZE),
+                size=(2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE),
+            ),
+            material=gs.materials.FEM.Elastic(
+                rho=10.0,
+                hydroelastic_modulus=CUBE_HYDROELASTIC_MODULUS,
+            ),
         ),
     )
     lid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.3, -0.3, 2 * CUBE_HALFSIZE + LID_HALFHEIGHT),
-            size=(2 * LID_HALFSIZE, 2 * LID_HALFSIZE, 2 * LID_HALFHEIGHT),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(-0.3, -0.3, 2 * CUBE_HALFSIZE + LID_HALFHEIGHT),
+                size=(2 * LID_HALFSIZE, 2 * LID_HALFSIZE, 2 * LID_HALFHEIGHT),
+            ),
         ),
     )
     scene.build()
@@ -1212,21 +1352,27 @@ def test_sap_coupler_capacity(
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, 0.9 * SPHERE_RADIUS),
-            radius=SPHERE_RADIUS,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, 0.9 * SPHERE_RADIUS),
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.FEM.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     # A tilted box landing on the sphere, the boxes of its large faces spanning many tets that do not cross them
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 1.8 * SPHERE_RADIUS + 0.12),
-            size=(0.3, 0.3, 0.1),
-            euler=(45.0, 35.0, 0.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 1.8 * SPHERE_RADIUS + 0.12),
+                size=(0.3, 0.3, 0.1),
+                euler=(45.0, 35.0, 0.0),
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -1269,51 +1415,65 @@ def test_sap_coupler_default_capacity(show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     # A coarse rigid box landing on a FEM sphere, and a rigid box resting flat on a larger one far apart
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, SPHERE_RADIUS),
-            radius=SPHERE_RADIUS,
-        ),
-        material=gs.materials.FEM.Elastic(
-            friction_mu=1.0,
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, SPHERE_RADIUS),
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.FEM.Elastic(
+                friction_mu=1.0,
+                model="linear_corotated",
+            ),
         ),
     )
     landing_box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.6),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.6),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(1.0, 0.0, BOX_SIZE),
-            size=(2 * BOX_SIZE, 2 * BOX_SIZE, 2 * BOX_SIZE),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(1.0, 0.0, BOX_SIZE),
+                size=(2 * BOX_SIZE, 2 * BOX_SIZE, 2 * BOX_SIZE),
+            ),
         ),
     )
     stacked_box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(1.0, 0.0, 2 * BOX_SIZE + BOX_SIZE / 2 + 1e-3),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(1.0, 0.0, 2 * BOX_SIZE + BOX_SIZE / 2 + 1e-3),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            ),
         ),
     )
     # A FEM cube falling onto another one, away from the rigid boxes
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-1.0, 0.0, BOX_SIZE),
-            size=(2 * BOX_SIZE, 2 * BOX_SIZE, 2 * BOX_SIZE),
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(-1.0, 0.0, BOX_SIZE),
+                size=(2 * BOX_SIZE, 2 * BOX_SIZE, 2 * BOX_SIZE),
+            ),
+            material=gs.materials.FEM.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     stacked_cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-1.0, 0.0, 3 * BOX_SIZE + 1e-3),
-            size=(2 * BOX_SIZE, 2 * BOX_SIZE, 2 * BOX_SIZE),
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(-1.0, 0.0, 3 * BOX_SIZE + 1e-3),
+                size=(2 * BOX_SIZE, 2 * BOX_SIZE, 2 * BOX_SIZE),
+            ),
+            material=gs.materials.FEM.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     scene.build(n_envs=2)
 
@@ -1367,40 +1527,47 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(xml_path, tol, show_
         show_FPS=False,
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-BOX_SIZE / 2, BOX_SIZE / 2 + MOTION_RADIUS, HEIGHT + BOX_SIZE / 2),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.45,
-            rho=1000.0,
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(-BOX_SIZE / 2, BOX_SIZE / 2 + MOTION_RADIUS, HEIGHT + BOX_SIZE / 2),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                nu=0.45,
+                rho=1000.0,
+                model="linear_corotated",
+            ),
         ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(MOTION_RADIUS + BOX_SIZE, -SPHERE_RADIUS, HEIGHT - BOX_SIZE / 2),
-            radius=SPHERE_RADIUS,
-        ),
-        material=gs.materials.FEM.Elastic(
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=(MOTION_RADIUS + BOX_SIZE, -SPHERE_RADIUS, HEIGHT - BOX_SIZE / 2),
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.FEM.Elastic(
+                model="linear_corotated",
+            ),
         ),
     )
     anchor = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(10.0, 0.0, HEIGHT),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(10.0, 0.0, HEIGHT),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                fixed=True,
+            ),
         ),
-        material=gs.materials.Rigid(),
     )
     sliders = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=xml_path,
-        ),
-        material=gs.materials.Rigid(
-            gravity_compensation=1.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+            ),
+            material=gs.materials.Rigid(
+                gravity_compensation=1.0,
+            ),
         ),
     )
     scene.build()

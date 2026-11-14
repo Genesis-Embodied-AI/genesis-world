@@ -52,93 +52,113 @@ def test_flotation_follows_density_ratio(n_envs, show_viewer):
     )
     # The floor of the liquid is the plane, which its offset places above the floor of the domain
     scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(0.0, 0.0, -0.1),
-            offset_pos=(0.0, 0.0, 0.1),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                pos=(0.0, 0.0, -0.1),
+                offset_pos=(0.0, 0.0, 0.1),
+            ),
         ),
     )
     liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.25),
-            size=(0.5, 0.5, 0.5),
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.25),
+                size=(0.5, 0.5, 0.5),
+            ),
+            material=gs.materials.SPH.Liquid(
+                sampler="regular",
+            ),
         ),
     )
     light_ball = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(-0.12, 0.0, 0.25),
-            radius=BALL_RADIUS,
-        ),
-        material=gs.materials.Rigid(
-            rho=200.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(-0.12, 0.0, 0.25),
+                radius=BALL_RADIUS,
+            ),
+            material=gs.materials.Rigid(
+                rho=200.0,
+            ),
         ),
     )
     heavy_ball = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.12, 0.0, 0.25),
-            radius=BALL_RADIUS,
-        ),
-        material=gs.materials.Rigid(
-            rho=1500.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(0.12, 0.0, 0.25),
+                radius=BALL_RADIUS,
+            ),
+            material=gs.materials.Rigid(
+                rho=1500.0,
+            ),
         ),
     )
     # This ball starts above the liquid, falls into it and comes to rest on the plane, pressing the liquid under it
     dropped_ball = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(-0.13, -0.13, 0.5 + BALL_RADIUS + PARTICLE_SIZE),
-            radius=BALL_RADIUS,
-        ),
-        material=gs.materials.Rigid(
-            rho=1500.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(-0.13, -0.13, 0.5 + BALL_RADIUS + PARTICLE_SIZE),
+                radius=BALL_RADIUS,
+            ),
+            material=gs.materials.Rigid(
+                rho=1500.0,
+            ),
         ),
     )
     # This ball starts just above the plane and is thrown down onto it, squeezing a particle placed under it
     pressing_ball = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=PRESSING_BALL_POS,
-            radius=BALL_RADIUS,
-        ),
-        material=gs.materials.Rigid(
-            rho=1500.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=PRESSING_BALL_POS,
+                radius=BALL_RADIUS,
+            ),
+            material=gs.materials.Rigid(
+                rho=1500.0,
+            ),
         ),
     )
     raft = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.12, 0.25),
-            size=RAFT_SIZE,
-            euler=(30.0, 0.0, 0.0),
-        ),
-        material=gs.materials.Rigid(
-            rho=200.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.12, 0.25),
+                size=RAFT_SIZE,
+                euler=(30.0, 0.0, 0.0),
+            ),
+            material=gs.materials.Rigid(
+                rho=200.0,
+            ),
         ),
     )
     floating_raft = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.15, 0.15, 0.505 + 0.5 * RAFT_SIZE[2]),
-            size=RAFT_SIZE,
-        ),
-        material=gs.materials.Rigid(
-            rho=RAFT_DENSITY_RATIO * gs.materials.SPH.Liquid().rho,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.15, 0.15, 0.505 + 0.5 * RAFT_SIZE[2]),
+                size=RAFT_SIZE,
+            ),
+            material=gs.materials.Rigid(
+                rho=RAFT_DENSITY_RATIO * gs.materials.SPH.Liquid().rho,
+            ),
         ),
     )
     block = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, -0.13, 0.51 + 0.5 * BLOCK_SIZE),
-            size=(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            rho=BLOCK_DENSITY_RATIO * gs.materials.SPH.Liquid().rho,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(0.0, -0.13, 0.51 + 0.5 * BLOCK_SIZE),
+                size=(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                rho=BLOCK_DENSITY_RATIO * gs.materials.SPH.Liquid().rho,
+            ),
         ),
     )
     # This pillar stands outside of the domain at build, and is moved into the liquid at a corner of the domain after it
     pillar = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(1.0, 0.0, 0.5),
-            fixed=True,
-            size=PILLAR_SIZE,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(1.0, 0.0, 0.5),
+                fixed=True,
+                size=PILLAR_SIZE,
+            ),
         ),
     )
     scene.build(n_envs=n_envs)
@@ -285,35 +305,43 @@ def test_coupling_force_wakes_hibernated_link(n_envs, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.35, 0.0, 0.15),
-            size=(0.3, 0.4, 0.3),
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(-0.35, 0.0, 0.15),
+                size=(0.3, 0.4, 0.3),
+            ),
+            material=gs.materials.SPH.Liquid(
+                sampler="regular",
+            ),
         ),
     )
     ball = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.35, 0.0, 0.06),
-            radius=0.06,
-        ),
-        material=gs.materials.Rigid(
-            rho=200.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(0.35, 0.0, 0.06),
+                radius=0.06,
+            ),
+            material=gs.materials.Rigid(
+                rho=200.0,
+            ),
         ),
     )
     # The island partition, which hibernation builds on, only engages when the scene holds at least two free
     # bodies; this bystander rests dry on the floor for the whole scenario.
     scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, 0.06),
-            radius=0.06,
-        ),
-        material=gs.materials.Rigid(
-            rho=2000.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, 0.06),
+                radius=0.06,
+            ),
+            material=gs.materials.Rigid(
+                rho=2000.0,
+            ),
         ),
     )
     scene.build(n_envs=n_envs)

@@ -34,21 +34,25 @@ def create_sph_scene(show_viewer, particle_size=0.01, gravity=-9.81, mu=0.005):
     )
 
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
 
     liquid = scene.add_entity(
-        material=gs.materials.SPH.Liquid(
-            mu=mu,
-            sampler="regular",
-        ),
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.65),
-            size=(0.4, 0.4, 0.4),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.4, 0.8, 1.0),
-            vis_mode="particle",
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.65),
+                size=(0.4, 0.4, 0.4),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.4, 0.8, 1.0),
+                vis_mode="particle",
+            ),
+            material=gs.materials.SPH.Liquid(
+                mu=mu,
+                sampler="regular",
+            ),
         ),
     )
 
@@ -275,24 +279,30 @@ def test_resume_from_pickle(show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     sph_liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.25, 0.0, 0.2),
-            size=LIQUID_SIZE,
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(-0.25, 0.0, 0.2),
+                size=LIQUID_SIZE,
+            ),
+            material=gs.materials.SPH.Liquid(
+                sampler="regular",
+            ),
         ),
     )
     pbd_liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.25, 0.0, 0.2),
-            size=LIQUID_SIZE,
-        ),
-        material=gs.materials.PBD.Liquid(
-            sampler="regular",
+        options=gs.entities.PBD(
+            morph=gs.morphs.Box(
+                pos=(0.25, 0.0, 0.2),
+                size=LIQUID_SIZE,
+            ),
+            material=gs.materials.PBD.Liquid(
+                sampler="regular",
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -337,11 +347,12 @@ def test_dfsph_resting_liquid_stability(show_viewer):
         show_viewer=show_viewer,
     )
     liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.5 * LIQUID_HEIGHT),
-            size=(0.2, 0.2, LIQUID_HEIGHT),
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.5 * LIQUID_HEIGHT),
+                size=(0.2, 0.2, LIQUID_HEIGHT),
+            ),
         ),
-        material=gs.materials.SPH.Liquid(),
     )
     scene.build(n_envs=2)
 
@@ -378,15 +389,19 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.5 * LIQUID_SIZE[2]),
-            size=LIQUID_SIZE,
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.5 * LIQUID_SIZE[2]),
+                size=LIQUID_SIZE,
+            ),
+            material=gs.materials.SPH.Liquid(
+                sampler="regular",
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -518,30 +533,36 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
         show_viewer=show_viewer,
     )
     scene_pools.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.15),
-            size=(0.3, 0.3, 0.3),
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.15),
+                size=(0.3, 0.3, 0.3),
+            ),
+            material=gs.materials.SPH.Liquid(
+                sampler="regular",
+            ),
         ),
     )
     wrapped_pool = scene_pools.add_entity(
-        morph=gs.morphs.Box(
-            pos=(6.0, 0.0, 0.03),
-            size=(0.3, 0.3, 0.06),
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(6.0, 0.0, 0.03),
+                size=(0.3, 0.3, 0.06),
+            ),
+            material=gs.materials.SPH.Liquid(
+                sampler="regular",
+            ),
         ),
     )
     isolated_pool = scene_pools.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 1.0, 0.03),
-            size=(0.3, 0.3, 0.06),
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.0, 1.0, 0.03),
+                size=(0.3, 0.3, 0.06),
+            ),
+            material=gs.materials.SPH.Liquid(
+                sampler="regular",
+            ),
         ),
     )
     scene_pools.build(n_envs=2)

@@ -283,7 +283,11 @@ def main() -> None:
         show_viewer=args.vis,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     if args.dome:
         sensor_morph = gs.morphs.Sphere(
@@ -298,12 +302,14 @@ def main() -> None:
             fixed=True,
         )
     sensor_obj = scene.add_entity(
-        morph=sensor_morph,
-        surface=gs.surfaces.Default(
-            color=(0.8, 0.8, 0.8, 1.0),
-        ),
-        material=gs.materials.Rigid(
-            friction=0.6,
+        options=gs.entities.Rigid(
+            morph=sensor_morph,
+            surface=gs.surfaces.Default(
+                color=(0.8, 0.8, 0.8, 1.0),
+            ),
+            material=gs.materials.Rigid(
+                friction=0.6,
+            ),
         ),
     )
     probe_normal_axis = (0.0, 0.0, 1.0)
@@ -332,31 +338,33 @@ def main() -> None:
         trimesh.creation.torus(major_radius=1.0, minor_radius=0.5).export(torus_path)
 
     obj = scene.add_entity(
-        morph=[
-            gs.morphs.Mesh(
-                file=torus_path,
-                scale=OBJECT_SIZE / 2,
-                convexify=False,
+        options=gs.entities.Rigid(
+            morph=[
+                gs.morphs.Mesh(
+                    file=torus_path,
+                    scale=OBJECT_SIZE / 2,
+                    convexify=False,
+                ),
+                gs.morphs.Sphere(
+                    radius=OBJECT_SIZE / 2,
+                ),
+                gs.morphs.Mesh(
+                    file="meshes/duck.obj",
+                    euler=(90.0, 0.0, 0.0),
+                    scale=0.03,
+                ),
+                gs.morphs.Mesh(
+                    file="meshes/dragon/dragon.obj",
+                    euler=(90.0, 0.0, 90.0),
+                    scale=0.001,
+                ),
+            ],
+            surface=gs.surfaces.Default(
+                color=(1.0, 1.0, 1.0, 1.0),
             ),
-            gs.morphs.Sphere(
-                radius=OBJECT_SIZE / 2,
+            material=gs.materials.Rigid(
+                friction=0.5,
             ),
-            gs.morphs.Mesh(
-                file="meshes/duck.obj",
-                euler=(90.0, 0.0, 0.0),
-                scale=0.03,
-            ),
-            gs.morphs.Mesh(
-                file="meshes/dragon/dragon.obj",
-                euler=(90.0, 0.0, 90.0),
-                scale=0.001,
-            ),
-        ],
-        surface=gs.surfaces.Default(
-            color=(1.0, 1.0, 1.0, 1.0),
-        ),
-        material=gs.materials.Rigid(
-            friction=0.5,
         ),
     )
 

@@ -44,13 +44,19 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     spherical_sensor = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=RAYCAST_HEIGHT,
-            pos=SPHERE_POS,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=RAYCAST_HEIGHT,
+                pos=SPHERE_POS,
+                fixed=True,
+            ),
         ),
     )
     spherical_raycaster = scene.add_sensor(
@@ -67,11 +73,13 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
     )
 
     grid_sensor = scene.add_entity(
-        gs.morphs.Box(
-            size=(RAYCAST_BOX_SIZE, RAYCAST_BOX_SIZE, RAYCAST_BOX_SIZE),
-            pos=(0.0, 0.0, RAYCAST_HEIGHT + 0.5 * RAYCAST_BOX_SIZE),
-            collision=False,
-            fixed=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(RAYCAST_BOX_SIZE, RAYCAST_BOX_SIZE, RAYCAST_BOX_SIZE),
+                pos=(0.0, 0.0, RAYCAST_HEIGHT + 0.5 * RAYCAST_BOX_SIZE),
+                collision=False,
+                fixed=False,
+            ),
         ),
     )
     grid_res = RAYCAST_GRID_SIZE_X / (NUM_RAYS_XY[0] - 1)
@@ -115,19 +123,23 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
     # A ray grazing a face from just below must still find it. The face sits on a power of two, so a mount one float
     # under it starts within half an eps, and the ray rises through the face only ten hit-distances later.
     scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, GRAZE_FACE_Z),
-            pos=(0.0, -RAYCAST_GRID_SIZE_X, 0.5 * GRAZE_FACE_Z),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, GRAZE_FACE_Z),
+                pos=(0.0, -RAYCAST_GRID_SIZE_X, 0.5 * GRAZE_FACE_Z),
+                fixed=True,
+            ),
         ),
     )
     graze_origin_z = np.nextafter(gs.np_float(GRAZE_FACE_Z), gs.np_float(0.0))
     graze_sensor = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(-(GRAZE_RANGE + 0.5 * BOX_SIZE), -RAYCAST_GRID_SIZE_X, graze_origin_z),
-            collision=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(-(GRAZE_RANGE + 0.5 * BOX_SIZE), -RAYCAST_GRID_SIZE_X, graze_origin_z),
+                collision=False,
+                fixed=True,
+            ),
         ),
     )
     graze_raycaster = scene.add_sensor(
@@ -144,19 +156,23 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
     )
 
     obstacle_1 = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(grid_res, grid_res, 0.5 * BOX_SIZE),
-        ),
-        material=gs.materials.Rigid(
-            use_visual_raycasting=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(grid_res, grid_res, 0.5 * BOX_SIZE),
+            ),
+            material=gs.materials.Rigid(
+                use_visual_raycasting=True,
+            ),
         ),
     )
     obstacle_2 = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(RAYCAST_GRID_SIZE_X, grid_size_y, RAYCAST_HEIGHT + RAYCAST_BOX_SIZE + BOX_SIZE),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(RAYCAST_GRID_SIZE_X, grid_size_y, RAYCAST_HEIGHT + RAYCAST_BOX_SIZE + BOX_SIZE),
+                fixed=True,
+            ),
         ),
     )
 
@@ -308,27 +324,35 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
         ),
         show_viewer=show_viewer,
     )
-    plane = scene.add_entity(gs.morphs.Plane())
-    kin_sphere = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.2,
-            pos=(0.0, 0.0, 0.5),
-            fixed=True,
-            enable_custom_vverts=True,
+    plane = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
         ),
-        material=gs.materials.Kinematic(
-            use_visual_raycasting=kin_raycastable,
+    )
+    kin_sphere = scene.add_entity(
+        options=gs.entities.Kinematic(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.2,
+                pos=(0.0, 0.0, 0.5),
+                fixed=True,
+                enable_custom_vverts=True,
+            ),
+            material=gs.materials.Kinematic(
+                use_visual_raycasting=kin_raycastable,
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=str(urdf_path),
-            pos=(0.0, 0.0, 1.5),
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(
-            use_visual_raycasting=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=str(urdf_path),
+                pos=(0.0, 0.0, 1.5),
+                fixed=True,
+            ),
+            material=gs.materials.Rigid(
+                use_visual_raycasting=True,
+            ),
         ),
     )
     cam_kin = scene.add_sensor(
@@ -412,28 +436,38 @@ def test_lidar_bvh_parallel_env(show_viewer, tol):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     sensor_mount = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.5),
-            fixed=True,
-            collision=False,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.5),
+                fixed=True,
+                collision=False,
+            ),
+        ),
     )
     obstacle_1 = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(1.0, 0.0, 0.5),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(1.0, 0.0, 0.5),
+                fixed=True,
+            ),
         ),
     )
     obstacle_2 = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.05, 0.4, 0.4),
-            pos=(1.0, 0.0, 0.5),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.05, 0.4, 0.4),
+                pos=(1.0, 0.0, 0.5),
+                fixed=True,
+            ),
         ),
     )
 
@@ -487,38 +521,50 @@ def test_lidar_bvh_parallel_env(show_viewer, tol):
 @pytest.mark.parametrize("n_envs", [0, pytest.param(4, marks=pytest.mark.required)])
 def test_cast_per_env_geoms(show_viewer, n_envs):
     scene = gs.Scene(show_viewer=show_viewer)
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.4, 0.4, 0.4),
-            pos=(1.0, 0.0, 0.5),
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.4, 0.4, 0.4),
+                pos=(1.0, 0.0, 0.5),
+                fixed=True,
+            ),
+        ),
     )
     sensor_mount = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.5),
-            fixed=True,
-            collision=False,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.5),
+                fixed=True,
+                collision=False,
+            ),
+        ),
     )
     visual_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.4, 0.4, 0.4),
-            pos=(6.0, 0.0, 0.5),
-            fixed=True,
-            collision=False,
-        ),
-        material=gs.materials.Kinematic(
-            use_visual_raycasting=True,
+        options=gs.entities.Kinematic(
+            morph=gs.morphs.Box(
+                size=(0.4, 0.4, 0.4),
+                pos=(6.0, 0.0, 0.5),
+                fixed=True,
+                collision=False,
+            ),
+            material=gs.materials.Kinematic(
+                use_visual_raycasting=True,
+            ),
         ),
     )
     movable_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(3.0, 2.0, 0.5),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(3.0, 2.0, 0.5),
+            ),
+        ),
     )
     lidar = scene.add_sensor(
         gs.sensors.Lidar(
@@ -566,12 +612,16 @@ def test_lidar_cache_offset_parallel_env(show_viewer, tol):
     scene = gs.Scene(show_viewer=show_viewer)
 
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 1.0),
-            pos=(0.0, 0.0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 1.0),
+                pos=(0.0, 0.0, 0.5),
+            ),
         ),
     )
 
@@ -617,45 +667,57 @@ def test_lidar_cache_offset_parallel_env(show_viewer, tol):
 @pytest.mark.required
 def test_heterogeneous_object(show_viewer, tol):
     scene = gs.Scene(show_viewer=show_viewer)
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     sensor_mount = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.5),
-            fixed=True,
-            collision=False,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, 0.0, 0.5),
+                fixed=True,
+                collision=False,
+            ),
+        ),
     )
     # Without per-env geom masking an env casts against the union of all variants (they share one vertex buffer). The
     # variants are concentric obstacles of decreasing near-face distance, so each env's own variant is the farthest
     # hit. A missing mask is then observable as an env shadowing its variant with a nearer one belonging to another env.
     het_obstacle = scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(1.0, 0.0, 0.5), fixed=True),
-            gs.morphs.Sphere(radius=0.2, pos=(1.0, 0.0, 0.5), fixed=True),
-            gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(1.0, 0.0, 0.5), fixed=True),
-        ),
-        material=gs.materials.Rigid(
-            use_visual_raycasting=True,
+        options=gs.entities.Rigid(
+            morph=(
+                gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(1.0, 0.0, 0.5), fixed=True),
+                gs.morphs.Sphere(radius=0.2, pos=(1.0, 0.0, 0.5), fixed=True),
+                gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(1.0, 0.0, 0.5), fixed=True),
+            ),
+            material=gs.materials.Rigid(
+                use_visual_raycasting=True,
+            ),
         ),
     )
     # A box primitive puts its vgeom at the link origin, so these same-pos variants hold identical vgeom poses and
     # differ only in rest-pose vverts: the active vgeom range of each environment alone tells them apart.
     scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(4.0, 0.0, 0.5), fixed=True),
-            gs.morphs.Box(size=(0.4, 0.4, 0.4), pos=(4.0, 0.0, 0.5), fixed=True),
-            gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(4.0, 0.0, 0.5), fixed=True),
-        ),
-        material=gs.materials.Kinematic(
-            use_visual_raycasting=True,
+        options=gs.entities.Kinematic(
+            morph=(
+                gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(4.0, 0.0, 0.5), fixed=True),
+                gs.morphs.Box(size=(0.4, 0.4, 0.4), pos=(4.0, 0.0, 0.5), fixed=True),
+                gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(4.0, 0.0, 0.5), fixed=True),
+            ),
+            material=gs.materials.Kinematic(
+                use_visual_raycasting=True,
+            ),
         ),
     )
     movable_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.05, 0.4, 0.4),
-            pos=(3.0, 2.0, 0.5),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.05, 0.4, 0.4),
+                pos=(3.0, 2.0, 0.5),
+            ),
+        ),
     )
     lidar = scene.add_sensor(
         gs.sensors.Lidar(
@@ -715,59 +777,73 @@ def test_cast_fixed_and_moving_geoms(show_viewer, n_envs, tol):
         show_viewer=show_viewer,
     )
     fixed_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(1.0, 1.0, 1.0),
-            pos=(0.0, 0.0, 0.5),
-            fixed=True,
-            batch_fixed_verts=False,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(1.0, 1.0, 1.0),
+                pos=(0.0, 0.0, 0.5),
+                fixed=True,
+                batch_fixed_verts=False,
+            ),
+        ),
     )
     visual_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(1.0, 1.0, 0.5),
-            pos=(0.0, 0.0, 0.25),
-            fixed=True,
-            collision=False,
-        ),
-        material=gs.materials.Rigid(
-            use_visual_raycasting=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(1.0, 1.0, 0.5),
+                pos=(0.0, 0.0, 0.25),
+                fixed=True,
+                collision=False,
+            ),
+            material=gs.materials.Rigid(
+                use_visual_raycasting=True,
+            ),
         ),
     )
     mount = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.05, 0.05, 0.05),
-            pos=(0.0, 0.0, MOUNT_Z),
-            fixed=True,
-            collision=False,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.05, 0.05, 0.05),
+                pos=(0.0, 0.0, MOUNT_Z),
+                fixed=True,
+                collision=False,
+            ),
+        ),
     )
     movable_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.4, 0.4, 0.4),
-            pos=FAR_POS,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.4, 0.4, 0.4),
+                pos=FAR_POS,
+            ),
+        ),
     )
     # Tactile cluster: a movable sensor pad resting 0.5mm into a fixed table with a movable box pressed
     # through it, so its probes hold candidates on both.
     table = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.4, 0.4, 0.1),
-            pos=(*TACTILE_POS, -0.05),
-            fixed=True,
-            batch_fixed_verts=False,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.4, 0.4, 0.1),
+                pos=(*TACTILE_POS, -0.05),
+                fixed=True,
+                batch_fixed_verts=False,
+            ),
+        ),
     )
     pad = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.04, 0.04, 0.006),
-            pos=(*TACTILE_POS, PAD_POS_Z),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.04, 0.04, 0.006),
+                pos=(*TACTILE_POS, PAD_POS_Z),
+            ),
+        ),
     )
     tactile_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.04, 0.04, 0.04),
-            pos=(*TACTILE_POS, TACTILE_BOX_BOTTOM_Z + 0.02),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.04, 0.04, 0.04),
+                pos=(*TACTILE_POS, TACTILE_BOX_BOTTOM_Z + 0.02),
+            ),
+        ),
     )
     depth_probe = scene.add_sensor(
         gs.sensors.ContactDepthProbe(

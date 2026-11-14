@@ -66,20 +66,24 @@ def main():
     # The contact coefficient is the maximum over the pair, so the zero-coefficient plane leaves each ball coasting
     # at its own rate.
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            friction_torsional=0.0,
-            friction_rolling=0.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Rigid(
+                friction_torsional=0.0,
+                friction_rolling=0.0,
+            ),
         ),
     )
     balls = [
         scene.add_entity(
-            gs.morphs.MJCF(
-                file=checkered_ball_mjcf(),
-                pos=(0.0, 0.6 * i_ball, RADIUS),
-            ),
-            material=gs.materials.Rigid(
-                friction_rolling=friction_rolling,
+            options=gs.entities.Rigid(
+                morph=gs.morphs.MJCF(
+                    file=checkered_ball_mjcf(),
+                    pos=(0.0, 0.6 * i_ball, RADIUS),
+                ),
+                material=gs.materials.Rigid(
+                    friction_rolling=friction_rolling,
+                ),
             ),
         )
         for i_ball, friction_rolling in enumerate((0.0, 0.005))

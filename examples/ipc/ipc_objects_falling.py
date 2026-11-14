@@ -36,7 +36,11 @@ def main():
     )
 
     # Ground plane
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     # Cloth using Cloth material
     # Note: Using coarse grid mesh to avoid IPC thickness violations
@@ -49,54 +53,60 @@ def main():
         max_workers=1,
     )
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/IPC/grid20x20.obj",
-            scale=1.5,
-            pos=(0.0, 0.0, 1.0),
-            euler=(120, -30, 0),
-        ),
-        material=gs.materials.FEM.Cloth(
-            E=1e5,  # Young's modulus (Pa) - soft cloth (100 kPa)
-            nu=0.499,  # Poisson's ratio - nearly incompressible
-            rho=200,  # Density (kg/m^3)
-            thickness=0.001,  # Shell thickness (m) - 1mm
-            bending_stiffness=50.0,  # Bending resistance
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.3, 0.5, 0.8, 1.0),
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/IPC/grid20x20.obj",
+                scale=1.5,
+                pos=(0.0, 0.0, 1.0),
+                euler=(120, -30, 0),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.3, 0.5, 0.8, 1.0),
+            ),
+            material=gs.materials.FEM.Cloth(
+                E=1e5,  # Young's modulus (Pa) - soft cloth (100 kPa)
+                nu=0.499,  # Poisson's ratio - nearly incompressible
+                rho=200,  # Density (kg/m^3)
+                thickness=0.001,  # Shell thickness (m) - 1mm
+                bending_stiffness=50.0,  # Bending resistance
+            ),
         ),
     )
 
     cube_size = 0.2
     cube_height = 0.3  # Height below cloth
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.25, 0, cube_height),
-            size=(cube_size, cube_size, cube_size),
-        ),
-        material=gs.materials.Rigid(
-            rho=500,
-            coup_type="ipc_only",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.8, 0.3, 0.2, 0.8),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(-0.25, 0, cube_height),
+                size=(cube_size, cube_size, cube_size),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.8, 0.3, 0.2, 0.8),
+            ),
+            material=gs.materials.Rigid(
+                rho=500,
+                coup_type="ipc_only",
+            ),
         ),
     )
 
     # Optional: Add another FEM volume object
     soft_ball = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.08,
-            pos=(0.25, 0.0, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e3,
-            nu=0.3,
-            rho=1000.0,
-            model="stable_neohookean",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.2, 0.8, 0.3, 0.8),
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                radius=0.08,
+                pos=(0.25, 0.0, 0.1),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.2, 0.8, 0.3, 0.8),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1.0e3,
+                nu=0.3,
+                rho=1000.0,
+                model="stable_neohookean",
+            ),
         ),
     )
 

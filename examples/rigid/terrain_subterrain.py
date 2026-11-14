@@ -31,21 +31,25 @@ def main():
     horizontal_scale = 0.25
     vertical_scale = 0.005
     terrain = scene.add_entity(
-        morph=gs.morphs.Terrain(
-            n_subterrains=(2, 2),
-            subterrain_size=(6.0, 6.0),
-            horizontal_scale=horizontal_scale,
-            vertical_scale=vertical_scale,
-            subterrain_types=[
-                ["flat_terrain", "random_uniform_terrain"],
-                ["pyramid_sloped_terrain", "discrete_obstacles_terrain"],
-            ],
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Terrain(
+                n_subterrains=(2, 2),
+                subterrain_size=(6.0, 6.0),
+                horizontal_scale=horizontal_scale,
+                vertical_scale=vertical_scale,
+                subterrain_types=[
+                    ["flat_terrain", "random_uniform_terrain"],
+                    ["pyramid_sloped_terrain", "discrete_obstacles_terrain"],
+                ],
+            ),
         ),
     )
     ball = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(1.0, 1.0, 1.0),
-            radius=0.1,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(1.0, 1.0, 1.0),
+                radius=0.1,
+            ),
         ),
     )
     scene.build(n_envs=100)

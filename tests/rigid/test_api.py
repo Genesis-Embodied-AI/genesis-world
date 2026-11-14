@@ -33,10 +33,16 @@ def test_data_accessor(n_envs, batched, tol):
         show_viewer=False,
         show_FPS=False,
     )
-    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     gs_robot = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/go2/urdf/go2.urdf",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/go2/urdf/go2.urdf",
+            ),
         ),
     )
     gs_link = gs_robot.get_link("RR_thigh")
@@ -407,10 +413,12 @@ def test_getter_vs_state_post_step_consistency(enable_mujoco_compatibility):
         ),
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(1.0, 1.0, 1.0),
-            pos=(0.0, 0.0, 0.0),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(1.0, 1.0, 1.0),
+                pos=(0.0, 0.0, 0.0),
+            ),
+        ),
     )
     (box_link,) = box.links
     scene.build()
@@ -433,10 +441,12 @@ def test_extended_broadcasting():
     scene = gs.Scene(show_viewer=False)
     for i in range(4):
         scene.add_entity(
-            gs.morphs.Box(
-                size=(1.0, 1.0, 1.0),
-                pos=(0.0, 0.0, i),
-            )
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(1.0, 1.0, 1.0),
+                    pos=(0.0, 0.0, i),
+                ),
+            ),
         )
     scene.build(n_envs=2)
 
@@ -471,11 +481,17 @@ def test_batched_info(batch_links_info, batch_joints_info, batch_dofs_info, tol)
             batch_dofs_info=batch_dofs_info,
         ),
     )
-    scene.add_entity(gs.morphs.Terrain())
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Terrain(),
+        ),
+    )
     franka = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+        ),
     )
     scene.build(n_envs=2)
     gs_s = scene.rigid_solver
@@ -569,11 +585,15 @@ def test_info_batching(tol):
         show_FPS=False,
     )
     plane = scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     robot = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -594,10 +614,12 @@ def test_geom_pos_quat(n_envs, show_viewer):
     )
 
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(1.0, 1.0, 1.0),
-            pos=(0.0, 0.0, 2.0),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(1.0, 1.0, 1.0),
+                pos=(0.0, 0.0, 2.0),
+            ),
+        ),
     )
     scene.build(n_envs=n_envs)
     batch_shape = (n_envs,) if n_envs > 0 else ()
@@ -633,44 +655,56 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
         show_FPS=False,
     )
     plane = scene.add_entity(
-        gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     robot = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-            offset_pos=ROBOT_POS_ZERO,
-            offset_euler=ROBOT_EULER_ZERO,
-            batch_fixed_verts=batch_fixed_verts,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+                offset_pos=ROBOT_POS_ZERO,
+                offset_euler=ROBOT_EULER_ZERO,
+                batch_fixed_verts=batch_fixed_verts,
+            ),
         ),
     )
     sphere = scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.04,
-            batch_fixed_verts=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.04,
+                batch_fixed_verts=False,
+                fixed=True,
+            ),
         ),
     )
     cube = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.04, 0.04, 0.04),
-            offset_pos=CUBE_POS_ZERO,
-            offset_euler=CUBE_EULER_ZERO,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.04, 0.04, 0.04),
+                offset_pos=CUBE_POS_ZERO,
+                offset_euler=CUBE_EULER_ZERO,
+            ),
         ),
     )
     plain_box = scene.add_entity(
-        gs.morphs.Box(
-            pos=(2.0, 0.0, 0.2),
-            size=(0.04, 0.04, 0.04),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(2.0, 0.0, 0.2),
+                size=(0.04, 0.04, 0.04),
+            ),
         ),
     )
     POSED_BOX_POS = (2.0, 0.5, 0.3)
     POSED_BOX_OFFSET_EULER = (0.0, 0.0, 45.0)
     posed_box = scene.add_entity(
-        gs.morphs.Box(
-            pos=POSED_BOX_POS,
-            size=(0.04, 0.04, 0.04),
-            offset_pos=(0.0, 0.0, 0.5),
-            offset_euler=POSED_BOX_OFFSET_EULER,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=POSED_BOX_POS,
+                size=(0.04, 0.04, 0.04),
+                offset_pos=(0.0, 0.0, 0.5),
+                offset_euler=POSED_BOX_OFFSET_EULER,
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -859,8 +893,10 @@ def test_normalized_quat(show_viewer, tol):
         show_FPS=False,
     )
     robot = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/go2/urdf/go2.urdf",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/go2/urdf/go2.urdf",
+            ),
         ),
     )
     scene.build()
@@ -923,39 +959,51 @@ def test_inertial_property_setters(sliding_ball_pair, xml_path, implicit_inertia
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     het_obj = scene.add_entity(
-        morph=[
-            gs.morphs.Box(size=(0.01, 0.01, 0.01), pos=(0.0, 3.0, 0.3)),
-            gs.morphs.Box(size=(0.02, 0.02, 0.02), pos=(0.0, 3.0, 0.3)),
-            gs.morphs.Sphere(radius=0.01, pos=(0.0, 3.0, 0.3)),
-            gs.morphs.Sphere(radius=0.02, pos=(0.0, 3.0, 0.3)),
-        ],
+        options=gs.entities.Rigid(
+            morph=[
+                gs.morphs.Box(size=(0.01, 0.01, 0.01), pos=(0.0, 3.0, 0.3)),
+                gs.morphs.Box(size=(0.02, 0.02, 0.02), pos=(0.0, 3.0, 0.3)),
+                gs.morphs.Sphere(radius=0.01, pos=(0.0, 3.0, 0.3)),
+                gs.morphs.Sphere(radius=0.02, pos=(0.0, 3.0, 0.3)),
+            ],
+        ),
     )
     authored, per_link, whole_entity = (
         scene.add_entity(
-            morph=gs.morphs.URDF(file=sliding_ball_pair(*masses), pos=(x, 0.0, 0.3)),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.URDF(file=sliding_ball_pair(*masses), pos=(x, 0.0, 0.3)),
+            ),
         )
         for x, masses in ((1.0, (1.0, 2.0)), (2.0, (1.0, 1.5)), (3.0, (0.5, 1.0)))
     )
     free_bodies = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=xml_path,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+            ),
         ),
     )
     unaligned = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=xml_path,
-            pos=(0.0, 10.0, 8.0),
-            align=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=xml_path,
+                pos=(0.0, 10.0, 8.0),
+                align=False,
+            ),
         ),
     )
     chain = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=implicit_inertial_origin_chain,
-            pos=(0.0, -3.0, 0.5),
-            merge_fixed_links=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=implicit_inertial_origin_chain,
+                pos=(0.0, -3.0, 0.5),
+                merge_fixed_links=False,
+            ),
         ),
     )
     scene.build(n_envs=4)
@@ -1124,33 +1172,43 @@ def test_axis_aligned_bounding_boxes(n_envs, coupler_options, enable_collision, 
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(
-            normal=(0, 0, 1),
-            pos=(0, 0, 0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                normal=(0, 0, 1),
+                pos=(0, 0, 0),
+            ),
         ),
     )
     scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0.5, 0, 0.05),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.5, 0, 0.05),
+            ),
         ),
     )
     cylinder = scene.add_entity(
-        gs.morphs.Cylinder(
-            height=0.8,
-            radius=0.06,
-            pos=(1.0, 0, 0.5),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Cylinder(
+                height=0.8,
+                radius=0.06,
+                pos=(1.0, 0, 0.5),
+            ),
         ),
     )
     scene.add_entity(
-        gs.morphs.Sphere(
-            radius=0.05,
-            pos=(-0.5, 0, 0.05),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.05,
+                pos=(-0.5, 0, 0.05),
+            ),
         ),
     )
     robot = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
         ),
     )
     scene.build(n_envs=n_envs)
@@ -1257,24 +1315,30 @@ def test_reset(
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/plane/plane.urdf",
-            fixed=True,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/plane/plane.urdf",
+                fixed=True,
+            ),
+        ),
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0, 0, 0.5),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0, 0, 0.5),
+            ),
+        ),
     )
     # Far enough from the first box to never interact, so the scene splits into one island each - the structure
     # hibernation needs to engage.
     box_far = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(2.0, 0, 0.5),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(2.0, 0, 0.5),
+            ),
+        ),
     )
     scene.build(n_envs=4)
 
@@ -1356,10 +1420,12 @@ def test_deprecated_properties(caplog):
         show_FPS=False,
     )
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(1.0, 1.0, 1.0),
-            pos=(0.0, 0.0, 0.0),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(1.0, 1.0, 1.0),
+                pos=(0.0, 0.0, 0.0),
+            ),
+        ),
     )
     scene.build()
 
@@ -1395,35 +1461,46 @@ def test_object_repr():
 
     scene = gs.Scene(show_viewer=False)
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+            ),
+        ),
     )
     panda = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+        ),
     )
     inline = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=inline_mjcf,
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file=inline_mjcf,
+            ),
+        ),
     )
     het = scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.2, 0.2, 0.2)),
-            gs.morphs.Cylinder(radius=0.05, height=0.2),
+        options=gs.entities.Rigid(
+            morph=(
+                gs.morphs.Box(size=(0.2, 0.2, 0.2)),
+                gs.morphs.Cylinder(radius=0.05, height=0.2),
+            ),
         ),
     )
     scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.2, 0.2, 0.2)),
-            gs.morphs.Sphere(radius=0.1),
+        options=gs.entities.Kinematic(
+            morph=(
+                gs.morphs.Box(size=(0.2, 0.2, 0.2)),
+                gs.morphs.Sphere(radius=0.1),
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     cam = scene.add_camera(
         res=(64, 64),

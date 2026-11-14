@@ -27,21 +27,27 @@ scene = gs.Scene(
     show_viewer=True,
 )
 scene.add_entity(
-    morph=gs.morphs.Plane(),
-    name="Plane",
+    options=gs.entities.Rigid(
+        morph=gs.morphs.Plane(),
+        name="Plane",
+    ),
 )
 scene.add_entity(
-    morph=gs.morphs.MJCF(
-        file="xml/franka_emika_panda/panda.xml",
+    options=gs.entities.Rigid(
+        morph=gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        ),
+        name="Panda",
     ),
-    name="Panda",
 )
 scene.add_entity(
-    morph=gs.morphs.Box(
-        pos=(0, 0, 1.0),
-        size=(0.2, 0.2, 0.2),
+    options=gs.entities.Rigid(
+        morph=gs.morphs.Box(
+            pos=(0, 0, 1.0),
+            size=(0.2, 0.2, 0.2),
+        ),
+        name="Box",
     ),
-    name="Box",
 )
 scene.build()
 

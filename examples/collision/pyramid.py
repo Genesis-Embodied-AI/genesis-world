@@ -37,7 +37,11 @@ def main():
         show_viewer=args.vis,
     )
 
-    plane = scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
 
     # create pyramid of boxes
     box_size = 0.25
@@ -47,9 +51,11 @@ def main():
     for i in range(args.num_cubes):
         for j in range(args.num_cubes - i):
             box = scene.add_entity(
-                gs.morphs.Box(
-                    size=[box_size, box_size, box_size],
-                    pos=box_pos_offset + box_spacing * np.array([i + 0.5 * j, 0, j]),
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Box(
+                        size=[box_size, box_size, box_size],
+                        pos=box_pos_offset + box_spacing * np.array([i + 0.5 * j, 0, j]),
+                    ),
                 ),
             )
 

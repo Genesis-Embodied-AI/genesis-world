@@ -60,15 +60,19 @@ def test_generation(is_named, show_viewer, tol):
     )
     # FIXME: Collision detection is very unstable for 'stepping_stones' pattern.
     terrain = scene.add_entity(
-        morph=gs.morphs.Terrain(**terrain_kwargs),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Terrain(**terrain_kwargs),
+        ),
     )
     obj = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(1.0, 1.0, 1.0),
-            size=(0.1, 0.1, 0.1),
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, 1.0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(1.0, 1.0, 1.0),
+                size=(0.1, 0.1, 0.1),
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.0, 0.0, 1.0),
+            ),
         ),
     )
     scene.build(n_envs=NUM_OBJ_SQRT**2)
@@ -103,7 +107,9 @@ def test_generation(is_named, show_viewer, tol):
     if is_named:
         scene = gs.Scene()
         terrain_2 = scene.add_entity(
-            morph=gs.morphs.Terrain(**{**terrain_kwargs, **dict(randomize=True)}),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Terrain(**{**terrain_kwargs, **dict(randomize=True)}),
+            ),
         )
         terrain_2_mesh = terrain_2.geoms[0].mesh
         assert_allclose(terrain_mesh.verts, terrain_2_mesh.verts, tol=tol)
@@ -113,19 +119,21 @@ def test_generation(is_named, show_viewer, tol):
 def test_discrete_obstacles():
     scene = gs.Scene()
     terrain = scene.add_entity(
-        gs.morphs.Terrain(
-            n_subterrains=(1, 1),
-            subterrain_size=(6.0, 6.0),
-            horizontal_scale=0.5,
-            vertical_scale=0.5,
-            subterrain_types=[["discrete_obstacles_terrain"]],
-            subterrain_parameters={
-                "discrete_obstacles_terrain": {
-                    "max_height": 1.0,
-                    "platform_size": 1.0,
-                }
-            },
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Terrain(
+                n_subterrains=(1, 1),
+                subterrain_size=(6.0, 6.0),
+                horizontal_scale=0.5,
+                vertical_scale=0.5,
+                subterrain_types=[["discrete_obstacles_terrain"]],
+                subterrain_parameters={
+                    "discrete_obstacles_terrain": {
+                        "max_height": 1.0,
+                        "platform_size": 1.0,
+                    }
+                },
+            ),
+        ),
     )
     scene.build()
     height_field = terrain.geoms[0].metadata["height_field"]
@@ -150,28 +158,34 @@ def test_get_terrain_height(n_envs, tol):
 
     scene = gs.Scene(show_viewer=False)
     terrain = scene.add_entity(
-        morph=gs.morphs.Terrain(
-            pos=(2.0, -1.0, 0.3),
-            quat=quat_yaw,
-            batch_fixed_verts=True,
-            horizontal_scale=0.5,
-            vertical_scale=0.1,
-            height_field=height_field,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Terrain(
+                pos=(2.0, -1.0, 0.3),
+                quat=quat_yaw,
+                batch_fixed_verts=True,
+                horizontal_scale=0.5,
+                vertical_scale=0.1,
+                height_field=height_field,
+            ),
         ),
     )
     visual_terrain = scene.add_entity(
-        morph=gs.morphs.Terrain(
-            pos=(30.0, 40.0, 3.0),
-            quat=gu.xyz_to_quat(np.array((0.0, 0.0, 37.0)), degrees=True),
-            collision=False,
-            horizontal_scale=0.25,
-            vertical_scale=0.01,
-            height_field=np.add.outer(np.arange(3), 2 * np.arange(3)),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Terrain(
+                pos=(30.0, 40.0, 3.0),
+                quat=gu.xyz_to_quat(np.array((0.0, 0.0, 37.0)), degrees=True),
+                collision=False,
+                horizontal_scale=0.25,
+                vertical_scale=0.01,
+                height_field=np.add.outer(np.arange(3), 2 * np.arange(3)),
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+            ),
         ),
     )
     scene.build(n_envs=n_envs)
@@ -248,27 +262,31 @@ def test_get_terrain_height(n_envs, tol):
 def test_subterrain_parameters(show_viewer):
     scene_ref = gs.Scene(show_viewer=show_viewer)
     terrain_ref = scene_ref.add_entity(
-        morph=gs.morphs.Terrain(
-            n_subterrains=(2, 2),
-            subterrain_size=(12.0, 12.0),
-            horizontal_scale=0.25,
-            subterrain_types="wave_terrain",
-            name="wave_terrain",
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Terrain(
+                n_subterrains=(2, 2),
+                subterrain_size=(12.0, 12.0),
+                horizontal_scale=0.25,
+                subterrain_types="wave_terrain",
+                name="wave_terrain",
+            ),
+        ),
     )
 
     height_ref = terrain_ref.geoms[0].metadata["height_field"]
 
     scene_test = gs.Scene(show_viewer=show_viewer)
     terrain_test = scene_test.add_entity(
-        morph=gs.morphs.Terrain(
-            n_subterrains=(2, 2),
-            subterrain_size=(12.0, 12.0),
-            horizontal_scale=0.25,
-            subterrain_types="wave_terrain",
-            name="wave_terrain",
-            subterrain_parameters={"wave_terrain": {"amplitude": 0.2}},
-        )
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Terrain(
+                n_subterrains=(2, 2),
+                subterrain_size=(12.0, 12.0),
+                horizontal_scale=0.25,
+                subterrain_types="wave_terrain",
+                name="wave_terrain",
+                subterrain_parameters={"wave_terrain": {"amplitude": 0.2}},
+            ),
+        ),
     )
 
     height_test = terrain_test.geoms[0].metadata["height_field"]
@@ -298,20 +316,28 @@ def test_mesh_to_heightfield(tmp_path, show_viewer):
         show_FPS=False,
     )
     terrain_heightfield = scene.add_entity(
-        morph=gs.morphs.Terrain(
-            horizontal_scale=horizontal_scale,
-            vertical_scale=1.0,
-            height_field=hf_terrain,
-            pos=translation,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Terrain(
+                horizontal_scale=horizontal_scale,
+                vertical_scale=1.0,
+                height_field=hf_terrain,
+                pos=translation,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     ball = scene.add_entity(
-        gs.morphs.Sphere(
-            pos=(10, 15, 7),
-            radius=1,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                pos=(10, 15, 7),
+                radius=1,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="collision",
+            ),
         ),
-        vis_mode="collision",
     )
     scene.build()
 
@@ -342,25 +368,29 @@ def test_box_on_terrain_no_spurious_spin(show_viewer):
         show_FPS=False,
     )
     scene.add_entity(
-        morph=gs.morphs.Terrain(
-            pos=(-1.5, -1.5, 0.0),
-            height_field=np.zeros((4, 4), dtype=np.float32),
-            horizontal_scale=1.0,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.4, 0.8, 0.4),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Terrain(
+                pos=(-1.5, -1.5, 0.0),
+                height_field=np.zeros((4, 4), dtype=np.float32),
+                horizontal_scale=1.0,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.4, 0.8, 0.4),
+            ),
         ),
     )
     box = scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=BOX_SIZE),
-            gs.morphs.MeshSet(
-                files=(trimesh.creation.box(extents=BOX_SIZE),),
-                decimate=False,
+        options=gs.entities.Rigid(
+            morph=(
+                gs.morphs.Box(size=BOX_SIZE),
+                gs.morphs.MeshSet(
+                    files=(trimesh.creation.box(extents=BOX_SIZE),),
+                    decimate=False,
+                ),
             ),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.95, 0.2, 0.2),
+            surface=gs.surfaces.Default(
+                color=(0.95, 0.2, 0.2),
+            ),
         ),
     )
 
@@ -408,24 +438,28 @@ def test_multicontact_sphere_vs_terrain(show_viewer, tol):
         show_FPS=False,
     )
     scene.add_entity(
-        morph=gs.morphs.Terrain(
-            pos=terrain_pos,
-            height_field=hf,
-            horizontal_scale=HORIZONTAL_SCALE,
-            vertical_scale=VERTICAL_SCALE,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.4, 0.8, 0.4),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Terrain(
+                pos=terrain_pos,
+                height_field=hf,
+                horizontal_scale=HORIZONTAL_SCALE,
+                vertical_scale=VERTICAL_SCALE,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.4, 0.8, 0.4),
+            ),
         ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=SPHERE_RADIUS,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=SPHERE_RADIUS,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.95, 0.2, 0.2),
+            ),
+            visualize_contact=True,
         ),
-        surface=gs.surfaces.Default(
-            color=(0.95, 0.2, 0.2),
-        ),
-        visualize_contact=True,
     )
 
     scene.build()

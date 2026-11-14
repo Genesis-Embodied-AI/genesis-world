@@ -55,29 +55,35 @@ scene = gs.Scene(
 )
 
 plane = scene.add_entity(
-    morph=gs.morphs.Plane(),
-    surface=gs.surfaces.Rough(
-        color=(0.4, 0.4, 0.4),
+    options=gs.entities.Rigid(
+        morph=gs.morphs.Plane(),
+        surface=gs.surfaces.Rough(
+            color=(0.4, 0.4, 0.4),
+        ),
     ),
 )
 
 sphere = scene.add_entity(
-    morph=gs.morphs.Sphere(
-        radius=0.5,
-        pos=(0.0, 0.0, 2.0),
-    ),
-    surface=gs.surfaces.Smooth(
-        color=(1.0, 0.5, 0.5),
+    options=gs.entities.Rigid(
+        morph=gs.morphs.Sphere(
+            radius=0.5,
+            pos=(0.0, 0.0, 2.0),
+        ),
+        surface=gs.surfaces.Smooth(
+            color=(1.0, 0.5, 0.5),
+        ),
     ),
 )
 
 box = scene.add_entity(
-    morph=gs.morphs.Box(
-        size=(0.3, 0.3, 0.3),
-        pos=(1.0, 1.0, 1.0),
-    ),
-    surface=gs.surfaces.Rough(
-        color=(0.5, 1.0, 0.5),
+    options=gs.entities.Rigid(
+        morph=gs.morphs.Box(
+            size=(0.3, 0.3, 0.3),
+            pos=(1.0, 1.0, 1.0),
+        ),
+        surface=gs.surfaces.Rough(
+            color=(0.5, 1.0, 0.5),
+        ),
     ),
 )
 
