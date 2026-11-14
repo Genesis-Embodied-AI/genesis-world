@@ -28,6 +28,7 @@ from pydantic import AfterValidator, TypeAdapter, ValidationError, ValidationInf
 
 import genesis as gs
 from genesis.options.options import Options
+from genesis.repr_base import get_public_name
 
 # What every member of an archive is stamped with, so a file is the bytes its scene comes to and nothing else.
 EPOCH = (1980, 1, 1, 0, 0, 0)
@@ -148,14 +149,30 @@ def _field_check(cls: type, name: str) -> TypeAdapter:
     What a field constrains stands beside its type rather than in it, so the two are put back together here.
     """
     info = cls.model_fields[name]
-    admitted = typing.Annotated[tuple([info.annotation, *info.metadata])] if info.metadata else info.annotation
+    annotation = _bind_self(info.annotation, cls)
+    admitted = typing.Annotated[tuple([annotation, *info.metadata])] if info.metadata else annotation
     return TypeAdapter(admitted)
+
+
+def _bind_self(annotation, cls: type):
+    """Return a declared type with 'typing.Self' standing for the class declaring it, as pydantic reads it."""
+    if annotation is typing.Self:
+        return cls
+    origin, args = typing.get_origin(annotation), typing.get_args(annotation)
+    if not args:
+        return annotation
+    bound_args = tuple(_bind_self(arg, cls) for arg in args)
+    if origin is typing.Annotated:
+        return typing.Annotated[tuple([bound_args[0], *annotation.__metadata__])]
+    if origin in (types.UnionType, typing.Union):
+        return typing.Union[bound_args]
+    return origin[bound_args]
 
 
 def _declared_fields(cls: type) -> dict[str, type]:
     """Return the declared type of each field of a class. Those types drive how a value loads back."""
     if issubclass(cls, Options):
-        return {name: info.annotation for name, info in cls.model_fields.items()}
+        return {name: _bind_self(info.annotation, cls) for name, info in cls.model_fields.items()}
     return typing.get_type_hints(cls)
 
 
@@ -246,7 +263,7 @@ def schema(classes: set[type]) -> dict:
     that gained a field since keeps loading while one whose fields moved is rejected by name. Sorted by name, so what
     a file holds follows from the classes alone rather than from the order they are met in.
     """
-    return {cls.__name__: _layout(cls) for cls in sorted(classes, key=lambda cls: cls.__name__)}
+    return {get_public_name(cls): _layout(cls) for cls in sorted(classes, key=get_public_name)}
 
 
 def declared_schema(expect: dict) -> dict:
@@ -267,13 +284,13 @@ def declared_schema(expect: dict) -> dict:
                 continue
             seen.add(declared)
             if issubclass(declared, (IntEnum, StrEnum)):
-                layout[declared.__name__] = _layout(declared)
+                layout[get_public_name(declared)] = _layout(declared)
             elif _has_declared_fields(declared):
                 for cls in _classes_by_name(declared).values():
                     if cls in seen and cls is not declared:
                         continue
                     seen.add(cls)
-                    layout[cls.__name__] = _layout(cls)
+                    layout[get_public_name(cls)] = _layout(cls)
                     declarations.extend(_declared_fields(cls).values())
     return layout
 
@@ -386,7 +403,10 @@ def _export_value(value, expect, exported: "Exported"):
             # are sorted, so exporting the same scene twice gives the same file.
             values = {"values": values, "given": sorted(value.model_fields_set)}
         return values if _accepted_classes(expect) == (type(value),) else {"@": type(value).__name__, **values}
-    expect = _deduce_union(expect, value)
+    # A union mixing an option with a sequence of them, such as one morph or several, exports as the argument it holds
+    deduced = _deduce_union(expect, value)
+    if deduced is not expect:
+        return _export_value(value, deduced, exported)
     origin = typing.get_origin(expect)
     if _is_sequence(origin):
         args = typing.get_args(expect)
@@ -498,7 +518,10 @@ def _load_value(raw, expect, loaded: list[np.ndarray]):
                     gs.raise_exception_from(f"A Genesis file states a '{name}' that {cls.__name__} rejects.", e)
             return cls.model_construct(_fields_set=set(raw["given"]), **values)
         return cls(**{name: _load_value(raw[name], declared[name], loaded) for name in declared if name in raw})
-    expect = _deduce_union(expect, raw)
+    # See '_export_value' for a union mixing an option with a sequence of them
+    deduced = _deduce_union(expect, raw)
+    if deduced is not expect:
+        return _load_value(raw, deduced, loaded)
     origin = typing.get_origin(expect)
     if _is_sequence(origin):
         args = typing.get_args(expect)

@@ -512,6 +512,7 @@ from .utils import tools
 from .utils.geom import *
 from .utils.misc import assert_built, assert_unbuilt, assert_initialized, raise_exception, raise_exception_from
 
+from .options import entities, indices
 from .options import morphs
 from .options import sensors
 from .options import renderers

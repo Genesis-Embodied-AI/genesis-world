@@ -81,9 +81,10 @@ def _apply_deterministic_imgui_overrides(monkeypatch):
     def _capture_pending_entities_basename(self):
         orig_capture(self)
         for entity_kwargs in self._pending_entities_kwargs.values():
-            morph = entity_kwargs["morph"]
-            if isinstance(morph, gs.morphs.FileMorph):
-                morph.file = os.path.basename(morph.file)
+            options = entity_kwargs["options"]
+            if isinstance(options.morph, gs.morphs.FileMorph):
+                morph = options.morph.model_copy(update={"file": os.path.basename(options.morph.file)})
+                entity_kwargs["options"] = options.model_copy(update={"morph": morph})
 
     monkeypatch.setattr(ImGuiOverlayPlugin, "_capture_pending_entities_kwargs", _capture_pending_entities_basename)
 
@@ -317,8 +318,8 @@ def test_scene_rebuild():
     # manual InteractiveScene. A Rebuild click only queues the request; scene.step() applies it on its thread.
     scene = _build_default_scene(enable_gui=True, run_in_thread=(sys.platform == "linux"))
     # A UV-mapped mesh with an image texture, so the capture comparison below catches the renderer swap invalidating
-    # GL textures shared across the rebuild.
-    scene.add_entity(
+    # GL textures shared across the rebuild. The friction set on its geoms must survive a rebuild that edits its morph.
+    duck_options = gs.entities.Rigid(
         morph=gs.morphs.Mesh(
             file="meshes/duck/duck.obj",
             scale=0.001,
@@ -327,6 +328,8 @@ def test_scene_rebuild():
         ),
         name="duck",
     )
+    duck_options.select(gs.indices.Geom.at(slice(None))).set_friction(0.9)
+    scene.add_entity(options=duck_options)
     scene.build()
 
     scene_id = id(scene)
@@ -375,11 +378,14 @@ def test_scene_rebuild():
     duck_aabb = scene.get_entity("duck").get_AABB()
     digest_before = scene._desc_digest
     duck_kwargs = plugin._pending_entities_kwargs["duck"]
-    duck_kwargs["morph"] = duck_kwargs["morph"].model_copy(update={"scale": 0.002})
+    duck_morph = duck_kwargs["options"].morph.model_copy(update={"scale": 0.002})
+    duck_kwargs["options"] = duck_kwargs["options"].model_copy(update={"morph": duck_morph})
     interactive.rebuild(entities_kwargs=plugin._pending_entities_kwargs)
     scene.step()
     duck_aabb_scaled = scene.get_entity("duck").get_AABB()
     assert_allclose(duck_aabb_scaled[1] - duck_aabb_scaled[0], 2.0 * (duck_aabb[1] - duck_aabb[0]), tol=1e-3)
+    for geom in scene.get_entity("duck").geoms:
+        assert_allclose(geom.get_friction(), 0.9, tol=gs.EPS)
     # A checkpoint restore compares against the cached digest, so the cache must follow the edit
     assert scene._desc_digest != digest_before
 
@@ -422,16 +428,13 @@ def test_capture_pending_entities_preserves_heterogeneous_morphs():
 
     plugin._capture_pending_entities_kwargs()
 
-    single_kwargs = plugin._pending_entities_kwargs[single_entity.name]
-    assert single_kwargs["morph"] is single_morph
-    assert single_kwargs["material"] is single_entity.material
-    assert single_kwargs["surface"] is single_entity.surface
-    assert single_kwargs["visualize_contact"] is True
+    single_options = plugin._pending_entities_kwargs[single_entity.name]["options"]
+    assert single_options is single_entity.options
+    assert single_options.morph is single_morph
+    assert single_options.visualize_contact
 
-    heterogeneous_kwargs = plugin._pending_entities_kwargs[heterogeneous_entity.name]
-    assert heterogeneous_kwargs["morph"] == heterogeneous_morphs
-    assert heterogeneous_kwargs["morph"][0] is heterogeneous_morphs[0]
-    assert heterogeneous_kwargs["morph"][1] is heterogeneous_morphs[1]
-    assert heterogeneous_kwargs["material"] is heterogeneous_entity.material
-    assert heterogeneous_kwargs["surface"] is heterogeneous_entity.surface
-    assert heterogeneous_kwargs["visualize_contact"] is True
+    heterogeneous_options = plugin._pending_entities_kwargs[heterogeneous_entity.name]["options"]
+    assert heterogeneous_options is heterogeneous_entity.options
+    assert heterogeneous_options.morph[0] is heterogeneous_morphs[0]
+    assert heterogeneous_options.morph[1] is heterogeneous_morphs[1]
+    assert heterogeneous_options.visualize_contact

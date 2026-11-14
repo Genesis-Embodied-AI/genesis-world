@@ -1,6 +1,6 @@
 from collections.abc import Callable, Iterator, Sequence
 from enum import IntFlag
-from typing import TYPE_CHECKING, NamedTuple, overload
+from typing import TYPE_CHECKING, ClassVar, NamedTuple, overload
 
 import numpy as np
 import torch
@@ -12,7 +12,6 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.force_fields import ForceField, ForceFields
-from genesis.engine.materials.base import Material
 from genesis.engine.state_change import StateChange, Subscriber, mutates
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import RolloutGraph, no_grad
@@ -549,10 +548,10 @@ class GravityMixin:
 
 
 class Solver(ErrnoMixin, CheckpointMixin, RBC):
-    # The material of the entities this solver simulates, None for a solver holding no entity of its own
-    material_cls: type[Material] | None = None
     # Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must
     is_differentiable: bool = False
+    # The class of entity options whose entities the solver simulates, which the simulator dispatches on
+    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]]
 
     def __init__(self, scene: "Scene", sim: "Simulator", options):
         self._uid = gs.UID()
@@ -676,6 +675,9 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
             if tensor_ is not None and n_envs == 0:
                 tensor_ = tensor_[None]
         return tensor_, inputs_idx_, envs_idx_
+
+    def post_build(self) -> None:
+        """Apply what the entity options of the solver set, through the public setters, once the scene is built."""
 
     def build(self):
         self._B = self._sim._B

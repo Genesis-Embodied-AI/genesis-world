@@ -5,6 +5,33 @@ import genesis.utils.repr as ru
 from genesis.styles import colors, formats, styless
 
 
+def get_public_name(cls: type) -> str:
+    """Return the path of a class under ``gs``, such as 'entities.Rigid', unique among the classes of Genesis.
+
+    The path is the shortest alias of the class that ``gs`` exposes, so it follows the public API rather than the module
+    defining the class. A class that ``gs`` does not expose keeps the path of its module, without the 'genesis' prefix.
+    """
+    class_name = cls.__qualname__
+    if getattr(gs, class_name, None) is cls:
+        return class_name
+    _module, *submodule = cls.__module__.split(".")
+    # Greedily strip redundant submodule segments (front first, then back)
+    for strip_end in (False, True):
+        while submodule:
+            shorter = submodule[:-1] if strip_end else submodule[1:]
+            obj = gs
+            try:
+                for seg in shorter:
+                    obj = getattr(obj, seg)
+                if getattr(obj, class_name, None) is cls:
+                    submodule = shorter
+                    continue
+            except AttributeError:
+                pass
+            break
+    return ".".join((*submodule, class_name))
+
+
 class RBC:
     """
     REPR Base Class.
@@ -14,24 +41,7 @@ class RBC:
     """
 
     def __repr_name__(self):
-        cls = type(self)
-        class_name = cls.__qualname__
-        _module, *submodule = cls.__module__.split(".")
-        # Greedily strip redundant submodule segments (front first, then back)
-        for strip_end in (False, True):
-            while submodule:
-                shorter = submodule[:-1] if strip_end else submodule[1:]
-                obj = gs
-                try:
-                    for seg in shorter:
-                        obj = getattr(obj, seg)
-                    if getattr(obj, class_name, None) is cls:
-                        submodule = shorter
-                        continue
-                except AttributeError:
-                    pass
-                break
-        return f"<gs.{'.'.join((*submodule, class_name))}>"
+        return f"<gs.{get_public_name(type(self))}>"
 
     def _repr_briefer(self):
         return self.__repr_name__()

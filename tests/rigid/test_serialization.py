@@ -519,7 +519,7 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
         members = {name: archive.read(name) for name in archive.namelist()}
     original = json.loads(members[MANIFEST_NAME])
     manifest = deepcopy(original)
-    manifest["schema"]["RigidLinkDescription"].append("inertial_frame")
+    manifest["schema"]["engine.entities.rigid_entity.description.RigidLinkDescription"].append("inertial_frame")
     members[MANIFEST_NAME] = json.dumps(manifest).encode()
     with zipfile.ZipFile(exported, "w") as archive:
         for name, content in members.items():
@@ -540,7 +540,7 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
     # A field a class gained since is not a mismatch: an option states which of its fields were given, and a
     # description field a file leaves out stands at the default it declares.
     manifest = deepcopy(original)
-    manifest["schema"]["RigidLinkDescription"].remove("invweight")
+    manifest["schema"]["engine.entities.rigid_entity.description.RigidLinkDescription"].remove("invweight")
     members[MANIFEST_NAME] = json.dumps(manifest).encode()
     with zipfile.ZipFile(exported, "w") as archive:
         for name, content in members.items():

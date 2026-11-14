@@ -309,21 +309,8 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         editor panel. Keyed by entity name; values are the kwargs forwarded to ``scene.add_entity``."""
         self._pending_entities_kwargs = {}
         for entity in self.scene.entities:
-            # A heterogeneous entity has multiple morph variants; capture them all so a rebuild reproduces every
-            # variant instead of collapsing the entity to its first morph.
-            if isinstance(entity, gs.engine.entities.KinematicEntity):
-                morph = tuple(entity.morphs) if len(entity.morphs) > 1 else entity.main_morph
-            else:
-                morph = entity.morph
-            kwargs: dict[str, Any] = {"morph": morph}
-            # Carry the material and surface so a rebuild preserves the entity's solver (e.g. a Kinematic entity must
-            # not silently become Rigid, the add_entity default). visualize_contact is rigid-only.
-            if isinstance(entity, gs.engine.entities.KinematicEntity):
-                kwargs["material"] = entity.material
-                kwargs["surface"] = entity.surface
-                if isinstance(entity, gs.engine.entities.RigidEntity):
-                    kwargs["visualize_contact"] = entity.visualize_contact
-            self._pending_entities_kwargs[entity.name] = kwargs
+            # The rebuild re-creates an entity handed its own options from its description (see 'InteractiveScene')
+            self._pending_entities_kwargs[entity.name] = {"options": entity.options}
 
     def _is_capturing(self) -> bool:
         """Check if ImGui or gizmo wants mouse/keyboard input."""
@@ -837,7 +824,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         # Per-entity scale editing (FileMorph only; primitives carry size/radius/height instead).
         to_remove: str | None = None
         for name, kwargs in self._pending_entities_kwargs.items():
-            morph = kwargs["morph"]
+            morph = kwargs["options"].morph
             morph_name = type(morph).__name__
             file_name = morph.file if isinstance(morph, gs.morphs.FileMorph) else ""
 
@@ -851,9 +838,12 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                 imgui.end_disabled()
                 self._maybe_show_disabled_tooltip(scale_disabled)
                 if changed and not scale_disabled:
-                    # A new morph rather than an edit in place, since the rebuild re-creates an entity handed its own
-                    # morph from the description resolved at the old scale (see 'InteractiveScene._apply_rebuild').
-                    kwargs["morph"] = morph.model_copy(update={"scale": new_scale})
+                    # New options rather than an edit in place, since the rebuild re-creates an entity handed its own
+                    # options from the description resolved at the old scale (see 'InteractiveScene._apply_rebuild').
+                    # The surface of the entity carries the visualization mode the overlay may have switched since
+                    new_morph = morph.model_copy(update={"scale": new_scale})
+                    surface = self.scene.get_entity(name).surface
+                    kwargs["options"] = kwargs["options"].model_copy(update={"morph": new_morph, "surface": surface})
                     self._pending_dirty = True
 
                 imgui.same_line()
@@ -992,12 +982,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                 while name in self._pending_entities_kwargs:
                     suffix += 1
                     name = f"{base_name}_{suffix}"
-                self._pending_entities_kwargs[name] = {
-                    "morph": new_morph,
-                    "material": None,
-                    "surface": None,
-                    "visualize_contact": False,
-                }
+                self._pending_entities_kwargs[name] = {"options": gs.entities.Rigid(morph=new_morph)}
                 self._pending_dirty = True
             imgui.unindent()
 

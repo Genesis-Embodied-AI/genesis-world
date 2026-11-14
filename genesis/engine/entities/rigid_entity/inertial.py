@@ -182,11 +182,13 @@ class LinkInertialInfo(NamedTuple):
     every geom), False for a pure geometry estimate (the true mass is a uniform material-density rescale of it), and
     None when the link mixes geoms with and without an authored density (neither explicit nor uniformly rescalable).
     'hint' is the material-density-resolved geometry estimate that resolving a link description consumes (None for
-    kinematic entities, which have no dynamics)."""
+    kinematic entities, which have no dynamics). 'has_set_density' is True when a selection block sets the density of a
+    geom of a link whose mass the estimate gives, which may move its center of mass off the align anchor."""
 
     props: LinkInertial
     is_mass_explicit: bool | None
     hint: InertialProperties | None
+    has_set_density: bool
 
 
 def finalize_inertial(
