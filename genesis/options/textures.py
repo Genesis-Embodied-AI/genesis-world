@@ -705,15 +705,8 @@ class DynamicTexture(_ImagelessTexture):
             if isinstance(variant, AssetTexture):
                 if not variant.is_batched or asset_texture.is_batched:
                     variant = asset_texture
-                elif isinstance(asset_texture, ImageTexture):
-                    variant = ImageTexture(
-                        image_array=asset_texture.image_array,
-                        image_color=asset_texture.image_color,
-                        encoding=asset_texture.encoding,
-                        is_batched=True,
-                    )
                 else:
-                    variant = ColorTexture(color=asset_texture.color, is_batched=True)
+                    variant = stack_textures((asset_texture,))
             variants.append(variant)
         variants = dict(zip(self.variants_name, variants)) if self.variants_name else tuple(variants)
         texture = self.model_copy(update={"variants": variants})
