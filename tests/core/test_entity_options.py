@@ -149,6 +149,16 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
         body.select(gs.indices.Geom.at(0)).set_rho(8000.0)
         body.select(gs.indices.Geom.at(1)).set_rho(1000.0)
     dense_body = scene.add_entity(options=dense_body_options)
+    # A density set on a body whose asset gives its mass changes nothing, so the body stays aligned
+    stated_mass_body_options = gs.entities.Rigid(
+        morph=gs.morphs.MJCF(
+            file=two_box_free_mjcf,
+            pos=(3.0, 2.0, 0.6),
+            align=True,
+        ),
+    )
+    stated_mass_body_options.select(gs.indices.Geom.at(0)).set_rho(8000.0)
+    stated_mass_body = scene.add_entity(options=stated_mass_body_options)
     dense_body_ghost = scene.add_entity(
         options=gs.entities.Kinematic(
             morph=gs.morphs.MJCF(
@@ -279,6 +289,8 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
 
     # The mass of each box is its volume, 0.2^3 m^3, times the density set on its geom
     assert_allclose(dense_body.get_mass(), (8000.0 + 1000.0) * 0.2**3, tol=tol)
+    assert stated_mass_body.base_link.aligned
+    assert_allclose(stated_mass_body.get_mass(), 2 * 1000.0 * 0.2**3, tol=tol)
     assert_allclose(dense_body.get_qpos(), dense_body_ghost.get_qpos(), tol=tol)
     # A force on the translation of the body acts at its frame, off its center of mass, so it spins the body
     dense_body.control_dofs_force([0.0, 0.0, PUSH_FORCE, 0.0, 0.0, 0.0])
