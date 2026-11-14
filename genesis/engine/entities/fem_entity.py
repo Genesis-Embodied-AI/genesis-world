@@ -355,25 +355,20 @@ class FEMEntity(Entity):
         if not init_positions.shape[0] > 0:
             gs.raise_exception("Entity has zero vertices.")
 
-        # The settings select vertices as the morph states them, relative to its position before its rotation. The
-        # later of two settings of one vertex applies.
+        # The blocks select vertices as the morph states them, relative to its position before its rotation. The later
+        # of two blocks setting one vertex applies.
         verts_pos_morph = verts - self._morph.pos
         verts_is_fixed = np.zeros(len(verts), dtype=np.bool_)
-        for setting in self._options.settings:
-            is_selected = np.ones(len(verts), dtype=np.bool_)
-            for group in setting.selectors:
-                is_in_group = np.zeros(len(verts), dtype=np.bool_)
-                # A selector picks among the vertices selected so far, an ordinal counting those vertices alone
-                held_verts_idx = np.flatnonzero(is_selected)
-                if held_verts_idx.size == 0:
-                    break
-                for vertex_index in group:
-                    is_in_group[held_verts_idx[vertex_index.resolve(verts_pos_morph[held_verts_idx])]] = True
-                is_selected &= is_in_group
-            if not is_selected.any():
-                gs.raise_exception(f"The selection {setting.selection_repr} holds no vertex of entity '{self.name}'.")
-            if "is_fixed" in setting.block.model_fields_set:
-                verts_is_fixed[is_selected] = setting.block.is_fixed
+        for selection_block in self._options.selection_blocks:
+            # Vertices are a single level, so a block holds one selector (see 'BaseEntity._check_selection_block')
+            (vertex_index,) = selection_block.selectors
+            verts_idx = vertex_index.resolve(verts_pos_morph)
+            if verts_idx.size == 0:
+                gs.raise_exception(
+                    f"The selection {selection_block.selection_repr} holds no vertex of entity '{self.name}'."
+                )
+            if "is_fixed" in selection_block.block.model_fields_set:
+                verts_is_fixed[verts_idx] = selection_block.block.is_fixed
         self._fixed_verts_idx_local = np.flatnonzero(verts_is_fixed).astype(gs.np_int, copy=False)
 
         self.init_positions = torch.tensor(init_positions, dtype=gs.tc_float, device=gs.device)

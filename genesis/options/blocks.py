@@ -63,46 +63,30 @@ class Vertex(_FrozenOptions):
     is_fixed: StrictBool = False
 
 
-class Setting(_FrozenOptions):
-    """Quantities set on a selection of parts of an entity, as ``select`` records them into its entity options.
+class SelectionBlock(_FrozenOptions):
+    """A block of quantities with the selection of parts of an entity it is set on, as ``select`` records it.
 
     Parameters
     ----------
-    selectors : tuple[tuple[gs.indices.Link | gs.indices.Geom | gs.indices.Vertex, ...], ...]
-        The selectors of each 'select' call leading to the parts. A part is selected when every call holds it, and a
-        call holds the parts any of its selectors holds. The selectors of one call are of one type.
+    selectors : tuple[gs.indices.Link | gs.indices.Geom | gs.indices.Vertex, ...]
+        The selector of each level leading to the parts, from the coarsest to the finest, each resolving among the
+        parts the previous one holds.
     block : gs.options.Geom | gs.options.Vertex
         The quantities set on the parts, of which the fields given explicitly apply.
     """
 
-    selectors: Annotated[
-        tuple[
-            Annotated[tuple[indices.Link | indices.Geom | indices.Vertex, ...], Field(min_length=1, strict=False)], ...
-        ],
-        Field(min_length=1, strict=False),
-    ]
+    selectors: Annotated[tuple[indices.Link | indices.Geom | indices.Vertex, ...], Field(min_length=1, strict=False)]
     block: Geom | Vertex
 
     @model_validator(mode="after")
-    def _check_setting(self) -> Self:
-        for group in self.selectors:
-            if len({type(selector) for selector in group}) > 1:
-                gs.raise_exception(
-                    "The selectors of one 'select' call are of one type, and selections of different types nest. Got "
-                    f"{[f'gs.{get_public_name(type(selector))}' for selector in group]}."
-                )
+    def _check_block(self) -> Self:
         if not self.block.model_fields_set:
             gs.raise_exception(f"gs.options.{type(self.block).__name__} sets no quantity. Give at least one field.")
         return self
 
     @property
     def selection_repr(self) -> str:
-        """The selection of the setting on one line, for error messages."""
-        return " and ".join(
-            "("
-            + " or ".join(
-                f"{get_public_name(type(selector))}{selector.model_dump(exclude_none=True)}" for selector in group
-            )
-            + ")"
-            for group in self.selectors
+        """The selection of the block on one line, for error messages."""
+        return " then ".join(
+            f"{get_public_name(type(selector))}{selector.model_dump(exclude_none=True)}" for selector in self.selectors
         )

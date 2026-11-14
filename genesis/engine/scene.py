@@ -522,7 +522,7 @@ class Scene(RBC):
             )
         if stage_options.name is not None:
             gs.raise_exception("A stage adds several entities, so its options take no name.")
-        if stage_options.settings:
+        if stage_options.selection_blocks:
             gs.raise_exception("A stage adds entities of different links, so its options select no part.")
         if not isinstance(stage_options.morph, gs.morphs.USD):
             gs.raise_exception(f"Unsupported morph: {stage_options.morph}.")

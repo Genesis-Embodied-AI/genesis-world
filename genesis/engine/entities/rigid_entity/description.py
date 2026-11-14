@@ -1467,12 +1467,12 @@ class KinematicEntityDescription(EntityDescription):
                 for link_g_infos in links_g_infos:
                     for g_info in link_g_infos:
                         g_info.pop(name, None)
-        if not self.options.settings:
+        if not self.options.selection_blocks:
             return
 
-        # A setting of a geom selection overrides one of links, and the later of two settings of one level applies. The
-        # density set on a geom is kept apart from the one the asset states, since it weighs in the estimate of the
-        # inertia alone (see '_resolve_inertial').
+        # A block set on a geom selection overrides one set on links, and the later of two blocks of one level
+        # applies. The density set on a geom is kept apart from the one the asset states, since it weighs in the
+        # estimate of the inertia alone (see '_resolve_inertial').
         cg_infos = [
             g_info
             for link_g_infos in links_g_infos
@@ -1490,33 +1490,31 @@ class KinematicEntityDescription(EntityDescription):
         )
         geoms_name = [g_info["mesh"].metadata.get("name", "") for g_info in cg_infos]
         geoms_field_level: dict[tuple[int, str], int] = {}
-        for setting in self.options.settings:
+        for selection_block in self.options.selection_blocks:
             is_selected = np.ones(len(cg_infos), dtype=np.bool_)
+            geoms_scope = np.zeros(len(cg_infos), dtype=gs.np_int)
             level = 0
-            is_link_scoped = False
-            for group in setting.selectors:
-                is_in_group = np.zeros(len(cg_infos), dtype=np.bool_)
-                # A geom selector picks among the geoms selected so far, an ordinal counting the geoms of each selected
-                # link apart under a link selection and those of the whole entity otherwise
-                held_geoms_idx = np.flatnonzero(is_selected)
-                held_geoms_scope = geoms_link_idx[held_geoms_idx] if is_link_scoped else np.zeros_like(held_geoms_idx)
-                held_geoms_name = [geoms_name[i_g] for i_g in held_geoms_idx]
-                for selector in group:
-                    if isinstance(selector, gs.indices.Link):
-                        is_in_group |= np.isin(geoms_link_idx, selector.resolve(links_path))
-                    else:
-                        # A selection already empty stays empty, and raises below
-                        if held_geoms_idx.size > 0:
-                            is_in_group[held_geoms_idx[selector.resolve(held_geoms_name, held_geoms_scope)]] = True
-                        level = 1
-                is_link_scoped |= isinstance(group[0], gs.indices.Link)
-                is_selected &= is_in_group
+            # The selectors go from the links to the geoms (see 'BaseEntity._check_selection_block')
+            for selector in selection_block.selectors:
+                if isinstance(selector, gs.indices.Link):
+                    is_selected = np.isin(geoms_link_idx, selector.resolve(links_path))
+                    # A geom ordinal below a link selection counts the geoms of each selected link apart
+                    geoms_scope = geoms_link_idx
+                else:
+                    held_geoms_idx = np.flatnonzero(is_selected)
+                    is_selected = np.zeros(len(cg_infos), dtype=np.bool_)
+                    # A selection already empty stays empty, and raises below
+                    if held_geoms_idx.size > 0:
+                        held_geoms_name = [geoms_name[i_g] for i_g in held_geoms_idx]
+                        held_geoms_ordinal = selector.resolve(held_geoms_name, geoms_scope[held_geoms_idx])
+                        is_selected[held_geoms_idx[held_geoms_ordinal]] = True
+                    level = 1
             if not is_selected.any():
                 gs.raise_exception(
-                    f"The selection {setting.selection_repr} holds no collision geom of {morph}. Existing geoms: "
-                    f"{geoms_name}."
+                    f"The selection {selection_block.selection_repr} holds no collision geom of {morph}. Existing "
+                    f"geoms: {geoms_name}."
                 )
-            for name, value in setting.block.model_dump(exclude_unset=True, exclude_none=True).items():
+            for name, value in selection_block.block.model_dump(exclude_unset=True, exclude_none=True).items():
                 for i_g in np.flatnonzero(is_selected):
                     if level >= geoms_field_level.get((i_g, name), 0):
                         geoms_field_level[(i_g, name)] = level

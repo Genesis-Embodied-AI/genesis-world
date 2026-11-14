@@ -281,7 +281,7 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     )
             gs.logger.debug(f"Rigid entity {i_e}: coupling type '{coup_type.name.lower()}'")
 
-            if entity.options.settings:
+            if entity.options.selection_blocks:
                 gs.raise_exception(
                     f"Entity '{entity.name}' sets a density or a friction on selected links or geoms, which the IPC "
                     "coupler does not support. Set it on the material instead."

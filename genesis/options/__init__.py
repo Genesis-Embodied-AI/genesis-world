@@ -1,4 +1,4 @@
-from .blocks import Geom, Setting, Vertex
+from .blocks import Geom, SelectionBlock, Vertex
 from .misc import CoacdOptions, FoamOptions
 from .profiling import ProfilingOptions
 from .scene import SceneOptions
@@ -32,7 +32,7 @@ __all__ = [
     "RigidOptions",
     "SAPCouplerOptions",
     "SceneOptions",
-    "Setting",
+    "SelectionBlock",
     "SimOptions",
     "SPHOptions",
     "Vertex",
