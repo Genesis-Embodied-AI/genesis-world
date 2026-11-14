@@ -1454,12 +1454,12 @@ class KinematicEntityDescription(EntityDescription):
         if not isinstance(self.options.material, gs.materials.Rigid):
             return
 
-        cg_infos = [
-            g_info
-            for link_g_infos in links_g_infos
-            for g_info in link_g_infos
-            if morph.collision and (g_info["contype"] or g_info["conaffinity"])
-        ]
+        cg_infos, geoms_link_idx = [], []
+        for i_l, link_g_infos in enumerate(links_g_infos):
+            for g_info in link_g_infos:
+                if morph.collision and (g_info["contype"] or g_info["conaffinity"]):
+                    cg_infos.append(g_info)
+                    geoms_link_idx.append(i_l)
         # The values the asset states, which a field given as None on a block stands for
         geoms_asset_values = [
             {name: g_info.get(name) for name in ("density", "friction", "friction_torsional", "friction_rolling")}
@@ -1478,31 +1478,18 @@ class KinematicEntityDescription(EntityDescription):
                 for link_g_infos in links_g_infos:
                     for g_info in link_g_infos:
                         g_info.pop(name, None)
-        if not self.options.selection_blocks:
+        selection_blocks = self.options.selection_blocks
+        if not selection_blocks:
             return
 
-        # A block on a geom selection overrides one on links, and the later of two blocks of one level applies. A
-        # density set on a geom stays apart from the asset's, since only the inertia estimate reads it.
-        geoms_link_idx = np.array(
-            [
-                i_l
-                for i_l, link_g_infos in enumerate(links_g_infos)
-                for g_info in link_g_infos
-                if morph.collision and (g_info["contype"] or g_info["conaffinity"])
-            ],
-            dtype=gs.np_int,
-        )
+        # Resolve each block once: the geoms it selects, and its level, 0 for links and 1 for geoms
+        geoms_link_idx = np.array(geoms_link_idx, dtype=gs.np_int)
         geoms_name = [g_info["mesh"].metadata.get("name", "") for g_info in cg_infos]
-        geoms_field_level: dict[tuple[int, str], int] = {}
-        default_coefficients = {
-            "friction": gu.default_friction,
-            "friction_torsional": gu.default_friction_torsional,
-            "friction_rolling": gu.default_friction_rolling,
-        }
-        for selection_block in self.options.selection_blocks:
-            is_selected = np.ones(len(cg_infos), dtype=np.bool_)
+        blocks_is_selected = np.ones((len(selection_blocks), len(cg_infos)), dtype=np.bool_)
+        blocks_level = np.zeros(len(selection_blocks), dtype=gs.np_int)
+        for i_b, selection_block in enumerate(selection_blocks):
+            is_selected = blocks_is_selected[i_b]
             geoms_scope = np.zeros(len(cg_infos), dtype=gs.np_int)
-            level = 0
             # Each selector resolves among the parts the selectors before it hold, from the links to the geoms (see
             # 'BaseEntity._check_selection_block')
             for selector in selection_block.selectors:
@@ -1512,41 +1499,51 @@ class KinematicEntityDescription(EntityDescription):
                     geoms_scope = geoms_link_idx
                 else:
                     held_geoms_idx = np.flatnonzero(is_selected)
-                    is_selected = np.zeros(len(cg_infos), dtype=np.bool_)
+                    is_selected[:] = False
                     # A selection already empty stays empty, and raises below
                     if held_geoms_idx.size > 0:
                         held_geoms_name = [geoms_name[i_g] for i_g in held_geoms_idx]
                         held_geoms_ordinal = selector._resolve(held_geoms_name, geoms_scope[held_geoms_idx])
                         is_selected[held_geoms_idx[held_geoms_ordinal]] = True
-                    level = 1
+                    blocks_level[i_b] = 1
             if not is_selected.any():
                 gs.raise_exception(
                     f"The selection {selection_block.selection_repr} holds no collision geom of {morph}. Existing "
                     f"geoms: {geoms_name}."
                 )
-            for name, value in selection_block.block.model_dump(exclude_unset=True).items():
-                for i_g in np.flatnonzero(is_selected):
-                    if level < geoms_field_level.get((i_g, name), 0):
-                        continue
-                    geoms_field_level[(i_g, name)] = level
-                    g_info = cg_infos[i_g]
-                    if name == "rho":
-                        resolution.links_idx_with_density.add(int(geoms_link_idx[i_g]))
-                    if value is not None:
-                        g_info[name] = value
-                    elif name == "rho":
-                        # The density of the asset, or else a None standing for the default density of the solver,
-                        # which depends on the link (see '_resolve_inertial')
-                        g_info.pop("density", None)
-                        g_info.pop("rho", None)
-                        if geoms_asset_values[i_g]["density"] is not None:
-                            g_info["density"] = geoms_asset_values[i_g]["density"]
-                        else:
-                            g_info["rho"] = None
+
+        # Of the blocks setting a field of a geom, the one of the finest level applies, and the later one within a
+        # level. A density set on a geom stays apart from the asset's, since only the inertia estimate reads it.
+        blocks_rank = blocks_level * len(selection_blocks) + np.arange(len(selection_blocks))
+        blocks_values = [selection_block.block.model_dump(exclude_unset=True) for selection_block in selection_blocks]
+        default_coefficients = {
+            "friction": gu.default_friction,
+            "friction_torsional": gu.default_friction_torsional,
+            "friction_rolling": gu.default_friction_rolling,
+        }
+        for name in gs.options.Geom.model_fields:
+            is_setting = np.array([name in block_values for block_values in blocks_values])
+            geoms_blocks_rank = np.where(blocks_is_selected & is_setting[:, None], blocks_rank[:, None], -1)
+            for i_g in np.flatnonzero(geoms_blocks_rank.max(axis=0) >= 0):
+                value = blocks_values[geoms_blocks_rank[:, i_g].argmax()][name]
+                g_info = cg_infos[i_g]
+                if name == "rho":
+                    resolution.links_idx_with_density.add(int(geoms_link_idx[i_g]))
+                if value is not None:
+                    g_info[name] = value
+                elif name == "rho":
+                    # The density of the asset, or else a None standing for the default density of the solver, which
+                    # depends on the link (see '_resolve_inertial')
+                    g_info.pop("density", None)
+                    g_info.pop("rho", None)
+                    if geoms_asset_values[i_g]["density"] is not None:
+                        g_info["density"] = geoms_asset_values[i_g]["density"]
                     else:
-                        # The coefficient of the asset, or the solver default when it states none
-                        asset_value = geoms_asset_values[i_g][name]
-                        g_info[name] = default_coefficients[name]() if asset_value is None else asset_value
+                        g_info["rho"] = None
+                else:
+                    # The coefficient of the asset, or the solver default when it states none
+                    asset_value = geoms_asset_values[i_g][name]
+                    g_info[name] = default_coefficients[name]() if asset_value is None else asset_value
 
     def _resolve_geoms(
         self, morph: Morph, g_infos: list[dict[str, Any]], is_robot: bool
