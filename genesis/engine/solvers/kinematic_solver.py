@@ -1,6 +1,6 @@
 from collections.abc import Iterator, Sequence
 from dataclasses import asdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -142,6 +142,8 @@ class KinematicSolver(Solver):
 
     RigidSolver extends this with physics (collision, constraints, dynamics).
     """
+
+    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]] = gs.entities.Kinematic
 
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True

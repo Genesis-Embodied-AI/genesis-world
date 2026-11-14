@@ -1,6 +1,6 @@
 from collections.abc import Callable, Iterator, Sequence
 from enum import IntFlag
-from typing import TYPE_CHECKING, NamedTuple, overload
+from typing import TYPE_CHECKING, ClassVar, NamedTuple, overload
 
 import numpy as np
 import torch
@@ -550,6 +550,8 @@ class GravityMixin:
 class Solver(ErrnoMixin, CheckpointMixin, RBC):
     # Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must
     is_differentiable: bool = False
+    # The class of entity options whose entities the solver simulates, which the simulator dispatches on
+    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]]
 
     def __init__(self, scene: "Scene", sim: "Simulator", options):
         self._uid = gs.UID()

@@ -124,13 +124,9 @@ class Simulator(RBC):
         )
         # The solver simulating the entities of each class of entity options, a subclass going where its base goes
         self._solvers_by_options_cls: dict[type[gs.entities.BaseEntity], "Solver"] = {
-            gs.entities.Rigid: self.rigid_solver,
-            gs.entities.Kinematic: self.kinematic_solver,
-            gs.entities.MPM: self.mpm_solver,
-            gs.entities.SPH: self.sph_solver,
-            gs.entities.PBD: self.pbd_solver,
-            gs.entities.FEM: self.fem_solver,
+            solver.entity_options_cls: solver for solver in self._solvers
         }
+        assert len(self._solvers_by_options_cls) == len(self._solvers)
 
         self._active_solvers: list["Solver"] = gs.List()
         # What runs in the scene in its own right: the active solvers, then the coupler when one is active
