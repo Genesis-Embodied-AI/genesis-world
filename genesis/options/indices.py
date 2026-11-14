@@ -223,8 +223,9 @@ class VGeom(_NamedOrdinalIndex):
     """Select visual geoms by their ordinal in the asset or by name.
 
     An ordinal counts the visual geoms of the selection it is selected in (see ``at``), as the asset splits them: a
-    mesh holding several materials loads as one visual geom per material. A name is matched against the names the asset
-    gives its visual geoms, as for ``Geom``.
+    mesh holding several materials loads as one visual geom per material.
+
+    Names match as ``named`` states.
     """
 
 
