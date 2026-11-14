@@ -446,6 +446,18 @@ def compute_sdf_data(mesh, res):
 _TEXTURE_MATERIALS_CACHE = OwnedCache()
 
 
+def _get_seed_image(texture) -> np.ndarray | None:
+    """Return the image a mesh visual is seeded with for a texture that renderers draw per environment, None otherwise.
+
+    The renderers replace it with the images of each environment, so the first one serves for any of them.
+    """
+    if isinstance(texture, gs.textures.DynamicTexture):
+        return texture.get_initial_image()
+    if isinstance(texture, (gs.textures.ColorTexture, gs.textures.ImageTexture)) and texture.is_batched:
+        return gs.textures.texture_to_rgba(texture)[0]
+    return None
+
+
 def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     texture = surface.get_rgba()
 
@@ -466,7 +478,13 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     emission = surface.emission
     emissive_kwargs = {}
     if emission is not None and base is not None and base is not emission and not base.is_black:
-        if (
+        # The renderer writes the images of a dynamic or batched texture into the texture this one seeds
+        emission_seed = _get_seed_image(emission)
+        if emission_seed is not None:
+            emissive_kwargs = dict(
+                emissiveTexture=Image.fromarray(emission_seed[..., :3]), emissiveFactor=(1.0, 1.0, 1.0)
+            )
+        elif (
             isinstance(emission, gs.textures.ImageTexture)
             and emission.image_array is not None
             and flipped_uvs is not None
@@ -477,7 +495,16 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
         elif isinstance(emission, gs.textures.ColorTexture):
             emissive_kwargs = dict(emissiveFactor=emission.color)
 
-    if isinstance(texture, gs.textures.ImageTexture):
+    texture_seed = _get_seed_image(texture)
+    if texture_seed is not None:
+        if flipped_uvs is None:
+            gs.raise_exception("A dynamic or batched texture requires a mesh with texture coordinates, which it lacks.")
+        # The images of a dynamic or batched texture may turn transparent, which the blending of a PBR material follows
+        material = trimesh.visual.material.PBRMaterial(
+            baseColorTexture=Image.fromarray(texture_seed), baseColorFactor=(255, 255, 255, 255), **emissive_kwargs
+        )
+        visual = trimesh.visual.TextureVisuals(uv=flipped_uvs, material=material)
+    elif isinstance(texture, gs.textures.ImageTexture):
         if flipped_uvs is not None:
             assert texture.image_array.dtype == np.uint8
             material = _TEXTURE_MATERIALS_CACHE.get(

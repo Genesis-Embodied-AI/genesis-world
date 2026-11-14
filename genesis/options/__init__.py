@@ -1,5 +1,5 @@
 from .misc import CoacdOptions, FoamOptions
-from .patches import Geom, Vertex
+from .patches import Geom, Vertex, VGeom
 from .profiling import ProfilingOptions
 from .scene import SceneOptions
 from .solvers import (
@@ -35,6 +35,7 @@ __all__ = [
     "SimOptions",
     "SPHOptions",
     "Vertex",
+    "VGeom",
     "ViewerOptions",
     "VisOptions",
 ]
