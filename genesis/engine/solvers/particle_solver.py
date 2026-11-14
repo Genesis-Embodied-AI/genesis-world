@@ -74,9 +74,10 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         # The distance from the walls of the domain to the boundary confining the particles
         self.boundary_padding = 0.0
 
-        self._n_particles: int | None = None
-        self._n_vverts: int | None = None
-        self._n_vfaces: int | None = None
+        # The totals over the entities added so far, which 'add_entity' keeps up to date
+        self._n_particles = 0
+        self._n_vverts = 0
+        self._n_vfaces = 0
 
         # The arrays of the particles the accessors read and write, and those the rendering reads
         self._particles_pos: qd.Tensor | None = None
@@ -90,9 +91,6 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
     def build(self) -> None:
         super().build()
         self._B = self._sim._B
-        self._n_particles = self.n_particles
-        self._n_vverts = self.n_vverts
-        self._n_vfaces = self.n_vfaces
 
     def _build_render(self, has_vverts: bool) -> None:
         """
@@ -220,9 +218,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @property
     def n_particles(self) -> int:
-        if self.is_built:
-            return self._n_particles
-        return sum([entity.n_particles for entity in self._entities])
+        return self._n_particles
 
     @property
     def n_vvert_supports(self) -> int:
@@ -231,15 +227,11 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @property
     def n_vverts(self) -> int:
-        if self.is_built:
-            return self._n_vverts
-        return sum([entity.n_vverts for entity in self._entities])
+        return self._n_vverts
 
     @property
     def n_vfaces(self) -> int:
-        if self.is_built:
-            return self._n_vfaces
-        return sum([entity.n_vfaces for entity in self._entities])
+        return self._n_vfaces
 
     @property
     def particle_size(self) -> float:

@@ -197,9 +197,10 @@ class PBDSolver(ParticleSolver):
         self._hash_grid_cell_size = options.hash_grid_cell_size
         self._hash_grid_res = options._hash_grid_res
 
-        self._n_edges: int | None = None
-        self._n_inner_edges: int | None = None
-        self._n_elems: int | None = None
+        # The totals over the entities added so far, which 'add_entity' keeps up to date
+        self._n_edges = 0
+        self._n_inner_edges = 0
+        self._n_elems = 0
 
         self.pbd_state: PBDState | None = None
         self.pbd_info: PBDInfo | None = None
@@ -207,10 +208,6 @@ class PBDSolver(ParticleSolver):
 
     def build(self) -> None:
         super().build()
-
-        self._n_edges = self.n_edges
-        self._n_inner_edges = self.n_inner_edges
-        self._n_elems = self.n_elems
 
         is_unused = not self.is_active
         sizes = dict(envs=self._B, particles=self._n_particles)
@@ -361,7 +358,14 @@ class PBDSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self,
+        idx: int,
+        material: "gs.materials.PBD.Base",
+        morph: "gs.morphs.Morph",
+        surface: "gs.surfaces.Surface",
+        visualize_contact: bool = False,
+        name: str | None = None,
+        desc: None = None,
     ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
         if isinstance(material, gs.materials.PBD.Cloth):
             entity = PBD2DEntity(
@@ -423,6 +427,15 @@ class PBDSolver(ParticleSolver):
             raise NotImplementedError()
 
         self._entities.append(entity)
+        self._n_particles += entity.n_particles
+        self._n_vverts += entity.n_vverts
+        self._n_vfaces += entity.n_vfaces
+        if isinstance(entity, PBDTetEntity):
+            self._n_edges += entity.n_edges
+        if isinstance(entity, PBD2DEntity):
+            self._n_inner_edges += entity.n_inner_edges
+        if isinstance(entity, PBD3DEntity):
+            self._n_elems += entity.n_elems
         return entity
 
     # ------------------------------------------------------------------------------------
@@ -536,21 +549,15 @@ class PBDSolver(ParticleSolver):
 
     @property
     def n_edges(self) -> int:
-        if self.is_built:
-            return self._n_edges
-        return sum([entity.n_edges for entity in self._entities if isinstance(entity, PBDTetEntity)])
+        return self._n_edges
 
     @property
     def n_inner_edges(self) -> int:
-        if self.is_built:
-            return self._n_inner_edges
-        return sum([entity.n_inner_edges for entity in self._entities if isinstance(entity, PBD2DEntity)])
+        return self._n_inner_edges
 
     @property
     def n_elems(self) -> int:
-        if self.is_built:
-            return self._n_elems
-        return sum([entity.n_elems for entity in self._entities if isinstance(entity, PBD3DEntity)])
+        return self._n_elems
 
     @property
     def hash_grid_res(self) -> tuple[int, int, int]:

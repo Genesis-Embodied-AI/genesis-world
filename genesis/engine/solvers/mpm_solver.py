@@ -268,14 +268,14 @@ class MPMData(Data):
             }
         super().__init__(
             sizes=dict(
-                particles=solver._n_particles,
+                particles=solver.n_particles,
                 envs=solver._B,
                 grid_x=grid_x,
                 grid_y=grid_y,
                 grid_z=grid_z,
                 geoms=solver._sim.rigid_solver.n_geoms_,
                 # The slots of the hash grid hash the cells of the grid, one per particle
-                **hash_grid_sizes(max(solver._n_particles, 1)),
+                **hash_grid_sizes(max(solver.n_particles, 1)),
                 tiles=n_tiles,
                 envs_groups=(solver._B + 31) // 32,
             ),
@@ -479,7 +479,14 @@ Please decrease the simulation timestep or adjust the material parameters."""
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self,
+        idx: int,
+        material: "gs.materials.MPM.Base",
+        morph: "gs.morphs.Morph",
+        surface: "gs.surfaces.Surface",
+        visualize_contact: bool = False,
+        name: str | None = None,
+        desc: None = None,
     ) -> "MPMEntity":
         self.add_material(material)
 
@@ -497,6 +504,9 @@ Please decrease the simulation timestep or adjust the material parameters."""
             name=name,
         )
         self._entities.append(entity)
+        self._n_particles += entity.n_particles
+        self._n_vverts += entity.n_vverts
+        self._n_vfaces += entity.n_vfaces
         return entity
 
     def add_material(self, material: MPM.Base) -> None:

@@ -333,7 +333,7 @@ class ConstraintSolver:
             n_constraints_frictionloss = qd_to_torch(self.constraint_state.n_constraints_frictionloss, copy=False)
             n_constraints_cone = qd_to_torch(self.constraint_state.n_constraints_cone, copy=False)
             qd_n_equalities = qd_to_torch(self.constraint_state.qd_n_equalities, copy=False)
-            n_eq = self._solver._n_equalities
+            n_eq = self._solver.n_equalities
             if isinstance(envs_idx, torch.Tensor) and envs_idx.dtype == torch.bool:
                 n_constraints.masked_fill_(envs_idx, 0)
                 n_constraints_equality.masked_fill_(envs_idx, 0)

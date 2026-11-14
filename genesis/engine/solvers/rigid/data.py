@@ -697,7 +697,7 @@ class RigidData(Data):
                 noslip_iterations=options.noslip_iterations,
                 noslip_tolerance=options.noslip_tolerance,
                 impratio=options.impratio,
-                n_equalities=solver._n_equalities,
+                n_equalities=solver.n_equalities,
                 n_candidate_equalities=solver.n_candidate_equalities_,
                 hibernation_thresh_vel=solver._hibernation_thresh_vel,
             )

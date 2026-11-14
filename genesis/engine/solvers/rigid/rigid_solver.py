@@ -10,7 +10,9 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
-from genesis.engine.entities.rigid_entity.description import _balanced_variant_mapping
+from genesis.engine.entities.rigid_entity import RigidGeom
+from genesis.engine.entities.rigid_entity.description import RigidEntityDescription, _balanced_variant_mapping
+from genesis.engine.entities.rigid_entity.rigid_equality import RigidEquality
 from genesis.engine.materials import Rigid
 from genesis.engine.solvers.rigid.collider.data import ColliderState
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
@@ -21,6 +23,7 @@ from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
+from genesis.options.surfaces import Surface
 from genesis.typing import FArrayType, IndexType, Vec2FType, Vec3FType
 from genesis.utils.data import ConfigItem, DataItem, is_opted_in
 from genesis.utils.misc import (
@@ -274,29 +277,54 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             else:
                 options.impratio = 1.0
 
+        # The structure of the entities added so far, which 'add_entity' and 'attach' keep up to date
+        self._geoms: list[RigidGeom] = gs.List()
+        self._equalities: list[RigidEquality] = gs.List()
+        self._n_verts = 0
+        self._n_free_verts = 0
+        self._n_fixed_verts = 0
+        self._n_faces = 0
+        self._n_edges = 0
+
         self.collider = None
         self.constraint_solver = None
 
         self.qpos: qd.Tensor | qd.Field | qd.Ndarray | None = None
 
-    def build(self):
+    def add_entity(
+        self,
+        idx: int,
+        material: Rigid,
+        morph: Morph | Sequence[Morph] | None,
+        surface: Surface | None,
+        visualize_contact: bool = False,
+        name: str | None = None,
+        desc: RigidEntityDescription | None = None,
+    ) -> RigidEntity:
+        entity = super().add_entity(idx, material, morph, surface, visualize_contact, name, desc)
+        self._geoms.extend(entity.geoms)
+        self._equalities.extend(entity.equalities)
+        self._n_verts += entity.n_verts
+        self._n_faces += entity.n_faces
+        self._n_edges += entity.n_edges
+        # The vertices of a link the world carries are stored once for every environment (see 'batch_fixed_verts').
+        # The entity comes last, so its vertices end both pools, wherever an attachment restored above moved them.
+        n_free_verts, n_fixed_verts = entity._free_verts_state_start, entity._fixed_verts_state_start
+        for link in entity.links:
+            if link.is_fixed and not entity._batch_fixed_verts:
+                n_fixed_verts += link.n_verts
+            else:
+                n_free_verts += link.n_verts
+        self._n_free_verts, self._n_fixed_verts = n_free_verts, n_fixed_verts
+        return entity
+
+    def build(self) -> None:
         # The simulator settles the substep shared by every solver before building them, possibly at the rate another
         # solver asks for, so the time constants are floored against it here rather than at construction.
         self._sol_min_timeconst = TIME_CONSTANT_SAFETY_FACTOR * self._substep_dt
         self._sol_default_timeconst = None
         if self._options.constraint_timeconst is not None:
             self._sol_default_timeconst = max(self._options.constraint_timeconst, self._sol_min_timeconst)
-
-        self._n_geoms = self.n_geoms
-        self._n_verts = self.n_verts
-        self._n_free_verts = self.n_free_verts
-        self._n_fixed_verts = self.n_fixed_verts
-        self._n_faces = self.n_faces
-        self._n_edges = self.n_edges
-        self._n_equalities = self.n_equalities
-
-        self._geoms = self.geoms
-        self._equalities = self.equalities
 
         self.n_geoms_ = max(1, self.n_geoms)
         self.n_verts_ = max(1, self.n_verts)
@@ -428,7 +456,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         movable_links_idx = np.flatnonzero([link.n_dofs > 0 for link in self.links])
         if movable_links_idx.size:
             total_mass = links_subtree_mass[:, movable_links_idx].sum(axis=1)
-            for i_l in reversed(range(self._n_links)):
+            for i_l in reversed(range(self.n_links)):
                 if self.links[i_l].parent_idx >= 0:
                     links_subtree_mass[:, self.links[i_l].parent_idx] += links_subtree_mass[:, i_l]
             movable_links_mass = links_subtree_mass[:, movable_links_idx]
@@ -3215,56 +3243,46 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     # ------------------------------------------------------------------------------------
 
     @property
-    def n_geoms(self):
-        if self.is_built:
-            return self._n_geoms
-        return len(self.geoms)
+    def n_geoms(self) -> int:
+        return len(self._geoms)
 
     @property
-    def n_verts(self):
-        if self.is_built:
-            return self._n_verts
-        return sum(entity.n_verts for entity in self._entities)
+    def n_verts(self) -> int:
+        return self._n_verts
 
     @property
-    def n_free_verts(self):
-        if self.is_built:
-            return self._n_free_verts
-        return sum(link.n_verts if not link.is_fixed or link.entity._batch_fixed_verts else 0 for link in self.links)
+    def n_free_verts(self) -> int:
+        return self._n_free_verts
 
     @property
-    def n_fixed_verts(self):
-        if self.is_built:
-            return self._n_fixed_verts
-        return sum(link.n_verts if link.is_fixed and not link.entity._batch_fixed_verts else 0 for link in self.links)
+    def n_fixed_verts(self) -> int:
+        return self._n_fixed_verts
 
     @property
-    def n_faces(self):
-        if self.is_built:
-            return self._n_faces
-        return sum(entity.n_faces for entity in self._entities)
+    def n_faces(self) -> int:
+        return self._n_faces
 
     @property
-    def n_edges(self):
-        if self.is_built:
-            return self._n_edges
-        return sum(entity.n_edges for entity in self._entities)
+    def n_edges(self) -> int:
+        return self._n_edges
 
     @property
     def max_collision_pairs(self):
         return self._max_collision_pairs
 
     @property
-    def n_equalities(self):
-        if self.is_built:
-            return self._n_equalities
-        return sum(entity.n_equalities for entity in self._entities)
+    def n_equalities(self) -> int:
+        return len(self._equalities)
 
     @property
-    def equalities(self):
-        if self.is_built:
-            return self._equalities
-        return gs.List(equality for entity in self._entities for equality in entity.equalities)
+    def geoms(self) -> gs.List[RigidGeom]:
+        """The collision geoms of the solver, as a copy."""
+        return gs.List(self._geoms)
+
+    @property
+    def equalities(self) -> gs.List[RigidEquality]:
+        """The equality constraints of the solver, as a copy."""
+        return gs.List(self._equalities)
 
 
 @qd.func

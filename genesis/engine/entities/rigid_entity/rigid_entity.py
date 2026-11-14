@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from itertools import chain
 from typing import TYPE_CHECKING
 
@@ -14,14 +15,16 @@ from ..base_entity import Entity
 from .description import (
     KinematicAttachmentDescription,
     KinematicEntityDescription,
+    KinematicLinkDescription,
     RigidEntityDescription,
     RigidEqualityDescription,
+    RigidJointDescription,
     RigidLinkDescription,
     _balanced_variant_mapping,
 )
 from .inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT, compose_inertial_from_g_infos, finalize_inertial
 from .rigid_equality import RigidEquality
-from .rigid_geom import RigidGeom
+from .rigid_geom import RigidGeom, RigidVisGeom
 from .rigid_joint import RigidJoint
 from .rigid_link import KinematicLink, RigidLink
 
@@ -261,10 +264,12 @@ class KinematicEntity(Entity):
                 link._variant_vgeom_ranges.append((vgeom_cursor, vgeom_cursor + count))
                 vgeom_cursor += count
 
-    def _load_model(self):
+    def _load_model(self) -> None:
         """Create the links, joints and geoms the description holds (see 'KinematicEntityDescription')."""
         self._links = gs.List()
         self._joints = gs.List()
+        self._n_qs = 0
+        self._n_dofs = 0
         for l_desc in self._desc.links:
             self._add_link(l_desc)
 
@@ -280,16 +285,18 @@ class KinematicEntity(Entity):
             if len(self._links) > 1:
                 self._reassign_heterogeneous_indices()
 
-    def _build(self):
+        # Gathered once every variant is added, since the visual geoms of the variants of a link follow its own
+        self._vgeoms = gs.List([vgeom for link in self._links for vgeom in link.vgeoms])
+
+    def _build(self) -> None:
         for link in self._links:
             link._build()
 
-        self._n_qs = self.n_qs
-        self._n_dofs = self.n_dofs
-        self._vgeoms = self.vgeoms
         self._is_built = True
 
-    def _create_joints(self, j_descs, link_idx, joint_start):
+    def _create_joints(
+        self, j_descs: Sequence[RigidJointDescription], link_idx: int, joint_start: int
+    ) -> gs.List[RigidJoint]:
         """Create the RigidJoint objects of one link from its described joints.
 
         Both '_add_link' overrides call this, so a kinematic and a rigid link build their joints the same way.
@@ -312,10 +319,12 @@ class KinematicEntity(Entity):
                 desc=j_desc,
             )
             joints.append(joint)
+            self._n_qs += joint.n_qs
+            self._n_dofs += joint.n_dofs
 
         return joints
 
-    def _add_link(self, l_desc):
+    def _add_link(self, l_desc: KinematicLinkDescription) -> tuple[KinematicLink, gs.List[RigidJoint]]:
         """Create one link from a description the resolution completed, with the joints and geoms it carries."""
         parent_idx = l_desc.parent_idx
         if parent_idx >= 0:
@@ -352,11 +361,11 @@ class KinematicEntity(Entity):
     @gs.assert_unbuilt
     def attach(
         self,
-        parent_entity,
+        parent_entity: "KinematicEntity",
         parent_link_name: str | None = None,
         pos: Vec3FType | None = None,
         quat: UnitVec4FType | None = None,
-    ):
+    ) -> None:
         """
         Merge two entities to act as single one, by attaching the base link of this entity as a child of a given link of
         another entity.
@@ -457,10 +466,8 @@ class KinematicEntity(Entity):
                 "consecutively."
             )
 
-        # Remove all root joints if necessary.
-        # The requires shifting joint and dof indices of all subsequent entities.
-        # Note that we do not remove world link if any, but rather remove all base joints. This is to avoid altering
-        # the parent entity by moving all fixed geometries to the new parent link.
+        # The base joints are removed rather than the world link, which would move its fixed geometries to the parent
+        # link and alter the parent entity. The joints, dofs and qs of every later entity shift down accordingly.
         if not base_link.is_fixed:
             n_base_joints = base_link.n_joints
             n_base_dofs = base_link.n_dofs
@@ -468,6 +475,11 @@ class KinematicEntity(Entity):
 
             base_link._n_joints = 0
             self._joints[0].clear()
+            self._n_qs -= n_base_qs
+            self._n_dofs -= n_base_dofs
+            del self._solver._joints[self.joint_start : self.joint_start + n_base_joints]
+            self._solver._n_qs -= n_base_qs
+            self._solver._n_dofs -= n_base_dofs
             # Indexed within the solver, since a scene index counts the entities of every solver.
             for entity in self._solver.entities[(self._idx_in_solver + 1) :]:
                 entity._joint_start -= n_base_joints
@@ -1086,11 +1098,9 @@ class KinematicEntity(Entity):
         return np.array([])
 
     @property
-    def n_qs(self):
+    def n_qs(self) -> int:
         """The number of `q` (generalized coordinates) of the entity."""
-        if self._is_built:
-            return self._n_qs
-        return sum(joint.n_qs for joint in self.joints)
+        return self._n_qs
 
     @property
     def n_links(self):
@@ -1141,11 +1151,9 @@ class KinematicEntity(Entity):
         return sum(map(len, self._joints))
 
     @property
-    def n_dofs(self):
+    def n_dofs(self) -> int:
         """The number of degrees of freedom (DOFs) of the entity."""
-        if self._is_built:
-            return self._n_dofs
-        return sum(joint.n_dofs for joint in self.joints)
+        return self._n_dofs
 
     @property
     def n_vgeoms(self):
@@ -1218,11 +1226,9 @@ class KinematicEntity(Entity):
         return self._q_start + self.n_qs
 
     @property
-    def vgeoms(self):
-        """The list of visual geoms (`RigidVisGeom`) in the entity."""
-        if self.is_built:
-            return self._vgeoms
-        return gs.List(vgeom for link in self._links for vgeom in link.vgeoms)
+    def vgeoms(self) -> gs.List[RigidVisGeom]:
+        """The list of visual geoms (`RigidVisGeom`) in the entity, as a copy."""
+        return gs.List(self._vgeoms)
 
     @gs.assert_built
     def set_vverts(self, vverts, envs_idx=None):
@@ -1272,9 +1278,9 @@ class KinematicEntity(Entity):
         return tensor[0] if self._solver.n_envs == 0 else tensor
 
     @property
-    def links(self) -> list[RigidLink]:
-        """The list of links (`RigidLink`) in the entity."""
-        return self._links
+    def links(self) -> gs.List[RigidLink]:
+        """The list of links (`RigidLink`) in the entity, as a copy."""
+        return gs.List(self._links)
 
     @property
     def joints(self) -> list[RigidJoint]:
@@ -1712,7 +1718,7 @@ class RigidEntity(KinematicEntity):
                 link._variant_geom_ranges.append((geom_cursor, geom_cursor + count))
                 geom_cursor += count
 
-    def _load_model(self):
+    def _load_model(self) -> None:
         self._equalities = gs.List()
         # The contype/conaffinity bitmasks of an MJCF or USD asset are authored for its own geoms alone: applied across
         # entities, they would spuriously disable collision against geoms whose masks the asset never accounted for
@@ -1732,23 +1738,26 @@ class RigidEntity(KinematicEntity):
 
         super()._load_model()
 
+        # Gathered once every variant is added, since the collision geoms of the variants of a link follow its own
+        self._geoms = gs.List([geom for link in self._links for geom in link.geoms])
+
         # Add equality constraints sequentially
         for e_desc in self._desc.equalities:
             self._add_equality(e_desc)
 
     def attach(
         self,
-        parent_entity,
+        parent_entity: "KinematicEntity",
         parent_link_name: str | None = None,
         pos: Vec3FType | None = None,
         quat: UnitVec4FType | None = None,
-    ):
+    ) -> None:
         """Attach this entity beneath a link of another one (see KinematicEntity.attach), the slots of its collision
         vertices following the fixed flags the attach leaves."""
         super().attach(parent_entity, parent_link_name, pos, quat)
 
         # This entity's links and geoms move between the free and fixed pools, and the rigid entities created after it
-        # shift behind them
+        # shift behind them, the totals of the solver following
         n_free_verts = self._free_verts_state_start
         n_fixed_verts = self._fixed_verts_state_start
         for entity in self._solver.entities[self._idx_in_solver :]:
@@ -1765,8 +1774,10 @@ class RigidEntity(KinematicEntity):
                         else:
                             geom._verts_state_start = n_free_verts
                             n_free_verts += geom.n_verts
+        self._solver._n_free_verts = n_free_verts
+        self._solver._n_fixed_verts = n_fixed_verts
 
-    def _add_link(self, l_desc):
+    def _add_link(self, l_desc: RigidLinkDescription) -> tuple[RigidLink, gs.List[RigidJoint]]:
         """Create one link from a description the resolution completed, with the joints and geoms it carries."""
         parent_idx = l_desc.parent_idx
         if parent_idx >= 0:
@@ -1793,7 +1804,7 @@ class RigidEntity(KinematicEntity):
             root_idx=root_idx,
             joint_start=joint_start,
             n_joints=len(l_desc.joints),
-            geom_start=self.n_geoms + self._geom_start,
+            geom_start=sum([link.n_geoms for link in self._links]) + self._geom_start,
             vert_start=self.n_verts + self._vert_start,
             face_start=self.n_faces + self._face_start,
             edge_start=self.n_edges + self._edge_start,
@@ -1817,10 +1828,7 @@ class RigidEntity(KinematicEntity):
 
         return link, joints
 
-    def _build(self):
-        self._n_geoms = self.n_geoms
-        self._geoms = self.geoms
-
+    def _build(self) -> None:
         # A link the world carries holds None where its asset states nothing (see 'RigidLinkDescription'). The solver
         # stores a value for every link, and the inertial of such a link never enters the dynamics, so zero it is.
         for link in self._links:
@@ -1850,8 +1858,6 @@ class RigidEntity(KinematicEntity):
             self._free_verts_idx_local = torch.cat(free_verts_idx_local)
         if fixed_verts_idx_local:
             self._fixed_verts_idx_local = torch.cat(fixed_verts_idx_local)
-        self._n_free_verts = len(self._free_verts_idx_local)
-        self._n_fixed_verts = len(self._fixed_verts_idx_local)
 
     def _add_equality(self, desc: RigidEqualityDescription):
         match desc.type:
@@ -2359,7 +2365,7 @@ class RigidEntity(KinematicEntity):
         super().set_quat(quat, envs_idx, zero_velocity=zero_velocity, relative=relative, skip_forward=skip_forward)
 
     @gs.assert_built
-    def get_verts(self):
+    def get_verts(self) -> torch.Tensor:
         """
         Get the all vertices of the entity based on collision geometries.
 
@@ -2373,7 +2379,7 @@ class RigidEntity(KinematicEntity):
 
         self._solver.update_verts_for_geoms(slice(self.geom_start, self.geom_end))
 
-        n_fixed_verts, n_free_vertices = self._n_fixed_verts, self._n_free_verts
+        n_fixed_verts, n_free_vertices = len(self._fixed_verts_idx_local), len(self._free_verts_idx_local)
         tensor = torch.empty((self._solver._B, n_fixed_verts + n_free_vertices, 3), dtype=gs.tc_float, device=gs.device)
 
         if n_fixed_verts > 0:
@@ -3300,11 +3306,9 @@ class RigidEntity(KinematicEntity):
         return self._visualize_contact
 
     @property
-    def n_geoms(self):
+    def n_geoms(self) -> int:
         """The number of collision geom `RigidGeom` in the entity."""
-        if self._is_built:
-            return self._n_geoms
-        return sum(link.n_geoms for link in self._links)
+        return len(self._geoms)
 
     @property
     def n_verts(self):
@@ -3352,11 +3356,9 @@ class RigidEntity(KinematicEntity):
         return self._edge_start
 
     @property
-    def geoms(self) -> list[RigidGeom]:
-        """The list of collision geoms (`RigidGeom`) in the entity."""
-        if self.is_built:
-            return self._geoms
-        return gs.List(geom for link in self._links for geom in link.geoms)
+    def geoms(self) -> gs.List[RigidGeom]:
+        """The list of collision geoms (`RigidGeom`) in the entity, as a copy."""
+        return gs.List(self._geoms)
 
     @property
     def n_equalities(self):
@@ -3374,9 +3376,9 @@ class RigidEntity(KinematicEntity):
         return self._equality_start + self.n_equalities
 
     @property
-    def equalities(self):
-        """The list of equality constraints (`RigidEquality`) in the entity."""
-        return self._equalities
+    def equalities(self) -> gs.List[RigidEquality]:
+        """The list of equality constraints (`RigidEquality`) in the entity, as a copy."""
+        return gs.List(self._equalities)
 
     @property
     def is_free(self) -> bool:

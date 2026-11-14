@@ -353,7 +353,14 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self,
+        idx: int,
+        material: "gs.materials.SPH.Base",
+        morph: "gs.morphs.Morph",
+        surface: "gs.surfaces.Surface",
+        visualize_contact: bool = False,
+        name: str | None = None,
+        desc: None = None,
     ) -> "SPHEntity":
         entity = SPHEntity(
             scene=self.scene,
@@ -366,7 +373,10 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
             particle_start=self.n_particles,
             name=name,
         )
-        self.entities.append(entity)
+        self._entities.append(entity)
+        self._n_particles += entity.n_particles
+        self._n_vverts += entity.n_vverts
+        self._n_vfaces += entity.n_vfaces
         return entity
 
     def add_particles(self, is_active: bool, particle_start: int, material: SPH.Base, pos: np.ndarray) -> None:

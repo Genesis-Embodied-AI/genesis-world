@@ -7,9 +7,11 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.entities.rigid_entity import KinematicEntity
-from genesis.engine.entities.rigid_entity.description import _balanced_variant_mapping
+from genesis.engine.entities.rigid_entity import KinematicEntity, RigidGeom, RigidJoint, RigidVisGeom
+from genesis.engine.entities.rigid_entity.description import KinematicEntityDescription, _balanced_variant_mapping
 from genesis.engine.entities.rigid_entity.rigid_entity import get_variants_kinematics
+from genesis.engine.entities.rigid_entity.rigid_equality import RigidEquality
+from genesis.engine.entities.rigid_entity.rigid_link import KinematicLink
 from genesis.engine.materials import Kinematic
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     IKScratch,
@@ -163,6 +165,17 @@ class KinematicSolver(Solver):
         self._requires_grad = False
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
 
+        # The structure of the entities added so far, which 'add_entity' and 'attach' keep up to date
+        self._links: list[KinematicLink] = gs.List()
+        self._joints: list[RigidJoint] = gs.List()
+        self._vgeoms: list[RigidVisGeom] = gs.List()
+        self._n_qs = 0
+        self._n_dofs = 0
+        self._n_vverts = 0
+        self._n_vfaces = 0
+        self._n_custom_vverts = 0
+        self._n_custom_vfaces = 0
+
         self.collider = None
         self.constraint_solver = None
 
@@ -179,8 +192,15 @@ class KinematicSolver(Solver):
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name=None, desc=None
-    ) -> "KinematicEntity":
+        self,
+        idx: int,
+        material: Kinematic,
+        morph: Morph | Sequence[Morph] | None,
+        surface: "gs.surfaces.Surface | None",
+        visualize_contact: bool = False,
+        name: str | None = None,
+        desc: KinematicEntityDescription | None = None,
+    ) -> KinematicEntity:
         """Create an entity from its description.
 
         Given no description, one is resolved from the other arguments (see 'KinematicEntityDescription'), the morph
@@ -202,6 +222,16 @@ class KinematicSolver(Solver):
         self._enable_heterogeneous |= bool(desc.variants)
         entity = entity_cls(self._scene, self, idx, desc)
         self._entities.append(entity)
+        self._links.extend(entity.links)
+        self._joints.extend(entity.joints)
+        self._vgeoms.extend(entity.vgeoms)
+        self._n_qs += entity.n_qs
+        self._n_dofs += entity.n_dofs
+        self._n_vverts += entity.n_vverts
+        self._n_vfaces += entity.n_vfaces
+        if entity._morph.enable_custom_vverts:
+            self._n_custom_vverts += entity.n_vverts
+            self._n_custom_vfaces += entity.n_vfaces
         # An attachment names an entity added before this one, which 'attach' requires, so it is restored here
         if desc.attachment is not None:
             entity.attach(self._scene.get_entity(desc.attachment.entity_name), desc.attachment.link_name)
@@ -211,7 +241,7 @@ class KinematicSolver(Solver):
     # ------------------------------------ build -----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def build(self):
+    def build(self) -> None:
         super().build()
 
         self.n_envs = self.sim.n_envs
@@ -224,21 +254,6 @@ class KinematicSolver(Solver):
         # Resolve the link-reach structures of @mutates notifications; see Solver.__init__.
         self._articulated_links_idx = np.array([link.idx for link in self.links if not link.is_fixed])
         self._links_parent_idx = np.array([link.parent_idx for link in self.links])
-
-        self._n_qs = self.n_qs
-        self._n_dofs = self.n_dofs
-        self._n_links = self.n_links
-        self._n_joints = self.n_joints
-        self._n_vgeoms = self.n_vgeoms
-        self._n_vfaces = self.n_vfaces
-        self._n_vverts = self.n_vverts
-        self._n_custom_vverts = self.n_custom_vverts
-        self._n_custom_vfaces = self.n_custom_vfaces
-        self._n_entities = self.n_entities
-
-        self._vgeoms = self.vgeoms
-        self._links = self.links
-        self._joints = self.joints
 
         base_links_idx = []
         for link in self.links:
@@ -1469,33 +1484,29 @@ class KinematicSolver(Solver):
     # ------------------------------------------------------------------------------------
 
     @property
-    def links(self):
-        if self.is_built:
-            return self._links
-        return gs.List(link for entity in self._entities for link in entity.links)
+    def links(self) -> gs.List[KinematicLink]:
+        """The links of the solver, as a copy."""
+        return gs.List(self._links)
 
     @property
-    def joints(self):
-        if self.is_built:
-            return self._joints
-        return gs.List(joint for entity in self._entities for joint in entity.joints)
+    def joints(self) -> gs.List[RigidJoint]:
+        """The joints of the solver, as a copy."""
+        return gs.List(self._joints)
 
     @property
-    def equalities(self):
+    def equalities(self) -> gs.List[RigidEquality]:
         """The equality constraints the solver enforces, which a kinematic solver holds none of."""
         return gs.List()
 
     @property
-    def geoms(self):
-        if self.is_built:
-            return self._geoms
-        return gs.List(geom for entity in self._entities for geom in entity.geoms)
+    def geoms(self) -> gs.List[RigidGeom]:
+        """The collision geoms of the solver, which a kinematic solver holds none of."""
+        return gs.List()
 
     @property
-    def vgeoms(self):
-        if self.is_built:
-            return self._vgeoms
-        return gs.List(vgeom for entity in self._entities for vgeom in entity.vgeoms)
+    def vgeoms(self) -> gs.List[RigidVisGeom]:
+        """The visual geoms of the solver, as a copy."""
+        return gs.List(self._vgeoms)
 
     @property
     def vfaces_raycast_mask(self) -> torch.Tensor:
@@ -1509,58 +1520,40 @@ class KinematicSolver(Solver):
         return self._vfaces_raycast_mask
 
     @property
-    def n_links(self):
-        if self.is_built:
-            return self._n_links
-        return len(self.links)
+    def n_links(self) -> int:
+        return len(self._links)
 
     @property
-    def n_joints(self):
-        if self.is_built:
-            return self._n_joints
-        return len(self.joints)
+    def n_joints(self) -> int:
+        return len(self._joints)
 
     @property
-    def n_vgeoms(self):
-        if self.is_built:
-            return self._n_vgeoms
-        return len(self.vgeoms)
+    def n_vgeoms(self) -> int:
+        return len(self._vgeoms)
 
     @property
-    def n_vverts(self):
-        if self.is_built:
-            return self._n_vverts
-        return sum(entity.n_vverts for entity in self._entities)
+    def n_vverts(self) -> int:
+        return self._n_vverts
 
     @property
-    def n_vfaces(self):
-        if self.is_built:
-            return self._n_vfaces
-        return sum(entity.n_vfaces for entity in self._entities)
+    def n_vfaces(self) -> int:
+        return self._n_vfaces
 
     @property
-    def n_custom_vverts(self):
-        if self.is_built:
-            return self._n_custom_vverts
-        return sum(entity.n_vverts for entity in self._entities if entity._morph.enable_custom_vverts)
+    def n_custom_vverts(self) -> int:
+        return self._n_custom_vverts
 
     @property
-    def n_custom_vfaces(self):
-        if self.is_built:
-            return self._n_custom_vfaces
-        return sum(entity.n_vfaces for entity in self._entities if entity._morph.enable_custom_vverts)
+    def n_custom_vfaces(self) -> int:
+        return self._n_custom_vfaces
 
     @property
-    def n_qs(self):
-        if self.is_built:
-            return self._n_qs
-        return sum(entity.n_qs for entity in self._entities)
+    def n_qs(self) -> int:
+        return self._n_qs
 
     @property
-    def n_dofs(self):
-        if self.is_built:
-            return self._n_dofs
-        return sum(entity.n_dofs for entity in self._entities)
+    def n_dofs(self) -> int:
+        return self._n_dofs
 
     @property
     def init_qpos(self):

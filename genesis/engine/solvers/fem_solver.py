@@ -599,13 +599,20 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # use scaled volume for better numerical stability, similar to p_vol_scale in mpm
         self._vol_scale = 1e4
 
+        # The totals over the entities added so far, which 'add_entity' keeps up to date
+        self._n_vertices = 0
+        self._n_elements = 0
+        self._n_surfaces = 0
+        self._n_vverts = 0
+        self._n_vfaces = 0
+
         self.fem_state: FEMState | None = None
         self.fem_info: FEMInfo | None = None
         self.fem_config: FEMConfig | None = None
         self.vertex_constraints: FEMVertexConstraints | None = None
         self.data_manager: FEMData | None = None
 
-    def build(self):
+    def build(self) -> None:
         super().build()
 
         self._B = self.sim._B
@@ -823,7 +830,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         return self.n_elements > 0
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self,
+        idx: int,
+        material: "gs.materials.FEM.Base",
+        morph: "gs.morphs.Morph",
+        surface: "gs.surfaces.Surface",
+        visualize_contact: bool = False,
+        name: str | None = None,
+        desc: None = None,
     ) -> "FEMEntity":
         entity = FEMEntity(
             scene=self._scene,
@@ -840,6 +854,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             name=name,
         )
         self._entities.append(entity)
+        self._n_vertices += entity.n_vertices
+        self._n_elements += entity.n_elements
+        self._n_surfaces += entity.n_surfaces
+        self._n_vverts += entity.n_vverts
+        self._n_vfaces += entity.n_vfaces
         return entity
 
     def add_elements(
@@ -1286,23 +1305,23 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @property
     def n_vertices(self) -> int:
-        return sum([entity.n_vertices for entity in self._entities])
+        return self._n_vertices
 
     @property
     def n_elements(self) -> int:
-        return sum([entity.n_elements for entity in self._entities])
+        return self._n_elements
 
     @property
     def n_surfaces(self) -> int:
-        return sum([entity.n_surfaces for entity in self.entities])
+        return self._n_surfaces
 
     @property
     def n_vverts(self) -> int:
-        return sum([entity.n_vverts for entity in self._entities])
+        return self._n_vverts
 
     @property
     def n_vfaces(self) -> int:
-        return sum([entity.n_vfaces for entity in self._entities])
+        return self._n_vfaces
 
     @property
     def vol_scale(self) -> float:
