@@ -113,8 +113,7 @@ class Primitive(object):
         # 'JITRenderer.env_offset_buffer'), and a pass drawing one environment draws the instances standing in it.
         self.envs = envs
         # For a material whose base color or emissive texture is a texture array, the layers of the base color (column
-        # 0) and of the emissive (column 1) array each rendered environment samples, None for a material sampling 2D
-        # textures alone
+        # 0) and of the emissive (column 1) array that each rendered environment samples, else None
         self.texture_layers: np.ndarray | None = None
 
         self._bounds = None
