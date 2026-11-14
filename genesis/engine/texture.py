@@ -182,8 +182,8 @@ class Texture:
 
     def reset(self, envs_idx: IndexType | None = None) -> None:
         """Show the initial variant again in the selected environments, and erase the pixels drawn in them."""
-        self.set_texture(self._initial_variant_idx, envs_idx)
         envs_idx = tensor_to_array(self._scene._sanitize_envs_idx(envs_idx))
+        self._active_variants_idx[envs_idx] = self._initial_variant_idx
         for i_variant in np.flatnonzero(self._is_drawn[:, envs_idx].any(axis=1)):
             drawn_envs_idx = envs_idx[self._is_drawn[i_variant, envs_idx]]
             if i_variant not in self._variants_seed:
@@ -195,6 +195,9 @@ class Texture:
             seed_idx = torch.as_tensor(drawn_envs_idx % len(variant_seed), device=gs.device)
             self._draw(np.full(len(drawn_envs_idx), i_variant), drawn_envs_idx, variant_seed[seed_idx])
             self._is_drawn[i_variant, drawn_envs_idx] = False
+        for subscriber in self._subscribers:
+            if StateChange.VISUAL in subscriber.to:
+                subscriber.notify(StateChange.VISUAL, envs_idx)
 
     def _draw(self, variants_idx: np.ndarray, envs_idx: np.ndarray, image: torch.Tensor) -> None:
         """Pass the pixels drawn in each environment to the drawing callbacks, grouped by the variant drawn in."""
