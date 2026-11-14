@@ -23,7 +23,6 @@ from genesis.typing import (
     UnitIntervalArrayType,
 )
 from genesis.utils.serialization import Exporting, Loading, SerializationMixin
-from genesis.utils.warnings import warn_once
 
 from .options import Options
 
@@ -421,27 +420,15 @@ def stack_textures(textures: Sequence["ColorTexture | ImageTexture"]) -> "ColorT
 
 class BatchTexture(Texture):
     """
-    A batch of textures for batch rendering, environment i showing texture i modulo their number.
-
-    Deprecated: give a batched texture instead, ``ImageTexture(..., is_batched=True)`` or
-    ``ColorTexture(..., is_batched=True)``. A surface given a batch texture holds the batched texture it stands for in
-    its place (see 'to_batched').
+    A batch of textures for batch rendering.
 
     Parameters
     ----------
     textures : list[Texture | None]
-        List of textures, each a ``ColorTexture`` or an ``ImageTexture``, or None for white.
+        List of textures.
     """
 
     textures: Annotated[list[Texture | None], BeforeValidator(list)] = Field(default_factory=list)
-
-    def model_post_init(self, context) -> None:
-        super().model_post_init(context)
-        warn_once(
-            "gs.textures.BatchTexture is deprecated and will be removed in a future release. Give a batched texture "
-            "instead: 'gs.textures.ImageTexture(..., is_batched=True)' or "
-            "'gs.textures.ColorTexture(..., is_batched=True)'."
-        )
 
     @staticmethod
     def from_images(
@@ -531,31 +518,32 @@ class BatchTexture(Texture):
         """
         return BatchTexture(textures=[ColorTexture(color=color) for color in colors])
 
+    @computed_field
+    @cached_property
+    def is_black(self) -> bool:
+        return all(texture is None or texture.is_black for texture in self.textures)
+
+    @computed_field
+    @cached_property
+    def requires_uv(self) -> bool:
+        return any(texture is not None and texture.requires_uv for texture in self.textures)
+
+    def check_dim(self, dim: int) -> "BatchTexture":
+        return BatchTexture(
+            textures=[texture.check_dim(dim) if texture is not None else None for texture in self.textures]
+        ).check_simplify()
+
+    def check_simplify(self) -> "BatchTexture":
+        self.textures = [texture.check_simplify() if texture is not None else None for texture in self.textures]
+        return self
+
+    def apply_cutoff(self, cutoff: float) -> None:
+        for texture in self.textures:
+            if texture is not None:
+                texture.apply_cutoff(cutoff)
+
     def merge(self, other: "BatchTexture") -> None:
         self.textures.extend(other.textures)
-
-    def to_batched(self) -> "ColorTexture | ImageTexture":
-        """Return the batched texture whose entries are the textures of the batch, as a surface holds it.
-
-        A batch of one texture stands for that texture alone, as every environment shows it. A texture left as None is
-        white. An image read from an HDR or EXR file has no pixels to batch, so it raises an error in a batch of
-        several textures. A batched image keeps the path of each image it was read from.
-        """
-        if not self.textures:
-            gs.raise_exception("A batch texture holds no texture.")
-        textures = [ColorTexture() if texture is None else texture for texture in self.textures]
-        if len(textures) == 1:
-            return textures[0]
-        for texture in textures:
-            if not isinstance(texture, (ColorTexture, ImageTexture)) or texture.is_batched:
-                gs.raise_exception(f"A batch texture holds colors and images alone, got {type(texture).__name__}.")
-            if isinstance(texture, ImageTexture) and texture.image_array is None:
-                gs.raise_exception(f"A batch of several textures takes no HDR image, got '{texture.image_path}'.")
-        batched = stack_textures(textures)
-        images_path = [texture.image_path if isinstance(texture, ImageTexture) else None for texture in textures]
-        if isinstance(batched, ImageTexture) and None not in images_path:
-            batched = batched.model_copy(update={"image_path": tuple(images_path)})
-        return batched
 
 
 class _ImagelessTexture(Texture):
