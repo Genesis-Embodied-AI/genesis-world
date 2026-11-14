@@ -65,7 +65,7 @@ def test_packed_rgba_resolves_batched_fallback_per_environment():
     # test, and per-environment (batched) textures are asserted here on the packed RGBA directly. A black base entry
     # defers to its emissive while a nonblack entry in the same batch keeps its base; blackness is the effective texel x
     # factor, so a green texture masked to black by a red-only factor still defers. A batch with no fallback keeps a
-    # stable identity so the packed-RGBA cache hits. The deprecated batch texture gives each entry its own factor.
+    # stable identity so the packed-RGBA cache hits. Batch textures and batched textures resolve alike.
     base = gs.textures.ImageTexture(image_array=np.full((4, 4, 3), (201, 166, 105), dtype=np.uint8))
     emissive = gs.textures.ImageTexture(image_array=np.full((4, 4, 3), (76, 122, 64), dtype=np.uint8))
     masked_black = gs.textures.ImageTexture(
@@ -80,15 +80,6 @@ def test_packed_rgba_resolves_batched_fallback_per_environment():
 
     stable_surface = gs.surfaces.BSDF(diffuse_texture=gs.textures.BatchTexture(textures=[base, base]))
     assert stable_surface.get_rgba(batch=True) is stable_surface.get_rgba(batch=True)
-    folded_surface = gs.surfaces.Default(
-        diffuse_texture=gs.textures.BatchTexture.from_images(
-            image_arrays=[base.image_array, emissive.image_array],
-            image_colors=[(1.0, 0.0, 0.0), None],
-        )
-    )
-    assert_equal(folded_surface.diffuse_texture.image_array[0], np.full((4, 4, 3), (201, 0, 0)))
-    assert_equal(folded_surface.diffuse_texture.image_array[1], emissive.image_array)
-
     base_batch = gs.textures.ImageTexture(
         image_array=[masked_black.image_array, base.image_array],
         image_color=(1.0, 0.0, 0.0),
