@@ -988,6 +988,7 @@ class Scene(BuildableMixin, RBC):
                                             f"vertices, got '{entity.name}'."
                                         )
                                     texture = Texture(self, options, texture_map_type, vgeom)
+                                    texture.build(n_envs)
                                     self._dynamic_textures.append(texture)
                                     vgeom._dynamic_textures.append(texture)
                     elif any(
