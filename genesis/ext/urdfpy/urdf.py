@@ -5,12 +5,19 @@ import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from typing import List
 
-import networkx as nx
 import numpy as np
+
+import networkx as nx
 import PIL
 import trimesh
 
+from genesis.utils.cache import OwnedCache
+
 from .utils import configure_origin, get_filename, load_meshes, parse_origin, unparse_origin
+
+# The meshes loaded from a file, keyed on its path, its modification time and whether they make a collision geometry.
+# The 'Mesh' objects referencing the file own them, so that a URDF using one file in several links loads it once.
+_MESHES_CACHE = OwnedCache()
 
 
 class URDFType(object):
@@ -623,13 +630,17 @@ class Mesh(URDFType):
         that represent this object.
         """
         if self._meshes is None:
-            meshes = load_meshes(self._mesh_path)
-            # Combine collision geometry meshes but keep visual ones separate to preserve colors and textures
-            if self._is_collision:
-                for m in meshes:
-                    m.visual = trimesh.visual.ColorVisuals(mesh=m)
-                meshes = [meshes[0] + meshes[1:]]
-            self.meshes = meshes
+            key = (self._mesh_path, os.path.getmtime(self._mesh_path), self._is_collision)
+            meshes = _MESHES_CACHE.find(key)
+            if meshes is None:
+                meshes = load_meshes(self._mesh_path)
+                # Combine collision geometry meshes but keep visual ones separate to preserve colors and textures
+                if self._is_collision:
+                    for m in meshes:
+                        m.visual = trimesh.visual.ColorVisuals(mesh=m)
+                    meshes = [meshes[0] + meshes[1:]]
+            # Each object holds copies of the cached meshes, which their users may transform in place
+            self.meshes = [m.copy(include_cache=True) for m in _MESHES_CACHE.own(self, key, meshes)]
         return self._meshes
 
     @meshes.setter
