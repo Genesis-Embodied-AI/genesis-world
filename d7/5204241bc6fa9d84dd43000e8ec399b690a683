@@ -1,0 +1,46 @@
+tests/core/test_surface.py
+  s_d39f85b9ab7930::t_8066ff17546b45 65-68
+genesis/utils/mesh.py
+  s_d39f85b9ab7930::t_8ccc5085a5fd40 450
+  s_d39f85b9ab7930::t_31e2a165422cec 479,499-500
+genesis/options/textures.py
+  s_d39f85b9ab7930::t_77baece4187b97 72,80-82,101,112,118,123,128,145-147,295-296,309,316,321,323,329-330,647,649-650,652-657
+  s_d39f85b9ab7930::t_ba3d0f0d8bb00e 561
+genesis/options/surfaces.py
+  s_d39f85b9ab7930::t_c16553fe869857 288
+  s_d39f85b9ab7930::t_fdeaac030e3845 15,150-151,158,160,182-183,264-271,280,282,299-303,354,356
+genesis/ext/pyrender/texture.py
+  s_d39f85b9ab7930::t_7817cad2207387 247
+  s_d39f85b9ab7930::t_ba3d0f0d8bb00e 242,246
+genesis/engine/mesh.py
+  s_d39f85b9ab7930::t_8ccc5085a5fd40 328,544
+tests/rendering/test_offscreen.py
+  s_d39f85b9ab7930::t_094440efaa87e7 566-601
+  s_d39f85b9ab7930::t_7d9f76ee625542 388,390,418-422,490-497,509-516,541
+genesis/vis/rasterizer_context.py
+  s_d39f85b9ab7930::t_ba3d0f0d8bb00e 225
+  s_d39f85b9ab7930::t_8ccc5085a5fd40 1412-1413
+  s_d39f85b9ab7930::t_6a5d2a4193dc9e 46,48-50,54,59,332,649-650,652-655,667-674,682,684,1432,1436-1437
+tests/rigid/test_serialization.py
+  s_d39f85b9ab7930::t_54e7acecda067c 378,381-383
+  s_d39f85b9ab7930::t_8066ff17546b45 165,173-174,365,368-369
+genesis/engine/scene.py
+  s_d39f85b9ab7930::t_7817cad2207387 50
+  s_d39f85b9ab7930::t_8ccc5085a5fd40 984,986
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d75204241bc6fa9d84dd43000e8ec399b690a683",
+  "prompts": {},
+  "sessions": {
+    "s_d39f85b9ab7930": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a73923d6-db95-4649-b538-03d34b310d4a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
