@@ -392,15 +392,15 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
         )
     with pytest.raises(gs.GenesisException, match="its own opacity"):
         gs.surfaces.Default(diffuse_texture=gs.textures.DynamicTexture(resolution=(4, 4)), opacity=0.5)
-    batch_options = gs.entities.Rigid(
+    batch_spec = gs.entities.Rigid(
         morph=gs.morphs.Plane(plane_size=(1.0, 1.0)),
         surface=gs.surfaces.Default(diffuse_texture=gs.textures.BatchTexture.from_colors([(1.0, 0.0, 0.0)] * 2)),
     )
-    batch_options.select(gs.indices.VGeom.at(0)).set_surface(
+    batch_spec.select(gs.indices.VGeom.at(0)).set_surface(
         gs.surfaces.Default(emissive_texture=gs.textures.DynamicTexture(resolution=(4, 4)))
     )
     with pytest.raises(gs.GenesisException, match="batch texture cannot be given"):
-        gs.Scene().add_entity(options=batch_options)
+        gs.Scene().add_entity(spec=batch_spec)
     surface = gs.surfaces.Default(
         diffuse_texture=gs.textures.DynamicTexture(resolution=(4, 4)),
         emissive_texture=gs.textures.ColorTexture(color=(0.1, 0.2, 0.3, 0.5)),

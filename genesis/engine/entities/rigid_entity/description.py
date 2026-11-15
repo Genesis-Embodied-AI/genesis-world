@@ -1444,8 +1444,7 @@ class KinematicEntityDescription(EntityDescription):
         which overrides that of the asset, and a field a patch gives as None stands for the value of the asset, or the
         surface of the entity. The values are written before post-processing, so that every convex piece of a geom takes
         them and geoms of different values never fuse. 'links_path' holds the names from the tree root down to each
-        link. A selection holding no geom of the morph raises, so each heterogeneous variant holds what the entity
-        selects.
+        link. Each heterogeneous variant holds what the entity selects: a selection holding no geom of the morph raises.
         """
         cg_infos, vg_infos, geoms_link_idx, vgeoms_link_idx = [], [], [], []
         for i_l, link_g_infos in enumerate(links_g_infos):

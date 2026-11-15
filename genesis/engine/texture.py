@@ -11,7 +11,7 @@ from genesis.constants import TEXTURE_MAP_TYPE
 from genesis.engine.state_change import StateChange, Subscriber
 from genesis.options.textures import ColorTexture, DynamicTexture, ImageTexture, texture_to_rgba
 from genesis.typing import IndexType
-from genesis.utils.misc import broadcast_tensor, tensor_to_array
+from genesis.utils.misc import BatchedMixin, broadcast_tensor, tensor_to_array
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.rigid_geom import RigidVisGeom
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 TextureValueType = int | str | Sequence[int | str] | np.ndarray | torch.Tensor | ColorTexture | ImageTexture
 
 
-class Texture:
+class Texture(BatchedMixin):
     """Runtime state of the dynamic texture of one map of a visual geom: the variant each environment shows.
 
     Genesis holds only the active variant indices, the position of the variant each environment shows. The renderers
@@ -47,13 +47,18 @@ class Texture:
         self._texture_map_type = texture_map_type
         self._vgeom = vgeom
         (self._initial_variant_idx,) = options.get_variants_idx(options.initial_variant)
-        self._active_variants_idx = np.full(scene._B, self._initial_variant_idx, dtype=gs.np_int)
+        self._active_variants_idx: np.ndarray | None = None
         # Whether pixels were drawn in each variant of each environment since its last reset
-        self._is_drawn = np.zeros((len(options.variants), scene._B), dtype=np.bool_)
+        self._is_drawn: np.ndarray | None = None
         # The entries of each batched variant on the device, which a reset draws again, built on the first reset
         self._variants_seed: dict[int, torch.Tensor] = {}
         # The subscribers, each with the callback receiving the pixels of every drawing, if any
         self._subscribers: dict[Subscriber, Callable[[int, np.ndarray, torch.Tensor], None] | None] = {}
+
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
+        self._active_variants_idx = np.full(self.n_envs_, self._initial_variant_idx, dtype=gs.np_int)
+        self._is_drawn = np.zeros((len(self._options.variants), self.n_envs_), dtype=np.bool_)
 
     @property
     def options(self) -> DynamicTexture:
@@ -98,9 +103,9 @@ class Texture:
 
     def get_texture(self, envs_idx: IndexType | None = None) -> torch.Tensor:
         """Return the position of the variant each selected environment shows."""
-        active_variants_idx = self._active_variants_idx[tensor_to_array(self._scene._sanitize_envs_idx(envs_idx))]
+        active_variants_idx = self._active_variants_idx[tensor_to_array(self._scene.sim.sanitize_envs_idx(envs_idx))]
         active_variants_idx = torch.as_tensor(active_variants_idx, dtype=gs.tc_int, device=gs.device)
-        return active_variants_idx[0] if self._scene.n_envs == 0 else active_variants_idx
+        return active_variants_idx[0] if self.n_envs == 0 else active_variants_idx
 
     def set_texture(self, texture: TextureValueType, envs_idx: IndexType | None = None) -> None:
         """Show a variant, or draw pixels, in the selected environments.
@@ -114,7 +119,7 @@ class Texture:
         An array holds uint8 values, or floats where 1.0 stands for 255: sRGB values clamped to [0, 1] in the diffuse
         map, and linear values clamped only below at 0 in the emissive map, so that an emission may exceed 1.
         """
-        envs_idx = tensor_to_array(self._scene._sanitize_envs_idx(envs_idx))
+        envs_idx = tensor_to_array(self._scene.sim.sanitize_envs_idx(envs_idx))
         if isinstance(texture, (ColorTexture, ImageTexture)):
             texture = texture_to_rgba(texture, self._options.resolution, self._texture_map_type)
         texture_ndim = texture.ndim if torch.is_tensor(texture) else np.ndim(texture)
@@ -182,7 +187,7 @@ class Texture:
 
     def reset(self, envs_idx: IndexType | None = None) -> None:
         """Show the initial variant again in the selected environments, and erase the pixels drawn in them."""
-        envs_idx = tensor_to_array(self._scene._sanitize_envs_idx(envs_idx))
+        envs_idx = tensor_to_array(self._scene.sim.sanitize_envs_idx(envs_idx))
         self._active_variants_idx[envs_idx] = self._initial_variant_idx
         for i_variant in np.flatnonzero(self._is_drawn[:, envs_idx].any(axis=1)):
             drawn_envs_idx = envs_idx[self._is_drawn[i_variant, envs_idx]]

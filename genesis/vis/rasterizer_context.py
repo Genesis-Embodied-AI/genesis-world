@@ -673,7 +673,7 @@ class RasterizerContext(BuildableMixin):
                             texture_map_type = TEXTURE_MAP_TYPE.DIFFUSE if is_base_color else TEXTURE_MAP_TYPE.EMISSIVE
                             variants_image = (texture_to_rgba(options, texture_map_type=texture_map_type),)
                             variants_is_drawn = (False,)
-                        variants_envs_layer = np.full((len(variants_image), self.sim._B), -1, dtype=gs.np_int)
+                        variants_envs_layer = np.full((len(variants_image), self.sim.n_envs_), -1, dtype=gs.np_int)
                         layers_image, n_layers = [], 0
                         for i_variant, (image, is_drawn) in enumerate(zip(variants_image, variants_is_drawn)):
                             if is_drawn:
