@@ -315,7 +315,7 @@ class IPCCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC)
                     )
             gs.logger.debug(f"Rigid entity {i_e}: coupling type '{coup_type.name.lower()}'")
 
-            if entity.options.selection_blocks:
+            if entity.options.selection_rules:
                 gs.raise_exception(
                     f"Entity '{entity.name}' sets a density or a friction on selected links or geoms, which the IPC "
                     "coupler does not support. Set it on the material instead."
@@ -404,7 +404,7 @@ class IPCCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC)
 
         entity: "FEMEntity"
         for entity in cast(list["FEMEntity"], self.fem_solver.entities):
-            if entity.options.selection_blocks:
+            if entity.options.selection_rules:
                 gs.raise_exception(
                     f"Entity '{entity.name}' sets quantities on selected vertices, which the IPC coupler does not support."
                 )

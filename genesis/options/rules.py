@@ -1,4 +1,4 @@
-"""Blocks of quantities set on selections of parts of an entity, and the settings recording them in entity options."""
+"""Rules of quantities set on selections of parts of an entity, and the settings recording them in entity options."""
 
 from typing import Annotated, Self
 
@@ -23,7 +23,7 @@ class Geom(_FrozenOptions):
 
     A field given explicitly overrides, for the selected geoms, the material and the coarser selections (see
     ``Rigid.select``). Given as None, it takes the value the asset states, else the solver default. A field left unset,
-    as every field is by default, keeps the value of the coarser levels. The IPC coupler rejects every block.
+    as every field is by default, keeps the value of the coarser levels. The IPC coupler rejects every rule.
 
     Parameters
     ----------
@@ -59,30 +59,32 @@ class Vertex(_FrozenOptions):
     is_fixed: StrictBool = False
 
 
-class SelectionBlock(_FrozenOptions):
-    """A block of quantities with the selection of parts of an entity it is set on, as ``select`` records it.
+class SelectionRule(_FrozenOptions):
+    """Quantities set on a selection of parts of an entity, as ``select`` records it.
 
     Parameters
     ----------
     selectors : tuple[gs.indices.Link | gs.indices.Geom | gs.indices.Vertex, ...]
         The selector of each level leading to the parts, from the coarsest to the finest, each resolving among the
         parts the previous one holds.
-    block : gs.options.Geom | gs.options.Vertex
+    quantities : gs.options.Geom | gs.options.Vertex
         The quantities set on the parts, of which the fields given explicitly apply.
     """
 
     selectors: Annotated[tuple[indices.Link | indices.Geom | indices.Vertex, ...], Field(min_length=1, strict=False)]
-    block: Geom | Vertex
+    quantities: Geom | Vertex
 
     @model_validator(mode="after")
-    def _check_block(self) -> Self:
-        if not self.block.model_fields_set:
-            gs.raise_exception(f"gs.options.{type(self.block).__name__} sets no quantity. Give at least one field.")
+    def _check_rule(self) -> Self:
+        if not self.quantities.model_fields_set:
+            gs.raise_exception(
+                f"gs.options.{type(self.quantities).__name__} sets no quantity. Give at least one field."
+            )
         return self
 
     @property
     def selection_repr(self) -> str:
-        """The selection of the block on one line, for error messages."""
+        """The selection of the rule on one line, for error messages."""
         return " then ".join(
             f"{get_public_name(type(selector))}{selector.model_dump(exclude_none=True)}" for selector in self.selectors
         )

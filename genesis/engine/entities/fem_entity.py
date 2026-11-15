@@ -357,23 +357,23 @@ class FEMEntity(Entity):
         if not init_positions.shape[0] > 0:
             gs.raise_exception("Entity has zero vertices.")
 
-        # The blocks select vertices as the morph states them, relative to its position before its rotation. The later
-        # of two blocks setting one vertex applies.
+        # The rules select vertices as the morph states them, relative to its position before its rotation. The later
+        # of two rules setting one vertex applies.
         verts_pos_morph = verts - self._morph.pos
         verts_is_fixed = np.zeros(len(verts), dtype=np.bool_)
-        for selection_block in self._options.selection_blocks:
+        for selection_rule in self._options.selection_rules:
             # Each selector resolves among the vertices the selectors before it hold, an ordinal counting those alone
             verts_idx = np.arange(len(verts))
-            for vertex_index in selection_block.selectors:
+            for vertex_index in selection_rule.selectors:
                 if verts_idx.size == 0:
                     break
                 verts_idx = verts_idx[vertex_index._resolve(verts_pos_morph[verts_idx])]
             if verts_idx.size == 0:
                 gs.raise_exception(
-                    f"The selection {selection_block.selection_repr} holds no vertex of entity '{self.name}'."
+                    f"The selection {selection_rule.selection_repr} holds no vertex of entity '{self.name}'."
                 )
-            if "is_fixed" in selection_block.block.model_fields_set:
-                verts_is_fixed[verts_idx] = selection_block.block.is_fixed
+            if "is_fixed" in selection_rule.quantities.model_fields_set:
+                verts_is_fixed[verts_idx] = selection_rule.quantities.is_fixed
         self._fixed_verts_idx_local = np.flatnonzero(verts_is_fixed).astype(gs.np_int, copy=False)
 
         self.init_positions = torch.tensor(init_positions, dtype=gs.tc_float, device=gs.device)

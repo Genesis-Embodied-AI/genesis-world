@@ -12,7 +12,7 @@ from genesis.engine.materials.base import Material
 from genesis.repr_base import get_public_name
 
 from . import indices
-from .blocks import Geom, SelectionBlock, Vertex, _FrozenOptions
+from .rules import Geom, SelectionRule, Vertex, _FrozenOptions
 from .morphs import Morph
 from .options import Options
 from .surfaces import Surface
@@ -81,10 +81,10 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
     """Options an entity is constructed from, as passed to ``Scene.add_entity(options=...)``.
 
     A concrete subclass decides the kind of entity and the solver simulating it, and declares the materials it admits,
-    the selectors of its parts and the blocks of quantities set on them. The fields are fixed at construction, while
+    the selectors of its parts and the rules of quantities set on them. The fields are fixed at construction, while
     ``select`` records into the options the quantities set on parts of the entity, where the kind of entity has parts.
     The entity holds a frozen copy, which records nothing more, so later records leave the entity as it is. A copy
-    of the options (``model_copy()``) records again, starting from the blocks recorded so far.
+    of the options (``model_copy()``) records again, starting from the rules recorded so far.
 
     Parameters
     ----------
@@ -96,23 +96,23 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
         The appearance of the entity, its visualization mode included. If None, use ``gs.surfaces.Default()``.
     name : str | None, optional
         The name of the entity, unique within the scene. If None, a name is generated from the morph.
-    selection_blocks : tuple[gs.options.SelectionBlock, ...], optional
-        The blocks of quantities set on selections of parts of the entity, in the order they were set, which ``select``
+    selection_rules : tuple[gs.options.SelectionRule, ...], optional
+        The rules of quantities set on selections of parts of the entity, in the order they were set, which ``select``
         and its setters alone record (see ``select``). Default is none.
     """
 
     # Whether the kind of entity admits several morphs, one per variant of a heterogeneous entity
     _admits_variants: ClassVar[bool] = False
-    # Selectors of the parts of the entity, from the coarsest level to the finest, and blocks of the quantities set on
+    # Selectors of the parts of the entity, from the coarsest level to the finest, and rules of the quantities set on
     # them, that the kind of entity admits
     _selector_types: ClassVar[tuple[type[indices.Link | indices.Geom | indices.Vertex], ...]] = ()
-    _block_types: ClassVar[tuple[type[Geom | Vertex], ...]] = ()
+    _rule_types: ClassVar[tuple[type[Geom | Vertex], ...]] = ()
 
     # Checked by instance alone, since validation would run the validators of 'Morph' on the sequence of morphs
     morph: InstanceOf[Morph] | Annotated[tuple[InstanceOf[Morph], ...], Field(min_length=1, strict=False)] | None = None
     surface: Surface | None = None
     name: str | None = None
-    selection_blocks: tuple[SelectionBlock, ...] = ()
+    selection_rules: tuple[SelectionRule, ...] = ()
 
     _is_frozen: bool = PrivateAttr(default=False)
 
@@ -132,13 +132,13 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
         return data
 
     @model_validator(mode="after")
-    def _check_selection_blocks(self) -> Self:
+    def _check_selection_rules(self) -> Self:
         if isinstance(self.morph, tuple) and not self._admits_variants:
             gs.raise_exception(
                 f"An entity of gs.entities.{type(self).__name__} is created from one morph, got {len(self.morph)}."
             )
-        for selection_block in self.selection_blocks:
-            self._check_selection_block(selection_block)
+        for selection_rule in self.selection_rules:
+            self._check_selection_rule(selection_rule)
         return self
 
     # A copy records again, frozen or not
@@ -152,10 +152,10 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
         options._is_frozen = False
         return options
 
-    def _check_selection_block(self, selection_block: SelectionBlock) -> None:
+    def _check_selection_rule(self, selection_rule: SelectionRule) -> None:
         # Each selector selects at the level of the one before it or a finer one
         levels = []
-        for selector in selection_block.selectors:
+        for selector in selection_rule.selectors:
             if not isinstance(selector, self._selector_types):
                 gs.raise_exception(
                     f"gs.entities.{type(self).__name__} selects no part with gs.{get_public_name(type(selector))}."
@@ -163,11 +163,11 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
             levels.append(next(i for i, cls in enumerate(self._selector_types) if isinstance(selector, cls)))
         if any(level < previous_level for previous_level, level in zip(levels, levels[1:])):
             gs.raise_exception(
-                f"A selection selects at its own level or a finer one, got {selection_block.selection_repr}."
+                f"A selection selects at its own level or a finer one, got {selection_rule.selection_repr}."
             )
-        if not isinstance(selection_block.block, self._block_types):
+        if not isinstance(selection_rule.quantities, self._rule_types):
             gs.raise_exception(
-                f"gs.entities.{type(self).__name__} sets no gs.options.{type(selection_block.block).__name__} on its "
+                f"gs.entities.{type(self).__name__} sets no gs.options.{type(selection_rule.quantities).__name__} on its "
                 "parts."
             )
 
@@ -179,22 +179,22 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
         return self.morph if isinstance(self.morph, tuple) else (self.morph,)
 
     def _frozen_copy(self, update: dict[str, Any] | None = None) -> Self:
-        """Return a copy of these options, with the fields 'update' gives, that records no more blocks."""
+        """Return a copy of these options, with the fields 'update' gives, that records no more rules."""
         options = self.model_copy(update=update)
         options._is_frozen = True
         return options
 
-    def _record(self, selection_blocks: tuple[SelectionBlock, ...]) -> None:
-        """Record blocks after those recorded so far, each checked as at construction."""
+    def _record(self, selection_rules: tuple[SelectionRule, ...]) -> None:
+        """Record rules after those recorded so far, each checked as at construction."""
         if self._is_frozen:
             gs.raise_exception(
                 "The options an entity holds are frozen. Select parts on a copy of them ('model_copy()') instead."
             )
-        for selection_block in selection_blocks:
-            self._check_selection_block(selection_block)
-        # The field is frozen for users, so that 'select' and its setters are the only way to record a block
-        object.__setattr__(self, "selection_blocks", (*self.selection_blocks, *selection_blocks))
-        self.__pydantic_fields_set__.add("selection_blocks")
+        for selection_rule in selection_rules:
+            self._check_selection_rule(selection_rule)
+        # The field is frozen for users, so that 'select' and its setters are the only way to record a rule
+        object.__setattr__(self, "selection_rules", (*self.selection_rules, *selection_rules))
+        self.__pydantic_fields_set__.add("selection_rules")
 
 
 OptionsT = TypeVar("OptionsT", bound=BaseEntity)
@@ -205,7 +205,7 @@ class _PartSelection(Generic[OptionsT]):
 
     It holds the entity options and the selector of each level leading to the parts, and owns no data. Every setter
     returns the selection, so that calls chain on it, ``end`` returns the entity options to start another selection
-    from, and ``with`` binds the selection to a name for a block.
+    from, and ``with`` binds the selection to a name for a rule.
     """
 
     def __init__(self, options: OptionsT, selectors: tuple[indices.Link | indices.Geom | indices.Vertex, ...]) -> None:
@@ -228,17 +228,19 @@ class _PartSelection(Generic[OptionsT]):
         """
         return self._options
 
-    def _set(self, blocks: tuple[Geom | Vertex, ...]) -> Self:
-        self._options._record(tuple(SelectionBlock(selectors=self._selectors, block=block) for block in blocks))
+    def _set(self, quantities: tuple[Geom | Vertex, ...]) -> Self:
+        self._options._record(
+            tuple(SelectionRule(selectors=self._selectors, quantities=quantities_) for quantities_ in quantities)
+        )
         return self
 
 
 class _GeomSetters(_PartSelection[OptionsT]):
     """The setters of the quantities of collision geoms, which a link selection applies to every geom of its links."""
 
-    def set(self, *blocks: Geom) -> Self:
-        """Set on the selected geoms the fields each block gives explicitly, a later call overriding an earlier one."""
-        return self._set(blocks)
+    def set(self, *quantities: Geom) -> Self:
+        """Set on the selected geoms the fields each rule gives explicitly, a later call overriding an earlier one."""
+        return self._set(quantities)
 
     def set_rho(self, rho: float) -> Self:
         """Set the density of the selected collision geoms (see ``gs.options.Geom.rho``)."""
@@ -323,9 +325,9 @@ class VertexSelection(_PartSelection[OptionsT]):
             )
         return VertexSelection(self._options, (*self._selectors, selector))
 
-    def set(self, *blocks: Vertex) -> Self:
-        """Set on the selected vertices the fields each block gives explicitly, overriding an earlier call."""
-        return self._set(blocks)
+    def set(self, *quantities: Vertex) -> Self:
+        """Set on the selected vertices the fields each rule gives explicitly, overriding an earlier call."""
+        return self._set(quantities)
 
     def set_is_fixed(self, is_fixed: bool) -> Self:
         """Set whether the selected vertices stay at their initial positions (see ``gs.options.Vertex.is_fixed``)."""
@@ -346,7 +348,7 @@ class Rigid(BaseEntity["RigidEntity"]):
 
     _admits_variants = True
     _selector_types = (indices.Link, indices.Geom)
-    _block_types = (Geom,)
+    _rule_types = (Geom,)
 
     material: materials.Rigid = Field(default_factory=materials.Rigid)
     visualize_contact: StrictBool = False
@@ -414,14 +416,14 @@ class FEM(BaseEntity["FEMEntity"]):
     """
 
     _selector_types = (indices.Vertex,)
-    _block_types = (Vertex,)
+    _rule_types = (Vertex,)
 
     material: materials.FEM.Base
 
-    def _check_selection_block(self, selection_block: SelectionBlock) -> None:
+    def _check_selection_rule(self, selection_rule: SelectionRule) -> None:
         if isinstance(self.material, materials.FEM.Cloth):
             gs.raise_exception("gs.entities.FEM cannot honour quantities of vertices for a Cloth material.")
-        super()._check_selection_block(selection_block)
+        super()._check_selection_rule(selection_rule)
 
     def select(self, selector: indices.Vertex) -> VertexSelection[Self]:
         """Select the vertices of the volume mesh that the selector holds, to set quantities on.
