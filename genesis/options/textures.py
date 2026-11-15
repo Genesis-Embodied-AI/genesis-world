@@ -69,7 +69,7 @@ class Texture(Options):
 
 class ColorTexture(Texture):
     """
-    A texture that consists of a single color, or of one color per environment.
+    A texture that consists of a single color, or of one color per environment as a variant of a dynamic texture.
 
     Parameters
     ----------
@@ -77,9 +77,9 @@ class ColorTexture(Texture):
         A list of color values, stored as tuple, supporting any number of channels within the range [0.0, 1.0]. A
         batched texture takes one such list per entry, or a single one for all of them. Default is (1.0, 1.0, 1.0).
     is_batched : bool, optional
-        Whether each environment shows its own entry, environment i showing entry i modulo the number of entries. Each
-        renderer stores every entry. As a variant of a ``DynamicTexture``, a batched texture instead stores one image
-        per rendered environment, which ``set_texture`` draws pixels into. Default is False.
+        Whether the texture holds one entry per environment, environment i showing entry i modulo the number of entries,
+        as a variant of a ``DynamicTexture`` alone. Each renderer stores one image per rendered environment, which
+        ``set_texture`` draws pixels into. Default is False.
     """
 
     color: LaxFArrayType | FGridType = (1.0, 1.0, 1.0)
@@ -98,11 +98,7 @@ class ColorTexture(Texture):
         return data
 
     def check_dim(self, dim: int) -> Texture | None:
-        if self.is_batched:
-            if len(self.color[0]) > dim:
-                self.color, res = tuple(color[:dim] for color in self.color), tuple(color[dim:] for color in self.color)
-                return ColorTexture(color=res, is_batched=True)
-        elif len(self.color) > dim:
+        if len(self.color) > dim:
             self.color, res = self.color[:dim], self.color[dim]
             return ColorTexture(color=res)
         return None
@@ -113,26 +109,23 @@ class ColorTexture(Texture):
     def apply_cutoff(self, cutoff: float) -> None:
         if cutoff is None:
             return
-        if self.is_batched:
-            self.color = tuple(tuple(1.0 if c >= cutoff else 0.0 for c in color) for color in self.color)
-        else:
-            self.color = tuple(1.0 if c >= cutoff else 0.0 for c in self.color)
+        self.color = tuple(1.0 if c >= cutoff else 0.0 for c in self.color)
 
     @computed_field
     @cached_property
     def is_black(self) -> bool:
         assert gs.EPS is not None
-        return bool(np.all(np.asarray(self.color) < gs.EPS))
+        return all(c < gs.EPS for c in self.color)
 
     @computed_field
     @cached_property
     def requires_uv(self) -> bool:
-        return self.is_batched
+        return False
 
 
 class ImageTexture(Texture, SerializationMixin):
     """
-    A texture with a texture map (image), or with one image per environment.
+    A texture with a texture map (image), or with one image per environment as a variant of a dynamic texture.
 
     Parameters
     ----------
@@ -149,10 +142,9 @@ class ImageTexture(Texture, SerializationMixin):
         - 'srgb': Encoding of some RGB images.
         - 'linear': All generic images, such as opacity, roughness and normal, should be encoded with 'linear'.
     is_batched : bool, optional
-        Whether each environment shows its own entry, environment i showing entry i modulo the number of entries. The
-        entries are resized to the resolution of the largest one, so that each costs the memory of the largest image.
-        Each renderer stores every entry. As a variant of a ``DynamicTexture``, a batched texture instead stores one
-        image per rendered environment, which ``set_texture`` draws pixels into. Default is False.
+        Whether the texture holds one image per environment, environment i showing entry i modulo the number of entries,
+        as a variant of a ``DynamicTexture`` alone. Each renderer stores one image per rendered environment, which
+        ``set_texture`` draws pixels into. Default is False.
     """
 
     image_path: str | StrArrayType | None = None
@@ -300,7 +292,8 @@ class ImageTexture(Texture, SerializationMixin):
         # Black when every channel's effective value (texel x factor) is zero. Testing the factor and the array
         # independently would miss a per-channel factor that masks the only nonzero channels (e.g. a green texture
         # scaled by a red-only factor).
-        channel_peaks = self.image_array.reshape(-1, self.channel).max(axis=0)
+        channels = self.image_array.shape[-1] if self.image_array.ndim == 3 else 1
+        channel_peaks = self.image_array.reshape(-1, channels).max(axis=0)
         return all(factor < gs.EPS or peak == 0 for factor, peak in zip(self.image_color, channel_peaks))
 
     @computed_field
@@ -313,38 +306,29 @@ class ImageTexture(Texture, SerializationMixin):
     def channel(self) -> int:
         if self.image_array is None:
             return 3
-        return self.image_array.shape[-1] if self.image_array.ndim >= 3 else 1
+        return self.image_array.shape[2] if self.image_array.ndim == 3 else 1
 
     @computed_field
     @cached_property
     def mean_color(self) -> NDArrayType:
         if self.image_array is None:
             return np.ones(3, dtype=np.float16)
-        axes = (0, 1, 2) if self.is_batched else (0, 1)
-        return cast(np.ndarray, (np.mean(self.image_array, axis=axes, dtype=np.float32) / 255).astype(np.float16))
+        return cast(np.ndarray, (np.mean(self.image_array, axis=(0, 1), dtype=np.float32) / 255).astype(np.float16))
 
     def check_dim(self, dim: int) -> Texture | None:
         if self.image_array is not None:
             if self.channel > dim:
-                if self.is_batched:
-                    self.image_array, res_array = self.image_array[..., :dim], self.image_array[..., dim : dim + 1]
-                else:
-                    self.image_array, res_array = self.image_array[:, :, :dim], self.image_array[:, :, dim]
+                self.image_array, res_array = self.image_array[:, :, :dim], self.image_array[:, :, dim]
                 self.image_color, res_color = self.image_color[:dim], self.image_color[dim:]
-                return ImageTexture(
-                    image_array=res_array, image_color=res_color, encoding="linear", is_batched=self.is_batched
-                ).check_simplify()
+                return ImageTexture(image_array=res_array, image_color=res_color, encoding="linear").check_simplify()
         return None
 
     def check_simplify(self) -> "ImageTexture | ColorTexture":
         if self.image_array is None:
             return self
-        axes = (1, 2) if self.is_batched else (0, 1)
-        max_color = np.max(self.image_array, axis=axes)
-        min_color = np.min(self.image_array, axis=axes)
+        max_color = np.max(self.image_array, axis=(0, 1))
+        min_color = np.min(self.image_array, axis=(0, 1))
         if np.all(min_color == max_color):
-            if self.is_batched:
-                return ColorTexture(color=max_color / 255.0 * self.image_color, is_batched=True)
             return ColorTexture(color=max_color.reshape(-1) / 255.0 * self.image_color)
         return self
 
@@ -381,41 +365,6 @@ class ImageTexture(Texture, SerializationMixin):
             encoding=raw["encoding"],
             is_batched=raw.get("is_batched", False),
         )
-
-
-def stack_textures(textures: Sequence["ColorTexture | ImageTexture"]) -> "ColorTexture | ImageTexture":
-    """Return the batched texture whose entries are the given textures that are not batched.
-
-    Colors stack into a batched color, and images of one factor and one encoding into a batched image of that factor.
-    Otherwise, each entry turns into an image of the resolution of the first image, its factor applied to its pixels,
-    since a batched image holds one factor for all its entries.
-    """
-    if all(isinstance(texture, ColorTexture) for texture in textures):
-        return ColorTexture(color=[texture.color for texture in textures], is_batched=True)
-    first = next(texture for texture in textures if isinstance(texture, ImageTexture))
-    if all(
-        isinstance(texture, ImageTexture)
-        and texture.encoding == first.encoding
-        and len(texture.image_color) == len(first.image_color)
-        and np.allclose(texture.image_color, first.image_color, atol=gs.EPS)
-        for texture in textures
-    ):
-        return ImageTexture(
-            image_array=[texture.image_array for texture in textures],
-            image_color=first.image_color,
-            encoding=first.encoding,
-            is_batched=True,
-        )
-    images = []
-    for texture in textures:
-        if isinstance(texture, ImageTexture):
-            image = texture.image_array if texture.image_array.ndim == 3 else texture.image_array[..., None]
-            images.append(np.round(image * np.array(texture.image_color)).astype(np.uint8))
-        else:
-            images.append(
-                np.full((*first.image_array.shape[:2], len(texture.color)), mu.color_f32_to_u8(texture.color), np.uint8)
-            )
-    return ImageTexture(image_array=images, is_batched=True)
 
 
 class BatchTexture(Texture):
@@ -609,7 +558,7 @@ def texture_to_rgba(
         if isinstance(texture, ImageTexture):
             image_array = texture.image_array
             if image_array is None:
-                gs.raise_exception(f"A dynamic or batched texture takes no HDR image, got '{texture.image_path}'.")
+                gs.raise_exception(f"A dynamic texture takes no HDR image, got '{texture.image_path}'.")
             rgba = []
             for image in image_array if texture.is_batched else (image_array,):
                 if image.ndim == 3 and image.shape[-1] == 1:
@@ -695,10 +644,17 @@ class DynamicTexture(_ImagelessTexture):
         variants = []
         for variant in self.variants_texture:
             if isinstance(variant, AssetTexture):
-                if not variant.is_batched or asset_texture.is_batched:
+                if not variant.is_batched:
                     variant = asset_texture
+                elif isinstance(asset_texture, ColorTexture):
+                    variant = ColorTexture(color=[asset_texture.color], is_batched=True)
                 else:
-                    variant = stack_textures((asset_texture,))
+                    variant = ImageTexture(
+                        image_array=[asset_texture.image_array],
+                        image_color=asset_texture.image_color,
+                        encoding=asset_texture.encoding,
+                        is_batched=True,
+                    )
             variants.append(variant)
         variants = dict(zip(self.variants_name, variants)) if self.variants_name else tuple(variants)
         texture = self.model_copy(update={"variants": variants})

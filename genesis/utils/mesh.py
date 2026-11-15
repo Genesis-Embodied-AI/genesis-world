@@ -447,14 +447,12 @@ _TEXTURE_MATERIALS_CACHE = OwnedCache()
 
 
 def _get_seed_image(texture) -> np.ndarray | None:
-    """Return the image a mesh visual is seeded with for a texture that renderers draw per environment, None otherwise.
+    """Return the image a mesh visual is seeded with for a dynamic texture, None for any other texture.
 
     The renderers replace it with the images of each environment, so the first one serves for any of them.
     """
     if isinstance(texture, gs.textures.DynamicTexture):
         return gs.textures.texture_to_rgba(texture.variants_texture[0], texture.resolution)[0]
-    if isinstance(texture, (gs.textures.ColorTexture, gs.textures.ImageTexture)) and texture.is_batched:
-        return gs.textures.texture_to_rgba(texture)[0]
     return None
 
 
@@ -478,7 +476,7 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     emission = surface.emission
     emissive_kwargs = {}
     if emission is not None and base is not None and base is not emission and not base.is_black:
-        # The renderer writes the images of a dynamic or batched texture into the texture this one seeds
+        # The renderer writes the images of a dynamic texture into the texture this one seeds
         emission_seed = _get_seed_image(emission)
         if emission_seed is not None:
             emissive_kwargs = dict(
@@ -498,8 +496,8 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     texture_seed = _get_seed_image(texture)
     if texture_seed is not None:
         if flipped_uvs is None:
-            gs.raise_exception("A dynamic or batched texture requires a mesh with texture coordinates, which it lacks.")
-        # The images of a dynamic or batched texture may turn transparent, which the blending of a PBR material follows
+            gs.raise_exception("A dynamic texture requires a mesh with texture coordinates, which it lacks.")
+        # The images of a dynamic texture may turn transparent, which the blending of a PBR material follows
         material = trimesh.visual.material.PBRMaterial(
             baseColorTexture=Image.fromarray(texture_seed), baseColorFactor=(255, 255, 255, 255), **emissive_kwargs
         )
