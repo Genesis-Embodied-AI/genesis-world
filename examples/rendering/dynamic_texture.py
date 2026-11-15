@@ -38,29 +38,38 @@ TEXTURE_RESOLUTION = (256, 256)
 
 
 class Canvas(NamedTuple):
-    """A dynamic texture taking paint, with the image of its batched variant in each environment as last seen."""
+    """A dynamic texture taking paint, with the image of its batched variant in each environment as last seen.
+
+    Attributes
+    ----------
+    texture : Texture
+        The dynamic texture taking the paint.
+    mesh : trimesh.Trimesh
+        The visual mesh of the geom drawing the texture, in the frame of the geom.
+    variants : tuple[np.ndarray, ...]
+        The entries of each variant, as RGBA uint8 arrays of shape (n_entries, height, width, 4).
+    i_paint_variant : int
+        The position of the batched variant taking the paint.
+    images : np.ndarray
+        The image of the batched variant in each environment.
+    pixels_pos : np.ndarray
+        The center of each pixel, as (column, row) of shape (height, width, 2).
+    subscriber : Subscriber
+        The subscriber passing the painter the pixels drawn by others, watching no change of state.
+    """
 
     texture: "Texture"
-    # The visual mesh of the geom drawing the texture, in the frame of the geom
     mesh: trimesh.Trimesh
-    # The entries of each variant, as RGBA uint8 arrays of shape (n_entries, height, width, 4)
     variants: tuple[np.ndarray, ...]
-    # The position of the batched variant taking the paint, and its image in each environment
     i_paint_variant: int
     images: np.ndarray
-    # The center of each pixel, as (column, row) of shape (height, width, 2)
     pixels_pos: np.ndarray
-    # The subscriber passing the painter the pixels drawn by others, watching no change of state
     subscriber: Subscriber
 
 
 class TexturePainterPlugin(RaycasterViewerPlugin):
     """
     Paint with the left mouse button on the visual geoms drawing a dynamic texture in their diffuse map.
-
-    The paint goes to the entities whose material sets use_visual_raycasting=True and whose dynamic texture holds one
-    batched variant, in the environment under the cursor. It covers the image this environment shows, then shows the
-    batched variant, so showing another variant hides it, and painting over that one starts afresh from it.
 
     Parameters
     ----------
@@ -76,16 +85,13 @@ class TexturePainterPlugin(RaycasterViewerPlugin):
         self.brush_radius = brush_radius
 
         self._canvases: dict[int, Canvas] = {}
-        # Stroke positions the viewer thread collects and the stepping thread paints, None ending a stroke
         self._strokes_pos: list[tuple[int, int] | None] = []
         self._is_painting = False
-        # The canvas, environment and pixel painted last, None at the start of a stroke
         self._stroke_end: tuple[Canvas, int, np.ndarray] | None = None
 
     @property
     def _lock(self):
-        # Painting draws on the textures, which takes the render lock to upload the pixels, so the plugin shares that
-        # lock rather than holding one of its own while waiting for it
+        # Painting uploads pixels under the render lock, so the plugin shares that lock rather than holding its own
         return self.viewer.render_lock
 
     def build(self, viewer, camera: "Node", scene: "Scene"):
@@ -103,7 +109,7 @@ class TexturePainterPlugin(RaycasterViewerPlugin):
             width, height = texture.options.resolution
             pixels_pos = np.stack(np.meshgrid(np.arange(width) + 0.5, np.arange(height) + 0.5), axis=-1)
 
-            # Genesis keeps no pixels, so the painter follows those others draw, from any thread, to paint over them
+            # Genesis stores no pixels, so the painter keeps a copy of every drawing to paint on top of it
             def copy_drawing(
                 i_variant: int, envs_idx: np.ndarray, image: torch.Tensor, images: np.ndarray = images
             ) -> None:
