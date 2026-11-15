@@ -1,6 +1,7 @@
 """Tests for the entity naming system."""
 
 import gc
+import itertools
 import os
 import xml.etree.ElementTree as ET
 
@@ -13,7 +14,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.point_cloud as pc
 from genesis.utils.cache import disable_owned_cache_release, enable_owned_cache_release
-from genesis.utils.misc import indices_to_mask, sanitize_index, tensor_to_array
+from genesis.utils.misc import assign_indexed_tensor, broadcast_tensor, indices_to_mask, sanitize_index, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -339,20 +340,76 @@ def test_sanitize_index_rejects_invalid_collections(index):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("as_boolean", (False, True))
-def test_indices_to_mask_selects_the_cross_product(as_boolean):
-    buf = torch.arange(20, dtype=torch.int32).reshape((4, 5))
-    if as_boolean:
-        envs_idx = torch.tensor((False, True, False, True))
-        dofs_idx = torch.tensor((True, False, True, False, False))
-    else:
-        envs_idx = torch.tensor((1, 3), dtype=torch.int32)
-        dofs_idx = torch.tensor((0, 2), dtype=torch.int32)
+def test_tensor_read_write_by_mixed_selection():
+    tensor_ref = np.arange(20).reshape((4, 5))
+    # Every form a selection of one axis takes, with the entries it selects. A trailing None leaves a single axis.
+    selections = [
+        (
+            (None, np.arange(size)),
+            (1, np.array((1,))),
+            (slice(1, 4), np.arange(1, 4)),
+            (range(0, size, 2), np.arange(0, size, 2)),
+            ([3, 0, 2], np.array((3, 0, 2))),
+            (np.array((3, 0, 2)), np.array((3, 0, 2))),
+            (torch.tensor((3, 0, 2), device=gs.device), np.array((3, 0, 2))),
+            (torch.tensor((True, False, True, True, False)[:size], device=gs.device), np.array((0, 2, 3))),
+        )
+        for size in tensor_ref.shape
+    ]
+    for (selection_0, idx_0), (selection_1, idx_1) in itertools.product(*selections):
+        idx = np.ix_(idx_0, idx_1)
+        tensor = torch.as_tensor(tensor_ref, dtype=gs.tc_float, device=gs.device)
+        assert_equal(tensor[indices_to_mask(selection_0, selection_1, boolean_mask=False)], tensor_ref[idx])
 
-    # Selecting on two axes takes every combination, rather than pairing the two selections elementwise, which for
-    # these inputs would give the two values on the diagonal.
-    assert_equal(buf[indices_to_mask(envs_idx, dofs_idx)], torch.tensor(((5, 7), (15, 17)), dtype=torch.int32))
-    assert_equal(buf[indices_to_mask(envs_idx)], buf[torch.tensor((1, 3))])
+        # A value is a scalar, broadcast along either axis, holds the selected entries, or holds every entry of the
+        # axes selected by a mask, the selected entries being written in the order of the selection.
+        n_0, n_1 = len(idx_0), len(idx_1)
+        blocks = (np.arange(n_1), np.arange(n_0)[:, None], np.arange(n_0 * n_1).reshape((n_0, n_1)))
+        values_and_blocks = [(7, 7), *[(block, block) for block in blocks]]
+        is_mask = []
+        for selection in (selection_0, selection_1):
+            is_mask.append(isinstance(selection, torch.Tensor) and selection.dtype == torch.bool)
+        if any(is_mask):
+            full_value_shape, full_value_idx = [], []
+            for size, axis_idx, is_axis_mask in zip(tensor_ref.shape, (idx_0, idx_1), is_mask):
+                full_value_shape.append(size if is_axis_mask else len(axis_idx))
+                full_value_idx.append(axis_idx if is_axis_mask else np.arange(len(axis_idx)))
+            full_value = np.arange(np.prod(full_value_shape)).reshape(full_value_shape)
+            values_and_blocks.append((full_value, full_value[np.ix_(*full_value_idx)]))
+        mask = indices_to_mask(selection_0, selection_1)
+        for dtype in (gs.tc_float, torch.uint32):
+            for value, block in values_and_blocks:
+                if isinstance(value, int):
+                    value_tensor = value
+                else:
+                    value_tensor = torch.as_tensor(value, dtype=dtype, device=gs.device)
+                if value is block:
+                    assert_equal(broadcast_tensor(value_tensor, dtype, (n_0, n_1)), np.broadcast_to(block, (n_0, n_1)))
+                tensor_written = torch.as_tensor(tensor_ref, dtype=dtype, device=gs.device)
+                assign_indexed_tensor(tensor_written, mask, value_tensor)
+                expected = tensor_ref.copy()
+                expected[idx] = block
+                assert_equal(tensor_written, expected)
+
+    # A selection of two dimensions takes one row of entries per selected environment, or a row shared by all of them.
+    # A write keeps the last occurrence of an entry repeated in a row, and the last row of a repeated environment.
+    for selection_0, idx_0 in (*selections[0], (torch.tensor((3, 0, 3), device=gs.device), np.array((3, 0, 3)))):
+        rows = (np.arange(len(idx_0))[:, None] + (4, 1, 4)) % 5
+        for rows_idx in (rows, rows[:1]):
+            idx_0_block, rows_block = np.broadcast_arrays(idx_0[:, None], rows_idx)
+            mask = indices_to_mask(selection_0, rows_idx, boolean_mask=False, pair_rows=True)
+            tensor = torch.as_tensor(tensor_ref, dtype=gs.tc_float, device=gs.device)
+            assert_equal(tensor[mask], tensor_ref[idx_0_block, rows_block])
+            for value in (7, np.arange(rows_block.size).reshape(rows_block.shape)):
+                tensor = torch.as_tensor(tensor_ref, dtype=gs.tc_float, device=gs.device)
+                value_tensor = value if isinstance(value, int) else torch.as_tensor(value, device=gs.device)
+                assign_indexed_tensor(tensor, mask, value_tensor)
+                expected = tensor_ref.copy()
+                values_block = np.broadcast_to(value, rows_block.shape)
+                for i in {i_0: i for i, i_0 in enumerate(idx_0)}.values():
+                    for i_0, i_1, entry in zip(idx_0_block[i], rows_block[i], values_block[i]):
+                        expected[i_0, i_1] = entry
+                assert_equal(tensor, expected)
 
 
 @pytest.mark.required

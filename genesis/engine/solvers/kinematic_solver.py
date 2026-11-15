@@ -76,7 +76,7 @@ def _select_links_offset(offset, links_idx, envs_idx):
     """
     if offset.ndim == 2:
         return offset[indices_to_mask(links_idx)]
-    return offset[indices_to_mask(envs_idx, links_idx)]
+    return offset[indices_to_mask(envs_idx, links_idx, boolean_mask=False)]
 
 
 def _offset_world_shift(offset_pos, offset_quat, world_quat):

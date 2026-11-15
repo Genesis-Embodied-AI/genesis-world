@@ -2331,7 +2331,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 gain = qd_to_torch(self.dyn_info.dofs.act_gain, transpose=True, copy=False)
                 assign_indexed_tensor(gain, mask, kp)
                 bias = qd_to_torch(self.dyn_info.dofs.act_bias, transpose=True, copy=False)
-                bias[(*mask, ..., 0)] = 0.0
+                assign_indexed_tensor(bias, (*mask, ..., 0), 0.0)
                 assign_indexed_tensor(bias, (*mask, ..., 1), -kp)
             elif name == "kv":
                 # kv sets act_bias[..., 2] = -kv
@@ -2474,7 +2474,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
-            ctrl_mode[mask] = gs.CTRL_MODE.FORCE
+            assign_indexed_tensor(ctrl_mode, mask, gs.CTRL_MODE.FORCE)
             ctrl_force = qd_to_torch(self.dyn_state.dofs.ctrl_force, transpose=True, copy=False)
             assign_indexed_tensor(ctrl_force, mask, force)
             if gs.backend == gs.metal:
@@ -2494,7 +2494,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
-            ctrl_mode[mask] = gs.CTRL_MODE.VELOCITY
+            assign_indexed_tensor(ctrl_mode, mask, gs.CTRL_MODE.VELOCITY)
             ctrl_vel = qd_to_torch(self.dyn_state.dofs.ctrl_vel, transpose=True, copy=False)
             assign_indexed_tensor(ctrl_vel, mask, velocity)
             if gs.backend == gs.metal:
@@ -2514,11 +2514,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
-            ctrl_mode[mask] = gs.CTRL_MODE.POSITION
+            assign_indexed_tensor(ctrl_mode, mask, gs.CTRL_MODE.POSITION)
             ctrl_pos = qd_to_torch(self.dyn_state.dofs.ctrl_pos, transpose=True, copy=False)
             assign_indexed_tensor(ctrl_pos, mask, position)
             ctrl_vel = qd_to_torch(self.dyn_state.dofs.ctrl_vel, transpose=True, copy=False)
-            ctrl_vel[mask] = 0.0
+            assign_indexed_tensor(ctrl_vel, mask, 0.0)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
             return
@@ -2536,7 +2536,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
-            ctrl_mode[mask] = gs.CTRL_MODE.POSITION
+            assign_indexed_tensor(ctrl_mode, mask, gs.CTRL_MODE.POSITION)
             ctrl_pos = qd_to_torch(self.dyn_state.dofs.ctrl_pos, transpose=True, copy=False)
             assign_indexed_tensor(ctrl_pos, mask, position)
             ctrl_vel = qd_to_torch(self.dyn_state.dofs.ctrl_vel, transpose=True, copy=False)
@@ -2901,7 +2901,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def get_mass_mat(self, dofs_idx=None, envs_idx=None, decompose=False):
         tensor = qd_to_torch(self.mass_mat_L if decompose else self.mass_mat, envs_idx, transpose=True, copy=True)
         if dofs_idx is not None:
-            tensor = tensor[indices_to_mask(None, dofs_idx, dofs_idx)]
+            tensor = tensor[indices_to_mask(None, dofs_idx, dofs_idx, boolean_mask=False)]
         if self.n_envs == 0:
             tensor = tensor[0]
 

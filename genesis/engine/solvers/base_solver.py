@@ -774,7 +774,10 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
         tensors = [qd_to_torch(field, transpose=is_batched, copy=copy) for field in fields]
         if self.is_recording:
             self.record_read(tuple(tensors), fields)
-        mask = indices_to_mask(envs_idx, idx, pair_rows=True) if is_batched else indices_to_mask(idx)
+        if is_batched:
+            mask = indices_to_mask(envs_idx, idx, boolean_mask=False, pair_rows=True)
+        else:
+            mask = indices_to_mask(idx)
         tensors = [tensor[mask] for tensor in tensors]
         return tensors[0] if is_single else tensors
 

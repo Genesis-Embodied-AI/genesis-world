@@ -809,12 +809,10 @@ def indices_to_mask(
     Args:
         keepdim (bool): Whether to keep all dimensions even if masks are integers. Defaults to True.
         to_torch (bool): Whether to force casting collections to torch.Tensor.
-        boolean_mask (bool): Whether a boolean mask may be returned as it is. Defaults to True. Set it to False when
-        the mask is given to something that only accepts indices, such as a kernel that has no masked variant.
-        Converting a boolean mask to indices counts its selected entries on the device and reads that count back, which
-        synchronizes the GPU. It should be avoided at all cost because it would significantly impede performance,
-        especially for massively parallel applications like reinforcement learning. A mask selecting on several axes at
-        once is always converted, because the cross-product needs one index per axis.
+        boolean_mask (bool): Whether a boolean mask may be returned as it is. Defaults to True. Converting it to indices
+        reads its count of selected entries back from the device, which synchronizes the GPU. Over several axes, a
+        kept mask leaves each axis as given, for 'assign_indexed_tensor', while converted indices broadcast into their
+        cross-product. Set it to False for a consumer taking indices only, such as a kernel or a read.
         raise_if_fancy (bool): Whether to raise if the resulting mask requires advanced indexing (aka. fancy
         indexing), which would make extracting a slice copy.
         pair_rows (bool): Whether an index of two dimensions selects one row of entries per entry of the index before
@@ -904,17 +902,13 @@ def indices_to_mask(
             mask[i - 1], mask[i] = prev.reshape((-1, 1)), rows
             num_tensors = 0
 
-    if num_tensors > 1:
+    has_boolean_mask = any([isinstance(arg, torch.Tensor) and arg.dtype == torch.bool for arg in mask])
+    if num_tensors > 1 and not has_boolean_mask:
         tensor_idx = 0
         for i in range(len(mask)):
             if is_tensor[i]:
                 if not isinstance(mask[i], (torch.Tensor, np.ndarray)):
                     gs.raise_exception("Multi-dimensional masking only supported for 'to_torch=True'.")
-                # The cross-product comes of broadcasting one index per axis, which a boolean selection cannot take
-                # part in: torch reads it as consuming as many axes as it has dimensions. It becomes indices here, at
-                # the only place where combining axes makes that necessary.
-                if isinstance(mask[i], torch.Tensor) and mask[i].dtype == torch.bool:
-                    mask[i] = mask[i].nonzero()[:, 0]
                 shape = [1] * num_tensors
                 shape[tensor_idx] = -1
                 mask[i] = mask[i].reshape(shape)
@@ -961,7 +955,9 @@ def _apply_masks(out, value, row_mask, col_mask, keepdim, copy, *, to_torch):
             raise_if_fancy=raise_if_fancy,
         )
     else:
-        mask = indices_to_mask(row_mask, col_mask, to_torch=to_torch, keepdim=keepdim, raise_if_fancy=raise_if_fancy)
+        mask = indices_to_mask(
+            row_mask, col_mask, to_torch=to_torch, keepdim=keepdim, boolean_mask=False, raise_if_fancy=raise_if_fancy
+        )
     return out[mask]
 
 
@@ -1604,59 +1600,103 @@ def assign_indexed_tensor(
         signed_dtype = _UNSIGNED_TO_SIGNED_DTYPES[tensor.dtype]
         value = torch.as_tensor(value, dtype=tensor.dtype, device=tensor.device).view(signed_dtype)
         tensor = tensor.view(signed_dtype)
+    is_value_scalar = isinstance(value, (int, float))
 
-    # A boolean mask selecting along one axis, the others being sliced, writes through the mask itself. Indexing by it
-    # would count its entries on the device and read the count back, which synchronizes the host.
-    mask_axis = None
+    # A selection holding a boolean mask, its other axes being sliced or selected by indices (see 'boolean_mask' in
+    # 'indices_to_mask'), writes through one mask over the selected entries. Indexing by a boolean mask would count its
+    # entries on the device and read the count back, which synchronizes the host. Integers and an ellipsis trailing the
+    # selected axes leave the position of these axes in the selection unchanged.
+    masked_axes: list[int] = []
+    has_boolean_mask = False
+    is_tail = False
     for axis, index in enumerate(indices):
-        if not isinstance(index, slice):
-            is_mask = isinstance(index, torch.Tensor) and index.dtype == torch.bool and index.ndim == 1
-            if mask_axis is not None or not is_mask:
-                mask_axis = None
-                break
-            mask_axis = axis
+        if isinstance(index, slice):
+            continue
+        if not is_tail and isinstance(index, torch.Tensor) and index.ndim == 1:
+            masked_axes.append(axis)
+            has_boolean_mask = has_boolean_mask or index.dtype == torch.bool
+        elif index is Ellipsis or isinstance(index, int):
+            is_tail = True
+        else:
+            has_boolean_mask = False
+            break
     selection = None
-    if mask_axis is not None and not isinstance(tensor, np.ndarray):
-        selection = tensor[tuple([slice(None) if axis == mask_axis else index for axis, index in enumerate(indices)])]
-        if not isinstance(value, (int, float)):
-            # The entries of a value of the rank of the selection, or omitting every axis up to the masked one, follow
-            # from its shape alone. Any other value is broadcast against the number of selected entries by indexing.
+    if has_boolean_mask and not isinstance(tensor, np.ndarray):
+        selection = tensor[tuple([slice(None) if isinstance(index, torch.Tensor) else index for index in indices])]
+        boolean_axes = [axis for axis in masked_axes if indices[axis].dtype == torch.bool]
+        if not is_value_scalar:
+            # The entries of a value of the rank of the selection, or omitting every axis up to the last masked one,
+            # follow from its shape alone. Any other value is broadcast against the number of selected entries by
+            # indexing, which takes the indices of several axes broadcast against each other.
             value_shape = np.shape(value)
             value_offset = selection.ndim - len(value_shape)
-            is_value_explicit = value_offset == 0 or value_offset > mask_axis
+            is_value_explicit = value_offset == 0 or value_offset > boolean_axes[-1]
             for axis, size in enumerate(value_shape, value_offset):
-                if axis != mask_axis and size not in (1, selection.shape[axis]):
-                    is_value_explicit = False
+                if axis not in boolean_axes:
+                    n_entries = len(indices[axis]) if axis in masked_axes else selection.shape[axis]
+                    is_value_explicit = is_value_explicit and size in (1, n_entries)
             if not is_value_explicit:
                 selection = None
+                if len(masked_axes) > 1:
+                    masked_indices = indices_to_mask(*[indices[axis] for axis in masked_axes], boolean_mask=False)
+                    indices = list(indices)
+                    for axis, index in zip(masked_axes, masked_indices):
+                        indices[axis] = index
+                    indices = tuple(indices)
     if isinstance(tensor, np.ndarray):
         value = torch.as_tensor(value)
     elif selection is not None:
-        spread = [1] * selection.ndim
-        spread[mask_axis] = -1
-        # A mask given on the host selects on the device of the tensor
-        mask = indices[mask_axis].to(device=selection.device).view(spread)
-        if isinstance(value, (int, float)):
-            selection.masked_fill_(mask, value)
-            return
-        # A value spanning the masked axis, or broadcast along it, is written entry by entry, any other one holds the
-        # selected entries in order.
-        broadcast_shape = list(selection.shape)
-        broadcast_shape[mask_axis] = value_shape[mask_axis] if value_offset == 0 else 1
-        value = broadcast_tensor(value, selection.dtype, broadcast_shape, dim_names)
-        if broadcast_shape[mask_axis] in (1, selection.shape[mask_axis]):
-            torch.where(mask, value, selection, out=selection)
+        # The entries of the axes selected by indices are gathered, written through the masks, then scattered back,
+        # which keeps the cost of the write proportional to the number of indices.
+        indexed_axes = [axis for axis in masked_axes if indices[axis].dtype != torch.bool]
+        axes_index = [indices[axis].to(device=selection.device) for axis in indexed_axes]
+        subselections = [selection]
+        for axis, index in zip(indexed_axes, axes_index):
+            subselections.append(subselections[-1][(*(slice(None),) * axis, index)])
+        subselection = subselections[-1]
+        axes_mask: list[torch.Tensor] = []
+        for axis in boolean_axes:
+            spread = [1] * selection.ndim
+            spread[axis] = -1
+            # A mask given on the host selects on the device of the tensor
+            axes_mask.append(indices[axis].to(device=selection.device).view(spread))
+        mask = functools.reduce(torch.logical_and, axes_mask)
+        if is_value_scalar:
+            subselection.masked_fill_(mask, value)
         else:
-            # Metal mis-scatters a stride-0 broadcast mask or source, which must be dense there
-            if gs.backend == gs.metal:
-                mask = mask.expand_as(selection).contiguous()
-                value = value.contiguous()
-            selection.masked_scatter_(mask, value)
+            # A value spanning a masked axis, or broadcast along it, is written entry by entry, any other one holds the
+            # selected entries of the masked axes in order.
+            broadcast_shape = list(subselection.shape)
+            expanded_shape = list(subselection.shape)
+            compact_masks: list[torch.Tensor] = []
+            for axis in masked_axes:
+                broadcast_shape[axis] = value_shape[axis - value_offset] if axis >= value_offset else 1
+                if indices[axis].dtype == torch.bool and broadcast_shape[axis] not in (1, selection.shape[axis]):
+                    expanded_shape[axis] = broadcast_shape[axis]
+                    compact_masks.append(axes_mask[boolean_axes.index(axis)])
+            # An index given several times writes the value of one of its occurrences, which one being undefined.
+            # Keeping the last one, as below, would cost more than the rest of the write.
+            value = broadcast_tensor(value, selection.dtype, broadcast_shape, dim_names)
+            if compact_masks:
+                value = value.expand(expanded_shape)
+                compact_mask = functools.reduce(torch.logical_and, compact_masks)
+                # Metal mis-scatters a stride-0 broadcast mask or source, which must be dense there
+                if gs.backend == gs.metal:
+                    compact_mask = compact_mask.expand_as(subselection).contiguous()
+                    value = value.contiguous()
+                if len(compact_masks) == len(boolean_axes):
+                    subselection.masked_scatter_(compact_mask, value)
+                else:
+                    value = torch.empty_like(subselection).masked_scatter_(compact_mask, value)
+            if len(compact_masks) < len(boolean_axes):
+                torch.where(mask, value, subselection, out=subselection)
+        for i in range(len(indexed_axes) - 1, -1, -1):
+            subselections[i][(*(slice(None),) * indexed_axes[i], axes_index[i])] = subselections[i + 1]
         return
     # A single value written over a selection of one axis has faster forms than advanced indexing, which stages an
     # index tensor and a scatter that dominate a write this small: the buffer is filled whole when every axis is taken
     # whole, and a selection of rows fills through the rows.
-    elif isinstance(value, (int, float)):
+    elif is_value_scalar:
         axes = [axis for axis, index in enumerate(indices) if not (isinstance(index, slice) and index == slice(None))]
         if not axes:
             tensor.fill_(value)
@@ -1667,30 +1707,48 @@ def assign_indexed_tensor(
             if isinstance(index, torch.Tensor) and index.ndim == 1 and index.dtype == torch.int64:
                 tensor.index_fill_(axis, index, value)
                 return
-    else:
-        # Every occurrence of an index given several times writes the value of its last occurrence, since a scatter
-        # writes them in no defined order. The tensors and integers indexing the axes broadcast against each other into
-        # one block of axes of the selection, which takes the place of the first of them when they are contiguous, and
-        # leads the selection otherwise. Each tensor spans the axis of the block along which its size is above 1.
+    repeatable_axes = []
+    if not isinstance(tensor, np.ndarray):
         # A loop spares the frame of a comprehension, which the many small writes of the hot path would pay
-        repeatable_axes = []
         for axis, index in enumerate(indices):
             if isinstance(index, torch.Tensor) and index.dtype != torch.bool and index.numel() > 1:
                 repeatable_axes.append(axis)
-        if repeatable_axes:
-            advanced_axes = [axis for axis, index in enumerate(indices) if not isinstance(index, slice)]
-            indexed_shape = get_indexed_shape(tensor.shape, indices)
-            value = broadcast_tensor(value, tensor.dtype, indexed_shape, dim_names)
-            is_advanced_axes_contiguous = advanced_axes == list(range(advanced_axes[0], advanced_axes[-1] + 1))
-            block_start = advanced_axes[0] if is_advanced_axes_contiguous else 0
-            block_ndim = max([indices[axis].ndim for axis in repeatable_axes])
-            for axis in repeatable_axes:
-                index = indices[axis]
-                index_shape = (1,) * (block_ndim - index.ndim) + tuple(index.shape)
-                block_axis = [i for i, size in enumerate(index_shape) if size > 1][0]
+    # Every occurrence of an index given several times writes the value of its last occurrence, since a scatter writes
+    # them in no defined order. The tensors and integers indexing the axes broadcast against each other into one block
+    # of axes of the selection, which takes the place of the first of them when they are contiguous, and leads the
+    # selection otherwise. Each tensor repeats its entries along its last axis of size above 1 in the block, so one row
+    # per environment (see 'pair_rows' in 'indices_to_mask') repeats them within each row, and a repeated environment
+    # writes its last row alone, as the kernels do.
+    if repeatable_axes:
+        advanced_axes = [axis for axis, index in enumerate(indices) if not isinstance(index, slice)]
+        if not is_value_scalar:
+            value = broadcast_tensor(value, tensor.dtype, get_indexed_shape(tensor.shape, indices), dim_names)
+        is_advanced_axes_contiguous = advanced_axes == list(range(advanced_axes[0], advanced_axes[-1] + 1))
+        block_start = advanced_axes[0] if is_advanced_axes_contiguous else 0
+        block_ndim = max([indices[axis].ndim for axis in repeatable_axes])
+        indices = list(indices)
+        for axis in repeatable_axes:
+            index_shape = (1,) * (block_ndim - indices[axis].ndim) + tuple(indices[axis].shape)
+            block_axis = [i for i, size in enumerate(index_shape) if size > 1][-1]
+            rows_axes_and_shapes = []
+            for other_axis in repeatable_axes:
+                other_shape = (1,) * (block_ndim - indices[other_axis].ndim) + tuple(indices[other_axis].shape)
+                if other_axis != axis and other_shape[block_axis] > 1:
+                    rows_axes_and_shapes.append((other_axis, other_shape))
+            # Every occurrence of an index written a single value writes the same, unless it carries a row
+            if is_value_scalar and not rows_axes_and_shapes:
+                continue
+            index = indices[axis].reshape(index_shape)
+            positions = get_last_occurrence(index.movedim(block_axis, -1)).movedim(-1, block_axis)
+            if not is_value_scalar:
                 # An index may live on another device than the values, which a scatter accepts and a gather does not
-                positions = get_last_occurrence(index.squeeze().to(device=value.device))
-                value = value.index_select(block_start + block_axis, positions)
+                positions_shape = (1,) * block_start + index_shape + (1,) * (value.ndim - block_start - block_ndim)
+                positions_value = positions.reshape(positions_shape).to(device=value.device)
+                value = torch.take_along_dim(value, positions_value, dim=block_start + block_axis)
+            for other_axis, other_shape in rows_axes_and_shapes:
+                other_index = indices[other_axis].reshape(other_shape)
+                indices[other_axis] = torch.take_along_dim(other_index, positions, dim=block_axis)
+        indices = tuple(indices)
 
     try:
         tensor[indices] = value
