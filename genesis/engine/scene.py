@@ -317,7 +317,7 @@ class Scene(BuildableMixin, RBC):
         morph: Morph | Iterable[Morph],
         material: gs.materials.Rigid | None = ...,
         surface: Surface | None = ...,
-        visualize_contact: bool = ...,
+        visualize_contact: bool | None = ...,
         vis_mode: str | None = ...,
         name: str | None = ...,
     ) -> "RigidEntity": ...
@@ -328,7 +328,7 @@ class Scene(BuildableMixin, RBC):
         morph: Morph | Iterable[Morph],
         material: gs.materials.Kinematic,
         surface: Surface | None = ...,
-        visualize_contact: Literal[False] = ...,
+        visualize_contact: Literal[False] | None = ...,
         vis_mode: str | None = ...,
         name: str | None = ...,
     ) -> KinematicEntity: ...
@@ -339,7 +339,7 @@ class Scene(BuildableMixin, RBC):
         morph: Morph | Iterable[Morph],
         material: Material[MaterialEntityT],
         surface: Surface | None = ...,
-        visualize_contact: bool = ...,
+        visualize_contact: Literal[False] | None = ...,
         vis_mode: str | None = ...,
         name: str | None = ...,
     ) -> MaterialEntityT: ...
@@ -475,7 +475,7 @@ class Scene(BuildableMixin, RBC):
     def add_stage(
         self,
         morph: gs.morphs.USD | None = None,
-        material: gs.materials.Kinematic | None = None,
+        material: gs.materials.Rigid | gs.materials.Kinematic | None = None,
         surface: Surface | None = None,
         visualize_contact: bool | None = None,
         vis_mode: Literal["visual", "collision"] | None = None,
@@ -798,7 +798,12 @@ class Scene(BuildableMixin, RBC):
     ) -> "Emitter": ...
 
     @overload
-    def add_emitter(self, material: Material, max_particles: int = ..., surface: Surface | None = ...) -> "Emitter": ...
+    def add_emitter(
+        self,
+        material: gs.materials.MPM.Base | gs.materials.SPH.Base | gs.materials.PBD.Liquid | gs.materials.PBD.Particle,
+        max_particles: int = ...,
+        surface: Surface | None = ...,
+    ) -> "Emitter": ...
 
     @gs.assert_unbuilt
     def add_emitter(
