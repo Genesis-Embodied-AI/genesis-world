@@ -666,9 +666,8 @@ class DynamicTexture(_ImagelessTexture):
         magenta checkerboard. A mapping names them, so that they are shown by name as well as by position. The variants
         are fixed once the scene is built, except the batched ones, which take pixels drawn per environment, each
         environment in its own copy. A variant costs the memory of one image per visual geom showing the texture and per
-        renderer, or of one image per environment for a batched one. Default is one variant with no texture.
-    initial_variant : int | str, optional
-        The variant every environment shows at build and after a reset, by position or by name. Default is 0.
+        renderer, or of one image per environment for a batched one. Every environment shows the first variant at build
+        and after a reset. Default is one variant with no texture.
     """
 
     resolution: PositiveVec2IType
@@ -676,15 +675,9 @@ class DynamicTexture(_ImagelessTexture):
         Annotated[tuple[ColorTexture | ImageTexture | AssetTexture | None, ...], Field(min_length=1, strict=False)]
         | Annotated[dict[str, ColorTexture | ImageTexture | AssetTexture | None], Field(min_length=1)]
     ) = (None,)
-    initial_variant: StrictInt | str = 0
 
     # The texture an asset gives the map it fills, which its asset texture variants show (see '_resolve_asset_texture')
     _asset_texture: "ColorTexture | ImageTexture | None" = PrivateAttr(default=None)
-
-    @model_validator(mode="after")
-    def _check_variants(self) -> Self:
-        self.get_variants_idx(self.initial_variant)
-        return self
 
     def _resolve_asset_texture(self, asset_texture: Texture | None) -> "DynamicTexture":
         """Return a copy whose asset texture variants show the texture an asset gives the map.

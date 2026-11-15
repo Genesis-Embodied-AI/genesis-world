@@ -46,7 +46,6 @@ class Texture(BatchedMixin):
         self._options = options
         self._texture_map_type = texture_map_type
         self._vgeom = vgeom
-        (self._initial_variant_idx,) = options.get_variants_idx(options.initial_variant)
         self._active_variants_idx: np.ndarray | None = None
         # Whether pixels were drawn in each variant of each environment since its last reset
         self._is_drawn: np.ndarray | None = None
@@ -57,7 +56,7 @@ class Texture(BatchedMixin):
 
     def build(self, n_envs: int) -> None:
         super().build(n_envs)
-        self._active_variants_idx = np.full(self.n_envs_, self._initial_variant_idx, dtype=gs.np_int)
+        self._active_variants_idx = np.zeros(self.n_envs_, dtype=gs.np_int)
         self._is_drawn = np.zeros((len(self._options.variants), self.n_envs_), dtype=np.bool_)
 
     @property
@@ -186,9 +185,9 @@ class Texture(BatchedMixin):
                 subscriber.notify(StateChange.VISUAL, envs_idx)
 
     def reset(self, envs_idx: IndexType | None = None) -> None:
-        """Show the initial variant again in the selected environments, and erase the pixels drawn in them."""
+        """Show the first variant again in the selected environments, and erase the pixels drawn in them."""
         envs_idx = tensor_to_array(self._scene.sim.sanitize_envs_idx(envs_idx))
-        self._active_variants_idx[envs_idx] = self._initial_variant_idx
+        self._active_variants_idx[envs_idx] = 0
         for i_variant in np.flatnonzero(self._is_drawn[:, envs_idx].any(axis=1)):
             drawn_envs_idx = envs_idx[self._is_drawn[i_variant, envs_idx]]
             if i_variant not in self._variants_seed:
