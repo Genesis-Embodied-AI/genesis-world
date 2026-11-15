@@ -230,7 +230,7 @@ def main():
     scene.add_entity(
         gs.morphs.Plane(),
     )
-    duckurcqa_dir = snapshot_download(
+    asset_path = snapshot_download(
         repo_type="dataset",
         repo_id="Genesis-Intelligence/assets",
         revision="d571c25abb363a5facc603b7f6be62e6e0ad46da",
@@ -248,7 +248,7 @@ def main():
             image_array=np.where(is_stripe[..., None], [135, 206, 235], [189, 224, 254]).astype(np.uint8),
         ),
         "duckurcqa": gs.textures.ImageTexture(
-            image_path=os.path.join(duckurcqa_dir, "textures", "duckurcqa.png"),
+            image_path=f"{asset_path}/textures/duckurcqa.png",
         ),
         "paint": gs.textures.AssetTexture(
             is_batched=True,
