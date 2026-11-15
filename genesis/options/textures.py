@@ -648,8 +648,8 @@ class DynamicTexture(_ImagelessTexture):
     per environment, which ``set_texture`` draws pixels into at runtime. Once the scene is built, ``vgeom.set_texture``
     shows a variant or draws pixels in each environment, and ``vgeom.get_texture`` returns the variant each environment
     shows. Each visual geom showing the texture switches and draws on its own, while ``entity.set_texture`` sets at once
-    the visual geoms it selects, by position or by the selector that declared the texture. Each renderer holds its own
-    copy of the pixels, and only the rasterizer renders a dynamic texture yet.
+    the visual geoms it selects, by position or by a ``gs.indices.VGeom``. Each renderer holds its own copy of the
+    pixels, and only the rasterizer renders a dynamic texture yet.
 
     The variants and drawn pixels are RGBA images, whose format the map sets. The diffuse map holds 8-bit sRGB values,
     the alpha channel standing for the opacity in place of the opacity of the surface. The emissive map holds 16-bit

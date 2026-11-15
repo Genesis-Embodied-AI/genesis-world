@@ -43,7 +43,7 @@ class RigidNodeBatch(NamedTuple):
 
 
 @dataclass
-class LayeredTextureBinding:
+class TextureBinding:
     """The texture array of one map of a geom holding several images, and the node sampling it.
 
     'texture' is the dynamic texture, or None for a static batched texture of the surface. 'variants_envs_layer' holds
@@ -225,7 +225,7 @@ class RasterizerContext(BuildableMixin):
         self.frustum_nodes = dict()  # nodes camera frustums
         self.rigid_nodes = dict()
         # The rigid nodes that the dynamic and batched textures of the scene are drawn by, synced at update time
-        self._texture_bindings: list[LayeredTextureBinding] = []
+        self._texture_bindings: list[TextureBinding] = []
         # The geoms behind the rigid nodes, grouped by solver and visual mode for placement at update time
         self._rigid_batches: dict[tuple["RigidSolver | KinematicSolver", bool], RigidNodeBatch] = {}
         # (env_idx, geom.uid) -> per-env pyrender node for kinematic entities currently driven by set_vverts
@@ -695,7 +695,7 @@ class RasterizerContext(BuildableMixin):
                                 else GL_UNSIGNED_BYTE,
                             )
                             textures_array[(id(material), is_base_color)] = texture_array
-                        binding = LayeredTextureBinding(
+                        binding = TextureBinding(
                             geom.uid,
                             texture,
                             texture_array,
@@ -1415,7 +1415,7 @@ class RasterizerContext(BuildableMixin):
         self.clear_external_nodes()
 
     def _on_dynamic_texture_draw(
-        self, binding: LayeredTextureBinding, i_variant: int, envs_idx: np.ndarray, image: torch.Tensor
+        self, binding: TextureBinding, i_variant: int, envs_idx: np.ndarray, image: torch.Tensor
     ) -> None:
         """Queue the upload of the pixels drawn in a batched variant for the rendered environments."""
         envs_layer = binding.variants_envs_layer[i_variant, envs_idx]
