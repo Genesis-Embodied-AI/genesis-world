@@ -65,7 +65,7 @@ def test_packed_rgba_resolves_batched_fallback_per_environment():
     # test, and per-environment (batched) textures are asserted here on the packed RGBA directly. A black base entry
     # defers to its emissive while a nonblack entry in the same batch keeps its base; blackness is the effective texel x
     # factor, so a green texture masked to black by a red-only factor still defers. A batch with no fallback keeps a
-    # stable identity so the packed-RGBA cache hits. Batch textures and batched textures resolve alike.
+    # stable identity so the packed-RGBA cache hits, for both forms of per-environment textures.
     base = gs.textures.ImageTexture(image_array=np.full((4, 4, 3), (201, 166, 105), dtype=np.uint8))
     emissive = gs.textures.ImageTexture(image_array=np.full((4, 4, 3), (76, 122, 64), dtype=np.uint8))
     masked_black = gs.textures.ImageTexture(
@@ -92,6 +92,14 @@ def test_packed_rgba_resolves_batched_fallback_per_environment():
     rgba = gs.surfaces.BSDF(diffuse_texture=base_batch, emissive_texture=emissive_batch).get_rgba()
     assert_equal(rgba.image_array[0, ..., :3], emissive.image_array)
     assert_equal(rgba.image_array[1, ..., :3], (201, 0, 0))
+    # A dynamic emissive is drawn whole, so a batched base keeps its images rather than falling back to it per entry
+    rgba = gs.surfaces.BSDF(
+        diffuse_texture=base_batch,
+        emissive_texture=gs.textures.DynamicTexture(
+            resolution=(4, 4),
+        ),
+    ).get_rgba()
+    assert_equal(rgba.image_array[..., :3], base_batch.image_array)
 
     stable_surface = gs.surfaces.BSDF(
         diffuse_texture=gs.textures.ImageTexture(

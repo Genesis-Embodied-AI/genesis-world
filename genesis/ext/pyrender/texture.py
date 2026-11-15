@@ -233,18 +233,18 @@ class Texture(object):
         if self.data_format == GL_HALF_FLOAT:
             internal_fmt = GL_RGBA16F if fmt == GL_RGBA else GL_RGB16F
 
-        # The source rows are tightly packed, while OpenGL reads each row from a 4-byte boundary by default, which shifts
-        # every row after the first where a row is no multiple of 4 bytes, as one of an odd width in RGB half floats
+        # The source rows are tightly packed, while OpenGL reads each row from a 4-byte boundary by default, shifting
+        # every row after the first where a row is no multiple of 4 bytes, as an odd width of RGB half floats does
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
 
         # Bind texture and generate mipmaps
         if is_array:
-            # A dynamic or batched texture takes a layer per variant entry and per rendered environment of a batched one
+            # A dynamic or batched texture takes a layer per variant entry, and per rendered environment if batched
             max_layers = glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS)
             if len(self.source) > max_layers:
                 gs.raise_exception(
-                    f"A dynamic or batched texture takes {len(self.source)} layers, more than the {max_layers} this GPU "
-                    "holds. Render fewer environments with 'rendered_envs_idx' of the visualization options."
+                    f"A dynamic or batched texture takes {len(self.source)} layers, more than the {max_layers} this "
+                    "GPU holds. Render fewer environments with 'rendered_envs_idx' of the visualization options."
                 )
             glTexImage3D(
                 self.tex_type, 0, internal_fmt, width, height, len(self.source), 0, fmt, self.data_format, data

@@ -244,28 +244,36 @@ def test_export_and_load_rigid(
         parent_link_name=holder.base_link.name,
         pos=(0.0, 0.0, 0.15),
     )
-    # A scale stated per axis, which its declaration accepts beside a single factor. Its surface holds a texture
-    # read from an HDR file. Such a texture keeps a path rather than pixels, so no file can carry it.
+    # A scale stated per axis, which its declaration accepts beside a single factor. Its surface, and the surface its
+    # visual geom selection sets, hold textures read from an HDR file. Such a texture keeps a path rather than pixels,
+    # so no file can carry it.
     hdr_path = tmp_path / "sky.hdr"
     hdr_path.touch()
-    stretched = scene.add_entity(
-        spec=gs.entities.Rigid(
-            morph=gs.morphs.Mesh(
-                file=Path(get_assets_dir()) / "meshes" / "sphere.obj",
-                scale=(0.05, 0.1, 0.15),
-                pos=(60.0, 60.0, 1.0),
-            ),
-            surface=gs.surfaces.Default(
-                normal_texture=gs.textures.ImageTexture(
-                    image_path=str(hdr_path),
-                    encoding="linear",
-                ),
-            ),
-            dynamic_vertices=gs.surfaces.DynamicVertices(
-                is_batched=True,
+    stretched_spec = gs.entities.Rigid(
+        morph=gs.morphs.Mesh(
+            file=Path(get_assets_dir()) / "meshes" / "sphere.obj",
+            scale=(0.05, 0.1, 0.15),
+            pos=(60.0, 60.0, 1.0),
+        ),
+        surface=gs.surfaces.Default(
+            normal_texture=gs.textures.ImageTexture(
+                image_path=str(hdr_path),
+                encoding="linear",
             ),
         ),
+        dynamic_vertices=gs.surfaces.DynamicVertices(
+            is_batched=True,
+        ),
     )
+    stretched_spec.select(gs.indices.VGeom.at(0)).set_surface(
+        gs.surfaces.Default(
+            roughness_texture=gs.textures.ImageTexture(
+                image_path=str(hdr_path),
+                encoding="linear",
+            ),
+        )
+    )
+    stretched = scene.add_entity(spec=stretched_spec)
     # A XACRO is expanded at creation, so this morph holds the model its file was parsed into
     expanded = scene.add_entity(
         morph=gs.morphs.URDF(
@@ -332,6 +340,7 @@ def test_export_and_load_rigid(
     left_out = " ".join(record.getMessage() for record in caplog.records)
     assert "IMUSensor" in left_out
     assert "normal_texture" in left_out
+    assert "roughness_texture" in left_out
     assert "CSVFileWriter" not in left_out
     assert "pre_step_callback" in left_out
     assert "visual vertices" in left_out
