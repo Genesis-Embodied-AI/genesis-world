@@ -255,7 +255,7 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
     box.options.model_copy(deep=True).select(gs.indices.Geom.at(0)).set_friction(3.0)
     with pytest.raises(gs.GenesisException, match="at least 1"):
         gs.entities.Rigid(morph=())
-    with pytest.raises(gs.GenesisException, match="sets no quantity"):
+    with pytest.raises(gs.GenesisException, match="sets no field"):
         box_options.select(gs.indices.Geom.at(0)).set(gs.options.Geom())
     out_of_range_options = box_options.model_copy()
     out_of_range_options.select(gs.indices.Link.named("box_baselink")).select(gs.indices.Geom.at(1)).set_friction(1.0)

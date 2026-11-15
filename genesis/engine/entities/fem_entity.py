@@ -372,8 +372,8 @@ class FEMEntity(Entity):
                 gs.raise_exception(
                     f"The selection {selection_rule.selection_repr} holds no vertex of entity '{self.name}'."
                 )
-            if "is_fixed" in selection_rule.quantities.model_fields_set:
-                verts_is_fixed[verts_idx] = selection_rule.quantities.is_fixed
+            if "is_fixed" in selection_rule.options.model_fields_set:
+                verts_is_fixed[verts_idx] = selection_rule.options.is_fixed
         self._fixed_verts_idx_local = np.flatnonzero(verts_is_fixed).astype(gs.np_int, copy=False)
 
         self.init_positions = torch.tensor(init_positions, dtype=gs.tc_float, device=gs.device)

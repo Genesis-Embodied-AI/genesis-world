@@ -81,8 +81,8 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
     """Options an entity is constructed from, as passed to ``Scene.add_entity(options=...)``.
 
     A concrete subclass decides the kind of entity and the solver simulating it, and declares the materials it admits,
-    the selectors of its parts and the rules of quantities set on them. The fields are fixed at construction, while
-    ``select`` records into the options the quantities set on parts of the entity, where the kind of entity has parts.
+    the selectors of its parts and the rules of options set on them. The fields are fixed at construction, while
+    ``select`` records into the options the options set on parts of the entity, where the kind of entity has parts.
     The entity holds a frozen copy, which records nothing more, so later records leave the entity as it is. A copy
     of the options (``model_copy()``) records again, starting from the rules recorded so far.
 
@@ -97,13 +97,13 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
     name : str | None, optional
         The name of the entity, unique within the scene. If None, a name is generated from the morph.
     selection_rules : tuple[gs.options.SelectionRule, ...], optional
-        The rules of quantities set on selections of parts of the entity, in the order they were set, which ``select``
+        The rules of options set on selections of parts of the entity, in the order they were set, which ``select``
         and its setters alone record (see ``select``). Default is none.
     """
 
     # Whether the kind of entity admits several morphs, one per variant of a heterogeneous entity
     _admits_variants: ClassVar[bool] = False
-    # Selectors of the parts of the entity, from the coarsest level to the finest, and rules of the quantities set on
+    # Selectors of the parts of the entity, from the coarsest level to the finest, and rules of the options set on
     # them, that the kind of entity admits
     _selector_types: ClassVar[tuple[type[indices.Link | indices.Geom | indices.Vertex], ...]] = ()
     _rule_types: ClassVar[tuple[type[Geom | Vertex], ...]] = ()
@@ -165,9 +165,9 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
             gs.raise_exception(
                 f"A selection selects at its own level or a finer one, got {selection_rule.selection_repr}."
             )
-        if not isinstance(selection_rule.quantities, self._rule_types):
+        if not isinstance(selection_rule.options, self._rule_types):
             gs.raise_exception(
-                f"gs.entities.{type(self).__name__} sets no gs.options.{type(selection_rule.quantities).__name__} on its "
+                f"gs.entities.{type(self).__name__} sets no gs.options.{type(selection_rule.options).__name__} on its "
                 "parts."
             )
 
@@ -201,7 +201,7 @@ OptionsT = TypeVar("OptionsT", bound=BaseEntity)
 
 
 class _PartSelection(Generic[OptionsT]):
-    """A selection of parts of an entity, recording into its entity options the quantities set on it.
+    """A selection of parts of an entity, recording into its entity options the options set on it.
 
     It holds the entity options and the selector of each level leading to the parts, and owns no data. Every setter
     returns the selection, so that calls chain on it, ``end`` returns the entity options to start another selection
@@ -228,9 +228,9 @@ class _PartSelection(Generic[OptionsT]):
         """
         return self._options
 
-    def _set(self, quantities: tuple[Geom | Vertex, ...]) -> Self:
+    def _set(self, rules_options: tuple[Geom | Vertex, ...]) -> Self:
         self._options._record(
-            tuple(SelectionRule(selectors=self._selectors, quantities=quantities_) for quantities_ in quantities)
+            tuple(SelectionRule(selectors=self._selectors, options=rule_options) for rule_options in rules_options)
         )
         return self
 
@@ -238,9 +238,9 @@ class _PartSelection(Generic[OptionsT]):
 class _GeomSetters(_PartSelection[OptionsT]):
     """The setters of the quantities of collision geoms, which a link selection applies to every geom of its links."""
 
-    def set(self, *quantities: Geom) -> Self:
+    def set(self, *options: Geom) -> Self:
         """Set on the selected geoms the fields each rule gives explicitly, a later call overriding an earlier one."""
-        return self._set(quantities)
+        return self._set(options)
 
     def set_rho(self, rho: float) -> Self:
         """Set the density of the selected collision geoms (see ``gs.options.Geom.rho``)."""
@@ -325,9 +325,9 @@ class VertexSelection(_PartSelection[OptionsT]):
             )
         return VertexSelection(self._options, (*self._selectors, selector))
 
-    def set(self, *quantities: Vertex) -> Self:
+    def set(self, *options: Vertex) -> Self:
         """Set on the selected vertices the fields each rule gives explicitly, overriding an earlier call."""
-        return self._set(quantities)
+        return self._set(options)
 
     def set_is_fixed(self, is_fixed: bool) -> Self:
         """Set whether the selected vertices stay at their initial positions (see ``gs.options.Vertex.is_fixed``)."""

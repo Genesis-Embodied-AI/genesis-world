@@ -1,4 +1,4 @@
-"""Rules of quantities set on selections of parts of an entity, and the settings recording them in entity options."""
+"""Rules of options set on selections of parts of an entity, and the settings recording them in entity options."""
 
 from typing import Annotated, Self
 
@@ -60,26 +60,24 @@ class Vertex(_FrozenOptions):
 
 
 class SelectionRule(_FrozenOptions):
-    """Quantities set on a selection of parts of an entity, as ``select`` records it.
+    """Options set on a selection of parts of an entity, as ``select`` records it.
 
     Parameters
     ----------
     selectors : tuple[gs.indices.Link | gs.indices.Geom | gs.indices.Vertex, ...]
         The selector of each level leading to the parts, from the coarsest to the finest, each resolving among the
         parts the previous one holds.
-    quantities : gs.options.Geom | gs.options.Vertex
-        The quantities set on the parts, of which the fields given explicitly apply.
+    options : gs.options.Geom | gs.options.Vertex
+        The options set on the parts, of which the fields given explicitly apply.
     """
 
     selectors: Annotated[tuple[indices.Link | indices.Geom | indices.Vertex, ...], Field(min_length=1, strict=False)]
-    quantities: Geom | Vertex
+    options: Geom | Vertex
 
     @model_validator(mode="after")
     def _check_rule(self) -> Self:
-        if not self.quantities.model_fields_set:
-            gs.raise_exception(
-                f"gs.options.{type(self.quantities).__name__} sets no quantity. Give at least one field."
-            )
+        if not self.options.model_fields_set:
+            gs.raise_exception(f"gs.options.{type(self.options).__name__} sets no field. Give at least one field.")
         return self
 
     @property

@@ -1510,7 +1510,7 @@ class KinematicEntityDescription(EntityDescription):
         # Of the rules setting a field of a geom, the one of the finest level applies, and the later one within a
         # level. A density set on a geom stays apart from the asset's, since only the inertia estimate reads it.
         rules_rank = rules_level * len(selection_rules) + np.arange(len(selection_rules))
-        rules_values = [selection_rule.quantities.model_dump(exclude_unset=True) for selection_rule in selection_rules]
+        rules_values = [selection_rule.options.model_dump(exclude_unset=True) for selection_rule in selection_rules]
         default_coefficients = {
             "friction": gu.default_friction,
             "friction_torsional": gu.default_friction_torsional,
