@@ -233,7 +233,7 @@ def main():
     duckurcqa_dir = snapshot_download(
         repo_type="dataset",
         repo_id="Genesis-Intelligence/assets",
-        revision="9d9d55ed59c118ed58201b259403d98e035cbb6c",
+        revision="d571c25abb363a5facc603b7f6be62e6e0ad46da",
         allow_patterns="textures/duckurcqa.png",
         max_workers=1,
     )
