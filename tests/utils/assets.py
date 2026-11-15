@@ -164,6 +164,10 @@ def get_hf_dataset(
         snapshot_paths = [path for path in snapshots_revision if fnmatch.fnmatchcase(path, pattern)]
         if not snapshot_paths:
             raise ValueError(f"No snapshot in '{SNAPSHOTS_LOCK_PATH}' matches '{pattern}'.")
+        # A local file the lock no longer lists would count as an unused snapshot and fail the session
+        for path in Path(local_dir).glob(pattern):
+            if path.relative_to(local_dir).as_posix() not in snapshots_revision:
+                path.unlink()
     elif repo_name != "assets":
         raise ValueError(f"Unsupported repository '{repo_name}'")
 
