@@ -22,6 +22,7 @@ from ..conftest import SKIP_NO_OMNIVERSE_KIT
 
 import genesis as gs
 from genesis.engine.scene import SCENE_FORMAT
+from genesis.utils.misc import tensor_to_array
 from genesis.utils.serialization import MANIFEST_NAME
 
 from ..utils.assertions import assert_allclose, assert_equal
