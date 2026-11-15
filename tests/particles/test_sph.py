@@ -100,13 +100,11 @@ def test_initial_density_regular_sampler(show_viewer, tol):
     # A regular sampler places particles at uniform spacing: interior particles see a consistent near-rest
     # density while boundary particles sit lower (fewer neighbors inside the kernel support), so the mean lands
     # below the rest density with a bounded spread.
-    scene, _ = create_sph_scene(show_viewer)
-    sph_solver = scene.sph_solver
-    n_particles = sph_solver.n_particles
-    rho0 = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
+    scene, liquid = create_sph_scene(show_viewer)
+    rho0 = liquid.material.rho
 
     # Get initial density values
-    densities = get_sph_density(scene, n_particles)
+    densities = get_sph_density(scene, liquid.n_particles)
 
     # Test 1: Mean density should be within reasonable bounds
     # For regular sampler, mean is typically 70-90% of rho0 due to boundary effects
@@ -138,11 +136,10 @@ def test_initial_pressure_regular_sampler(show_viewer, tol):
     # Regular sampling yields densities at or below the rest density, so the density solve finds no compression to
     # correct and the initial pressure is zero. A nonzero initial pressure would inject spurious forces that
     # destabilize the simulation. The liquid is inviscid, which leaves the stable timestep unbounded.
-    scene, _ = create_sph_scene(show_viewer, mu=0.0)
-    sph_solver = scene.sph_solver
-    rho0 = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
+    scene, liquid = create_sph_scene(show_viewer, mu=0.0)
+    rho0 = liquid.material.rho
 
-    densities = get_sph_density(scene, sph_solver.n_particles)
+    densities = get_sph_density(scene, liquid.n_particles)
     assert (densities <= rho0).all(), (
         f"Maximum initial density {densities.max():.6f} exceeds the rest density {rho0}, which shouldn't happen with "
         f"regular sampler."
@@ -154,8 +151,6 @@ def test_simulation_stability_regular_sampler(show_viewer, tol):
     GRAVITY = -9.81
 
     scene, liquid = create_sph_scene(show_viewer, gravity=GRAVITY)
-    sph_solver = scene.sph_solver
-    n_particles = sph_solver.n_particles
 
     # Get initial positions for comparison
     initial_pos = liquid.get_particles_pos().clone()
@@ -164,7 +159,7 @@ def test_simulation_stability_regular_sampler(show_viewer, tol):
     # of different densities along the free surface.
     particles_pos = tensor_to_array(initial_pos)
     is_sliding = (particles_pos[:, 0] < particles_pos[:, 0].mean()) & (particles_pos[:, 2] > particles_pos[:, 2].mean())
-    particles_vel = np.zeros((n_particles, 3))
+    particles_vel = np.zeros((liquid.n_particles, 3))
     particles_vel[is_sliding, 0] = 1.0
     liquid.set_particles_vel(particles_vel)
 
@@ -216,17 +211,15 @@ def test_simulation_stability_regular_sampler(show_viewer, tol):
 def test_density_consistency_different_particle_sizes(show_viewer, particle_size, tol):
     # The SPH kernel support scales with the particle size, so the density distribution normalized by the rest
     # density must be independent of the particle size.
-    scene, _ = create_sph_scene(
+    scene, liquid = create_sph_scene(
         show_viewer,
         particle_size=particle_size,
     )
 
-    sph_solver = scene.sph_solver
-    n_particles = sph_solver.n_particles
-    rho0 = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
+    rho0 = liquid.material.rho
 
     # Get density values
-    densities = get_sph_density(scene, n_particles)
+    densities = get_sph_density(scene, liquid.n_particles)
 
     # Normalized metrics should be similar regardless of particle size
     normalized_mean = densities.mean() / rho0
@@ -398,7 +391,7 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
     sph_solver = scene.sph_solver
     particle_weight = qd_to_numpy(sph_solver.sph_info.particles.mass)[0] * GRAVITY
     footprint_area = LIQUID_SIZE[0] * LIQUID_SIZE[1]
-    weight_per_area = sph_solver.n_particles * particle_weight / footprint_area
+    weight_per_area = liquid.n_particles * particle_weight / footprint_area
     # Under gravity tilted away from the vertical, the free surface settles normal to gravity, and the walls carry the
     # hydrostatic pressure of the depth along gravity. The second environment starts at this equilibrium, each column of
     # the lattice of the liquid filled up to the free surface over it, the columns gaining what others lose. The walls
@@ -426,7 +419,7 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
     is_column_odd = np.round(particles_pos[..., :2] / PARTICLE_SIZE).sum(axis=-1) % 2 > 0.5
     particles_pos[..., 2] += 0.05 * PARTICLE_SIZE * is_column_odd
     liquid.set_particles_pos(particles_pos)
-    rho_rest = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
+    rho_rest = liquid.material.rho
     p_bottoms, p_middles, p_tops, p_hydrostatics, tilted_ratios = [], [], [], [], []
     # A late reordering of the packing drops a particle at most from its site on the cubic lattice into a hollow of the
     # close-packed layer below, by the difference of their layer spacings at the same density, in free fall.

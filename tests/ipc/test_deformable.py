@@ -103,7 +103,7 @@ def test_robot_grasp_fem(coup_type, show_viewer):
 
     franka.set_dofs_kp([4500.0, 4500.0, 3500.0, 3500.0, 2000.0, 2000.0, 2000.0, 500.0, 500.0])
 
-    box_entity_idx = scene.sim.fem_solver.entities.index(box)
+    box_entity_idx = scene.fem_solver.entities.index(box)
     assert len(find_ipc_geometries(scene, solver_type="fem", idx=box_entity_idx, env_idx=0)) == 1
 
     franka_finger_links = {franka.get_link(name) for name in ("left_finger", "right_finger")}

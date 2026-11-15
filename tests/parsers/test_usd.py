@@ -17,12 +17,11 @@ if find_spec("pxr") is None:
     pytest.skip("USD is not supported because 'pxr' module is not available.", allow_module_level=True)
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
-from genesis.utils.usd import UsdContext, HAS_OMNIVERSE_KIT_SUPPORT
+from genesis.utils.usd import HAS_OMNIVERSE_KIT_SUPPORT
 from ..conftest import SKIP_NO_OMNIVERSE_KIT
 
 import genesis as gs
 from genesis.engine.scene import SCENE_FORMAT
-from genesis.utils.misc import tensor_to_array
 from genesis.utils.serialization import MANIFEST_NAME
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -570,7 +569,7 @@ def test_collision_filtering(collision_filtering_usd, show_viewer, caplog):
 
     # Both filtered bodies must be stopped by the ground plane, resting on it without penetration.
     for entity in entities:
-        aabb_min, _aabb_max = tensor_to_array(entity.get_AABB())
+        aabb_min, _aabb_max = entity.get_AABB()
         assert -5e-4 < aabb_min[-1] < 0.0
 
     # Every link rests on the ground. Among the links overlapping their base, those whose colliders are all filtered
@@ -630,9 +629,7 @@ def test_oriented_capsule(oriented_capsule_usd, show_viewer, tol):
     for _ in range(50):
         scene.step()
 
-    capsule_aabb_min, _capsule_aabb_max = tensor_to_array(
-        scene.rigid_solver.get_AABB(entities_idx=(capsule.idx,))[..., 0, :]
-    )
+    capsule_aabb_min, _capsule_aabb_max = capsule.get_AABB()
     capsule_aabb_min_z = float(capsule_aabb_min[-1])
     assert -5e-4 < capsule_aabb_min_z < 0.0
 
@@ -665,6 +662,6 @@ def test_ant_capsule_axis_collision(show_viewer):
     for _ in range(50):
         scene.step()
 
-    ant_aabb_min, _capsule_aabb_max = tensor_to_array(ant.get_AABB())
+    ant_aabb_min, _capsule_aabb_max = ant.get_AABB()
     ant_aabb_min_z = float(ant_aabb_min[-1])
     assert -0.001 < ant_aabb_min_z < 0.001

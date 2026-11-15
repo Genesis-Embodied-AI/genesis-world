@@ -424,8 +424,8 @@ def test_pick_heterogenous_objects(show_viewer):
 
     # Test 3: All 4 objects were lifted
     post_lift_z = het_obj.get_pos()[:, 2]
-    lift_deltas = tensor_to_array(post_lift_z - pre_lift_z)
-    assert np.all(lift_deltas > 0.05), f"All objects should be lifted (deltas={lift_deltas})"
+    lift_deltas = post_lift_z - pre_lift_z
+    assert (lift_deltas > 0.05).all(), f"All objects should be lifted (deltas={lift_deltas})"
 
 
 @pytest.mark.required

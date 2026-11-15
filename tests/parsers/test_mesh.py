@@ -550,7 +550,7 @@ def test_glb_shared_texture_not_duplicated(tmp_path):
     assert all([array is rgba_arrays[0] for array in rgba_arrays])
 
     scene.build()
-    retriever = GenesisGeomRetriever(scene.sim.rigid_solver, seg_level="entity")
+    retriever = GenesisGeomRetriever(scene.rigid_solver, seg_level="entity")
     retriever.build()
     static_args = retriever.retrieve_rigid_meshes_static()
     assert len(static_args["tex_widths"]) == 1

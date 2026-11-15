@@ -6,7 +6,6 @@ import pytest
 import torch
 
 import genesis as gs
-from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 from .utils import make_diff_scene_pair
@@ -37,27 +36,27 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, tol,
     scene_a.reset()
     v1_a = torch.tensor(v1, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     loss_h1_a = run_segment(scene_a, robot_a, v1_a)
-    qpos_mid_a = tensor_to_array(robot_a.get_qpos())
+    qpos_mid_a = robot_a.get_qpos()
     time_mid_a = scene_a.get_time().clone()
     scene_a.backward(loss_h1_a)
     # backward restores the physics state it snapshotted, so the clocks describing it come back too
     assert_allclose(scene_a.get_time(), time_mid_a, tol=gs.EPS)
-    grad1_a = tensor_to_array(v1_a.grad).copy()
+    grad1_a = v1_a.grad
 
     v2_a = torch.tensor(v2, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     loss_h2_a = run_segment(scene_a, robot_a, v2_a)
-    qpos_end_a = tensor_to_array(robot_a.get_qpos())
+    qpos_end_a = robot_a.get_qpos()
     scene_a.backward(loss_h2_a)
-    grad2_a = tensor_to_array(v2_a.grad).copy()
+    grad2_a = v2_a.grad
 
     # Scene B: horizon 1 only, whose backward pass returns the terminal snapshot Scene C resumes from.
     scene_b, robot_b = build()
     scene_b.reset()
     v1_b = torch.tensor(v1, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     loss_h1_b = run_segment(scene_b, robot_b, v1_b)
-    qpos_mid_b = tensor_to_array(robot_b.get_qpos())
+    qpos_mid_b = robot_b.get_qpos()
     snapshot_b = scene_b.backward(loss_h1_b)
-    grad1_b = tensor_to_array(v1_b.grad).copy()
+    grad1_b = v1_b.grad
 
     assert_equal(qpos_mid_a, qpos_mid_b)
     assert_equal(loss_h1_a, loss_h1_b)
@@ -68,9 +67,9 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, tol,
     scene_c.reset(snapshot_b)
     v2_c = torch.tensor(v2, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     loss_h2_c = run_segment(scene_c, robot_c, v2_c)
-    qpos_end_c = tensor_to_array(robot_c.get_qpos())
+    qpos_end_c = robot_c.get_qpos()
     scene_c.backward(loss_h2_c)
-    grad2_c = tensor_to_array(v2_c.grad).copy()
+    grad2_c = v2_c.grad
 
     assert_equal(qpos_end_a, qpos_end_c)
     assert_equal(loss_h2_a, loss_h2_c)
@@ -106,12 +105,12 @@ def test_state_query_grad_parity(show_viewer):
     ctrl = torch.tensor(np.random.randn(robot.n_dofs), dtype=gs.tc_float, device=gs.device, requires_grad=True)
 
     grads = []
-    for is_solver_source in (False, True):
+    for is_link_source in (False, True):
         scene.reset()
         robot.set_dofs_velocity(ctrl)
         scene.step()
-        if is_solver_source:
-            chassis_pos = scene.rigid_solver.get_links_pos(links_idx=robot.base_link_idx)
+        if is_link_source:
+            chassis_pos = robot.base_link.get_pos()
         else:
             chassis_pos = robot.get_pos()
         loss = torch.linalg.norm(chassis_pos)

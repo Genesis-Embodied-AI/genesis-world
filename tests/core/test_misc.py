@@ -27,12 +27,12 @@ def test_scene_destroy_cleans_up_simulator():
     scene.build()
     scene.step()
 
-    assert scene._sim is not None
+    assert scene.is_built
 
     scene.destroy()
 
-    assert scene._sim is None
-    assert scene._visualizer is None
+    assert not scene.is_built
+    assert scene.visualizer is None
 
 
 @pytest.mark.required
@@ -45,10 +45,10 @@ def test_scene_destroy_idempotent():
     scene.step()
 
     scene.destroy()
-    assert scene._sim is None
+    assert not scene.is_built
 
     scene.destroy()
-    assert scene._sim is None
+    assert not scene.is_built
 
 
 @pytest.mark.required
@@ -93,13 +93,11 @@ def test_destroy_after_aborted_camera_build(monkeypatch, raise_before_build):
         )
     )
 
-    # Capture the shared metadata reference now; SensorManager.destroy() drops its dict entry,
-    # but the dataclass instance itself stays alive through our local reference so we can
-    # inspect its fields after teardown.
+    # The shared metadata outlives its entry in the sensor manager through this reference, so its fields stay readable
     shared_metadata = camera._shared_metadata
 
-    # Inject a bug either at build entry (no metadata population) or after the original build
-    # has populated renderer / context / sensors / image_cache.
+    # Inject a bug either at build entry (no metadata population) or after the original build populated the renderer,
+    # the context, the sensors and the image cache.
     original_build = RasterizerCameraSensor.build
 
     def buggy_build(self):
@@ -109,21 +107,8 @@ def test_destroy_after_aborted_camera_build(monkeypatch, raise_before_build):
 
     monkeypatch.setattr(RasterizerCameraSensor, "build", buggy_build)
 
-    with pytest.raises(RuntimeError, match="injected camera build failure"):
-        scene.build()
-
-    if raise_before_build:
-        assert shared_metadata.renderer is None
-    else:
-        assert shared_metadata.renderer is not None
-        assert shared_metadata.context is not None
-        assert shared_metadata.sensors is not None
-        assert shared_metadata.image_cache is not None
-
-    # Track shared_metadata.destroy() invocations via instance-level shadow. Assigning to the
-    # instance __dict__ takes precedence over class-level lookup for this instance only, so
-    # neither the class nor any other metadata instance is affected. The `del` reverts the
-    # instance to plain class-level lookup before any finalizer can fire.
+    # Count the teardowns of the shared metadata through an instance-level shadow, which leaves the class and every other
+    # metadata instance untouched, and is removed before any finalizer can fire.
     original_destroy = shared_metadata.destroy
     destroy_call_count = [0]
 
@@ -133,15 +118,20 @@ def test_destroy_after_aborted_camera_build(monkeypatch, raise_before_build):
 
     shared_metadata.destroy = tracked_destroy
     try:
+        # The aborted build is torn down at once, from whatever state it reached
+        with pytest.raises(RuntimeError, match="injected camera build failure"):
+            scene.build()
+        assert destroy_call_count[0] == 1
+        assert shared_metadata.renderer is None
+        assert shared_metadata.context is None
+        assert shared_metadata.sensors is None
+        assert shared_metadata.image_cache is None
+
+        # Destroying the scene afterwards tears nothing down twice
         scene.destroy()
     finally:
         del shared_metadata.destroy
-
     assert destroy_call_count[0] == 1
-    assert shared_metadata.renderer is None
-    assert shared_metadata.context is None
-    assert shared_metadata.sensors is None
-    assert shared_metadata.image_cache is None
 
 
 @pytest.mark.required
@@ -489,7 +479,7 @@ def test_solver_state_change_subscribers(show_viewer, two_link_fixed_urdf):
     )
     scene.build(n_envs=2)
 
-    solver = scene.sim.rigid_solver
+    solver = scene.rigid_solver
 
     # Eager mode: a callback fires immediately on each matching change and nothing is retained.
     eager_events = []
@@ -618,11 +608,11 @@ def test_per_solver_gravity():
 
         new_gravity = [0.0, 0.0, -5.0]
 
-        rigid = scene.sim.rigid_solver
+        rigid = scene.rigid_solver
         rigid.set_gravity(new_gravity)
         assert_allclose(rigid.get_gravity(), new_gravity, atol=1e-6)
 
-        mpm = scene.sim.mpm_solver
+        mpm = scene.mpm_solver
         mpm.set_gravity(new_gravity)
         assert_allclose(mpm.get_gravity(), new_gravity, atol=1e-6)
 
@@ -710,9 +700,6 @@ def test_derived_substeps(show_viewer, tol):
         rigid_options=gs.options.RigidOptions(
             dt=0.01 / SUBSTEPS,
         ),
-        pbd_options=gs.options.PBDOptions(
-            dt=0.01 / SUBSTEPS,
-        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.5, 0.0, 1.0),
             camera_lookat=(0.0, 0.0, 0.5),
@@ -747,61 +734,49 @@ def test_derived_substeps(show_viewer, tol):
     expected_z = 1.0 + GRAVITY * solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
     assert_allclose(ball.get_pos()[2], expected_z, tol=tol)
 
-    assert_equal(scene.sim.pbd_solver.substeps, SUBSTEPS)
+    # The substep loop advances every active solver once per iteration, so the interval one of them asks for is the
+    # rate they all take, whether they asked for one or not.
+    assert_equal(scene.pbd_solver.substeps, SUBSTEPS)
 
-    # The substeps shorthand decides the rate when no solver asks for one of its own, which is settled as a solver is
-    # made rather than as a scene is built.
+    # The substeps shorthand decides the rate of every solver when none asks for one of its own
     scene_from_substeps = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
-            substeps=4,
+            gravity=(0.0, 0.0, GRAVITY),
+            substeps=SUBSTEPS,
         ),
         show_viewer=False,
     )
-    assert_equal(scene_from_substeps.rigid_solver.substeps, 4)
-    assert_allclose(scene_from_substeps.rigid_solver.substep_dt, 0.0025, tol=gs.EPS)
-
-    # The substep loop advances every active solver once per iteration, so the interval one of them asks for is the
-    # rate they all take, whether they asked for one or not.
-    scene_from_solver_dt = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=0.01,
-        ),
-        pbd_options=gs.options.PBDOptions(
-            dt=0.01 / SUBSTEPS,
-        ),
-        show_viewer=False,
-    )
-    ball_at_derived_rate = scene_from_solver_dt.add_entity(
+    ball_from_substeps = scene_from_substeps.add_entity(
         morph=gs.morphs.Sphere(
             pos=(0.0, 0.0, 1.0),
         ),
     )
-    scene_from_solver_dt.add_entity(
+    scene_from_substeps.add_entity(
         morph=gs.morphs.Box(
             pos=(1.0, 0.0, 1.0),
             size=(0.02, 0.02, 0.02),
         ),
         material=gs.materials.PBD.Particle(),
     )
-    scene_from_solver_dt.build()
-    assert_equal(scene_from_solver_dt.rigid_solver.substeps, SUBSTEPS)
-    assert_allclose(scene_from_solver_dt.rigid_solver.substep_dt, 0.01 / SUBSTEPS, tol=gs.EPS)
+    scene_from_substeps.build()
+    assert_equal(scene_from_substeps.rigid_solver.substeps, SUBSTEPS)
+    assert_allclose(scene_from_substeps.rigid_solver.substep_dt, 0.01 / SUBSTEPS, tol=gs.EPS)
 
     # The constraint time constant is floored against the substep the rigid solver integrates at, so the contacts are
     # as stiff as in a scene whose rigid solver asks for that rate itself.
-    timeconst, *_ = ball_at_derived_rate.geoms[0].get_sol_params()
+    timeconst, *_ = ball_from_substeps.geoms[0].get_sol_params()
     timeconst_ref, *_ = ball.geoms[0].get_sol_params()
-    assert timeconst + gs.EPS >= 2.0 * scene_from_solver_dt.rigid_solver.substep_dt
+    assert timeconst + gs.EPS >= 2.0 * scene_from_substeps.rigid_solver.substep_dt
     assert_allclose(timeconst, timeconst_ref, tol=gs.EPS)
 
-    # The interval reaches what integrates, not only what reports it: a solver settles its buffers as it builds, so a
-    # rate inherited afterwards would leave it stepping the scene interval as many times as the shorter one.
+    # The rate reaches what integrates, not only what reports it: a solver settles its buffers as it builds, so a rate
+    # settled afterwards would leave it stepping the scene interval as many times as the shorter one.
     for _ in range(N_STEPS):
-        scene_from_solver_dt.step()
+        scene_from_substeps.step()
     n_substeps = N_STEPS * SUBSTEPS
-    expected_z = 1.0 + GRAVITY * scene_from_solver_dt.rigid_solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
-    assert_allclose(ball_at_derived_rate.get_pos()[2], expected_z, tol=tol)
+    expected_z = 1.0 + GRAVITY * scene_from_substeps.rigid_solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
+    assert_allclose(ball_from_substeps.get_pos()[2], expected_z, tol=tol)
 
     # A differentiable scene replays the substeps of a step, as many as the rate a solver dt derives: the gradient of
     # the position over one step reaches the velocity it started from through every one of them.

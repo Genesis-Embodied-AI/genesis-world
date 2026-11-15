@@ -36,9 +36,9 @@ def test_link_velocity(gs_sim, tol):
 
     gs_robot.set_qpos([0.0, np.pi / 2.0])
     gs_robot.set_dofs_velocity([0.0, 1.2])
-    COM = gs_sim.rigid_solver.dyn_state.links.root_COM[0, 0]
+    COM = gs_robot.get_links_pos(ref=gs.link_ref_frame.root_COM)[0]
     assert_allclose(COM, np.array([0.375, 0.125, 0.0]), tol=tol)
-    xanchor = gs_sim.rigid_solver.dyn_state.joints.xanchor[1, 0]
+    xanchor = gs_robot.joints[1].get_anchor_pos()
     assert_allclose(xanchor, np.array([0.5, 0.0, 0.0]), tol=tol)
     cvel_0, cvel_1 = gs_sim.rigid_solver.dyn_state.links.cd_vel.to_numpy()[:, 0]
     assert_allclose(cvel_0, 0, tol=tol)
@@ -47,11 +47,11 @@ def test_link_velocity(gs_sim, tol):
     # Check that the velocity is valid for a random configuration
     gs_robot.set_qpos([-0.7, 0.2])
     gs_robot.set_dofs_velocity([3.0, 13.0])
-    xanchor = gs_sim.rigid_solver.dyn_state.joints.xanchor[1, 0]
-    theta_0, theta_1 = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
+    xanchor = tensor_to_array(gs_robot.joints[1].get_anchor_pos())
+    theta_0, theta_1 = tensor_to_array(gs_robot.get_qpos())
     assert_allclose(xanchor[0], 0.5 * np.cos(theta_0), tol=tol)
     assert_allclose(xanchor[1], 0.5 * np.sin(theta_0), tol=tol)
-    COM = gs_sim.rigid_solver.dyn_state.links.root_COM[0, 0]
+    COM = tensor_to_array(gs_robot.get_links_pos(ref=gs.link_ref_frame.root_COM))[0]
     COM_0 = np.array([0.25 * np.cos(theta_0), 0.25 * np.sin(theta_0), 0.0])
     COM_1 = np.array(
         [
@@ -60,14 +60,14 @@ def test_link_velocity(gs_sim, tol):
             0.0,
         ]
     )
-    link_COM0, link_COM1 = gs_sim.rigid_solver.get_links_pos(ref=gs.link_ref_frame.link_COM)
+    link_COM0, link_COM1 = gs_robot.get_links_pos(ref=gs.link_ref_frame.link_COM)
 
     assert_allclose(link_COM0, COM_0, tol=tol)
     assert_allclose(link_COM1, COM_1, tol=tol)
     assert_allclose(COM, 0.5 * (COM_0 + COM_1), tol=tol)
 
     cvel_0, cvel_1 = gs_sim.rigid_solver.dyn_state.links.cd_vel.to_numpy()[:, 0]
-    omega_0, omega_1 = gs_sim.rigid_solver.dyn_state.links.cd_ang.to_numpy()[:, 0, 2]
+    omega_0, omega_1 = tensor_to_array(gs_robot.get_links_ang())[:, 2]
     assert_allclose(omega_0, 3.0, tol=tol)
     assert_allclose(omega_1 - omega_0, 13.0, tol=tol)
     cvel_0_ = omega_0 * np.array([-COM[1], COM[0], 0.0])
@@ -75,14 +75,14 @@ def test_link_velocity(gs_sim, tol):
     cvel_1_ = cvel_0 + (omega_1 - omega_0) * np.array([xanchor[1] - COM[1], COM[0] - xanchor[0], 0.0])
     assert_allclose(cvel_1, cvel_1_, tol=tol)
 
-    xpos_0, xpos_1 = gs_sim.rigid_solver.dyn_state.links.pos.to_numpy()[:, 0]
+    xpos_0, xpos_1 = tensor_to_array(gs_robot.get_links_pos())
     assert_allclose(xpos_0, 0.0, tol=tol)
     assert_allclose(xpos_1, xanchor, tol=tol)
-    xvel_0, xvel_1 = gs_sim.rigid_solver.get_links_vel()
+    xvel_0, xvel_1 = gs_robot.get_links_vel()
     assert_allclose(xvel_0, 0.0, tol=tol)
     xvel_1_ = omega_0 * np.array([-xpos_1[1], xpos_1[0], 0.0])
     assert_allclose(xvel_1, xvel_1_, tol=tol)
-    civel_0, civel_1 = gs_sim.rigid_solver.get_links_vel(ref=gs.link_ref_frame.link_COM)
+    civel_0, civel_1 = gs_robot.get_links_vel(ref=gs.link_ref_frame.link_COM)
     civel_0_ = omega_0 * np.array([-COM_0[1], COM_0[0], 0.0])
     assert_allclose(civel_0, civel_0_, tol=tol)
     civel_1_ = omega_0 * np.array([-COM_1[1], COM_1[0], 0.0]) + (omega_1 - omega_0) * np.array(
@@ -92,26 +92,26 @@ def test_link_velocity(gs_sim, tol):
 
     # A mass or a center of mass written moves the center the velocities are quoted about, and the write alone has to
     # leave them right: the same identity, against the masses and the placements the solver now carries.
-    solver = gs_sim.rigid_solver
     for writing in ("mass", "COM"):
         if writing == "mass":
-            solver.set_links_mass([1.0, 3.0])
+            gs_robot.set_links_mass([1.0, 3.0])
         else:
-            solver.set_links_COM(solver.get_links_COM() + torch.tensor([0.05, -0.02, 0.0], device=gs.device))
+            gs_robot.set_links_COM(gs_robot.get_links_COM() + torch.tensor([0.05, -0.02, 0.0], device=gs.device))
 
-        masses = tensor_to_array(solver.get_links_mass())
-        centers = tensor_to_array(solver.get_links_pos(ref=gs.link_ref_frame.link_COM))
-        anchor = tensor_to_array(gs_robot.joints[1].get_anchor_pos())
-        turn = tensor_to_array(solver.get_links_ang())[:, 2]
-        weighed = (masses[:, None] * centers).sum(axis=0) / masses.sum()
-        assert_allclose(tensor_to_array(solver.get_links_pos(ref=gs.link_ref_frame.root_COM)), weighed, tol=tol)
+        masses = gs_robot.get_links_mass()
+        centers = gs_robot.get_links_pos(ref=gs.link_ref_frame.link_COM)
+        anchor = gs_robot.joints[1].get_anchor_pos()
+        turn = gs_robot.get_links_ang()[:, 2]
+        weighed = (masses[:, None] * centers).sum(dim=0) / masses.sum()
+        assert_allclose(gs_robot.get_links_pos(ref=gs.link_ref_frame.root_COM), weighed, tol=tol)
 
         # The velocity of a point of a turning link, taken at each link's own center of mass.
+        axis_z = torch.tensor([0.0, 0.0, 1.0], dtype=gs.tc_float, device=gs.device)
         for i_l, (center, spin) in enumerate(zip(centers, turn)):
-            expected = turn[0] * np.array([-center[1], center[0], 0.0])
+            expected = torch.linalg.cross(turn[0] * axis_z, center)
             if i_l:
-                expected += (spin - turn[0]) * np.array([anchor[1] - center[1], center[0] - anchor[0], 0.0])
-            reported = tensor_to_array(solver.get_links_vel(i_l, ref=gs.link_ref_frame.link_COM))
+                expected += torch.linalg.cross((spin - turn[0]) * axis_z, center - anchor)
+            reported = gs_robot.get_links_vel(i_l, ref=gs.link_ref_frame.link_COM)
             assert_allclose(reported, expected, tol=tol)
 
 
@@ -131,15 +131,15 @@ def test_pendulum_links_acc(gs_sim, tol):
     pendulum.set_dofs_velocity([theta_dot])
     for _ in range(100):
         # Backup state before integration
-        theta = gs_sim.rigid_solver.qpos[0, 0]
-        theta_dot = gs_sim.rigid_solver.dyn_state.dofs.vel[0, 0]
+        theta = tensor_to_array(pendulum.get_qpos())[0]
+        theta_dot = tensor_to_array(pendulum.get_dofs_velocity())[0]
 
         # Run one simulation step
         gs_sim.scene.step()
 
         # Angular acceleration:
         # * acc_ang_x = - sin(theta) * g
-        acc_ang = gs_sim.rigid_solver.get_links_acc_ang()
+        acc_ang = pendulum.get_links_acc_ang()
         assert_allclose(acc_ang[0], 0, tol=tol)
         assert_allclose(acc_ang[2], np.array([-np.sin(theta) * g, 0.0, 0.0]), tol=tol)
         # Linear spatial acceleration:
@@ -158,7 +158,7 @@ def test_pendulum_links_acc(gs_sim, tol):
         # Linear true acceleration:
         # * acc_classical_lin_y = sin(theta) * g (tangential angular acceleration effect)
         # * acc_classical_lin_z = - theta_dot ** 2  (radial centripedal effect)
-        acc_classical_lin_world = tensor_to_array(gs_sim.rigid_solver.get_links_acc())
+        acc_classical_lin_world = tensor_to_array(pendulum.get_links_acc())
         assert_allclose(acc_classical_lin_world[0], 0, tol=tol)
         acc_classical_lin_local = R @ acc_classical_lin_world[2]
         assert_allclose(acc_classical_lin_local, np.array([0.0, np.sin(theta) * g, -(theta_dot**2)]), tol=tol)
@@ -169,7 +169,7 @@ def test_pendulum_links_acc(gs_sim, tol):
     pendulum.control_dofs_position([0.5 * np.pi])
     for _ in range(400):
         gs_sim.scene.step()
-    acc_classical_lin_world = gs_sim.rigid_solver.get_links_acc()
+    acc_classical_lin_world = pendulum.get_links_acc()
     assert_allclose(acc_classical_lin_world, 0, tol=tol)
 
 
@@ -188,25 +188,25 @@ def test_double_pendulum_links_acc(gs_sim, tol):
     robot.set_dofs_velocity(qvel)
     for _ in range(100):
         # Backup state before integration
-        theta = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
-        theta_dot = gs_sim.rigid_solver.dyn_state.dofs.vel.to_numpy()[:, 0]
+        theta = tensor_to_array(robot.get_qpos())
+        theta_dot = tensor_to_array(robot.get_dofs_velocity())
 
         # Run one simulation step
         gs_sim.scene.step()
 
         # Backup acceleration before integration
-        theta_ddot = gs_sim.rigid_solver.dyn_state.dofs.acc.to_numpy()[:, 0]
+        theta_ddot = tensor_to_array(robot.get_dofs_acc())
 
         # Angular acceleration
-        acc_ang = tensor_to_array(gs_sim.rigid_solver.get_links_acc_ang())
+        acc_ang = tensor_to_array(robot.get_links_acc_ang())
         assert_allclose(acc_ang[0], 0, tol=tol)
         assert_allclose(acc_ang[1], [theta_ddot[0], 0.0, 0.0], tol=tol)
         assert_allclose(acc_ang[-1], [theta_ddot[0] + theta_ddot[1], 0.0, 0.0], tol=tol)
 
         # Linear spatial acceleration
         cacc_spatial_lin_world = gs_sim.rigid_solver.dyn_state.links.cacc_lin.to_numpy()[[0, 2, 4], 0]
-        com = gs_sim.rigid_solver.dyn_state.links.root_COM.to_numpy()[-1, 0]
-        pos = gs_sim.rigid_solver.dyn_state.links.pos.to_numpy()[[0, 2, 4], 0]
+        com = tensor_to_array(robot.get_links_pos(ref=gs.link_ref_frame.root_COM))[-1]
+        pos = tensor_to_array(robot.get_links_pos())[[0, 2, 4]]
         assert_allclose(cacc_spatial_lin_world[1], np.cross(acc_ang[2], com), tol=tol)
         acc_spatial_lin_world = cacc_spatial_lin_world + np.cross(acc_ang[[0, 2, 4]], pos - com)
         assert_allclose(acc_spatial_lin_world[0], 0, tol=tol)
@@ -228,7 +228,7 @@ def test_double_pendulum_links_acc(gs_sim, tol):
         )
 
         # Linear true acceleration
-        acc_classical_lin_world = tensor_to_array(gs_sim.rigid_solver.get_links_acc()[[0, 2, 4]])
+        acc_classical_lin_world = tensor_to_array(robot.get_links_acc()[[0, 2, 4]])
         assert_allclose(acc_classical_lin_world[0], 0, tol=tol)
         acc_classical_lin_local = np.matmul(np.moveaxis(R, 2, 0), acc_classical_lin_world[1:, :, None])[..., 0]
         assert_allclose(acc_classical_lin_local[0], np.array([0.0, -theta_ddot[0], -(theta_dot[0] ** 2)]), tol=tol)
@@ -244,7 +244,7 @@ def test_double_pendulum_links_acc(gs_sim, tol):
     robot.control_dofs_position([0.5 * np.pi, 0.0])
     for _ in range(900):
         gs_sim.scene.step()
-    acc_classical_lin_world = gs_sim.rigid_solver.get_links_acc()
+    acc_classical_lin_world = robot.get_links_acc()
     assert_allclose(acc_classical_lin_world, 0, tol=tol)
 
 
@@ -264,7 +264,7 @@ def test_jacobian(gs_sim, tol):
 
     p_local = np.array([0.05, -0.02, 0.12], dtype=gs.np_float)
     J_o = tensor_to_array(pendulum.get_jacobian(link))
-    J_p = tensor_to_array(pendulum.get_jacobian(link, p_local))
+    J_p = pendulum.get_jacobian(link, p_local)
 
     c, s = np.cos(angle), np.sin(angle)
     Rx = np.array(
@@ -976,7 +976,7 @@ def test_kinematics_queries(n_envs, show_viewer, tol):
         assert_allclose(links_quat, entity.get_links_quat(relative=False), tol=gs.EPS)
 
     # Callers hand the query whatever array-like configuration they hold, a NumPy trajectory included.
-    links_pos, links_quat = franka.solver.forward_kinematics_query(franka, tensor_to_array(franka.get_qpos()))
+    links_pos, links_quat = franka.solver.forward_kinematics_query(franka, franka.get_qpos())
     assert_allclose(links_pos, franka.get_links_pos(relative=False), tol=gs.EPS)
     assert_allclose(links_quat, franka.get_links_quat(relative=False), tol=gs.EPS)
 
@@ -1012,7 +1012,7 @@ def test_kinematics_queries(n_envs, show_viewer, tol):
         assert_allclose(end_effector.get_pos(), target_pos, tol=tol)
 
     # Carrying more targets than the error buffer is sized for is rejected, rather than written past.
-    n_tgts = franka.solver._options.IK_max_targets
+    n_tgts = franka.solver.options.IK_max_targets
     with pytest.raises(gs.GenesisException):
         franka.inverse_kinematics_multilink(
             links=franka.links[: n_tgts + 1],

@@ -64,6 +64,7 @@ class BasePlotter[T](Recorder[T]):
         super().__init__(manager, options, data_func)
         self._frames_buffer: list[np.ndarray] = []
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -237,6 +238,7 @@ class BasePyQtPlotter[T](BasePlotter[T]):
         if threading.current_thread() is not threading.main_thread():
             gs.raise_exception("Impossible to run PyQtPlotter in background thread.")
 
+    @gs.assert_unbuilt
     def build(self):
         if not IS_PYQTGRAPH_AVAILABLE:
             gs.raise_exception(
@@ -295,6 +297,7 @@ class BasePyQtPlotter[T](BasePlotter[T]):
 
 @register_recording(PyQtLinePlotterOptions)
 class PyQtLinePlotter(BasePyQtPlotter):
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -357,6 +360,7 @@ class BaseMPLPlotter[T](BasePlotter[T]):
         if threading.current_thread() is not threading.main_thread():
             gs.raise_exception("Impossible to run MPLPlotter in background thread.")
 
+    @gs.assert_unbuilt
     def build(self):
         if not IS_MATPLOTLIB_AVAILABLE:
             gs.raise_exception(
@@ -491,6 +495,7 @@ class BaseMPLPlotter[T](BasePlotter[T]):
 
 @register_recording(MPLLinePlotterOptions)
 class MPLLinePlotter(BaseMPLPlotter):
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -658,6 +663,7 @@ class MPLImagePlotter(BaseMPLPlotter):
     The image data should be an array-like object with shape (H, W), (H, W, 1), (H, W, 3), or (H, W, 4).
     """
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -721,6 +727,7 @@ class MPLVectorFieldPlotter(BaseMPLPlotter):
     sweeps counter-clockwise; the arc is colored by signed twist on a diverging colorbar centered at zero.
     """
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 

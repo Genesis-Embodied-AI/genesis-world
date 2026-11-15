@@ -126,6 +126,7 @@ class RaycasterSensor(
         self.ray_starts: torch.Tensor = torch.empty((0, 3), device=gs.device, dtype=gs.tc_float)
         self.ray_dirs: torch.Tensor = torch.empty((0, 3), device=gs.device, dtype=gs.tc_float)
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -217,7 +218,7 @@ class RaycasterSensor(
         # into the initial allocation so static sensors (entity_idx<0) leave their rows at identity, letting the cast
         # kernel apply pos_offset / euler_offset in world frame.
         if shared_metadata.links_pos is None:
-            B = targets[0].solver._B
+            B = targets[0].solver.n_envs_
             shared_metadata.links_pos = torch.zeros(
                 B, shared_metadata.n_sensors, 3, device=gs.device, dtype=gs.tc_float
             )
@@ -265,7 +266,7 @@ class RaycasterSensor(
         """Make spheres at the start and at the hit point of every ray, for the first rendered environment."""
         if 0 not in envs_idx:
             return []
-        env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
+        env_idx = context.rendered_envs_idx[0] if self._manager.n_envs > 0 else None
 
         data = self.read(env_idx)
 

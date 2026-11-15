@@ -1,5 +1,6 @@
 import torch
 
+import genesis as gs
 from genesis.options.sensors import DepthCamera as DepthCameraOptions
 
 from .base_sensor import Sensor
@@ -11,10 +12,11 @@ from .raycaster import RaycastContext, RaycasterReturnType, RaycasterSensor, Ray
 class DepthCameraSensor(
     RaycasterSensor, Sensor[DepthCameraOptions, RaycastContext, RaycasterSharedMetadata, RaycasterReturnType]
 ):
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
-        batch_shape = (self._manager._sim._B,) if self._manager._sim.n_envs > 0 else ()
+        batch_shape = (self._manager.n_envs_,) if self._manager.n_envs > 0 else ()
         self._shape = (*batch_shape, self._options.pattern.height, self._options.pattern.width)
 
     def read_image(self) -> torch.Tensor:

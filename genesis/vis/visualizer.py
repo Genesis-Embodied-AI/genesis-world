@@ -5,6 +5,7 @@ import pyglet
 import genesis as gs
 from genesis.engine.state_change import StateChange, Subscriber
 from genesis.repr_base import RBC
+from genesis.utils.misc import BuildableMixin
 
 from .camera import Camera
 from .rasterizer import Rasterizer
@@ -24,7 +25,7 @@ class DummyViewerLock:
         pass
 
 
-class Visualizer(RBC):
+class Visualizer(BuildableMixin, RBC):
     """
     This abstraction layer manages viewer and renderers.
     """
@@ -33,7 +34,6 @@ class Visualizer(RBC):
         self._t = -1
         self._scene = scene
 
-        self._is_built = False
         self._context = None
         self._viewer = None
         self._rasterizer = None
@@ -118,7 +118,7 @@ class Visualizer(RBC):
             self._rasterizer.destroy()
             self._rasterizer = None
         if self._viewer is not None:
-            self._viewer.stop()
+            self._viewer.destroy()
             self._viewer = None
         if self._batch_renderer is not None:
             self._batch_renderer.destroy()
@@ -132,6 +132,7 @@ class Visualizer(RBC):
             self._context = None
         self.viewer_lock = None
         self._renderer = None
+        self._is_built = False
 
     def add_camera(
         self, res, pos, lookat, up, model, fov, aperture, focus_dist, GUI, spp, denoise, near, far, env_idx, debug
@@ -194,6 +195,7 @@ class Visualizer(RBC):
             else:
                 self._viewer.update()
 
+    @gs.assert_unbuilt
     def build(self):
         self._context.build(self._scene)
 
@@ -286,7 +288,6 @@ class Visualizer(RBC):
         for solver in self._scene.sim.active_solvers if solvers is None else solvers:
             # The rigid solver derives from the kinematic one
             if isinstance(solver, gs.engine.solvers.KinematicSolver):
-                solver.update_vgeoms()
                 # drone propellers
                 for entity in solver.entities:
                     if isinstance(entity, gs.engine.entities.DroneEntity):
@@ -321,8 +322,8 @@ class Visualizer(RBC):
     def rasterizer(self):
         return self._rasterizer
 
-    @property
     @gs.assert_built
+    @property
     def is_software(self):
         if self._batch_renderer is not None or self._raytracer is not None:
             return False

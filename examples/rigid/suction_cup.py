@@ -98,7 +98,7 @@ def main():
         scene.step()
 
     # add suction / weld constraint
-    rigid = scene.sim.rigid_solver
+    rigid = scene.rigid_solver
     link_cube = cube.get_link("box_baselink").idx
     link_franka = franka.get_link("hand").idx
     rigid.add_weld_constraint(link_cube, link_franka)

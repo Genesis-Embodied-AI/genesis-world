@@ -172,6 +172,8 @@ class ParticleEntity(Entity):
         if self._need_skinning:
             self._add_vverts_to_solver()
 
+        self._is_built = True
+
     def _add_particles_to_solver(self):
         raise NotImplementedError
 
@@ -505,12 +507,12 @@ class ParticleEntity(Entity):
         closest_idx : torch.Tensor, shape (M,)
             The index of the closest particle.
         """
-        pos = broadcast_tensor(pos, gs.tc_float, (self._scene._B, 3), ("envs_idx", ""))
+        pos = broadcast_tensor(pos, gs.tc_float, (self._solver.n_envs_, 3), ("envs_idx", ""))
 
         cur_particles = self.get_particles_pos(envs_idx)
         distances = torch.linalg.norm(cur_particles - pos[:, None], dim=-1)
         closest_idx = torch.argmin(distances, dim=-1).to(dtype=gs.tc_int)
-        if self._scene.n_envs == 0:
+        if self._solver.n_envs == 0:
             closest_idx = closest_idx[0]
         return closest_idx
 

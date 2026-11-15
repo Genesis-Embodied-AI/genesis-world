@@ -260,6 +260,7 @@ class SurfaceDistanceProbeSensor(
     def _get_cache_dtype(cls) -> torch.dtype:
         return gs.tc_float
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -282,10 +283,10 @@ class SurfaceDistanceProbeSensor(
         )
 
         self._shared_metadata.nearest_positions = torch.zeros(
-            (self._manager._sim._B, self._shared_metadata.total_n_probes, 3), dtype=gs.tc_float, device=gs.device
+            (self._manager.n_envs_, self._shared_metadata.total_n_probes, 3), dtype=gs.tc_float, device=gs.device
         )
         self._shared_metadata.nearest_positions_measured = torch.zeros(
-            (self._manager._sim._B, self._shared_metadata.total_n_probes, 3), dtype=gs.tc_float, device=gs.device
+            (self._manager.n_envs_, self._shared_metadata.total_n_probes, 3), dtype=gs.tc_float, device=gs.device
         )
         slice_start = self._shared_metadata.sensor_probe_start[self._idx]
         self._nearest_points_slice = slice(slice_start, slice_start + self._n_probes)
@@ -294,7 +295,7 @@ class SurfaceDistanceProbeSensor(
         # so this is a one-shot scene-build cost; per-step queries traverse the static structure.
         self._shared_metadata.bvh.append_sensor(track_link_idx, self._shared_metadata.solver)
         if self._idx == len(self._manager._sensors_by_type[type(self)]) - 1:
-            self._shared_metadata.bvh.build_closest_query(self._shared_metadata.total_n_probes, self._manager._sim._B)
+            self._shared_metadata.bvh.build_closest_query(self._shared_metadata.total_n_probes, self._manager.n_envs_)
 
     @classmethod
     def reset(cls, shared_metadata: SurfaceDistanceProbeMetadata, shared_ground_truth_cache: torch.Tensor, envs_idx):
@@ -343,7 +344,7 @@ class SurfaceDistanceProbeSensor(
         """Make the probes, their nearest surface points and the lines joining them, for the first rendered env."""
         if 0 not in envs_idx:
             return []
-        env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
+        env_idx = context.rendered_envs_idx[0] if self._manager.n_envs > 0 else None
 
         # Single env: drop the leading env axis to a bare (3,) / (4,); squeeze(0) leaves an unbatched vector untouched.
         link_pos = self._link.get_pos(env_idx, relative=False).squeeze(0)

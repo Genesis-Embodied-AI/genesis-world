@@ -48,9 +48,10 @@ from genesis.options.surfaces import Surface
 from genesis.recorders import RecorderManager
 from genesis.recorders.trajectory import Trajectory, save_checkpoint
 from genesis.repr_base import RBC
+from genesis.typing import IndexType
 from genesis.utils import serialization
 from genesis.utils.data import Namespace, namespace
-from genesis.utils.misc import sanitize_index, tensor_to_array
+from genesis.utils.misc import BuildableMixin, sanitize_index, tensor_to_array
 from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME, pixel_less_textures
 from genesis.utils.tools import RunningMean
 from genesis.utils.warnings import warn_once
@@ -138,7 +139,7 @@ def description_digest(desc: SceneDescription) -> str:
 
 
 @gs.assert_initialized
-class Scene(RBC):
+class Scene(BuildableMixin, RBC):
     """
     A ``genesis.Scene`` object wraps all components in a simulation environment, including a simulator (containing multiple physics solvers), entities, and a visualizer (controlling both the viewer and all the cameras).
     Basically, everything happens inside a scene.
@@ -148,15 +149,15 @@ class Scene(RBC):
     sim_options : gs.options.SimOptions
         The options configuring the overarching `simulator`, which in turn manages all the solvers.
     rigid_options : gs.options.RigidOptions
-        The options configuring the rigid_solver (``scene.sim.RigidSolver``).
+        The options configuring the rigid_solver (``scene.rigid_solver``).
     mpm_options : gs.options.MPMOptions
-        The options configuring the mpm_solver (``scene.sim.MPMSolver``).
+        The options configuring the mpm_solver (``scene.mpm_solver``).
     sph_options : gs.options.SPHOptions
-        The options configuring the sph_solver (``scene.sim.SPHSolver``).
+        The options configuring the sph_solver (``scene.sph_solver``).
     fem_options : gs.options.FEMOptions
-        The options configuring the fem_solver (``scene.sim.FEMSolver``).
+        The options configuring the fem_solver (``scene.fem_solver``).
     pbd_options : gs.options.PBDOptions
-        The options configuring the pbd_solver (``scene.sim.PBDSolver``).
+        The options configuring the pbd_solver (``scene.pbd_solver``).
     coupler_options : gs.options.CouplerOptions
         The options configuring the `coupler` between different solvers.
     vis_options : gs.options.VisOptions
@@ -229,7 +230,7 @@ class Scene(RBC):
                 renderer=renderer,
             )
         if show_FPS is not None:
-            warn_once("Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
+            warn_once(self, "Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
             self.options.profiling.show_FPS = show_FPS
 
         # description
@@ -260,7 +261,6 @@ class Scene(RBC):
         self._emitters = gs.List()
 
         self._uid = gs.UID()
-        self._is_built = False
         self._pre_step_callbacks: list = []
 
         gs.logger.info(f"Scene ~~~<{self._uid}>~~~ created.")
@@ -281,6 +281,8 @@ class Scene(RBC):
             if getattr(self, "_recorder_manager", None) is not None and self._recorder_manager.is_recording:
                 self.stop_recording()
         finally:
+            if getattr(self, "_recorder_manager", None) is not None:
+                self._recorder_manager.destroy()
             self._recorder_manager = None
 
             if getattr(self, "_visualizer", None) is not None:
@@ -448,7 +450,7 @@ class Scene(RBC):
         else:
             gs.raise_exception()
 
-        entity = self._sim._add_entity(morph, material, surface, visualize_contact, name)
+        entity = self._sim.add_entity(morph, material, surface, visualize_contact, name)
 
         return entity
 
@@ -591,7 +593,7 @@ class Scene(RBC):
             The options for the sensor.
         """
         with namespace(self._namespace):
-            return self._sim._sensor_manager.create_sensor(sensor_options)
+            return self._sim.sensor_manager.create_sensor(sensor_options)
 
     @gs.assert_built
     def read_sensors(self, envs_idx=None) -> "dict[type[Sensor], torch.Tensor]":
@@ -611,7 +613,7 @@ class Scene(RBC):
         dict[type[Sensor], torch.Tensor]
             For each sensor class present in the scene, a tensor of shape (B, [history,] class_cache_size).
         """
-        return self._sim._sensor_manager.read_sensors(entity_idx=None, envs_idx=envs_idx)
+        return self._sim.sensor_manager.read_sensors(entity_idx=None, envs_idx=envs_idx)
 
     @gs.assert_unbuilt
     def add_recorder(self, data_func: Callable, rec_options: "RecorderOptions") -> "Recorder":
@@ -797,13 +799,12 @@ class Scene(RBC):
         if surface.vis_mode == "visual":
             gs.raise_exception("surface.vis_mode='visual' is not supported for fluid emitters.")
 
-        emitter = Emitter(max_particles)
         entity = self.add_entity(
             morph=gs.morphs.Nowhere(n_particles=max_particles),
             material=material,
             surface=surface,
         )
-        emitter.set_entity(entity)
+        emitter = Emitter(entity, max_particles)
         self._emitters.append(emitter)
         return emitter
 
@@ -823,7 +824,7 @@ class Scene(RBC):
             The added force field.
         """
         force_field.scene = self
-        self._sim._add_force_field(force_field)
+        self._sim.add_force_field(force_field)
         return force_field
 
     @gs.assert_unbuilt
@@ -862,88 +863,65 @@ class Scene(RBC):
 
         gs._scene_registry.append(weakref.ref(self, _destroy_callback))
 
-        with gs.logger.timer(f"Building scene ~~~<{self._uid}>~~~..."):
-            self._parallelize(n_envs, env_spacing, n_envs_per_row, center_envs_at_origin)
+        # A failed build destroys the scene, so that it never stays half built
+        is_done = False
+        try:
+            with gs.logger.timer(f"Building scene ~~~<{self._uid}>~~~..."):
+                self.env_spacing = env_spacing
+                self.n_envs_per_row = n_envs_per_row
+                self._center_envs_at_origin = center_envs_at_origin
 
-            with namespace(self._namespace):
-                self._sim.build()
+                # A scene without parallel environments lays out one
+                n_envs_ = max(1, n_envs)
+                if self.n_envs_per_row is None:
+                    self.n_envs_per_row = math.ceil(math.sqrt(n_envs_))
 
-            # reset state
-            self._reset()
+                # compute offset values for visualizing each env
+                if not isinstance(env_spacing, (list, tuple)) or len(env_spacing) != 2:
+                    gs.raise_exception("`env_spacing` should be a tuple of length 2.")
+                self._layout = EnvironmentLayout(n_envs, tuple(env_spacing), self.n_envs_per_row, center_envs_at_origin)
+                offset_x = (np.arange(n_envs_) // self.n_envs_per_row) * self.env_spacing[0]
+                offset_y = (np.arange(n_envs_) % self.n_envs_per_row) * self.env_spacing[1]
+                offset_z = np.zeros((n_envs_,))
+                self.envs_offset = np.stack((offset_x, offset_y, offset_z), axis=-1, dtype=gs.np_float)
+
+                # move to center
+                if center_envs_at_origin:
+                    center = (np.max(self.envs_offset, axis=0) + np.min(self.envs_offset, axis=0)) / 2.0
+                    self.envs_offset -= center
+
+                with namespace(self._namespace):
+                    self._sim.build(n_envs)
+
+                # reset state
+                self._reset()
+
+            with gs.logger.timer("Compiling simulation kernels..."):
+                self._sim.step()
+                try:
+                    self._sim.check_errno()
+                except gs.GenesisException as e:
+                    gs.logger.warning(
+                        "The initial state is invalid. Register a valid one with 'scene.reset(state)', or overwrite it "
+                        "manually following 'scene.build' and every call to 'scene.reset()', otherwise stepping will "
+                        f"fail with: {e}"
+                    )
+                self._sim.reset(self._init_state)
+                self._restart()
+
+            # visualizer
+            with gs.logger.timer("Building visualizer..."):
+                self._visualizer.build()
+
+            # recorders, which lay out the phases a step times once (see 'StepTimer.add_phases')
+            self._sim.step_timer.add_phases("recorders", "rendering", "video")
+            self._recorder_manager.build()
 
             self._is_built = True
-
-        with gs.logger.timer("Compiling simulation kernels..."):
-            self._sim.step()
-            try:
-                self._sim.check_errno()
-            except gs.GenesisException as e:
-                gs.logger.warning(
-                    "The initial state is invalid. Register a valid one with 'scene.reset(state)', or overwrite it "
-                    "manually following 'scene.build' and every call to 'scene.reset()', otherwise stepping will fail "
-                    f"with: {e}"
-                )
-            self._reset()
-
-        # visualizer
-        with gs.logger.timer("Building visualizer..."):
-            self._visualizer.build()
-
-        # recorders, which lay out the phases a step times once (see 'StepTimer.add_phases')
-        self._sim.step_timer.add_phases("recorders", "rendering", "video")
-        self._recorder_manager.build()
-
-    def _parallelize(
-        self,
-        n_envs: int,
-        env_spacing: tuple[float, float],
-        n_envs_per_row: int,
-        center_envs_at_origin: bool,
-    ):
-        self.n_envs = n_envs
-        self.env_spacing = env_spacing
-        self.n_envs_per_row = n_envs_per_row
-        self._center_envs_at_origin = center_envs_at_origin
-
-        # true batch size
-        self._B = max(1, self.n_envs)
-        self._envs_idx = torch.arange(self._B, dtype=gs.tc_int, device=gs.device)
-
-        if self.n_envs_per_row is None:
-            self.n_envs_per_row = math.ceil(math.sqrt(self._B))
-
-        # compute offset values for visualizing each env
-        if not isinstance(env_spacing, (list, tuple)) or len(env_spacing) != 2:
-            gs.raise_exception("`env_spacing` should be a tuple of length 2.")
-        self._layout = EnvironmentLayout(n_envs, tuple(env_spacing), self.n_envs_per_row, center_envs_at_origin)
-        offset_x = (np.arange(self._B) // self.n_envs_per_row) * self.env_spacing[0]
-        offset_y = (np.arange(self._B) % self.n_envs_per_row) * self.env_spacing[1]
-        offset_z = np.zeros((self._B,))
-        self.envs_offset = np.stack((offset_x, offset_y, offset_z), axis=-1, dtype=gs.np_float)
-
-        # move to center
-        if center_envs_at_origin:
-            center = (np.max(self.envs_offset, axis=0) + np.min(self.envs_offset, axis=0)) / 2.0
-            self.envs_offset -= center
-
-        """
-        Notes:
-        - When using gpu
-            - for non-batched env, we only parallelize certain loops that have big loop size
-            - for batched env, we parallelize all loops
-        - When using cpu, we serialize everything.
-            - Parallelization only provides a boost for n_envs >= num_threads.
-              It is always disabled by default but can be enforced by setting the env var `GS_PARA_LEVEL=2`.
-            - In order to exploit full cpu power, users are encouraged to launch multiple processes manually, so that
-              each process uses a single cpu thread.
-        """
-        if gs.backend == gs.cpu:
-            para_level = gs.PARA_LEVEL.NEVER
-        elif self.n_envs <= 1:
-            para_level = gs.PARA_LEVEL.PARTIAL
-        else:
-            para_level = gs.PARA_LEVEL.ALL
-        self._para_level = int(os.environ.get("GS_PARA_LEVEL", para_level))
+            is_done = True
+        finally:
+            if not is_done:
+                self.destroy()
 
     @gs.assert_built
     def reset(self, state: SimState | None = None, envs_idx=None):
@@ -966,7 +944,7 @@ class Scene(RBC):
         self._recorder_manager.reset(envs_idx)
         self._reset(state, envs_idx=envs_idx)
 
-    def _reset(self, state: SimState | None = None, *, envs_idx=None, keep_init: bool = False):
+    def _reset(self, state: SimState | None = None, *, envs_idx: IndexType | None = None, keep_init: bool = False):
         if self._is_built:
             if state is None:
                 state = self._init_state
@@ -1020,13 +998,13 @@ class Scene(RBC):
         # Snapshot the current state before the backward pass rewinds the physics. The clocks go with it: the backward
         # pass of each step winds them down, and the restore below puts the physics back where they were.
         snapshot = self._sim.get_state()
-        steps = self._sim._steps.clone()
+        steps = self._sim.steps.clone()
         # The autograd nodes of the steps unroll the rollout within this backward pass (see genesis.grad.bridge).
         torch.autograd.backward(loss, *args, **kwargs)
         # keep_init semantics: see _reset. Restoring the snapshot puts the physics back where the forward pass left
         # it, and the clocks snapshotted above with it.
         self._reset(snapshot, keep_init=True)
-        self._sim._steps[:] = steps
+        self._sim.steps.copy_(steps)
         return snapshot
 
     @gs.assert_built
@@ -1543,8 +1521,7 @@ class Scene(RBC):
         """
         Get the simulated time of each environment, in seconds.
 
-        Environments are stepped and reset independently, so each one carries its own simulated time. The number of
-        `scene.step()` calls is a separate scalar, `Simulator.cur_step_global`.
+        Environments are stepped and reset independently, so each one carries its own simulated time.
 
         Parameters
         ----------
@@ -1572,7 +1549,7 @@ class Scene(RBC):
         rejected_kinds = Counter(type(entity).__name__ for entity in self.entities if entity.desc is None)
         rejected_kinds.update(type(emitter).__name__ for emitter in self._emitters)
         rejected_kinds.update(type(force_field).__name__ for force_field in self._sim.solvers[0].force_fields.fields)
-        omitted_kinds = Counter(type(sensor).__name__ for sensor in self._sim._sensor_manager.sensors)
+        omitted_kinds = Counter(type(sensor).__name__ for sensor in self.sensors)
         if self._visualizer is not None:
             omitted_kinds.update(type(camera).__name__ for camera in self._visualizer.cameras)
         if self._pre_step_callbacks:
@@ -1692,7 +1669,7 @@ class Scene(RBC):
         # 'add_entity' would resolve a material and a surface the description already holds, and read the asset it
         # replaces.
         for desc in described.entities:
-            scene._sim._add_entity(desc=desc)
+            scene._sim.add_entity(desc=desc)
         return scene
 
     @gs.assert_built
@@ -1843,33 +1820,6 @@ class Scene(RBC):
         # The restored state is rendered at the scheduled framerate without forcing immediate refresh, as after a step
         self._restart(refresh_viewer=False)
 
-    def _sanitize_envs_idx(
-        self, envs_idx: int | range | slice | tuple[int, ...] | list[int] | torch.Tensor | np.ndarray | None
-    ) -> torch.Tensor:
-        if envs_idx is None:
-            return self._envs_idx
-
-        if self.n_envs == 0:
-            gs.raise_exception("`envs_idx` is not supported for non-parallelized scene.")
-
-        if isinstance(envs_idx, slice):
-            if envs_idx.step is not None and envs_idx.step < 0:
-                return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
-            return self._envs_idx[envs_idx]
-        if isinstance(envs_idx, range):
-            if envs_idx.step < 0:
-                return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
-            return self._envs_idx[envs_idx]
-        if isinstance(envs_idx, (int, np.integer)):
-            n_envs = self.n_envs
-            if not -n_envs <= envs_idx < n_envs:
-                gs.raise_exception(f"`envs_idx` out of range: {envs_idx} not in [{-n_envs}, {n_envs}).")
-            if envs_idx < 0:
-                envs_idx = envs_idx + n_envs
-            return self._envs_idx[envs_idx : envs_idx + 1]
-
-        return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
-
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
@@ -1888,6 +1838,11 @@ class Scene(RBC):
     def substeps(self):
         """The number of substeps per simulation step."""
         return self._sim.substeps
+
+    @property
+    def n_envs(self) -> int:
+        """The number of parallel environments, 0 for a scene without a batch dimension."""
+        return self._sim.n_envs
 
     @property
     def timings(self):
@@ -1926,7 +1881,7 @@ class Scene(RBC):
     @property
     def show_FPS(self):
         """Whether to print the frames per second (FPS) in the terminal."""
-        warn_once("Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
+        warn_once(self, "Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
         return self.options.profiling.show_FPS
 
     @property
@@ -1953,6 +1908,11 @@ class Scene(RBC):
     def entities(self) -> list["Entity"]:
         """All the entities in the scene."""
         return self._sim.entities
+
+    @property
+    def sensors(self) -> list["Sensor"]:
+        """All the sensors in the scene."""
+        return self._sim.sensor_manager.sensors
 
     @property
     def entity_names(self) -> tuple[str, ...]:
@@ -1997,20 +1957,7 @@ class Scene(RBC):
         Entity
             The matching entity.
         """
-        if not ((name is None) ^ (uid is None)):
-            gs.raise_exception("Please specify either one argument between `name` or `uid`.")
-
-        if name is not None:
-            try:
-                return next(entity for entity in self.entities if entity.name == name)
-            except StopIteration as e:
-                gs.raise_exception_from(f"Entity not found for name: '{name}'.", e)
-        else:  # uid is not None
-            matches = [entity for entity in self.entities if entity.uid.match(uid, short_only=True)]
-            if matches:
-                (match,) = matches
-                return match
-            gs.raise_exception(f"Entity not found for uid: '{uid}'.")
+        return self._sim.get_entity(name, uid=uid)
 
     @property
     def emitters(self):

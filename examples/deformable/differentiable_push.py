@@ -123,15 +123,13 @@ def main():
 
             scene.step()
 
-            # you can use the getters of a solver
+            # The loss at the intermediate step covers the active particles of both objects
             if i == 25:
-                # compute loss
                 goal = torch.tensor([0.5, 0.8, 0.05], dtype=gs.tc_float, device=gs.device)
-                particles_pos = scene.mpm_solver.get_particles_pos()
-                particles_active = scene.mpm_solver.get_particles_active()
-                loss += torch.pow(particles_pos[particles_active] - goal, 2).sum()
+                for obj in (obj1, obj2):
+                    particles_pos, particles_active = obj.get_particles_pos(), obj.get_particles_active()
+                    loss += torch.pow(particles_pos[particles_active] - goal, 2).sum()
 
-            # you can also use the getters of an entity
             if i == horizon - 1:
                 # compute loss
                 goal = torch.tensor([0.5, 0.8, 0.05], dtype=gs.tc_float, device=gs.device)

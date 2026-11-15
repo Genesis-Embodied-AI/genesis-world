@@ -9,6 +9,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.entities.particle_entity import ParticleEntity
+from genesis.typing import IndexType
 
 
 class PBDBaseEntity(ParticleEntity):
@@ -68,7 +69,11 @@ class PBDBaseEntity(ParticleEntity):
         self._solver.fix_particles(particles_idx, envs_idx)
 
     @gs.assert_built
-    def release_particle(self, particles_idx_local=None, envs_idx=None):
+    def release_particles(
+        self,
+        particles_idx_local: IndexType | None = None,
+        envs_idx: IndexType | None = None,
+    ) -> None:
         """
         Release some of the attached particles, allowing them to move freely again.
 

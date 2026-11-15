@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 from functools import partial
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import numpy as np
 import torch
@@ -20,7 +20,6 @@ from scipy.spatial.transform import Rotation, Slerp
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
-from genesis.utils import warnings
 from genesis.utils.image_exporter import FrameImageExporter, as_grayscale_image
 from genesis.utils.misc import tensor_to_array, unique_rows
 from genesis.utils.tools import RunningMean
@@ -41,13 +40,6 @@ RET_SUCCESS = 42
 FILE_PATH = pathlib.Path(__file__)
 MODULE_ROOT_DIR = FILE_PATH.parents[2]
 MODULE = ".".join((FILE_PATH.parents[1].name, FILE_PATH.parent.name, FILE_PATH.stem))
-
-
-@pytest.fixture
-def clear_seen_fixture():
-    warnings._seen.clear()
-    yield
-    warnings._seen.clear()
 
 
 def _qd_kernel_wrapper(qd_func, num_inputs, num_outputs, *args):
@@ -1138,8 +1130,6 @@ def test_genuine_interpenetration(show_viewer):
         for convexify in (False, True)
     }
     scene.build()
-    links_pos0 = tensor_to_array(scene.rigid_solver.get_links_pos(), dtype=np.float64)
-    links_quat0 = tensor_to_array(scene.rigid_solver.get_links_quat(), dtype=np.float64)
 
     def placed(geoms, pos, quat):
         quat = np.asarray(quat)
@@ -1164,7 +1154,9 @@ def test_genuine_interpenetration(show_viewer):
             [
                 (
                     gu.inv_transform_by_trans_quat(
-                        tensor_to_array(geom.get_verts(), dtype=np.float64), links_pos0[link.idx], links_quat0[link.idx]
+                        tensor_to_array(geom.get_verts(), dtype=np.float64),
+                        tensor_to_array(link.get_pos(relative=False), dtype=np.float64),
+                        tensor_to_array(link.get_quat(relative=False), dtype=np.float64),
                     ),
                     geom.trimesh.faces.astype(np.int64),
                 )
@@ -1397,35 +1389,26 @@ def test_logger_raw_theme_plain_text(capsys):
 
 
 @pytest.mark.required
-def test_warn_once_logs_once(clear_seen_fixture):
-    msg = "This is a warning"
+def test_warn_once():
+    scene_1 = gs.Scene(show_viewer=False)
+    scene_2 = gs.Scene(show_viewer=False)
     with patch.object(gs, "logger", create=True) as mock_logger:
         with patch.object(mock_logger, "warning") as mock_warning:
-            warn_once(msg)
-            warn_once(msg)
-            mock_warning.assert_called_once_with(msg)
+            for message in ("Warning 1", "Warning 1", "Warning 2", ""):
+                warn_once(scene_1, message)
+            warn_once(scene_2, "Warning 1")
+            warn_once(scene_2, "")
+            warn_once(scene_2, "")
+    assert mock_warning.call_args_list == [call("Warning 1"), call("Warning 2"), call(""), call("Warning 1"), call("")]
 
 
-@pytest.mark.required
-def test_warn_once_logs_different_messages(clear_seen_fixture):
-    msg1 = "Warning 1"
-    msg2 = "Warning 2"
-    with patch.object(gs, "logger", create=True) as mock_logger:
-        with patch.object(mock_logger, "warning") as mock_warning:
-            warn_once(msg1)
-            warn_once(msg2)
-            assert mock_warning.call_count == 2
-            mock_warning.assert_any_call(msg1)
-            mock_warning.assert_any_call(msg2)
+def test_build_guard_requires_buildable_mixin():
+    with pytest.raises(gs.GenesisException, match="only a subclass of BuildableMixin"):
 
-
-@pytest.mark.required
-def test_warn_once_with_empty_message(clear_seen_fixture):
-    with patch.object(gs, "logger", create=True) as mock_logger:
-        with patch.object(mock_logger, "warning") as mock_warning:
-            warn_once("")
-            warn_once("")
-            mock_warning.assert_called_once_with("")
+        class Unbuildable:
+            @gs.assert_built
+            def step(self):
+                pass
 
 
 if __name__ == "__main__":

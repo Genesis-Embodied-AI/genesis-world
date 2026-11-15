@@ -14,7 +14,7 @@ import genesis.utils.geom as gu
 from genesis.engine.bvh import BVHPackedTrees, build_packed_bvh
 from genesis.options.sensors.options import ProbesWithNormalSensorOptionsMixin
 from genesis.utils.data import opt_in
-from genesis.utils.misc import concat_with_tensor, gaussian_crosstalk_kernel, make_tensor_field
+from genesis.utils.misc import BuildableMixin, concat_with_tensor, gaussian_crosstalk_kernel, make_tensor_field
 from genesis.utils.sdf import SDFInfo
 
 if TYPE_CHECKING:
@@ -405,7 +405,7 @@ def resolve_contact_depth_query(metadata: ContactDepthQueryMetadataMixin, mode: 
     metadata.contact_depth_query = mode
 
 
-class ContactDepthQuerySensorMixin:
+class ContactDepthQuerySensorMixin(BuildableMixin):
     """
     Sensor-side counterpart to ``ContactDepthQueryMetadataMixin``.
 
@@ -422,6 +422,7 @@ class ContactDepthQuerySensorMixin:
         if self._options.contact_depth_query != "raycast":
             opt_in(SDFInfo)
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
         resolve_contact_depth_query(self._shared_metadata, self._options.contact_depth_query, type(self).__name__)
@@ -443,7 +444,9 @@ class ViscoelasticHysteresisMetadataMixin:
     has_any_hysteresis: bool = False
 
 
-class ViscoelasticHysteresisMixin[ViscoelasticHysteresisSharedMetadataT: ViscoelasticHysteresisMetadataMixin]:
+class ViscoelasticHysteresisMixin[ViscoelasticHysteresisSharedMetadataT: ViscoelasticHysteresisMetadataMixin](
+    BuildableMixin
+):
     """
     Viscoelastic hysteresis (single Maxwell element, equilibrium gain normalized to 1).
 
@@ -459,6 +462,7 @@ class ViscoelasticHysteresisMixin[ViscoelasticHysteresisSharedMetadataT: Viscoel
 
     _shared_metadata: ViscoelasticHysteresisSharedMetadataT
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
         # Every sensor mixing in ViscoelasticHysteresisMixin uses an options class that inherits

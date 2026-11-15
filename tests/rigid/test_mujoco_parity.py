@@ -34,7 +34,8 @@ def test_equality_joint(gs_sim, mj_sim, tol):
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_equality_joint_mimic(gs_sim, mj_sim, tol):
-    assert gs_sim.rigid_solver.n_equalities == 1
+    (gs_robot,) = gs_sim.entities
+    assert gs_robot.n_equalities == 1
 
     qpos = np.array((0.0, -1.0))
     qvel = np.array((1.0, -0.3))
@@ -234,12 +235,13 @@ def test_one_ball_joint(gs_sim, mj_sim, tol):
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_rope_ball(gs_sim, mj_sim, gs_solver, tol):
     # Make sure it is possible to set the configuration vector without failure
-    qpos = gs_sim.rigid_solver.get_dofs_position()
-    gs_sim.rigid_solver.set_dofs_position(qpos)
-    assert_allclose(gs_sim.rigid_solver.get_dofs_position(), qpos, tol=gs.EPS)
-    qpos = torch.rand(gs_sim.rigid_solver.n_dofs, dtype=gs.tc_float).clip(*gs_sim.rigid_solver.get_dofs_limit())
-    gs_sim.rigid_solver.set_dofs_position(qpos)
-    assert_allclose(gs_sim.rigid_solver.get_dofs_position(), qpos, tol=gs.EPS)
+    (gs_robot,) = gs_sim.entities
+    qpos = gs_robot.get_dofs_position()
+    gs_robot.set_dofs_position(qpos)
+    assert_allclose(gs_robot.get_dofs_position(), qpos, tol=gs.EPS)
+    qpos = torch.rand(gs_robot.n_dofs, dtype=gs.tc_float).clip(*gs_robot.get_dofs_limit())
+    gs_robot.set_dofs_position(qpos)
+    assert_allclose(gs_robot.get_dofs_position(), qpos, tol=gs.EPS)
 
     check_mujoco_model_consistency(gs_sim, mj_sim, tol=tol)
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=300, tol=5e-9)
@@ -286,7 +288,8 @@ def test_urdf_rope(gs_sim, mj_sim, gs_solver, xml_path):
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_tet_primitive_shapes(gs_sim, mj_sim, gs_integrator, gs_solver, multi_contact, tol):
     # Make sure it is possible to set the configuration vector without failure
-    gs_sim.rigid_solver.set_dofs_position(gs_sim.rigid_solver.get_dofs_position())
+    (gs_robot,) = gs_sim.entities
+    gs_robot.set_dofs_position(gs_robot.get_dofs_position())
 
     check_mujoco_model_consistency(gs_sim, mj_sim, tol=tol)
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=700, tol=5e-6)
@@ -366,16 +369,16 @@ def test_general_actuator(gs_sim, mj_sim, tol):
     entity.control_dofs_force(5.0, dofs_idx_local=[2])
 
     # Pre-step so that Genesis computes qf_applied (needed for data consistency checks)
-    mj_sim.data.qpos[:] = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
-    mj_sim.data.qvel[:] = gs_sim.rigid_solver.dyn_state.dofs.vel.to_numpy()[:, 0]
+    mj_sim.data.qpos[:] = tensor_to_array(entity.get_qpos())
+    mj_sim.data.qvel[:] = tensor_to_array(entity.get_dofs_velocity())
     mujoco.mj_step(mj_sim.model, mj_sim.data)
     gs_sim.scene.step()
 
     for _ in range(99):
         check_mujoco_data_consistency(gs_sim, mj_sim, tol=tol, ignore_constraints=True)
 
-        mj_sim.data.qpos[:] = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
-        mj_sim.data.qvel[:] = gs_sim.rigid_solver.dyn_state.dofs.vel.to_numpy()[:, 0]
+        mj_sim.data.qpos[:] = tensor_to_array(entity.get_qpos())
+        mj_sim.data.qvel[:] = tensor_to_array(entity.get_dofs_velocity())
         mujoco.mj_step(mj_sim.model, mj_sim.data)
         gs_sim.scene.step()
 
@@ -412,9 +415,9 @@ def test_robot_kinematics(gs_sim, mj_sim, tol):
     check_mujoco_model_consistency(gs_sim, mj_sim, tol=tol)
 
     (gs_robot,) = gs_sim.entities
-    dof_bounds = gs_sim.rigid_solver.dyn_info.dofs.limit.to_numpy()
+    dofs_lower, dofs_upper = (tensor_to_array(dofs_limit) for dofs_limit in gs_robot.get_dofs_limit())
     for _ in range(100):
-        qpos = dof_bounds[:, 0] + (dof_bounds[:, 1] - dof_bounds[:, 0]) * np.random.rand(gs_robot.n_qs)
+        qpos = dofs_lower + (dofs_upper - dofs_lower) * np.random.rand(gs_robot.n_qs)
         init_paired_simulators(gs_sim, mj_sim, qpos)
         check_mujoco_data_consistency(gs_sim, mj_sim, tol=tol)
 

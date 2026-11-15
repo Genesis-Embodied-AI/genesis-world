@@ -156,11 +156,12 @@ class ContactSensor(SimpleSensor[ContactSensorOptions, None, ContactSensorMetada
 
         self._link: "RigidLink | None" = None
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
         if self._shared_metadata.solver is None:
-            self._shared_metadata.solver = self._manager._sim.rigid_solver
+            self._shared_metadata.solver = self._manager.sim.rigid_solver
 
         entity = self._shared_metadata.solver.entities[self._options.entity_idx]
         link_idx = self._options.link_idx_local + entity.link_start
@@ -216,7 +217,7 @@ class ContactSensor(SimpleSensor[ContactSensorOptions, None, ContactSensorMetada
         """Make a sphere at the link of the sensor while it detects a contact, for the first rendered environment."""
         if 0 not in envs_idx:
             return []
-        env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
+        env_idx = context.rendered_envs_idx[0] if self._manager.n_envs > 0 else None
 
         pos = self._link.get_pos(env_idx, relative=False).reshape((3,))
         is_contact = self.read(env_idx)
@@ -249,11 +250,12 @@ class ContactForceSensor(
     Sensor that returns the total contact force being applied to the associated RigidLink in its local frame.
     """
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
         if self._shared_metadata.solver is None:
-            self._shared_metadata.solver = self._manager._sim.rigid_solver
+            self._shared_metadata.solver = self._manager.sim.rigid_solver
 
         self._shared_metadata.min_force = concat_with_tensor(
             self._shared_metadata.min_force, self._options.min_force, expand=(1, 3)
@@ -337,7 +339,7 @@ class ContactForceSensor(
         """Make an arrow showing the contact force measured by the sensor, for the first rendered environment."""
         if 0 not in envs_idx:
             return []
-        env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
+        env_idx = context.rendered_envs_idx[0] if self._manager.n_envs > 0 else None
 
         pos = self._link.get_pos(env_idx, relative=False).reshape((3,))
         quat = self._link.get_quat(env_idx, relative=False).reshape((4,))

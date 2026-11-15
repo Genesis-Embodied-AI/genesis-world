@@ -27,7 +27,7 @@ def test_set_dofs_frictionloss_physics(gs_sim, tol):
     assert_allclose(frictionloss, np.array([0.0, 0.0]), atol=tol)
     for _ in range(10):
         gs_sim.step()
-    velocity_zero = gs_sim.rigid_solver.dyn_state.dofs.vel.to_numpy()[:, 0]
+    velocity_zero = tensor_to_array(robot.get_dofs_velocity())
 
     robot.set_dofs_velocity(initial_velocity)
     robot.set_dofs_frictionloss(np.array([1.0, 0.0]))
@@ -35,7 +35,7 @@ def test_set_dofs_frictionloss_physics(gs_sim, tol):
     assert_allclose(frictionloss, np.array([1.0, 0.0]), atol=tol)
     for _ in range(10):
         gs_sim.step()
-    velocity_high = gs_sim.rigid_solver.dyn_state.dofs.vel.to_numpy()[:, 0]
+    velocity_high = tensor_to_array(robot.get_dofs_velocity())
 
     np.testing.assert_array_less(velocity_high[0], velocity_zero[0])
     np.testing.assert_array_less(velocity_high[1], velocity_zero[1])
@@ -46,7 +46,7 @@ def test_set_dofs_frictionloss_physics(gs_sim, tol):
     assert_allclose(frictionloss, np.array([0.5]), atol=tol)
     for _ in range(10):
         gs_sim.step()
-    velocity_medium = gs_sim.rigid_solver.dyn_state.dofs.vel.to_numpy()[:, 0]
+    velocity_medium = tensor_to_array(robot.get_dofs_velocity())
 
     np.testing.assert_array_less(velocity_high[0], velocity_medium[0])
     np.testing.assert_array_less(velocity_medium[0], velocity_zero[0])
@@ -210,7 +210,7 @@ def test_static_friction(mode, friction, n_boxes, solver, scale, mesh_boxes, sho
 
     # On GPU the cooperative decomposed arm engages from 16 DOFs (3 boxes) in performance mode, at any size otherwise.
     # prefer_decomposed_solver is pinned by the test infra (1 on GPU, 0 on CPU).
-    rigid_solver = scene.sim.rigid_solver
+    rigid_solver = scene.rigid_solver
     if gs.backend != gs.cpu:
         is_cooperative = gs.use_ndarray or 6 * n_boxes >= 16
         assert rigid_solver.rigid_config.enable_cooperative_constraint_kernels == is_cooperative

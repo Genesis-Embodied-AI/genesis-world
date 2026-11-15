@@ -376,7 +376,7 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
             reset_envs_idx = torch.as_tensor(
                 np.random.permutation(n_envs)[:n_reset_envs], dtype=gs.tc_int, device=gs.device
             )
-            reset_envs_mask = torch.isin(scene._envs_idx, reset_envs_idx)
+            reset_envs_mask = torch.isin(torch.arange(n_envs, device=gs.device), reset_envs_idx)
         else:
             reset_envs_mask = None
 

@@ -132,10 +132,6 @@ class InteractiveScene:
         return self.scene.entities
 
     @property
-    def rigid_solver(self):
-        return self.scene.rigid_solver
-
-    @property
     def n_envs(self) -> int:
         return self.scene.n_envs
 
@@ -146,10 +142,6 @@ class InteractiveScene:
     @property
     def dt(self) -> float:
         return self.scene.sim.dt
-
-    @property
-    def is_built(self) -> bool:
-        return self._scene is not None and self._scene.is_built
 
     @property
     def _lock(self):
@@ -184,7 +176,6 @@ class InteractiveScene:
             ctx.remove_rigid_node(geom)
 
         entity.surface.vis_mode = mode
-        solver.update_vgeoms()
 
         is_visual = mode == "visual"
         geoms = entity.vgeoms if is_visual else entity.geoms
@@ -292,7 +283,7 @@ class InteractiveScene:
                         and kwargs.get("visualize_contact", False) == desc.visualize_contact
                         and kwargs.get("vis_mode") in (None, desc.surface.vis_mode)
                     ):
-                        scene._sim._add_entity(desc=desc)
+                        scene.sim.add_entity(desc=desc)
                     else:
                         scene.add_entity(name=name, **kwargs)
                 for sensor_opts in self._sensors_kwargs:

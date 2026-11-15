@@ -519,6 +519,7 @@ class TemperatureGridSensor(
         self._debug_t_range: float = self._options.debug_temperature_range[1] - self._debug_t_min
         self._debug_cell_local_positions: np.ndarray = np.array([])  # set in build
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -561,7 +562,7 @@ class TemperatureGridSensor(
             self._shared_metadata.simulate_all_link_temps = True
             if len(self._shared_metadata.link_temps) == 0:
                 self._shared_metadata.link_temps = torch.empty(
-                    (solver._B, solver.n_links), dtype=gs.tc_float, device=gs.device
+                    (solver.n_envs_, solver.n_links), dtype=gs.tc_float, device=gs.device
                 )
                 self._shared_metadata.link_volume = torch.empty(solver.n_links, dtype=gs.tc_float, device=gs.device)
 
@@ -583,7 +584,7 @@ class TemperatureGridSensor(
                     link_base_T[link_to_mat],
                     torch.tensor(ambient_T, dtype=gs.tc_float, device=gs.device),
                 )
-                n_batches = solver._B
+                n_batches = solver.n_envs_
                 self._shared_metadata.link_temps.copy_(base_T_per_link.unsqueeze(0).expand(n_batches, -1))
 
         # Per-sensor properties
@@ -654,10 +655,10 @@ class TemperatureGridSensor(
         # Contact area buffers
         n_c_max = int(solver.collider.collider_info.max_candidate_contacts[None])
         self._shared_metadata.contact_area_buffer = torch.zeros(
-            (n_c_max, solver._B), device=gs.device, dtype=gs.tc_float
+            (n_c_max, solver.n_envs_), device=gs.device, dtype=gs.tc_float
         )
         self._shared_metadata.contact_area_scratch = torch.empty(
-            (solver._B, n_c_max, len(_ScratchIdx)), device=gs.device, dtype=gs.tc_float
+            (solver.n_envs_, n_c_max, len(_ScratchIdx)), device=gs.device, dtype=gs.tc_float
         )
 
     def _get_return_format(self) -> tuple[int, ...]:
@@ -693,7 +694,7 @@ class TemperatureGridSensor(
         cls, shared_context: None, shared_metadata: TemperatureGridSensorMetadata, raw_data_T: torch.Tensor
     ):
         solver = shared_metadata.solver
-        dt = solver._sim.dt
+        dt = solver.sim.dt
         props = shared_metadata.link_material_properties
         link_conductivity = props[_PropIdx.CONDUCTIVITY]
         link_base_temperature = props[_PropIdx.BASE_TEMP]
@@ -784,7 +785,7 @@ class TemperatureGridSensor(
         _apply_T_measured_filter(
             shared_metadata.cache_sizes,
             shared_metadata.sensor_time_const,
-            shared_metadata.solver._sim.dt,
+            shared_metadata.solver.sim.dt,
             raw,
             previous,
         )
@@ -794,7 +795,7 @@ class TemperatureGridSensor(
         """Make a flat mesh colored by temperature (cool=blue, hot=red), for the first rendered environment."""
         if 0 not in envs_idx or self._link is None:
             return []
-        env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
+        env_idx = context.rendered_envs_idx[0] if self._manager.n_envs > 0 else None
 
         link_pos = self._link.get_pos(env_idx, relative=False)
         link_quat = self._link.get_quat(env_idx, relative=False)

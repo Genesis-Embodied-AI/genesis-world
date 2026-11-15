@@ -161,13 +161,8 @@ class HybridEntity(Entity):
         # set members
         self._material_rigid = material_rigid
         self._part_rigid = part_rigid
-        self._solver_rigid = part_rigid.solver
         self._material_soft = material_soft
         self._part_soft = part_soft
-        self._solver_soft = part_soft.solver
-
-        # TODO: test with different dt
-        assert self._solver_rigid.dt == self._solver_soft.dt, "Rigid and soft solver should have the same dt for now"
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------
@@ -346,7 +341,8 @@ class HybridEntity(Entity):
     # ----------------------------------- instantiation ----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def build(self):
+    @gs.assert_unbuilt
+    def _build(self):
         """
         Finalize the hybrid entity setup during simulation build.
         """
@@ -356,6 +352,8 @@ class HybridEntity(Entity):
                 muscle_group=torch.tensor(self._muscle_group_cache, dtype=gs.tc_int, device=gs.device)
                 # no muscle direction as the soft body is actuated by rigid parts
             )
+
+        self._is_built = True
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -385,16 +383,6 @@ class HybridEntity(Entity):
     def part_soft(self):
         """The soft part of the hybrid entity."""
         return self._part_soft
-
-    @property
-    def solver_rigid(self):
-        """The solver associated with the rigid part of the hybrid entity."""
-        return self._solver_rigid
-
-    @property
-    def solver_soft(self):
-        """The solver associated with the soft part of the hybrid entity."""
-        return self._solver_soft
 
 
 # ------------------------------------------------------------------------------------

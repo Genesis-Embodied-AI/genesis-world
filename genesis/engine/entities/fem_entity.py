@@ -275,9 +275,11 @@ class FEMEntity(Entity):
             If the tensor shape is not supported or per-element actuation is attempted.
         """
         elements_idx = self._get_global_idx(None, self.n_elements, self._el_start, unsafe=True)
-        actu = broadcast_tensor(actu, gs.tc_float, (self._sim._B, self.material.n_groups), ("envs_idx", "groups"))
+        actu = broadcast_tensor(
+            actu, gs.tc_float, (self._solver.n_envs_, self.material.n_groups), ("envs_idx", "groups")
+        )
         # Every element of the entity takes the actuation of its muscle group
-        actu = actu[:, None] if self._scene.n_envs > 0 else actu[0]
+        actu = actu[:, None] if self._solver.n_envs > 0 else actu[0]
         self._solver.set_elements_actu(actu, elements_idx, n_groups=self.material.n_groups)
 
     def set_muscle(self, muscle_group=None, muscle_direction=None):
@@ -408,7 +410,7 @@ class FEMEntity(Entity):
         self.instantiate(verts, elems)
 
     def _add_to_solver(self):
-        self._step_global_added = self._sim.cur_step_global
+        self._step_global_added = self._solver.sim.cur_step_global
         gs.logger.info(
             f"Entity {self.uid} added. class: {self.__class__.__name__}, morph: {self.morph.__class__.__name__}, "
             f"size: ({self.n_elements}, {self.n_vertices}), material: {self.material}."
@@ -451,6 +453,8 @@ class FEMEntity(Entity):
                 uvs=uvs,
                 vfaces=vgeom.vmesh.faces.astype(gs.np_int, copy=False),
             )
+
+        self._is_built = True
 
     # ------------------------------------------------------------------------------------
     # ---------------------------- interfacing with solver -------------------------------
