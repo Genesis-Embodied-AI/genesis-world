@@ -1530,13 +1530,13 @@ def test_align_mixed_mass_raises():
         links_inertial=[{"mass": 1.0, "ixx": 0.01, "iyy": 0.01, "izz": 0.01, "origin_xyz": "0 0 0"}, None],
         joint_type="fixed",
     )
-    for options_cls in (gs.entities.Rigid, gs.entities.Kinematic):
+    for spec_cls in (gs.entities.Rigid, gs.entities.Kinematic):
         scene = gs.Scene(
             show_viewer=False,
             show_FPS=False,
         )
         with pytest.raises(gs.GenesisException, match="geometry-estimated link masses"):
-            scene.add_entity(spec=options_cls(morph=gs.morphs.URDF(file=urdf, align=True, merge_fixed_links=False)))
+            scene.add_entity(spec=spec_cls(morph=gs.morphs.URDF(file=urdf, align=True, merge_fixed_links=False)))
 
 
 @pytest.mark.required

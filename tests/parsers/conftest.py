@@ -429,7 +429,7 @@ def build_usd_scene(
         show_viewer=show_viewer,
     )
 
-    options = gs.entities.Rigid(
+    spec = gs.entities.Rigid(
         morph=gs.morphs.USD(
             file=usd_file,
             scale=scale,
@@ -451,9 +451,9 @@ def build_usd_scene(
     with pytest.MonkeyPatch.context() as patched:
         patched.setattr(UsdContext, "__init__", partialmethod(UsdContext.__init__, use_bake_cache=False))
         if is_stage:
-            scene.add_stage(options=options)
+            scene.add_stage(spec=spec)
         else:
-            scene.add_entity(spec=options)
+            scene.add_entity(spec=spec)
 
     # Note that it is necessary to build the scene because spatial inertia of some geometries may not be specified.
     # In such a case, it will be estimated from the geometry during build (RigidLink._build to be specific).

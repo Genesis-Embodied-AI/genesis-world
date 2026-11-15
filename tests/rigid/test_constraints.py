@@ -638,9 +638,11 @@ def test_set_sol_params(n_envs, batched, tol):
         ),
     )
     robot_b = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-            pos=(0.0, -0.4, 0.1),
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+                pos=(0.0, -0.4, 0.1),
+            ),
         ),
     )
     scene.build(n_envs=2)

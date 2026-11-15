@@ -66,6 +66,7 @@ def run_worker(args: argparse.Namespace) -> None:
             morph=gs.morphs.MJCF(
                 file="xml/franka_emika_panda/panda.xml",
             ),
+            visualize_contact=True,
         ),
     )
     scene.build(n_envs=args.num_envs)

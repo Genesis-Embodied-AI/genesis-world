@@ -799,11 +799,12 @@ def test_derived_substeps(show_viewer, tol):
         ),
     )
     scene_from_substeps.add_entity(
-        spec=gs.entities.Rigid(
+        spec=gs.entities.PBD(
             morph=gs.morphs.Box(
                 pos=(1.0, 0.0, 1.0),
                 size=(0.02, 0.02, 0.02),
             ),
+            material=gs.materials.PBD.Particle(),
         ),
     )
     scene_from_substeps.build()

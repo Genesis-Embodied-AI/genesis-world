@@ -596,21 +596,23 @@ def test_dynamic_texture_side_by_side_envs(show_viewer):
         show_viewer=False,
     )
     unbatched_screen = unbatched_scene.add_entity(
-        morph=gs.morphs.Plane(
-            plane_size=(0.4, 1.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Emission(
-            emissive_texture=gs.textures.DynamicTexture(
-                resolution=(4, 4),
-                variants={
-                    "red": gs.textures.ColorTexture(
-                        color=(1.0, 0.0, 0.0),
-                    ),
-                    "blue": gs.textures.ColorTexture(
-                        color=(0.0, 0.0, 1.0),
-                    ),
-                },
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                plane_size=(0.4, 1.0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Emission(
+                emissive_texture=gs.textures.DynamicTexture(
+                    resolution=(4, 4),
+                    variants={
+                        "red": gs.textures.ColorTexture(
+                            color=(1.0, 0.0, 0.0),
+                        ),
+                        "blue": gs.textures.ColorTexture(
+                            color=(0.0, 0.0, 1.0),
+                        ),
+                    },
+                ),
             ),
         ),
     )
