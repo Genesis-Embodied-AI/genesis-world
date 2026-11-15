@@ -76,10 +76,6 @@ IS_INTERACTIVE_VIEWER_AVAILABLE = has_display or has_egl
 TOL_SINGLE = 5e-5
 TOL_DOUBLE = 1e-9
 
-# Lock pattern of the snapshots each test regenerates with '--snapshot-update', by test id. A test that does not pass
-# drops its entry, so that its snapshots keep their pin rather than lose the lines of the files it never wrote.
-SNAPSHOTS_UPDATED_PATTERNS_KEY = pytest.StashKey[dict[str, str]]()
-
 
 @pytest.fixture(scope="session")
 def scaled_mjcf_joint_equalities():
@@ -262,7 +258,7 @@ with lazy_imports():
 
     import genesis as gs
 
-    from .utils.assets import get_hf_dataset, mark_snapshots_unpushed, push_snapshots
+    from .utils.assets import get_hf_dataset, pin_snapshots
     from .utils.simulators import build_genesis_sim, build_mujoco_sim
 
 
@@ -310,12 +306,12 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
             "run benchmarks with '-m benchmarks' alone."
         )
 
-    # Push before collection, so that the selected tests download the snapshots the lock now pins
-    snapshots_message = config.getoption("--snapshot-push")
-    if snapshots_message is not None:
+    snapshots_revision = config.getoption("--snapshot-pin")
+    if snapshots_revision is not None:
         if config.getoption("--snapshot-update"):
-            raise pytest.UsageError("'--snapshot-push' uploads snapshots that a previous '--snapshot-update' wrote.")
-        push_snapshots(snapshots_message)
+            raise pytest.UsageError("'--snapshot-pin' and '--snapshot-update' cannot be combined.")
+        if not re.fullmatch(r"[0-9a-f]{40}", snapshots_revision):
+            raise pytest.UsageError("'--snapshot-pin' takes the full hash of a commit of the snapshots dataset.")
 
     # Only launch memory monitor from the main process, not from xdist workers
     mem_filepath = config.getoption("--mem-monitoring-filepath")
@@ -350,12 +346,14 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
     # Snapshot regeneration must run serially: syrupy writes updated snapshots at session end in the main process, so
     # it is incompatible with xdist and pytest-forked. Coerce the default '-n auto' to serial like the viewer does,
     # but reject an explicitly parallel or forked run.
-    if config.getoption("--snapshot-update", False):
-        if config.option.forked or (isinstance(config.option.numprocesses, int) and config.option.numprocesses > 0):
-            raise pytest.UsageError(
-                "'--snapshot-update' requires serial execution; run with '-n 0' and without '--forked'."
-            )
-        config.option.numprocesses = 0
+    # Pinning is serial too, since every test rewrites the shared lock file.
+    for snapshot_option in ("--snapshot-update", "--snapshot-pin"):
+        if config.getoption(snapshot_option, None):
+            if config.option.forked or (isinstance(config.option.numprocesses, int) and config.option.numprocesses > 0):
+                raise pytest.UsageError(
+                    f"'{snapshot_option}' requires serial execution; run with '-n 0' and without '--forked'."
+                )
+            config.option.numprocesses = 0
 
     # Force disabling distributed framework if interactive viewer is enabled
     show_viewer = config.getoption("--vis", IS_INTERACTIVE_VIEWER_AVAILABLE)
@@ -752,10 +750,7 @@ def _normalize_skip_location(report):
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
-    report = outcome.get_result()
-    _normalize_skip_location(report)
-    if not report.passed:
-        item.config.stash.get(SNAPSHOTS_UPDATED_PATTERNS_KEY, {}).pop(item.nodeid, None)
+    _normalize_skip_location(outcome.get_result())
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -763,14 +758,6 @@ def pytest_make_collect_report(collector):
     # A module skipping itself as it is imported is reported here rather than by its tests
     outcome = yield
     _normalize_skip_location(outcome.get_result())
-
-
-# Syrupy writes the regenerated snapshots in its own 'pytest_sessionfinish', which runs first
-@pytest.hookimpl(trylast=True)
-def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    snapshots_patterns = session.config.stash.get(SNAPSHOTS_UPDATED_PATTERNS_KEY, None)
-    if snapshots_patterns is not None:
-        mark_snapshots_unpushed(snapshots_patterns.values())
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
@@ -805,13 +792,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         parser.addoption("--vis", action="store_true", default=False, help="Enable interactive viewer.")
     parser.addoption("--dev", action="store_true", default=False, help="Enable genesis debug mode.")
     parser.addoption(
-        "--snapshot-push",
+        "--snapshot-pin",
         type=str,
         default=None,
-        metavar="MESSAGE",
+        metavar="COMMIT",
         help=(
-            "Upload the snapshots that '--snapshot-update' left unpushed in 'tests/snapshots.lock' to the snapshots "
-            "dataset in one commit with this message, pin them to it, then run the selected tests against the lock."
+            "Pin the snapshots of the selected tests in 'tests/snapshots.lock' to the files this commit of the snapshots "
+            "dataset holds for them, then run the tests against them."
         ),
     )
     parser.addoption(
@@ -1365,8 +1352,10 @@ def png_snapshot(request, snapshot):
         for path in (Path(snapshot_dir.parent) / snapshot_dir.name).glob(snapshot_pattern):
             assert path.is_file()
             path.unlink()
-        request.config.stash.setdefault(SNAPSHOTS_UPDATED_PATTERNS_KEY, {})[request.node.nodeid] = snapshot_lock_pattern
     else:
+        snapshots_revision = request.config.getoption("--snapshot-pin")
+        if snapshots_revision is not None:
+            pin_snapshots(snapshot_lock_pattern, snapshots_revision)
         get_hf_dataset(pattern=snapshot_lock_pattern, repo_name="snapshots", local_dir=tests_dir)
         # The image goes into a directory of its own per test, inside the one given by '--failure-artifacts-dir'. Its
         # name is shortened to keep the path within the length limit of Windows, and the digest of the full test id
@@ -1399,9 +1388,10 @@ def load_trajectory_snapshot(request):
     tests_dir = Path(__file__).parent
     snapshot_lock_pattern = f"{path.parent.relative_to(tests_dir).as_posix()}/{snapshot_pattern}"
     must_update_snapshot = request.config.getoption("--snapshot-update")
-    if must_update_snapshot:
-        request.config.stash.setdefault(SNAPSHOTS_UPDATED_PATTERNS_KEY, {})[request.node.nodeid] = snapshot_lock_pattern
-    else:
+    if not must_update_snapshot:
+        snapshots_revision = request.config.getoption("--snapshot-pin")
+        if snapshots_revision is not None:
+            pin_snapshots(snapshot_lock_pattern, snapshots_revision)
         get_hf_dataset(pattern=snapshot_lock_pattern, repo_name="snapshots", local_dir=tests_dir)
 
     def load(scene, n_envs, n_steps, show_viewer):
