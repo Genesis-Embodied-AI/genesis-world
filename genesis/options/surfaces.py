@@ -216,7 +216,7 @@ class Surface(Options):
             elif not force:
                 self.texture = ColorTexture()
         elif isinstance(self.texture, DynamicTexture):
-            self.texture = self.texture.resolve_asset_texture(color_texture)
+            self.texture = self.texture._resolve_asset_texture(color_texture)
 
         # update ior
         if self.ior is None or force:
@@ -240,7 +240,7 @@ class Surface(Options):
             elif not force and default is not None:
                 return default
         elif isinstance(current, DynamicTexture):
-            return current.resolve_asset_texture(new)
+            return current._resolve_asset_texture(new)
         return current
 
     @staticmethod

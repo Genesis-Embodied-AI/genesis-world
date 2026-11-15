@@ -695,7 +695,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         surface = surface.model_copy(update=fields)
         for name, texture in dict(surface).items():
             if isinstance(texture, gs.textures.DynamicTexture):
-                setattr(surface, name, texture.resolve_asset_texture(slots_texture.get(name)))
+                setattr(surface, name, texture._resolve_asset_texture(slots_texture.get(name)))
         # The merge skips the validators, and fields of both surfaces may combine into textures a surface refuses
         surface._check_dynamic_textures()
         self._surface = surface

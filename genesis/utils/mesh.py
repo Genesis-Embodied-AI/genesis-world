@@ -452,7 +452,8 @@ def _get_seed_image(texture) -> np.ndarray | None:
     The renderers replace it with the images of each environment, so the first one serves for any of them.
     """
     if isinstance(texture, gs.textures.DynamicTexture):
-        return texture.get_initial_image()
+        (i_variant,) = texture.get_variants_idx(texture.initial_variant)
+        return gs.textures.texture_to_rgba(texture.variants_texture[i_variant], texture.resolution)[0]
     if isinstance(texture, (gs.textures.ColorTexture, gs.textures.ImageTexture)) and texture.is_batched:
         return gs.textures.texture_to_rgba(texture)[0]
     return None
