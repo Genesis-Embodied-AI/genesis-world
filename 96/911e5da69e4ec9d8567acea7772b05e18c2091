@@ -1,0 +1,19 @@
+examples/rigid/single_franka_batch_render.py
+  s_ec1962963f1d21::t_f0ff6c94bb4b63 42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "96911e5da69e4ec9d8567acea7772b05e18c2091",
+  "prompts": {},
+  "sessions": {
+    "s_ec1962963f1d21": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cadd8ae9-41a6-4e47-aad1-49be5fffd081",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
