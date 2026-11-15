@@ -57,8 +57,8 @@ class HybridEntity(Entity):
         The index of the entity within the scene.
     scene : genesis.Scene
         The simulation scene where the entity is added.
-    options : gs.entities.Hybrid
-        The entity options the entity is constructed from, whose morph, a URDF or a Mesh, gives its shape.
+    spec : gs.entities.Hybrid
+        The entity spec the entity is constructed from, whose morph, a URDF or a Mesh, gives its shape.
     surface : genesis.surfaces.Surface
         The surface properties applied to the soft part of the entity.
     """
@@ -68,12 +68,12 @@ class HybridEntity(Entity):
         idx: int,
         scene: "Scene",
         surface: Surface,
-        options: "gs.entities.Hybrid",
+        spec: "gs.entities.Hybrid",
     ) -> None:
-        super().__init__(idx, scene, None, surface, options)
+        super().__init__(idx, scene, None, surface, spec)
 
-        morph = options.morph
-        material = options.material
+        morph = spec.morph
+        material = spec.material
         material_rigid = material.material_rigid
         material_soft = material.material_soft
 

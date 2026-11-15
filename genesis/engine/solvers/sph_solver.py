@@ -213,7 +213,7 @@ class SPHConfig(Config):
 
 
 class SPHSolver(ParticleSolver):
-    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]] = gs.entities.SPH
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]] = gs.entities.SPH
 
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
@@ -361,7 +361,7 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
         self,
         idx: int,
         surface: Surface,
-        options: "gs.entities.SPH",
+        spec: "gs.entities.SPH",
         desc: "EntityDescription | None" = None,
     ) -> "SPHEntity":
         entity = SPHEntity(
@@ -371,7 +371,7 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
             particle_size=self._particle_size,
             idx=idx,
             particle_start=self.n_particles,
-            options=options,
+            spec=spec,
         )
         self._entities.append(entity)
         self._n_particles += entity.n_particles

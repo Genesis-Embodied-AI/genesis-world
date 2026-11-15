@@ -132,11 +132,11 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
                 self.fem_solver,
             ]
         )
-        # The solver simulating the entities of each class of entity options, a subclass going where its base goes
-        self._solvers_by_options_cls: dict[type[gs.entities.BaseEntity], "Solver"] = {
-            solver.entity_options_cls: solver for solver in self._solvers
+        # The solver simulating the entities of each entity spec class, a subclass going where its base goes
+        self._solvers_by_spec_cls: dict[type[gs.entities.Spec], "Solver"] = {
+            solver.entity_spec_cls: solver for solver in self._solvers
         }
-        assert len(self._solvers_by_options_cls) == len(self._solvers)
+        assert len(self._solvers_by_spec_cls) == len(self._solvers)
 
         self._active_solvers: list["Solver"] = gs.List()
         # What runs in the scene in its own right: the active solvers, then the coupler when one is active
@@ -166,25 +166,25 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
     def add_entity(
         self,
         surface: "Surface | None" = None,
-        options: "gs.entities.BaseEntity | None" = None,
+        spec: "gs.entities.Spec | None" = None,
         desc: "EntityDescription | None" = None,
     ) -> "Entity":
         if desc is not None:
-            options = desc.options
-        if isinstance(options, gs.entities.Hybrid):
+            spec = desc.spec
+        if isinstance(spec, gs.entities.Hybrid):
             # A hybrid entity adds its parts to the scene itself, as entities of their own
-            entity = HybridEntity(self.n_entities, self.scene, surface, options)
+            entity = HybridEntity(self.n_entities, self.scene, surface, spec)
         else:
             solver = next(
                 (
-                    self._solvers_by_options_cls[options_cls]
-                    for options_cls in type(options).__mro__
-                    if options_cls in self._solvers_by_options_cls
+                    self._solvers_by_spec_cls[spec_cls]
+                    for spec_cls in type(spec).__mro__
+                    if spec_cls in self._solvers_by_spec_cls
                 ),
                 None,
             )
             assert solver is not None
-            entity = solver.add_entity(self.n_entities, surface, options, desc)
+            entity = solver.add_entity(self.n_entities, surface, spec, desc)
         self._entities.append(entity)
         if entity.desc is not None:
             self.scene._desc.entities.append(entity.desc)

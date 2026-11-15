@@ -29,16 +29,16 @@ def main():
     plane = scene.add_entity(
         gs.morphs.Plane(),
     )
-    franka_options = gs.entities.Rigid(
+    franka_spec = gs.entities.Rigid(
         morph=gs.morphs.MJCF(
             file="xml/franka_emika_panda/panda.xml",
         ),
     )
     # Geom 0 of each finger is the finger mesh, and 1 to 5 are the fingertip_pad_collision_* classes
-    fingers = franka_options.select(gs.indices.Link.named("left_finger", "right_finger"))
+    fingers = franka_spec.select(gs.indices.Link.named("left_finger", "right_finger"))
     fingers.select(gs.indices.Geom.at(slice(1, 6))).set_friction(1.5)
     franka = scene.add_entity(
-        options=franka_options,
+        spec=franka_spec,
     )
 
     cube = scene.add_entity(

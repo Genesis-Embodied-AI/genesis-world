@@ -37,8 +37,8 @@ class MPMEntity(ParticleEntity):
         Scene object this entity belongs to.
     solver : Solver
         The solver responsible for simulating this entity.
-    options : gs.entities.MPM
-        The entity options the entity is constructed from, whose morph gives its geometry.
+    spec : gs.entities.MPM
+        The entity spec the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface or texture representation.
     particle_size : float
@@ -63,10 +63,10 @@ class MPMEntity(ParticleEntity):
         particle_start: int,
         vvert_start: int,
         vface_start: int,
-        options: "gs.entities.MPM",
+        spec: "gs.entities.MPM",
     ) -> None:
         need_skinning = not isinstance(
-            options.material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
+            spec.material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
         )
         super().__init__(
             scene,
@@ -78,7 +78,7 @@ class MPMEntity(ParticleEntity):
             vvert_start=vvert_start,
             vface_start=vface_start,
             need_skinning=need_skinning,
-            options=options,
+            spec=spec,
         )
 
     def _add_to_solver(self):

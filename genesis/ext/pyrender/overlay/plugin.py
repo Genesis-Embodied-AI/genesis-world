@@ -309,8 +309,8 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         editor panel. Keyed by entity name; values are the kwargs forwarded to ``scene.add_entity``."""
         self._pending_entities_kwargs = {}
         for entity in self.scene.entities:
-            # The rebuild re-creates an entity handed its own options from its description (see 'InteractiveScene')
-            self._pending_entities_kwargs[entity.name] = {"options": entity.options}
+            # The rebuild re-creates an entity handed its own spec from its description (see 'InteractiveScene')
+            self._pending_entities_kwargs[entity.name] = {"spec": entity.spec}
 
     def _is_capturing(self) -> bool:
         """Check if ImGui or gizmo wants mouse/keyboard input."""
@@ -824,7 +824,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         # Per-entity scale editing (FileMorph only; primitives carry size/radius/height instead).
         to_remove: str | None = None
         for name, kwargs in self._pending_entities_kwargs.items():
-            morph = kwargs["options"].morph
+            morph = kwargs["spec"].morph
             morph_name = type(morph).__name__
             file_name = morph.file if isinstance(morph, gs.morphs.FileMorph) else ""
 
@@ -838,12 +838,12 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                 imgui.end_disabled()
                 self._maybe_show_disabled_tooltip(scale_disabled)
                 if changed and not scale_disabled:
-                    # New options rather than an edit in place, since the rebuild re-creates an entity handed its own
-                    # options from the description resolved at the old scale (see 'InteractiveScene._apply_rebuild').
+                    # A new spec rather than an edit in place, since the rebuild re-creates an entity handed its own
+                    # spec from the description resolved at the old scale (see 'InteractiveScene._apply_rebuild').
                     # The surface of the entity carries the visualization mode the overlay may have switched since
                     new_morph = morph.model_copy(update={"scale": new_scale})
                     surface = self.scene.get_entity(name).surface
-                    kwargs["options"] = kwargs["options"].model_copy(update={"morph": new_morph, "surface": surface})
+                    kwargs["spec"] = kwargs["spec"].model_copy(update={"morph": new_morph, "surface": surface})
                     self._pending_dirty = True
 
                 imgui.same_line()
@@ -982,7 +982,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                 while name in self._pending_entities_kwargs:
                     suffix += 1
                     name = f"{base_name}_{suffix}"
-                self._pending_entities_kwargs[name] = {"options": gs.entities.Rigid(morph=new_morph)}
+                self._pending_entities_kwargs[name] = {"spec": gs.entities.Rigid(morph=new_morph)}
                 self._pending_dirty = True
             imgui.unindent()
 

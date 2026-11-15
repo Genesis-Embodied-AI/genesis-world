@@ -1,4 +1,4 @@
-"""Patches of options set on selections of parts of an entity, and the settings recording them in entity options."""
+"""Patches of options set on selections of parts of an entity, and the settings recording them in an entity spec."""
 
 from typing import Annotated, Self
 

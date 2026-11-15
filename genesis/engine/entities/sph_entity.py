@@ -23,8 +23,8 @@ class SPHEntity(ParticleEntity):
         The simulation scene.
     solver : Solver
         The solver handling the simulation logic.
-    options : gs.entities.SPH
-        The entity options the entity is constructed from, whose morph gives its geometry.
+    spec : gs.entities.SPH
+        The entity spec the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface constraints or geometry.
     particle_size : float
@@ -43,7 +43,7 @@ class SPHEntity(ParticleEntity):
         particle_size: float,
         idx: int,
         particle_start: int,
-        options: "gs.entities.SPH",
+        spec: "gs.entities.SPH",
     ) -> None:
         super().__init__(
             scene,
@@ -53,7 +53,7 @@ class SPHEntity(ParticleEntity):
             idx,
             particle_start,
             need_skinning=False,
-            options=options,
+            spec=spec,
         )
 
     def init_sampler(self):

@@ -171,7 +171,7 @@ class PBDConfig(Config):
 
 
 class PBDSolver(ParticleSolver):
-    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]] = gs.entities.PBD
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]] = gs.entities.PBD
 
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
@@ -366,10 +366,10 @@ class PBDSolver(ParticleSolver):
         self,
         idx: int,
         surface: Surface,
-        options: "gs.entities.PBD",
+        spec: "gs.entities.PBD",
         desc: "EntityDescription | None" = None,
     ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
-        if isinstance(options.material, gs.materials.PBD.Cloth):
+        if isinstance(spec.material, gs.materials.PBD.Cloth):
             entity = PBD2DEntity(
                 scene=self._sim.scene,
                 solver=self,
@@ -381,9 +381,9 @@ class PBDSolver(ParticleSolver):
                 inner_edge_start=self.n_inner_edges,
                 vvert_start=self.n_vverts,
                 vface_start=self.n_vfaces,
-                options=options,
+                spec=spec,
             )
-        elif isinstance(options.material, gs.materials.PBD.Elastic):
+        elif isinstance(spec.material, gs.materials.PBD.Elastic):
             entity = PBD3DEntity(
                 scene=self._sim.scene,
                 solver=self,
@@ -395,9 +395,9 @@ class PBDSolver(ParticleSolver):
                 elem_start=self.n_elems,
                 vvert_start=self.n_vverts,
                 vface_start=self.n_vfaces,
-                options=options,
+                spec=spec,
             )
-        elif isinstance(options.material, gs.materials.PBD.Liquid):
+        elif isinstance(spec.material, gs.materials.PBD.Liquid):
             entity = PBDParticleEntity(
                 scene=self._sim.scene,
                 solver=self,
@@ -405,9 +405,9 @@ class PBDSolver(ParticleSolver):
                 particle_size=self._particle_size,
                 idx=idx,
                 particle_start=self.n_particles,
-                options=options,
+                spec=spec,
             )
-        elif isinstance(options.material, gs.materials.PBD.Particle):
+        elif isinstance(spec.material, gs.materials.PBD.Particle):
             entity = PBDFreeParticleEntity(
                 scene=self._sim.scene,
                 solver=self,
@@ -415,7 +415,7 @@ class PBDSolver(ParticleSolver):
                 particle_size=self._particle_size,
                 idx=idx,
                 particle_start=self.n_particles,
-                options=options,
+                spec=spec,
             )
         else:
             raise NotImplementedError()

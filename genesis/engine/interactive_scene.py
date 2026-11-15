@@ -4,7 +4,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
 import genesis as gs
-from genesis.options.entities import get_entity_options
+from genesis.options.entities import get_entity_spec
 from genesis.utils.cache import disable_owned_cache_release, enable_owned_cache_release, is_owned_cache_release_enabled
 from genesis.utils.misc import with_lock
 from genesis.vis.viewer_plugins.plugins import DefaultControlsPlugin
@@ -200,14 +200,14 @@ class InteractiveScene:
         Any argument left as ``None`` reuses what was supplied previously. Pass an empty ``dict`` / iterable to
         explicitly clear stored state.
 
-        An entity whose kwargs hold the very entity options it was built from (``entity.options``) is re-created from
+        An entity whose kwargs hold the very entity spec it was built from (``entity.spec``) is re-created from
         the description resolved then, without reading its asset again, unless ``scene_kwargs`` is given. To edit an
-        entity, pass new options (e.g. ``options.model_copy(update={"morph": ...})``).
+        entity, pass a new spec (e.g. ``spec.model_copy(update={"morph": ...})``).
 
         Args:
             scene_kwargs: Keyword arguments forwarded to ``gs.Scene(...)`` (sim_options, viewer_options, etc.).
             entities_kwargs: Mapping from entity name to a kwargs dict forwarded to ``scene.add_entity``, either
-                ``options`` or the individual arguments (morph, material, surface, visualize_contact, vis_mode), keyed
+                ``spec`` or the individual arguments (morph, material, surface, visualize_contact, vis_mode), keyed
                 by the name of the entity.
             sensors_kwargs: Iterable of ``SensorOptions`` instances forwarded to ``scene.add_sensor``.
         """
@@ -266,31 +266,31 @@ class InteractiveScene:
                 scene.__dict__.pop("_desc_digest", None)
                 # Re-register the pre-step callback: the in-place re-init cleared Scene's callback list.
                 scene.register_pre_step_callback(self._pre_step)
-                # The fields compared by identity, and the name, which the entity records into its options. The other
+                # The fields compared by identity, and the name, which the entity records into its spec. The other
                 # fields compare with what was given explicitly, since a patch field given as None differs from unset.
                 objects_fields = {"morph", "material", "surface", "name"}
                 for name, kwargs in self._entities_kwargs.items():
-                    options = kwargs["options"] if "options" in kwargs else get_entity_options(**kwargs)
+                    spec = kwargs["spec"] if "spec" in kwargs else get_entity_spec(**kwargs)
                     desc = entities_desc.get(name)
                     # A USD morph describes a whole stage (potentially many bodies); add_stage parses and adds them and
                     # takes no name. Every other morph is a single entity added by name.
-                    if isinstance(options.morph, gs.morphs.USD):
-                        # A stage names each entity it adds, so the options of an entity of a stage drop its name
-                        scene.add_stage(options=options.model_copy(update={"name": None}))
-                    # An entity handed the options, or the morphs, material and surface, its description was resolved
+                    if isinstance(spec.morph, gs.morphs.USD):
+                        # A stage names each entity it adds, so the spec of an entity of a stage drops its name
+                        scene.add_stage(spec=spec.model_copy(update={"name": None}))
+                    # An entity handed the spec, or the morphs, material and surface, its description was resolved
                     # from is unchanged, so it reuses that description without reading its asset again.
                     elif desc is not None and (
-                        options is desc.options
-                        or len(options.morphs) == len(desc.options.morphs)
-                        and all(morph is desc_morph for morph, desc_morph in zip(options.morphs, desc.options.morphs))
-                        and options.material is desc.options.material
-                        and options.surface is desc.options.surface
-                        and options.model_dump(exclude=objects_fields, exclude_unset=True)
-                        == desc.options.model_dump(exclude=objects_fields, exclude_unset=True)
+                        spec is desc.spec
+                        or len(spec.morphs) == len(desc.spec.morphs)
+                        and all(morph is desc_morph for morph, desc_morph in zip(spec.morphs, desc.spec.morphs))
+                        and spec.material is desc.spec.material
+                        and spec.surface is desc.spec.surface
+                        and spec.model_dump(exclude=objects_fields, exclude_unset=True)
+                        == desc.spec.model_dump(exclude=objects_fields, exclude_unset=True)
                     ):
                         scene.sim.add_entity(desc=desc)
                     else:
-                        scene.add_entity(options=options.model_copy(update={"name": name}))
+                        scene.add_entity(spec=spec.model_copy(update={"name": name}))
                 for sensor_opts in self._sensors_kwargs:
                     scene.add_sensor(sensor_opts)
                 # Hand the preserved window to the new viewer so build() reuses it instead of opening a new one.

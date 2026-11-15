@@ -548,8 +548,8 @@ class GravityMixin(BuildableMixin):
 class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
     # Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must
     is_differentiable: bool = False
-    # The class of entity options whose entities the solver simulates, which the simulator dispatches on
-    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]]
+    # The entity spec class whose entities the solver simulates, which the simulator dispatches on
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]]
 
     def __init__(self, sim: "Simulator", options):
         self._uid = gs.UID()

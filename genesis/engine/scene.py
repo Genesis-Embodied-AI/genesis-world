@@ -40,7 +40,7 @@ from genesis.options import (
     ViewerOptions,
     VisOptions,
 )
-from genesis.options.entities import EntityT, get_entity_options
+from genesis.options.entities import EntityT, get_entity_spec
 from genesis.options.morphs import Morph
 from genesis.options.recorders import RecorderOptions, TrajectoryFile
 from genesis.options.renderers import RendererOptions
@@ -306,10 +306,10 @@ class Scene(BuildableMixin, RBC):
             self._is_built = False
 
     @overload
-    def add_entity(self, *, options: gs.entities.BaseEntity[EntityT]) -> EntityT: ...
+    def add_entity(self, *, spec: gs.entities.Spec[EntityT]) -> EntityT: ...
 
     @overload
-    def add_entity(self, *, options: gs.entities.BaseEntity) -> "Entity": ...
+    def add_entity(self, *, spec: gs.entities.Spec) -> "Entity": ...
 
     @overload
     def add_entity(
@@ -354,16 +354,16 @@ class Scene(BuildableMixin, RBC):
         vis_mode: str | None = None,
         name: str | None = None,
         *,
-        options: gs.entities.BaseEntity | None = None,
+        spec: gs.entities.Spec | None = None,
     ) -> "Entity":
-        """Add an entity to the scene, constructed from entity options or from individual arguments.
+        """Add an entity to the scene, constructed from an entity spec or from individual arguments.
 
-        The class of ``options``, such as ``gs.entities.Rigid``, ``gs.entities.Kinematic`` or ``gs.entities.FEM``,
-        decides the kind of entity and the solver simulating it. The entity holds them as ``entity.options``.
+        The class of ``spec``, such as ``gs.entities.Rigid``, ``gs.entities.Kinematic`` or ``gs.entities.FEM``,
+        decides the kind of entity and the solver simulating it. The entity holds it as ``entity.spec``.
 
-        The individual arguments are a shorthand for the options of the entities the material is given to, such as
-        ``options=gs.entities.Rigid(...)`` for ``gs.materials.Rigid``, and stand for those options alone. Passing
-        options and individual arguments together raises an error.
+        The individual arguments are a shorthand for the spec of the entities the material is given to, such as
+        ``spec=gs.entities.Rigid(...)`` for ``gs.materials.Rigid``, and stand for that spec alone. Passing
+        spec and individual arguments together raises an error.
 
         Parameters
         ----------
@@ -387,34 +387,34 @@ class Scene(BuildableMixin, RBC):
         name : str | None, optional
             User-specified name for the entity. If not provided, an auto-generated name will be assigned
             based on the morph type and entity UID (e.g., "box_a1b2c3d4"). Must be unique within the scene.
-        options : gs.entities.BaseEntity | None, optional
-            The options to construct the entity from, an instance of a subclass of ``gs.entities.BaseEntity``.
+        spec : gs.entities.Spec | None, optional
+            The spec to construct the entity from, an instance of a subclass of ``gs.entities.Spec``.
 
         Returns
         -------
         entity : genesis.Entity
-            The created entity, of the kind its options class decides.
+            The created entity, of the kind its spec class decides.
         """
-        if options is None:
-            options = get_entity_options(morph, material, surface, visualize_contact, vis_mode, name)
+        if spec is None:
+            spec = get_entity_spec(morph, material, surface, visualize_contact, vis_mode, name)
         elif any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode, name)):
-            gs.raise_exception("Pass either entity options or individual entity arguments, never both.")
-        if options.morph is None:
+            gs.raise_exception("Pass either an entity spec or individual entity arguments, never both.")
+        if spec.morph is None:
             gs.raise_exception("Entity construction requires a morph.")
-        material = options.material
+        material = spec.material
         # The surface resolves on a copy, since other entities may share it. The morph resolves in place, as shared
-        # morphs rely on (see 'Entity.options').
-        surface = gs.surfaces.Default() if options.surface is None else options.surface.model_copy()
+        # morphs rely on (see 'Entity.spec').
+        surface = gs.surfaces.Default() if spec.surface is None else spec.surface.model_copy()
 
         # some morph should not smooth surface normal
-        if isinstance(options.morphs[0], (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)):
+        if isinstance(spec.morphs[0], (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)):
             surface.smooth = False
 
         if surface.double_sided is None:
             surface.double_sided = isinstance(material, (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth))
 
         # validate and populate default surface.vis_mode considering the kind of entity
-        if isinstance(options, (gs.entities.Rigid, gs.entities.Kinematic)):
+        if isinstance(spec, (gs.entities.Rigid, gs.entities.Kinematic)):
             vis_modes = ("visual", "collision", "sdf")
         elif isinstance(
             material,
@@ -428,9 +428,9 @@ class Scene(BuildableMixin, RBC):
             ),
         ):
             vis_modes = ("particle", "recon")
-        elif isinstance(options, (gs.entities.PBD, gs.entities.MPM, gs.entities.SPH)):
+        elif isinstance(spec, (gs.entities.PBD, gs.entities.MPM, gs.entities.SPH)):
             vis_modes = ("visual", "particle", "recon")
-        elif isinstance(options, gs.entities.FEM):
+        elif isinstance(spec, gs.entities.FEM):
             vis_modes = ("visual",)
         else:
             # The visual of a hybrid entity is the one of its outer soft part
@@ -439,17 +439,17 @@ class Scene(BuildableMixin, RBC):
             surface.vis_mode = vis_modes[0]
         if surface.vis_mode not in vis_modes:
             gs.raise_exception(
-                f"Unsupported `surface.vis_mode` for gs.entities.{type(options).__name__}: '{surface.vis_mode}'. "
+                f"Unsupported `surface.vis_mode` for gs.entities.{type(spec).__name__}: '{surface.vis_mode}'. "
                 f"Expected one of: {list(vis_modes)}."
             )
 
-        return self._sim.add_entity(surface, options)
+        return self._sim.add_entity(surface, spec)
 
     @overload
-    def add_stage(self, *, options: gs.entities.Kinematic) -> list[KinematicEntity]: ...
+    def add_stage(self, *, spec: gs.entities.Kinematic) -> list[KinematicEntity]: ...
 
     @overload
-    def add_stage(self, *, options: gs.entities.Rigid) -> list["RigidEntity"]: ...
+    def add_stage(self, *, spec: gs.entities.Rigid) -> list["RigidEntity"]: ...
 
     @overload
     def add_stage(
@@ -480,13 +480,13 @@ class Scene(BuildableMixin, RBC):
         visualize_contact: bool | None = None,
         vis_mode: Literal["visual", "collision"] | None = None,
         *,
-        options: gs.entities.Rigid | gs.entities.Kinematic | None = None,
+        spec: gs.entities.Rigid | gs.entities.Kinematic | None = None,
     ) -> list:
         """Add a USD stage to the scene, as one entity per articulation or rigid body it holds.
 
-        The class of ``options`` decides the kind of every entity of the stage, ``gs.entities.Rigid`` or
-        ``gs.entities.Kinematic``, its morph being the stage. The options name no entity, since a stage
-        adds several. As for ``Scene.add_entity``, the individual arguments are a shorthand for the options of the
+        The class of ``spec`` decides the kind of every entity of the stage, ``gs.entities.Rigid`` or
+        ``gs.entities.Kinematic``, its morph being the stage. The spec names no entity, since a stage
+        adds several. As for ``Scene.add_entity``, the individual arguments are a shorthand for the spec of the
         entities their material is given to, and passing both raises an error.
 
         Parameters
@@ -503,37 +503,37 @@ class Scene(BuildableMixin, RBC):
         vis_mode : str | None, optional
             The visualization mode of the stage. This is a handy shortcut for setting `surface.vis_mode` without
             explicitly creating a surface object.
-        options : gs.entities.Rigid | gs.entities.Kinematic | None, optional
-            The options to construct the entities of the stage from.
+        spec : gs.entities.Rigid | gs.entities.Kinematic | None, optional
+            The spec to construct the entities of the stage from.
 
         Returns
         -------
         entities : list[genesis.Entity]
             The created entities.
         """
-        if options is None:
-            stage_options = get_entity_options(morph, material, surface, visualize_contact, vis_mode)
+        if spec is None:
+            stage_spec = get_entity_spec(morph, material, surface, visualize_contact, vis_mode)
         else:
             if any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode)):
-                gs.raise_exception("Pass either entity options or individual entity arguments, never both.")
-            stage_options = options
-        if not isinstance(stage_options, (gs.entities.Rigid, gs.entities.Kinematic)):
+                gs.raise_exception("Pass either an entity spec or individual entity arguments, never both.")
+            stage_spec = spec
+        if not isinstance(stage_spec, (gs.entities.Rigid, gs.entities.Kinematic)):
             gs.raise_exception(
-                f"A stage holds rigid or kinematic entities, which gs.entities.{type(stage_options).__name__} cannot "
+                f"A stage holds rigid or kinematic entities, which gs.entities.{type(stage_spec).__name__} cannot "
                 "construct."
             )
-        if stage_options.name is not None:
-            gs.raise_exception("A stage adds several entities, so its options take no name.")
-        if stage_options.patches:
-            gs.raise_exception("A stage adds entities of different links, so its options select no part.")
-        if not isinstance(stage_options.morph, gs.morphs.USD):
-            gs.raise_exception(f"Unsupported morph: {stage_options.morph}.")
+        if stage_spec.name is not None:
+            gs.raise_exception("A stage adds several entities, so its spec takes no name.")
+        if stage_spec.patches:
+            gs.raise_exception("A stage adds entities of different links, so its spec selects no part.")
+        if not isinstance(stage_spec.morph, gs.morphs.USD):
+            gs.raise_exception(f"Unsupported morph: {stage_spec.morph}.")
         from genesis.utils.usd import parse_usd_stage
 
         # One `gs.morphs.USD` per entity of the stage, added while the stage it was split from stays open.
-        with parse_usd_stage(stage_options.morph) as entity_morphs:
+        with parse_usd_stage(stage_spec.morph) as entity_morphs:
             return [
-                self.add_entity(options=stage_options.model_copy(update={"morph": entity_morph}))
+                self.add_entity(spec=stage_spec.model_copy(update={"morph": entity_morph}))
                 for entity_morph in entity_morphs
             ]
 
@@ -794,7 +794,7 @@ class Scene(BuildableMixin, RBC):
 
     @overload
     def add_emitter(
-        self, *, options: gs.entities.MPM | gs.entities.SPH | gs.entities.PBD, max_particles: int = ...
+        self, *, spec: gs.entities.MPM | gs.entities.SPH | gs.entities.PBD, max_particles: int = ...
     ) -> "Emitter": ...
 
     @overload
@@ -812,7 +812,7 @@ class Scene(BuildableMixin, RBC):
         max_particles: int = 20000,
         surface: Surface | None = None,
         *,
-        options: gs.entities.MPM | gs.entities.SPH | gs.entities.PBD | None = None,
+        spec: gs.entities.MPM | gs.entities.SPH | gs.entities.PBD | None = None,
     ) -> "Emitter":
         """
         Add a fluid emitter to the scene.
@@ -828,8 +828,8 @@ class Scene(BuildableMixin, RBC):
         surface : gs.surfaces.Surface | None, optional
             The surface of the emitted particles. Defaults to ``gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))``.
             Its ``vis_mode`` defaults to 'particle'.
-        options : gs.entities.MPM | gs.entities.SPH | gs.entities.PBD | None, optional
-            The entity options of the emitted particles, which replace the material and the surface.
+        spec : gs.entities.MPM | gs.entities.SPH | gs.entities.PBD | None, optional
+            The entity spec of the emitted particles, which replaces the material and the surface.
 
         Returns
         -------
@@ -841,26 +841,26 @@ class Scene(BuildableMixin, RBC):
         if self.requires_grad:
             gs.raise_exception("Emitter is not supported in differentiable mode.")
 
-        if options is None:
+        if spec is None:
             if material is None:
-                gs.raise_exception("An emitter requires a material or entity options.")
-            emitter_options = get_entity_options(material=material, surface=surface)
+                gs.raise_exception("An emitter requires a material or an entity spec.")
+            emitter_spec = get_entity_spec(material=material, surface=surface)
         else:
             if material is not None or surface is not None:
-                gs.raise_exception("Pass either entity options or a material and a surface, never both.")
-            emitter_options = options
-        if not isinstance(emitter_options, (gs.entities.MPM, gs.entities.SPH)) and not (
-            isinstance(emitter_options, gs.entities.PBD)
-            and isinstance(emitter_options.material, (gs.materials.PBD.Liquid, gs.materials.PBD.Particle))
+                gs.raise_exception("Pass either an entity spec or a material and a surface, never both.")
+            emitter_spec = spec
+        if not isinstance(emitter_spec, (gs.entities.MPM, gs.entities.SPH)) and not (
+            isinstance(emitter_spec, gs.entities.PBD)
+            and isinstance(emitter_spec.material, (gs.materials.PBD.Liquid, gs.materials.PBD.Particle))
         ):
             gs.raise_exception(
-                f"Non-supported entity options for emitter: gs.entities.{type(emitter_options).__name__}. Supported "
+                f"Non-supported entity spec class for emitter: gs.entities.{type(emitter_spec).__name__}. Supported "
                 "ones are gs.entities.MPM, gs.entities.SPH and gs.entities.PBD with a Liquid or a Particle material."
             )
-        if emitter_options.morph is not None:
-            gs.raise_exception("The emitter sets the morph of its entity options. Leave it None.")
+        if emitter_spec.morph is not None:
+            gs.raise_exception("The emitter sets the morph of its entity spec. Leave it None.")
 
-        surface = emitter_options.surface
+        surface = emitter_spec.surface
         if surface is None:
             surface = gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))
         if surface.vis_mode is None:
@@ -869,7 +869,7 @@ class Scene(BuildableMixin, RBC):
             gs.raise_exception("surface.vis_mode='visual' is not supported for fluid emitters.")
 
         morph = gs.morphs.Nowhere(n_particles=max_particles)
-        entity = self.add_entity(options=emitter_options.model_copy(update={"morph": morph, "surface": surface}))
+        entity = self.add_entity(spec=emitter_spec.model_copy(update={"morph": morph, "surface": surface}))
         emitter = Emitter(entity, max_particles)
         self._emitters.append(emitter)
         return emitter

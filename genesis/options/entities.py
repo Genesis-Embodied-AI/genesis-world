@@ -1,4 +1,4 @@
-"""Typed options an entity is constructed from, each class deciding the kind of entity and the solver simulating it."""
+"""Typed specs an entity is constructed from, each class deciding the kind of entity and the solver simulating it."""
 
 from collections.abc import Iterable
 from types import TracebackType
@@ -33,65 +33,65 @@ if TYPE_CHECKING:
 EntityT = TypeVar("EntityT", bound="Entity")
 
 
-def get_entity_options_cls(material: Material) -> type["BaseEntity"]:
-    """Return the class of entity options of the solver simulating a material, raising if no solver simulates it.
+def get_entity_spec_cls(material: Material) -> type["Spec"]:
+    """Return the entity spec class of the solver simulating a material, raising if no solver simulates it.
 
     A material goes to the class of the nearest of its bases that the solvers of Genesis simulate, so a subclass a user
     declares goes where the material it derives from goes.
     """
     for material_cls in type(material).__mro__:
-        options_cls = _OPTIONS_CLS_BY_MATERIAL_CLS.get(material_cls)
-        if options_cls is not None:
-            return options_cls
-    gs.raise_exception(f"No entity options admit material {type(material).__name__}.")
+        spec_cls = _SPEC_CLS_BY_MATERIAL_CLS.get(material_cls)
+        if spec_cls is not None:
+            return spec_cls
+    gs.raise_exception(f"No entity spec class admits material {type(material).__name__}.")
 
 
-def get_entity_options(
+def get_entity_spec(
     morph: Morph | Iterable[Morph] | None = None,
     material: Material | None = None,
     surface: Surface | None = None,
     visualize_contact: bool | None = None,
     vis_mode: str | None = None,
     name: str | None = None,
-) -> "BaseEntity":
-    """Return the entity options that the individual arguments of ``Scene.add_entity`` stand for.
+) -> "Spec":
+    """Return the entity spec that the individual arguments of ``Scene.add_entity`` stand for.
 
-    The material decides the class of the options (see ``get_entity_options_cls``), ``gs.entities.Rigid`` if None. Each
-    argument given fills the field of the options it stands for, 'vis_mode' filling that of a copy of the surface, and
-    the options refuse an argument their class has no field for.
+    The material decides the class of the spec (see ``get_entity_spec_cls``), ``gs.entities.Rigid`` if None. Each
+    argument given fills the field of the spec it stands for, 'vis_mode' filling that of a copy of the surface, and
+    the spec refuses an argument its class has no field for.
     """
-    options_cls = Rigid if material is None else get_entity_options_cls(material)
+    spec_cls = Rigid if material is None else get_entity_spec_cls(material)
     # Heterogeneous morphs may come as any iterable of morphs
     if isinstance(morph, Iterable) and not isinstance(morph, Morph):
         morph = tuple(morph)
     if vis_mode is not None:
         surface = (gs.surfaces.Default() if surface is None else surface).model_copy(update={"vis_mode": vis_mode})
     # Only rigid entities have contacts to draw, and 'False' asks for nothing, so every kind of entity accepts it
-    if "visualize_contact" not in options_cls.model_fields:
+    if "visualize_contact" not in spec_cls.model_fields:
         if visualize_contact:
             gs.raise_exception(
-                f"'visualize_contact' only applies to rigid entities, not to gs.entities.{options_cls.__name__}."
+                f"'visualize_contact' only applies to rigid entities, not to gs.entities.{spec_cls.__name__}."
             )
         visualize_contact = None
     fields = {"morph": morph, "material": material, "surface": surface, "visualize_contact": visualize_contact}
-    return options_cls(**{field: value for field, value in {**fields, "name": name}.items() if value is not None})
+    return spec_cls(**{field: value for field, value in {**fields, "name": name}.items() if value is not None})
 
 
-class BaseEntity(_FrozenOptions, Generic[EntityT]):
-    """Options an entity is constructed from, as passed to ``Scene.add_entity(options=...)``.
+class Spec(_FrozenOptions, Generic[EntityT]):
+    """Spec an entity is constructed from, as passed to ``Scene.add_entity(spec=...)``.
 
     A concrete subclass decides the kind of entity and the solver simulating it, and declares the materials it admits,
     the selectors of its parts and the patches of options set on them. The fields are fixed at construction, while
-    ``select`` records into the options the options set on parts of the entity, where the kind of entity has parts.
+    ``select`` records into the spec the options set on parts of the entity, where the kind of entity has parts.
     The entity holds a frozen copy, which records nothing more, so later records leave the entity as it is. A copy
-    of the options (``model_copy()``) records again, starting from the patches recorded so far.
+    of the spec (``model_copy()``) records again, starting from the patches recorded so far.
 
     Parameters
     ----------
     morph : Morph | tuple[Morph, ...] | None, optional
         The geometry or asset of the entity. A sequence of morphs makes the entity heterogeneous: each parallel
-        environment simulates one of them (see ``Scene.add_entity``). It must be set once the options reach
-        ``Scene.add_entity``, while the options given to ``Scene.add_emitter`` leave it None, since the emitter sets it.
+        environment simulates one of them (see ``Scene.add_entity``). It must be set once the spec reaches
+        ``Scene.add_entity``, while the spec given to ``Scene.add_emitter`` leaves it None, since the emitter sets it.
     surface : Surface | None, optional
         The appearance of the entity, its visualization mode included. If None, use ``gs.surfaces.Default()``.
     name : str | None, optional
@@ -123,11 +123,11 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
             return data
         material = data.get("material")
         if isinstance(material, Material) and "material" in cls.model_fields:
-            options_cls = get_entity_options_cls(material)
-            if not issubclass(cls, options_cls):
+            spec_cls = get_entity_spec_cls(material)
+            if not issubclass(cls, spec_cls):
                 gs.raise_exception(
                     f"gs.entities.{cls.__name__} cannot take material {type(material).__name__} of another solver. "
-                    f"Pass it to gs.entities.{options_cls.__name__} instead."
+                    f"Pass it to gs.entities.{spec_cls.__name__} instead."
                 )
         return data
 
@@ -143,14 +143,14 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
 
     # A copy records again, frozen or not
     def __copy__(self) -> Self:
-        options = super().__copy__()
-        options._is_frozen = False
-        return options
+        spec = super().__copy__()
+        spec._is_frozen = False
+        return spec
 
     def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
-        options = super().__deepcopy__(memo)
-        options._is_frozen = False
-        return options
+        spec = super().__deepcopy__(memo)
+        spec._is_frozen = False
+        return spec
 
     def _check_patch(self, patch: Patch) -> None:
         # Each selector selects at the level of the one before it or a finer one
@@ -176,16 +176,16 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
         return self.morph if isinstance(self.morph, tuple) else (self.morph,)
 
     def _frozen_copy(self, update: dict[str, Any] | None = None) -> Self:
-        """Return a copy of these options, with the fields 'update' gives, that records no more patches."""
-        options = self.model_copy(update=update)
-        options._is_frozen = True
-        return options
+        """Return a copy of this spec, with the fields 'update' gives, that records no more patches."""
+        spec = self.model_copy(update=update)
+        spec._is_frozen = True
+        return spec
 
     def _record(self, patches: tuple[Patch, ...]) -> None:
         """Record patches after those recorded so far, each checked as at construction."""
         if self._is_frozen:
             gs.raise_exception(
-                "The options an entity holds are frozen. Select parts on a copy of them ('model_copy()') instead."
+                "The spec an entity holds is frozen. Select parts on a copy of it ('model_copy()') instead."
             )
         for patch in patches:
             self._check_patch(patch)
@@ -194,19 +194,19 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
         self.__pydantic_fields_set__.add("patches")
 
 
-OptionsT = TypeVar("OptionsT", bound=BaseEntity)
+SpecT = TypeVar("SpecT", bound=Spec)
 
 
-class _PartSelection(Generic[OptionsT]):
-    """A selection of parts of an entity, recording into its entity options the options set on it.
+class _PartSelection(Generic[SpecT]):
+    """A selection of parts of an entity, recording into its entity spec the options set on it.
 
-    It holds the entity options and the selector of each level leading to the parts, and owns no data. Every setter
-    returns the selection, so that calls chain on it, ``end`` returns the entity options to start another selection
+    It holds the entity spec and the selector of each level leading to the parts, and owns no data. Every setter
+    returns the selection, so that calls chain on it, ``end`` returns the entity spec to start another selection
     from, and ``with`` binds the selection to a name for a patch.
     """
 
-    def __init__(self, options: OptionsT, selectors: tuple[indices.Link | indices.Geom | indices.Vertex, ...]) -> None:
-        self._options = options
+    def __init__(self, spec: SpecT, selectors: tuple[indices.Link | indices.Geom | indices.Vertex, ...]) -> None:
+        self._spec = spec
         self._selectors = selectors
 
     def __enter__(self) -> Self:
@@ -217,22 +217,22 @@ class _PartSelection(Generic[OptionsT]):
     ) -> None:
         return None
 
-    def end(self) -> OptionsT:
-        """Return the entity options this selection records into, however deeply it is nested.
+    def end(self) -> SpecT:
+        """Return the entity spec this selection records into, however deeply it is nested.
 
-        It ends a chain inline, so that one expression configures several selections and gives the options to
-        ``add_entity``: ``options.select(top).set_is_fixed(True).end().select(bottom).set_is_fixed(True).end()``.
+        It ends a chain inline, so that one expression configures several selections and gives the spec to
+        ``add_entity``: ``spec.select(top).set_is_fixed(True).end().select(bottom).set_is_fixed(True).end()``.
         """
-        return self._options
+        return self._spec
 
     def _set(self, patches_options: tuple[Geom | Vertex, ...]) -> Self:
-        self._options._record(
+        self._spec._record(
             tuple(Patch(selectors=self._selectors, options=patch_options) for patch_options in patches_options)
         )
         return self
 
 
-class _GeomSetters(_PartSelection[OptionsT]):
+class _GeomSetters(_PartSelection[SpecT]):
     """The setters of the quantities of collision geoms, which a link selection applies to every geom of its links."""
 
     def set(self, *options: Geom) -> Self:
@@ -256,10 +256,10 @@ class _GeomSetters(_PartSelection[OptionsT]):
         return self._set((Geom(friction_rolling=friction_rolling),))
 
 
-class GeomSelection(_GeomSetters[OptionsT]):
+class GeomSelection(_GeomSetters[SpecT]):
     """A selection of collision geoms of an entity (see ``gs.entities.Rigid.select``)."""
 
-    def select(self, selector: indices.Geom) -> "GeomSelection[OptionsT]":
+    def select(self, selector: indices.Geom) -> "GeomSelection[SpecT]":
         """Return the selection of the geoms of this selection that the selector holds, resolved among them.
 
         Two rules decide which value a field of a geom takes:
@@ -272,19 +272,19 @@ class GeomSelection(_GeomSetters[OptionsT]):
             gs.raise_exception(
                 f"A geom selection selects with gs.indices.Geom, got gs.{get_public_name(type(selector))}."
             )
-        return GeomSelection(self._options, (*self._selectors, selector))
+        return GeomSelection(self._spec, (*self._selectors, selector))
 
 
-class LinkSelection(_GeomSetters[OptionsT]):
+class LinkSelection(_GeomSetters[SpecT]):
     """A selection of links of an entity, whose geom setters apply to every geom of the links (see ``select``)."""
 
     @overload
-    def select(self, selector: indices.Link) -> "LinkSelection[OptionsT]": ...
+    def select(self, selector: indices.Link) -> "LinkSelection[SpecT]": ...
 
     @overload
-    def select(self, selector: indices.Geom) -> GeomSelection[OptionsT]: ...
+    def select(self, selector: indices.Geom) -> GeomSelection[SpecT]: ...
 
-    def select(self, selector: indices.Link | indices.Geom) -> "LinkSelection[OptionsT] | GeomSelection[OptionsT]":
+    def select(self, selector: indices.Link | indices.Geom) -> "LinkSelection[SpecT] | GeomSelection[SpecT]":
         """Return the selection of the links, or the geoms, of this selection that the selector holds.
 
         The selector resolves among these links, and a geom ordinal counts each link apart (see ``gs.indices.Geom.at``).
@@ -296,19 +296,19 @@ class LinkSelection(_GeomSetters[OptionsT]):
         2. Between two selections of one level, the later call applies.
         """
         if isinstance(selector, indices.Geom):
-            return GeomSelection(self._options, (*self._selectors, selector))
+            return GeomSelection(self._spec, (*self._selectors, selector))
         if not isinstance(selector, indices.Link):
             gs.raise_exception(
                 "A link selection selects with gs.indices.Link or gs.indices.Geom, got "
                 f"gs.{get_public_name(type(selector))}."
             )
-        return LinkSelection(self._options, (*self._selectors, selector))
+        return LinkSelection(self._spec, (*self._selectors, selector))
 
 
-class VertexSelection(_PartSelection[OptionsT]):
+class VertexSelection(_PartSelection[SpecT]):
     """A selection of vertices of a deformable entity (see ``gs.entities.FEM.select``)."""
 
-    def select(self, selector: indices.Vertex) -> "VertexSelection[OptionsT]":
+    def select(self, selector: indices.Vertex) -> "VertexSelection[SpecT]":
         """Return the selection of the vertices of this selection that the selector holds, resolved among them.
 
         Two rules decide which value a field of a vertex takes:
@@ -320,7 +320,7 @@ class VertexSelection(_PartSelection[OptionsT]):
             gs.raise_exception(
                 f"A vertex selection selects with gs.indices.Vertex, got gs.{get_public_name(type(selector))}."
             )
-        return VertexSelection(self._options, (*self._selectors, selector))
+        return VertexSelection(self._spec, (*self._selectors, selector))
 
     def set(self, *options: Vertex) -> Self:
         """Set on the selected vertices the fields each of the options gives explicitly, overriding an earlier call."""
@@ -331,8 +331,8 @@ class VertexSelection(_PartSelection[OptionsT]):
         return self._set((Vertex(is_fixed=is_fixed),))
 
 
-class Rigid(BaseEntity["RigidEntity"]):
-    """Options for an entity simulated with rigid-body dynamics.
+class Rigid(Spec["RigidEntity"]):
+    """Spec of an entity simulated with rigid-body dynamics.
 
     Parameters
     ----------
@@ -361,8 +361,8 @@ class Rigid(BaseEntity["RigidEntity"]):
 
         Selectors combine with ``|`` and ``&``, each resolving over the whole entity. A selection selects again with
         ``select``, at its own level or a finer one, the nested selector resolving among the parts the selection holds:
-        ``options.select(fingers).select(gs.indices.Geom.at(slice(1, 6)))`` holds geoms 1 to 5 of each finger, and
-        ``options.select(fingers).select(gs.indices.Geom.named("pad*")).select(gs.indices.Geom.at(0))`` the first pad of
+        ``spec.select(fingers).select(gs.indices.Geom.at(slice(1, 6)))`` holds geoms 1 to 5 of each finger, and
+        ``spec.select(fingers).select(gs.indices.Geom.named("pad*")).select(gs.indices.Geom.at(0))`` the first pad of
         each finger. A quantity set on links applies to every collision geom of those links.
 
         Two rules decide which value a field of a geom takes:
@@ -373,9 +373,9 @@ class Rigid(BaseEntity["RigidEntity"]):
         2. Between two selections of one level, the later call applies. The three calls here select links, so the thumb
            ends at 1.0::
 
-               options.select(gs.indices.Link.subtree("hand")).select(gs.indices.Link.named("thumb")).set_friction(2.0)
-               options.select(gs.indices.Link.subtree("hand") & gs.indices.Link.named("thumb")).set_friction(3.0)
-               options.select(gs.indices.Link.subtree("hand")).set_friction(1.0)
+               spec.select(gs.indices.Link.subtree("hand")).select(gs.indices.Link.named("thumb")).set_friction(2.0)
+               spec.select(gs.indices.Link.subtree("hand") & gs.indices.Link.named("thumb")).set_friction(3.0)
+               spec.select(gs.indices.Link.subtree("hand")).set_friction(1.0)
 
         A selection that holds no geom of the entity, or of one of its heterogeneous variants, raises in ``add_entity``.
         """
@@ -389,8 +389,8 @@ class Rigid(BaseEntity["RigidEntity"]):
         return LinkSelection(self, (selector,))
 
 
-class Kinematic(BaseEntity["KinematicEntity"]):
-    """Options for an entity simulated with kinematics only, with no collision.
+class Kinematic(Spec["KinematicEntity"]):
+    """Spec of an entity simulated with kinematics only, with no collision.
 
     Parameters
     ----------
@@ -403,8 +403,8 @@ class Kinematic(BaseEntity["KinematicEntity"]):
     material: materials.Kinematic = Field(default_factory=materials.Kinematic)
 
 
-class FEM(BaseEntity["FEMEntity"]):
-    """Options for an entity simulated with the finite element method (FEM).
+class FEM(Spec["FEMEntity"]):
+    """Spec of an entity simulated with the finite element method (FEM).
 
     Parameters
     ----------
@@ -428,8 +428,8 @@ class FEM(BaseEntity["FEMEntity"]):
         Selectors combine with ``|`` and ``&``, each resolving over the whole mesh. A selection selects again with
         ``select``, the nested selector resolving among the vertices the selection holds. With
         ``top = gs.indices.Vertex.in_box(lower, upper)`` and
-        ``near = gs.indices.Vertex.closest_to(clamp, max_distance=0.01)``, ``options.select(top).select(near)`` holds
-        the vertex of the top face nearest the clamp, where ``options.select(top & near)`` holds the vertex of the whole
+        ``near = gs.indices.Vertex.closest_to(clamp, max_distance=0.01)``, ``spec.select(top).select(near)`` holds
+        the vertex of the top face nearest the clamp, where ``spec.select(top & near)`` holds the vertex of the whole
         mesh nearest the clamp, if it lies on the top face.
 
         Two rules decide which value a field of a vertex takes:
@@ -447,8 +447,8 @@ class FEM(BaseEntity["FEMEntity"]):
         return VertexSelection(self, (selector,))
 
 
-class MPM(BaseEntity["MPMEntity"]):
-    """Options for an entity simulated with the material point method (MPM).
+class MPM(Spec["MPMEntity"]):
+    """Spec of an entity simulated with the material point method (MPM).
 
     Parameters
     ----------
@@ -459,8 +459,8 @@ class MPM(BaseEntity["MPMEntity"]):
     material: materials.MPM.Base
 
 
-class SPH(BaseEntity["SPHEntity"]):
-    """Options for an entity simulated with smoothed particle hydrodynamics (SPH).
+class SPH(Spec["SPHEntity"]):
+    """Spec of an entity simulated with smoothed particle hydrodynamics (SPH).
 
     Parameters
     ----------
@@ -471,8 +471,8 @@ class SPH(BaseEntity["SPHEntity"]):
     material: materials.SPH.Base = Field(default_factory=materials.SPH.Liquid)
 
 
-class PBD(BaseEntity["PBDBaseEntity"]):
-    """Options for an entity simulated with position-based dynamics (PBD).
+class PBD(Spec["PBDBaseEntity"]):
+    """Spec of an entity simulated with position-based dynamics (PBD).
 
     Parameters
     ----------
@@ -483,8 +483,8 @@ class PBD(BaseEntity["PBDBaseEntity"]):
     material: materials.PBD.Base
 
 
-class Hybrid(BaseEntity["HybridEntity"]):
-    """Options for an entity simulated with a rigid skeleton inside a material point method (MPM) skin.
+class Hybrid(Spec["HybridEntity"]):
+    """Spec of an entity simulated with a rigid skeleton inside a material point method (MPM) skin.
 
     Parameters
     ----------
@@ -495,9 +495,9 @@ class Hybrid(BaseEntity["HybridEntity"]):
     material: materials.Hybrid
 
 
-# The class of entity options each material class goes to, the one each options class declares for its material. A
-# material takes the class of the nearest of its bases (see 'get_entity_options_cls').
-_OPTIONS_CLS_BY_MATERIAL_CLS: dict[type[Any] | None, type[BaseEntity]] = {
-    options_cls.model_fields["material"].annotation: options_cls
-    for options_cls in (Rigid, Kinematic, FEM, MPM, SPH, PBD, Hybrid)
+# The entity spec class each material class goes to, the one each spec class declares for its material. A
+# material takes the class of the nearest of its bases (see 'get_entity_spec_cls').
+_SPEC_CLS_BY_MATERIAL_CLS: dict[type[Any] | None, type[Spec]] = {
+    spec_cls.model_fields["material"].annotation: spec_cls
+    for spec_cls in (Rigid, Kinematic, FEM, MPM, SPH, PBD, Hybrid)
 }

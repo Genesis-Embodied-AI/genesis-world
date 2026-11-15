@@ -199,7 +199,7 @@ def _sanitize_sol_params(
 
 
 class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
-    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]] = gs.entities.Rigid
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]] = gs.entities.Rigid
 
     _entity_classes = ((Drone, DroneEntity), (Terrain, TerrainEntity), (Morph, RigidEntity))
     # override typing
@@ -295,10 +295,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self,
         idx: int,
         surface: Surface | None,
-        options: "gs.entities.Rigid | None",
+        spec: "gs.entities.Rigid | None",
         desc: RigidEntityDescription | None = None,
     ) -> RigidEntity:
-        entity = super().add_entity(idx, surface, options, desc)
+        entity = super().add_entity(idx, surface, spec, desc)
         self._geoms.extend(entity.geoms)
         self._equalities.extend(entity.equalities)
         self._n_verts += entity.n_verts

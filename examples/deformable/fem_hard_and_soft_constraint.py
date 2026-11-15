@@ -44,7 +44,7 @@ def main():
     blob_fixed_bounds = np.array([[-0.1, -0.1, 0.085], [0.1, 0.1, 0.1]])
     cylinder_pos = SCENE_POS + np.array([-0.3, 0.3, 0])
     cylinder_fixed_pos = np.array([0.05, 0.0, 0.1])
-    blob_options = gs.entities.FEM(
+    blob_spec = gs.entities.FEM(
         morph=gs.morphs.Sphere(
             pos=blob_pos,
             radius=0.1,
@@ -56,7 +56,7 @@ def main():
             model="linear_corotated",
         ),
     )
-    cube_options = gs.entities.FEM(
+    cube_spec = gs.entities.FEM(
         morph=gs.morphs.Box(
             pos=SCENE_POS + np.array([0.3, 0.3, 0]),
             size=(0.2, 0.2, 0.2),
@@ -68,7 +68,7 @@ def main():
             model="linear_corotated",
         ),
     )
-    cylinder_options = gs.entities.FEM(
+    cylinder_spec = gs.entities.FEM(
         morph=gs.morphs.Cylinder(
             pos=cylinder_pos,
             height=0.2,
@@ -82,12 +82,12 @@ def main():
         ),
     )
 
-    blob_options.select(gs.indices.Vertex.in_box(*blob_fixed_bounds)).set_is_fixed(True)
-    cylinder_options.select(gs.indices.Vertex.closest_to(cylinder_fixed_pos, max_distance=0.01)).set_is_fixed(True)
+    blob_spec.select(gs.indices.Vertex.in_box(*blob_fixed_bounds)).set_is_fixed(True)
+    cylinder_spec.select(gs.indices.Vertex.closest_to(cylinder_fixed_pos, max_distance=0.01)).set_is_fixed(True)
 
-    blob = scene.add_entity(options=blob_options)
-    cube = scene.add_entity(options=cube_options)
-    cylinder = scene.add_entity(options=cylinder_options)
+    blob = scene.add_entity(spec=blob_spec)
+    cube = scene.add_entity(spec=cube_spec)
+    cylinder = scene.add_entity(spec=cylinder_spec)
 
     # Recording every simulation step would be far denser than any player needs, and the step size here is tiny.
     video_fps = min(100.0, 1.0 / args.dt)

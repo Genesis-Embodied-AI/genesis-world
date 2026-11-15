@@ -361,7 +361,7 @@ class MPMMaterials:
 
 
 class MPMSolver(ParticleSolver):
-    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]] = gs.entities.MPM
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]] = gs.entities.MPM
 
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
@@ -487,10 +487,10 @@ Please decrease the simulation timestep or adjust the material parameters."""
         self,
         idx: int,
         surface: Surface,
-        options: "gs.entities.MPM",
+        spec: "gs.entities.MPM",
         desc: "EntityDescription | None" = None,
     ) -> "MPMEntity":
-        self.add_material(options.material)
+        self.add_material(spec.material)
 
         entity = MPMEntity(
             scene=self._sim.scene,
@@ -501,7 +501,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
             particle_start=self.n_particles,
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
-            options=options,
+            spec=spec,
         )
         self._entities.append(entity)
         self._n_particles += entity.n_particles

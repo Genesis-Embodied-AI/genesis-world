@@ -564,17 +564,17 @@ def test_collision_filtering(collision_filtering_usd, show_viewer, caplog):
     assert "col_e" in partial_records[0] and "col_f" in partial_records[0]
 
     ghosts = scene.add_stage(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.USD(
                 file=collision_filtering_usd,
                 pos=(0.0, 0.0, 0.5),
             ),
         ),
     )
-    stage_options = gs.entities.Rigid(morph=gs.morphs.USD(file=collision_filtering_usd))
-    stage_options.select(gs.indices.Link.named("base")).set_friction(1.0)
-    with pytest.raises(gs.GenesisException, match="select no part"):
-        scene.add_stage(options=stage_options)
+    stage_spec = gs.entities.Rigid(morph=gs.morphs.USD(file=collision_filtering_usd))
+    stage_spec.select(gs.indices.Link.named("base")).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="selects no part"):
+        scene.add_stage(spec=stage_spec)
     scene.build()
     ghosts_pos = [tensor_to_array(ghost.get_pos()) for ghost in ghosts]
 
@@ -585,7 +585,7 @@ def test_collision_filtering(collision_filtering_usd, show_viewer, caplog):
     for entity in entities:
         aabb_min, _aabb_max = entity.get_AABB()
         assert -5e-4 < aabb_min[-1] < 0.0
-    # The same stage constructed from kinematic options keeps its pose, neither falling nor colliding
+    # The same stage constructed from a kinematic spec keeps its pose, neither falling nor colliding
     assert len(ghosts) == len(entities)
     for ghost, pos in zip(ghosts, ghosts_pos):
         assert_allclose(ghost.get_pos(), pos, tol=gs.EPS)

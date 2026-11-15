@@ -1,4 +1,4 @@
-"""Selectors of the links, geoms and vertices of an entity, which entity options select parts of it with."""
+"""Selectors of the links, geoms and vertices of an entity, which an entity spec selects parts of it with."""
 
 from fnmatch import fnmatchcase
 from functools import reduce
@@ -16,7 +16,7 @@ from .options import Options
 
 
 class _Selection(Options):
-    """A selector of the parts of an entity, which entity options select with (see ``gs.entities.Rigid.select``).
+    """A selector of the parts of an entity, which an entity spec selects with (see ``gs.entities.Rigid.select``).
 
     Selectors of one type combine with ``|``, holding the parts either holds, and with ``&``, holding the parts both
     hold. A combination keeps its members as given and resolves them as the entity is added.
@@ -125,9 +125,9 @@ class _OrdinalIndex(_Selection):
         """Select the elements a numpy index picks: an ordinal, ordinals or a slice.
 
         The index is local to the selection it is selected in, as the ``*_idx_local`` arguments of the entity getters
-        are local to the entity. Selected on the entity options, it counts the elements of the whole entity. Selected on
+        are local to the entity. Selected on the entity spec, it counts the elements of the whole entity. Selected on
         a link selection, it counts the collision geoms of each selected link apart, so
-        ``options.select(fingers).select(gs.indices.Geom.at(0))`` selects the first geom of every finger. The elements
+        ``spec.select(fingers).select(gs.indices.Geom.at(0))`` selects the first geom of every finger. The elements
         count in the order the entity lists them: its collision geoms link after link in the order of ``entity.links``,
         as the asset states them before post-processing (see ``Geom``), or the vertices of its volume mesh.
         """

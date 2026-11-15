@@ -54,7 +54,7 @@ def torus_box_sphere_mjcf(asset_tmp_path):
 
 
 @pytest.mark.required
-def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_free_mjcf, torus_box_sphere_mjcf):
+def test_entity_spec(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_free_mjcf, torus_box_sphere_mjcf):
     DT = 1e-2
     N_STEPS = 10
     PUSH_FORCE = 50.0
@@ -70,7 +70,7 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
         show_viewer=show_viewer,
     )
     # The root link holds no collision geom, so the geom of 'arm2' is the second one of the entity
-    arm_options = gs.entities.Rigid(
+    arm_spec = gs.entities.Rigid(
         morph=gs.morphs.URDF(
             file="urdf/simple/two_link_arm.urdf",
             pos=(0.0, -1.0, 0.6),
@@ -82,21 +82,19 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
             friction=0.5,
         ),
     )
-    arm_options.select(gs.indices.Geom.at(1)).set_friction(1.5)
-    arm_options.select(gs.indices.Link.subtree("arm1")).set_friction(0.9).set_friction_rolling(0.003)
-    arm_options.select(gs.indices.Link.subtree("arm1") & gs.indices.Link.named("arm2")).set(
+    arm_spec.select(gs.indices.Geom.at(1)).set_friction(1.5)
+    arm_spec.select(gs.indices.Link.subtree("arm1")).set_friction(0.9).set_friction_rolling(0.003)
+    arm_spec.select(gs.indices.Link.subtree("arm1") & gs.indices.Link.named("arm2")).set(
         gs.options.Geom(rho=2000.0, friction=0.8)
     )
-    arm_options.select(gs.indices.Link.named("arm1")).set_friction(0.6)
+    arm_spec.select(gs.indices.Link.named("arm1")).set_friction(0.6)
     # Nesting a link selection in another keeps it at the link level, so the later selection of the subtree applies
-    arm_options.select(gs.indices.Link.subtree("arm1")).select(gs.indices.Link.named("arm2")).set_friction_torsional(
-        0.05
-    )
-    arm_options.select(gs.indices.Link.subtree("base")).set_friction_torsional(0.02)
-    arm = scene.add_entity(options=arm_options)
+    arm_spec.select(gs.indices.Link.subtree("arm1")).select(gs.indices.Link.named("arm2")).set_friction_torsional(0.05)
+    arm_spec.select(gs.indices.Link.subtree("base")).set_friction_torsional(0.02)
+    arm = scene.add_entity(spec=arm_spec)
     spheres = []
     for i, friction in enumerate((0.5, 1.5)):
-        sphere_options = gs.entities.Rigid(
+        sphere_spec = gs.entities.Rigid(
             morph=gs.morphs.Mesh(
                 file="meshes/sphere.obj",
                 pos=(1.0 + i, -1.0, 0.6),
@@ -104,10 +102,10 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
                 fixed=True,
             ),
         )
-        sphere_options.select(gs.indices.Geom.at(slice(None))).set_friction(friction)
-        spheres.append(scene.add_entity(options=sphere_options))
+        sphere_spec.select(gs.indices.Geom.at(slice(None))).set_friction(friction)
+        spheres.append(scene.add_entity(spec=sphere_spec))
     # The torus is decomposed into convex pieces
-    mixed_geoms_options = gs.entities.Rigid(
+    mixed_geoms_spec = gs.entities.Rigid(
         morph=gs.morphs.MJCF(
             file=torus_box_sphere_mjcf,
             pos=(4.0, 1.0, 0.6),
@@ -120,24 +118,24 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
         ),
     )
     caps = gs.indices.Geom.named("top_cap") | gs.indices.Geom.named("bottom_cap[[]1]")
-    mixed_geoms_options.select(caps).set(gs.options.Geom(friction_torsional=0.05, friction_rolling=0.002))
+    mixed_geoms_spec.select(caps).set(gs.options.Geom(friction_torsional=0.05, friction_rolling=0.002))
     # A nested ordinal counts the geoms of the selection alone, so this selects the second cap
-    mixed_geoms_options.select(caps).select(gs.indices.Geom.at(1)).set_friction_rolling(0.004)
+    mixed_geoms_spec.select(caps).select(gs.indices.Geom.at(1)).set_friction_rolling(0.004)
     # An ordinal under links counts the geoms of each link apart, so this selects the torus and the capsule
-    mixed_geoms_options.select(gs.indices.Link.subtree("body")).select(gs.indices.Geom.at(0)).set_friction(1.2)
-    with mixed_geoms_options.select(gs.indices.Link.named("body")) as body:
+    mixed_geoms_spec.select(gs.indices.Link.subtree("body")).select(gs.indices.Geom.at(0)).set_friction(1.2)
+    with mixed_geoms_spec.select(gs.indices.Link.named("body")) as body:
         body.select(gs.indices.Geom.named("tor*")).set_friction(0.7)
         body.select(gs.indices.Geom.at(1)).set_friction(1.5)
         body.select(gs.indices.Geom.at(slice(1, 3))).set_friction_torsional(0.03)
     # A density given as None stands for the default density on geoms that still fuse with each other
-    mixed_geoms_options.select(gs.indices.Link.named("body")).set(gs.options.Geom(rho=None))
+    mixed_geoms_spec.select(gs.indices.Link.named("body")).set(gs.options.Geom(rho=None))
     # A field given as None stands for the value of the asset, overriding the material
-    mixed_geoms_options.select(gs.indices.Geom.named("bottom_cap[[]1]")).set(gs.options.Geom(friction=None))
+    mixed_geoms_spec.select(gs.indices.Geom.named("bottom_cap[[]1]")).set(gs.options.Geom(friction=None))
     # The fifth collision geom of the entity is the capsule of the second link
-    mixed_geoms_options.select(gs.indices.Geom.at(4)).set_friction_rolling(0.001)
-    mixed_geoms_body = scene.add_entity(options=mixed_geoms_options)
+    mixed_geoms_spec.select(gs.indices.Geom.at(4)).set_friction_rolling(0.001)
+    mixed_geoms_body = scene.add_entity(spec=mixed_geoms_spec)
     # Geom densities weigh in the mass of an aligned body alone, whose frame stays where its kinematic ghost puts it
-    dense_body_options = gs.entities.Rigid(
+    dense_body_spec = gs.entities.Rigid(
         morph=gs.morphs.MJCF(
             file=two_box_free_mjcf,
             pos=(3.0, 1.0, 0.6),
@@ -145,22 +143,22 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
             recompute_inertia=True,
         ),
     )
-    with dense_body_options.select(gs.indices.Link.named("body")) as body:
+    with dense_body_spec.select(gs.indices.Link.named("body")) as body:
         body.select(gs.indices.Geom.at(0)).set_rho(8000.0)
         body.select(gs.indices.Geom.at(1)).set_rho(1000.0)
-    dense_body = scene.add_entity(options=dense_body_options)
+    dense_body = scene.add_entity(spec=dense_body_spec)
     # A density set on a body whose asset gives its mass changes nothing, so the body stays aligned
-    stated_mass_body_options = gs.entities.Rigid(
+    stated_mass_body_spec = gs.entities.Rigid(
         morph=gs.morphs.MJCF(
             file=two_box_free_mjcf,
             pos=(3.0, 2.0, 0.6),
             align=True,
         ),
     )
-    stated_mass_body_options.select(gs.indices.Geom.at(0)).set_rho(8000.0)
-    stated_mass_body = scene.add_entity(options=stated_mass_body_options)
+    stated_mass_body_spec.select(gs.indices.Geom.at(0)).set_rho(8000.0)
+    stated_mass_body = scene.add_entity(spec=stated_mass_body_spec)
     dense_body_ghost = scene.add_entity(
-        options=gs.entities.Kinematic(
+        spec=gs.entities.Kinematic(
             morph=gs.morphs.MJCF(
                 file=two_box_free_mjcf,
                 pos=(3.0, 1.0, 0.6),
@@ -168,7 +166,7 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
             ),
         ),
     )
-    box_options = gs.entities.Rigid(
+    box_spec = gs.entities.Rigid(
         morph=gs.morphs.Box(
             pos=(5.0, 0.0, 0.0),
             size=(0.1, 0.1, 0.1),
@@ -177,12 +175,12 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
             rho=500.0,
         ),
     )
-    box_options.select(gs.indices.Geom.at(0)).set_friction(2.0).end().select(gs.indices.Geom.at([0])).set_friction(1.0)
+    box_spec.select(gs.indices.Geom.at(0)).set_friction(2.0).end().select(gs.indices.Geom.at([0])).set_friction(1.0)
     # A density given as None stands for that of the asset, and the box states none, so the default density applies
-    box_options.select(gs.indices.Geom.at(0)).set(gs.options.Geom(rho=None))
-    box = scene.add_entity(options=box_options)
+    box_spec.select(gs.indices.Geom.at(0)).set(gs.options.Geom(rho=None))
+    box = scene.add_entity(spec=box_spec)
     # A fixed link estimates its inertia once a moving parent carries it, with the density its geoms resolved to
-    fixed_box_options = gs.entities.Rigid(
+    fixed_box_spec = gs.entities.Rigid(
         morph=gs.morphs.Box(
             pos=(5.0, 0.0, 0.2),
             size=(0.1, 0.1, 0.1),
@@ -192,42 +190,42 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
             rho=500.0,
         ),
     )
-    fixed_box_options.select(gs.indices.Geom.at(0)).set(gs.options.Geom(rho=None))
-    fixed_box = scene.add_entity(options=fixed_box_options)
+    fixed_box_spec.select(gs.indices.Geom.at(0)).set(gs.options.Geom(rho=None))
+    fixed_box = scene.add_entity(spec=fixed_box_spec)
     fixed_box.attach(box, box.base_link.name, pos=(0.0, 0.0, 0.2))
-    box_options.select(gs.indices.Geom.at(0)).set_friction(3.0)
+    box_spec.select(gs.indices.Geom.at(0)).set_friction(3.0)
     with pytest.raises(gs.GenesisException, match="frozen"):
-        box.options.select(gs.indices.Geom.at(0)).set_friction(3.0)
+        box.spec.select(gs.indices.Geom.at(0)).set_friction(3.0)
 
     exported = tmp_path / f"selections{SCENE_FORMAT}"
-    rigid_options = gs.entities.Rigid(
+    rigid_spec = gs.entities.Rigid(
         morph=gs.morphs.Box(
             size=(0.1, 0.1, 0.1),
         ),
     )
-    rigid_options.select(gs.indices.Link.subtree("box_*")).set_friction(1.0)
-    with rigid_options.select(gs.indices.Link.named("box_baselink")) as box_link:
+    rigid_spec.select(gs.indices.Link.subtree("box_*")).set_friction(1.0)
+    with rigid_spec.select(gs.indices.Link.named("box_baselink")) as box_link:
         box_link.select(gs.indices.Geom.at([0])).set_rho(1000.0)
         box_link.select(gs.indices.Geom.at(slice(0, 1))).set_friction_rolling(0.001)
-    rigid_options.select(gs.indices.Geom.named("box*") | gs.indices.Geom.named("*")).set_friction(2.0)
-    fem_options = gs.entities.FEM(
+    rigid_spec.select(gs.indices.Geom.named("box*") | gs.indices.Geom.named("*")).set_friction(2.0)
+    fem_spec = gs.entities.FEM(
         morph=gs.morphs.Box(
             size=(0.1, 0.1, 0.1),
         ),
         material=gs.materials.FEM.Elastic(),
     )
     corners = gs.indices.Vertex.at(0) | gs.indices.Vertex.closest_to(pos=(0.05, 0.05, 0.05), max_distance=0.01)
-    fem_options.select(corners).set_is_fixed(True)
-    fem_options.select(gs.indices.Vertex.at(slice(0, 4)) & (gs.indices.Vertex.at(0) | gs.indices.Vertex.at(1))).set(
+    fem_spec.select(corners).set_is_fixed(True)
+    fem_spec.select(gs.indices.Vertex.at(slice(0, 4)) & (gs.indices.Vertex.at(0) | gs.indices.Vertex.at(1))).set(
         gs.options.Vertex(is_fixed=False)
     )
-    fem_options.select(gs.indices.Vertex.in_box(lower=(0.0, 0.0, 0.0), upper=(0.1, 0.1, 0.1))).select(
+    fem_spec.select(gs.indices.Vertex.in_box(lower=(0.0, 0.0, 0.0), upper=(0.1, 0.1, 0.1))).select(
         gs.indices.Vertex.at(0)
     ).set_is_fixed(True)
-    serialization.export(exported, {"rigid": rigid_options, "fem": fem_options})
+    serialization.export(exported, {"rigid": rigid_spec, "fem": fem_spec})
     loaded = serialization.load(exported, {"rigid": gs.entities.Rigid, "fem": gs.entities.FEM})
-    assert loaded["rigid"].model_dump() == rigid_options.model_dump()
-    assert loaded["fem"].model_dump() == fem_options.model_dump()
+    assert loaded["rigid"].model_dump() == rigid_spec.model_dump()
+    assert loaded["fem"].model_dump() == fem_spec.model_dump()
 
     with pytest.raises(gs.GenesisException, match="gs.entities.FEM"):
         gs.entities.MPM(morph=gs.morphs.Sphere(), material=gs.materials.FEM.Elastic())
@@ -240,46 +238,46 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
 
     with pytest.raises(gs.GenesisException, match="gs.entities.Kinematic"):
         UserRigid(morph=gs.morphs.Sphere(), material=gs.materials.Kinematic())
-    assert type(gs.Scene().add_entity(gs.morphs.Sphere()).options) is gs.entities.Rigid
-    with pytest.raises(gs.GenesisException, match="either entity options"):
-        scene.add_entity(morph=gs.morphs.Sphere(), options=gs.entities.Rigid(morph=gs.morphs.Sphere()))
+    assert type(gs.Scene().add_entity(gs.morphs.Sphere()).spec) is gs.entities.Rigid
+    with pytest.raises(gs.GenesisException, match="either an entity spec"):
+        scene.add_entity(morph=gs.morphs.Sphere(), spec=gs.entities.Rigid(morph=gs.morphs.Sphere()))
     with pytest.raises(gs.GenesisException, match="got gs.indices.Vertex"):
         gs.entities.Rigid(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1))).select(gs.indices.Vertex.at(0)).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="got gs.indices.Link"):
-        box_options.select(gs.indices.Geom.at(0)).select(gs.indices.Link.named("box_baselink"))
+        box_spec.select(gs.indices.Geom.at(0)).select(gs.indices.Link.named("box_baselink"))
     with pytest.raises(gs.GenesisException, match="frozen"):
-        box.options.name = "renamed_box"
+        box.spec.name = "renamed_box"
     with pytest.raises(gs.GenesisException, match="frozen"):
-        box_options.patches = ()
+        box_spec.patches = ()
     # A copy records again, deep or not
-    box.options.model_copy(deep=True).select(gs.indices.Geom.at(0)).set_friction(3.0)
+    box.spec.model_copy(deep=True).select(gs.indices.Geom.at(0)).set_friction(3.0)
     with pytest.raises(gs.GenesisException, match="at least 1"):
         gs.entities.Rigid(morph=())
     with pytest.raises(gs.GenesisException, match="sets no field"):
-        box_options.select(gs.indices.Geom.at(0)).set(gs.options.Geom())
-    out_of_range_options = box_options.model_copy()
-    out_of_range_options.select(gs.indices.Link.named("box_baselink")).select(gs.indices.Geom.at(1)).set_friction(1.0)
+        box_spec.select(gs.indices.Geom.at(0)).set(gs.options.Geom())
+    out_of_range_spec = box_spec.model_copy()
+    out_of_range_spec.select(gs.indices.Link.named("box_baselink")).select(gs.indices.Geom.at(1)).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="selects no valid geom among 1"):
-        scene.add_entity(options=out_of_range_options)
-    disjoint_options = arm.options.model_copy()
-    disjoint_options.select(gs.indices.Link.named("arm1") & gs.indices.Link.named("arm2")).set_friction(1.0)
+        scene.add_entity(spec=out_of_range_spec)
+    disjoint_spec = arm.spec.model_copy()
+    disjoint_spec.select(gs.indices.Link.named("arm1") & gs.indices.Link.named("arm2")).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="holds no collision geom"):
-        scene.add_entity(options=disjoint_options)
-    unknown_link_options = arm.options.model_copy()
-    unknown_link_options.select(gs.indices.Link.named("arm3")).set_friction(1.0)
+        scene.add_entity(spec=disjoint_spec)
+    unknown_link_spec = arm.spec.model_copy()
+    unknown_link_spec.select(gs.indices.Link.named("arm3")).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="links_to_keep"):
-        scene.add_entity(options=unknown_link_options)
-    rootless_options = arm.options.model_copy()
-    rootless_options.select(gs.indices.Link.named("base")).select(gs.indices.Geom.at(0)).set_friction(1.0)
+        scene.add_entity(spec=unknown_link_spec)
+    rootless_spec = arm.spec.model_copy()
+    rootless_spec.select(gs.indices.Link.named("base")).select(gs.indices.Geom.at(0)).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="holds no collision geom"):
-        scene.add_entity(options=rootless_options)
+        scene.add_entity(spec=rootless_spec)
     # Every heterogeneous variant holds what the entity selects
-    variants_options = gs.entities.Rigid(
+    variants_spec = gs.entities.Rigid(
         morph=(gs.morphs.MJCF(file=two_box_free_mjcf), gs.morphs.MJCF(file=sphere_free_mjcf))
     )
-    variants_options.select(gs.indices.Geom.at(1)).set_friction(1.0)
+    variants_spec.select(gs.indices.Geom.at(1)).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="selects no valid geom among 1"):
-        scene.add_entity(options=variants_options)
+        scene.add_entity(spec=variants_spec)
     # Only rigid entities draw contacts, which every kind may decline
     gs.Scene().add_entity(gs.morphs.Sphere(), material=gs.materials.Kinematic(), visualize_contact=False)
     with pytest.raises(gs.GenesisException, match="only applies to rigid entities"):
@@ -317,7 +315,7 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
     com_x = boxes_mass @ boxes_x / boxes_mass.sum()
     inertia_yy = boxes_mass @ ((boxes_x - com_x) ** 2 + 2.0 * 0.2**2 / 12.0)
     assert_allclose(dense_body.get_dofs_velocity()[..., 4], com_x * PUSH_FORCE / inertia_yy * N_STEPS * DT, tol=5e-2)
-    # The ring, given no options, keeps the friction of the entity, its pieces fusing with none of the torus
+    # The ring, given no options of its own, keeps the friction of the entity, its pieces fusing with none of the torus
     meshes_friction = torch.stack(
         [geom.get_friction() for geom in mixed_geoms_body.geoms if geom.type == gs.GEOM_TYPE.MESH]
     )

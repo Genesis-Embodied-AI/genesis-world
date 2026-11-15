@@ -133,8 +133,8 @@ class FEMEntity(Entity):
         The simulation scene that this entity belongs to.
     solver : Solver
         The physics solver instance used for simulation.
-    options : gs.entities.FEM
-        The entity options the entity is constructed from, whose morph gives its geometry.
+    spec : gs.entities.FEM
+        The entity spec the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         The surface mesh associated with the entity (for rendering or collision).
     idx : int
@@ -157,14 +157,14 @@ class FEMEntity(Entity):
         solver: "FEMSolver",
         surface: Surface,
         idx: int,
-        options: "gs.entities.FEM",
+        spec: "gs.entities.FEM",
         v_start: int = 0,
         el_start: int = 0,
         s_start: int = 0,
         vvert_start: int = 0,
         vface_start: int = 0,
     ) -> None:
-        super().__init__(idx, scene, solver, surface, options)
+        super().__init__(idx, scene, solver, surface, spec)
 
         self._v_start = v_start  # offset for vertex index of elements
         self._el_start = el_start  # offset for element index
@@ -361,7 +361,7 @@ class FEMEntity(Entity):
         # of two patches setting one vertex applies.
         verts_pos_morph = verts - self._morph.pos
         verts_is_fixed = np.zeros(len(verts), dtype=np.bool_)
-        for patch in self._options.patches:
+        for patch in self._spec.patches:
             # Each selector resolves among the vertices the selectors before it hold, an ordinal counting those alone
             verts_idx = np.arange(len(verts))
             for vertex_index in patch.selectors:

@@ -72,8 +72,8 @@ class ParticleEntity(Entity):
         The scene object that this entity belongs to.
     solver : Solver
         The physics solver responsible for simulating the entity's particles.
-    options : gs.entities.MPM | gs.entities.SPH | gs.entities.PBD
-        The entity options the entity is constructed from, whose morph gives its geometry.
+    spec : gs.entities.MPM | gs.entities.SPH | gs.entities.PBD
+        The entity spec the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface material or texture information associated with the entity.
     particle_size : float
@@ -98,12 +98,12 @@ class ParticleEntity(Entity):
         particle_size: float,
         idx: int,
         particle_start: int,
-        options: "gs.entities.MPM | gs.entities.SPH | gs.entities.PBD",
+        spec: "gs.entities.MPM | gs.entities.SPH | gs.entities.PBD",
         vvert_start: int | None = None,
         vface_start: int | None = None,
         need_skinning: bool = True,
     ) -> None:
-        super().__init__(idx, scene, solver, surface, options)
+        super().__init__(idx, scene, solver, surface, spec)
 
         self._particle_size = particle_size
         self._particle_start = particle_start

@@ -81,10 +81,10 @@ def _apply_deterministic_imgui_overrides(monkeypatch):
     def _capture_pending_entities_basename(self):
         orig_capture(self)
         for entity_kwargs in self._pending_entities_kwargs.values():
-            options = entity_kwargs["options"]
-            if isinstance(options.morph, gs.morphs.FileMorph):
-                morph = options.morph.model_copy(update={"file": os.path.basename(options.morph.file)})
-                entity_kwargs["options"] = options.model_copy(update={"morph": morph})
+            spec = entity_kwargs["spec"]
+            if isinstance(spec.morph, gs.morphs.FileMorph):
+                morph = spec.morph.model_copy(update={"file": os.path.basename(spec.morph.file)})
+                entity_kwargs["spec"] = spec.model_copy(update={"morph": morph})
 
     monkeypatch.setattr(ImGuiOverlayPlugin, "_capture_pending_entities_kwargs", _capture_pending_entities_basename)
 
@@ -319,7 +319,7 @@ def test_scene_rebuild():
     scene = _build_default_scene(enable_gui=True, run_in_thread=(sys.platform == "linux"))
     # A UV-mapped mesh with an image texture, so the capture comparison below catches the renderer swap invalidating
     # GL textures shared across the rebuild. The friction set on its geoms must survive a rebuild that edits its morph.
-    duck_options = gs.entities.Rigid(
+    duck_spec = gs.entities.Rigid(
         morph=gs.morphs.Mesh(
             file="meshes/duck/duck.obj",
             scale=0.001,
@@ -328,8 +328,8 @@ def test_scene_rebuild():
         ),
         name="duck",
     )
-    duck_options.select(gs.indices.Geom.at(slice(None))).set_friction(0.9)
-    scene.add_entity(options=duck_options)
+    duck_spec.select(gs.indices.Geom.at(slice(None))).set_friction(0.9)
+    scene.add_entity(spec=duck_spec)
     scene.build()
 
     scene_id = id(scene)
@@ -378,8 +378,8 @@ def test_scene_rebuild():
     duck_aabb = scene.get_entity("duck").get_AABB()
     digest_before = scene._desc_digest
     duck_kwargs = plugin._pending_entities_kwargs["duck"]
-    duck_morph = duck_kwargs["options"].morph.model_copy(update={"scale": 0.002})
-    duck_kwargs["options"] = duck_kwargs["options"].model_copy(update={"morph": duck_morph})
+    duck_morph = duck_kwargs["spec"].morph.model_copy(update={"scale": 0.002})
+    duck_kwargs["spec"] = duck_kwargs["spec"].model_copy(update={"morph": duck_morph})
     interactive.rebuild(entities_kwargs=plugin._pending_entities_kwargs)
     scene.step()
     duck_aabb_scaled = scene.get_entity("duck").get_AABB()
@@ -428,13 +428,13 @@ def test_capture_pending_entities_preserves_heterogeneous_morphs():
 
     plugin._capture_pending_entities_kwargs()
 
-    single_options = plugin._pending_entities_kwargs[single_entity.name]["options"]
-    assert single_options is single_entity.options
-    assert single_options.morph is single_morph
-    assert single_options.visualize_contact
+    single_spec = plugin._pending_entities_kwargs[single_entity.name]["spec"]
+    assert single_spec is single_entity.spec
+    assert single_spec.morph is single_morph
+    assert single_spec.visualize_contact
 
-    heterogeneous_options = plugin._pending_entities_kwargs[heterogeneous_entity.name]["options"]
-    assert heterogeneous_options is heterogeneous_entity.options
-    assert heterogeneous_options.morph[0] is heterogeneous_morphs[0]
-    assert heterogeneous_options.morph[1] is heterogeneous_morphs[1]
-    assert heterogeneous_options.visualize_contact
+    heterogeneous_spec = plugin._pending_entities_kwargs[heterogeneous_entity.name]["spec"]
+    assert heterogeneous_spec is heterogeneous_entity.spec
+    assert heterogeneous_spec.morph[0] is heterogeneous_morphs[0]
+    assert heterogeneous_spec.morph[1] is heterogeneous_morphs[1]
+    assert heterogeneous_spec.visualize_contact

@@ -202,12 +202,12 @@ class KinematicEntity(Entity):
     def __init__(self, scene: "Scene", solver: "KinematicSolver", idx: int, desc: KinematicEntityDescription):
         # Set heterogeneous support before super().__init__() because _get_morph_identifier() needs it
         self._desc = desc
-        self._morph_heterogeneous = desc.options.morphs[1:]
+        self._morph_heterogeneous = desc.spec.morphs[1:]
         self._enable_heterogeneous = bool(self._morph_heterogeneous)
 
-        super().__init__(idx, scene, solver, desc.surface, desc.options)
-        # The scene names an entity as it is added, so the description takes the options recording that name
-        desc.options = self._options
+        super().__init__(idx, scene, solver, desc.surface, desc.spec)
+        # The scene names an entity as it is added, so the description takes the spec recording that name
+        desc.spec = self._spec
 
         # Where this entity's links, joints and geoms begin in the solver: right after those of the entities it holds
         self._idx_in_solver = solver.n_entities
@@ -1659,9 +1659,9 @@ class RigidEntity(KinematicEntity):
         self._equality_start = solver.n_equalities
         self._free_verts_idx_local = torch.tensor([], dtype=gs.tc_int, device=gs.device)
         self._fixed_verts_idx_local = torch.tensor([], dtype=gs.tc_int, device=gs.device)
-        self._visualize_contact: bool = desc.options.visualize_contact
+        self._visualize_contact: bool = desc.spec.visualize_contact
 
-        self._batch_fixed_verts: bool = desc.options.morphs[0].batch_fixed_verts
+        self._batch_fixed_verts: bool = desc.spec.morphs[0].batch_fixed_verts
 
         super().__init__(scene, solver, idx, desc)
 

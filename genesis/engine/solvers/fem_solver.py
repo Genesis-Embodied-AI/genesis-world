@@ -566,7 +566,7 @@ class FEMData(Data):
 
 
 class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
-    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]] = gs.entities.FEM
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]] = gs.entities.FEM
 
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
@@ -812,7 +812,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     continue
                 array.from_numpy(values.astype(gs.np_float if array.dtype == gs.qd_float else gs.np_int, copy=False))
 
-            # The vertices that the entity options fix take slots on top of 'max_vertex_constraints'
+            # The vertices that the entity spec fixes take slots on top of 'max_vertex_constraints'
             self._max_vertex_constraints = self._options.max_vertex_constraints + sum(
                 entity._fixed_verts_idx_local.size for entity in self._entities
             )
@@ -827,7 +827,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         self._is_built = True
 
-        # The vertices that the entity options fix are held at their initial positions, as vertex constraints
+        # The vertices that the entity spec fixes are held at their initial positions, as vertex constraints
         for entity in self._entities:
             if entity._fixed_verts_idx_local.size > 0:
                 entity.set_vertex_constraints(entity._fixed_verts_idx_local)
@@ -847,7 +847,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self,
         idx: int,
         surface: Surface,
-        options: "gs.entities.FEM",
+        spec: "gs.entities.FEM",
         desc: "EntityDescription | None" = None,
     ) -> "FEMEntity":
         entity = FEMEntity(
@@ -860,7 +860,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             s_start=self.n_surfaces,
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
-            options=options,
+            spec=spec,
         )
         self._entities.append(entity)
         self._n_vertices += entity.n_vertices

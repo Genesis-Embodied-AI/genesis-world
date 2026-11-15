@@ -144,7 +144,7 @@ class KinematicSolver(Solver):
     RigidSolver extends this with physics (collision, constraints, dynamics).
     """
 
-    entity_options_cls: ClassVar[type[gs.entities.BaseEntity]] = gs.entities.Kinematic
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]] = gs.entities.Kinematic
 
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
@@ -195,22 +195,18 @@ class KinematicSolver(Solver):
         self,
         idx: int,
         surface: Surface | None,
-        options: "gs.entities.Kinematic | gs.entities.Rigid | None",
+        spec: "gs.entities.Kinematic | gs.entities.Rigid | None",
         desc: KinematicEntityDescription | None = None,
     ) -> KinematicEntity:
         """Create an entity from its description.
 
-        Given no description, one is resolved from the entity options and their resolved surface (see
+        Given no description, one is resolved from the entity spec and its resolved surface (see
         'KinematicEntityDescription'), the primary morph deciding the kind of entity ('_entity_classes'). A given
         description says the kind by its class, and creating from it reads no asset.
         """
         if desc is None:
-            entity_cls = next(
-                cls for morph_cls, cls in self._entity_classes if isinstance(options.morphs[0], morph_cls)
-            )
-            desc = entity_cls._description_cls.resolve(
-                options, surface, self._options, self._enable_mujoco_compatibility
-            )
+            entity_cls = next(cls for morph_cls, cls in self._entity_classes if isinstance(spec.morphs[0], morph_cls))
+            desc = entity_cls._description_cls.resolve(spec, surface, self._options, self._enable_mujoco_compatibility)
         else:
             for _, entity_cls in self._entity_classes:
                 if entity_cls._description_cls is type(desc):
