@@ -1,0 +1,20 @@
+examples/rendering/dynamic_texture.py
+  s_d39f85b9ab7930::t_84292e69b7d72b 21
+  s_d39f85b9ab7930::t_30716a5074e5ba 23,233-239,251
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "159c7a94d2e0ce338bec7f8fddec702ba0034d78",
+  "prompts": {},
+  "sessions": {
+    "s_d39f85b9ab7930": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a73923d6-db95-4649-b538-03d34b310d4a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
