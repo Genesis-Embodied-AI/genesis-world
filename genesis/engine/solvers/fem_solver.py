@@ -827,8 +827,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         self._is_built = True
 
-    def post_build(self) -> None:
-        """Hold the vertices that the entity options fix at their initial positions, as vertex constraints."""
+        # The vertices that the entity options fix are held at their initial positions, as vertex constraints
         for entity in self._entities:
             if entity._fixed_verts_idx_local.size > 0:
                 entity.set_vertex_constraints(entity._fixed_verts_idx_local)
