@@ -1,5 +1,5 @@
-from .rules import Geom, SelectionRule, Vertex
 from .misc import CoacdOptions, FoamOptions
+from .patches import Geom, Vertex
 from .profiling import ProfilingOptions
 from .scene import SceneOptions
 from .solvers import (
@@ -32,7 +32,6 @@ __all__ = [
     "RigidOptions",
     "SAPCouplerOptions",
     "SceneOptions",
-    "SelectionRule",
     "SimOptions",
     "SPHOptions",
     "Vertex",

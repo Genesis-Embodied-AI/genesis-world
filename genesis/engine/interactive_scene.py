@@ -267,7 +267,7 @@ class InteractiveScene:
                 # Re-register the pre-step callback: the in-place re-init cleared Scene's callback list.
                 scene.register_pre_step_callback(self._pre_step)
                 # The fields compared by identity, and the name, which the entity records into its options. The other
-                # fields compare with what was given explicitly, since a rule field given as None differs from unset.
+                # fields compare with what was given explicitly, since a patch field given as None differs from unset.
                 objects_fields = {"morph", "material", "surface", "name"}
                 for name, kwargs in self._entities_kwargs.items():
                     options = kwargs["options"] if "options" in kwargs else get_entity_options(**kwargs)

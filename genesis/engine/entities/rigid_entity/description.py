@@ -1443,7 +1443,7 @@ class KinematicEntityDescription(EntityDescription):
         """Write into the parsed geoms of one morph the density and the friction coefficients they take.
 
         A value set through ``gs.entities.Rigid.select`` overrides that of the material, which overrides that of the
-        asset, and a field a rule gives as None stands for the value of the asset. The values are written before
+        asset, and a field a patch gives as None stands for the value of the asset. The values are written before
         post-processing, so that every convex piece of a geom takes them and geoms of different values never fuse.
         'links_path' holds the names from the root of the kinematic tree down to each link. A selection that holds no
         collision geom of the morph raises, so that each heterogeneous variant holds what the entity selects.
@@ -1457,8 +1457,8 @@ class KinematicEntityDescription(EntityDescription):
                 if morph.collision and (g_info["contype"] or g_info["conaffinity"]):
                     cg_infos.append(g_info)
                     geoms_link_idx.append(i_l)
-        # The values the asset states, which a field given as None on a rule stands for, the asset stating a density
-        # where a rule sets 'rho'
+        # The values the asset states, which a field given as None on a patch stands for, the asset stating a density
+        # where a patch sets 'rho'
         asset_names = ["density" if name == "rho" else name for name in gs.options.Geom.model_fields]
         geoms_asset_values = [{name: g_info.get(name) for name in asset_names} for g_info in cg_infos]
 
@@ -1474,20 +1474,20 @@ class KinematicEntityDescription(EntityDescription):
                 for link_g_infos in links_g_infos:
                     for g_info in link_g_infos:
                         g_info.pop(name, None)
-        selection_rules = self.options.selection_rules
-        if not selection_rules:
+        patches = self.options.patches
+        if not patches:
             return
 
-        # Resolve each rule once: the geoms it selects, and its level, 0 for links and 1 for geoms
+        # Resolve each patch once: the geoms it selects, and its level, 0 for links and 1 for geoms
         geoms_link_idx = np.array(geoms_link_idx, dtype=gs.np_int)
         geoms_name = [g_info["mesh"].metadata.get("name", "") for g_info in cg_infos]
-        rules_is_selected = np.ones((len(selection_rules), len(cg_infos)), dtype=np.bool_)
-        rules_level = np.zeros(len(selection_rules), dtype=gs.np_int)
-        for i_b, selection_rule in enumerate(selection_rules):
-            is_selected = rules_is_selected[i_b]
+        patches_is_selected = np.ones((len(patches), len(cg_infos)), dtype=np.bool_)
+        patches_level = np.zeros(len(patches), dtype=gs.np_int)
+        for i_b, patch in enumerate(patches):
+            is_selected = patches_is_selected[i_b]
             geoms_scope = np.zeros(len(cg_infos), dtype=gs.np_int)
-            # Each selector resolves among the parts the earlier ones hold (see 'BaseEntity._check_selection_rule')
-            for selector in selection_rule.selectors:
+            # Each selector resolves among the parts the earlier ones hold (see 'BaseEntity._check_patch')
+            for selector in patch.selectors:
                 if isinstance(selector, gs.indices.Link):
                     is_selected &= np.isin(geoms_link_idx, selector._resolve(links_path))
                     # A geom ordinal below a link selection counts the geoms of each selected link apart
@@ -1500,27 +1500,27 @@ class KinematicEntityDescription(EntityDescription):
                         held_geoms_name = [geoms_name[i_g] for i_g in held_geoms_idx]
                         held_geoms_ordinal = selector._resolve(held_geoms_name, geoms_scope[held_geoms_idx])
                         is_selected[held_geoms_idx[held_geoms_ordinal]] = True
-                    rules_level[i_b] = 1
+                    patches_level[i_b] = 1
             if not is_selected.any():
                 gs.raise_exception(
-                    f"The selection {selection_rule.selection_repr} holds no collision geom of {morph}. Existing "
+                    f"The selection {patch.selection_repr} holds no collision geom of {morph}. Existing "
                     f"geoms: {geoms_name}."
                 )
 
-        # Of the rules setting a field of a geom, the one of the finest level applies, and the later one within a
+        # Of the patches setting a field of a geom, the one of the finest level applies, and the later one within a
         # level. A density set on a geom stays apart from the asset's, since only the inertia estimate reads it.
-        rules_rank = rules_level * len(selection_rules) + np.arange(len(selection_rules))
-        rules_values = [selection_rule.options.model_dump(exclude_unset=True) for selection_rule in selection_rules]
+        patches_rank = patches_level * len(patches) + np.arange(len(patches))
+        patches_values = [patch.options.model_dump(exclude_unset=True) for patch in patches]
         default_coefficients = {
             "friction": gu.default_friction,
             "friction_torsional": gu.default_friction_torsional,
             "friction_rolling": gu.default_friction_rolling,
         }
         for name in gs.options.Geom.model_fields:
-            is_setting = np.array([name in rule_values for rule_values in rules_values])
-            geoms_rules_rank = np.where(rules_is_selected & is_setting[:, None], rules_rank[:, None], -1)
-            for i_g in np.flatnonzero(geoms_rules_rank.max(axis=0) >= 0):
-                value = rules_values[geoms_rules_rank[:, i_g].argmax()][name]
+            is_setting = np.array([name in patch_values for patch_values in patches_values])
+            geoms_patches_rank = np.where(patches_is_selected & is_setting[:, None], patches_rank[:, None], -1)
+            for i_g in np.flatnonzero(geoms_patches_rank.max(axis=0) >= 0):
+                value = patches_values[geoms_patches_rank[:, i_g].argmax()][name]
                 g_info = cg_infos[i_g]
                 if value is not None:
                     g_info[name] = value

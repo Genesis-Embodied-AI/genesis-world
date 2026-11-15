@@ -1,4 +1,4 @@
-"""Rules of options set on selections of parts of an entity, and the settings recording them in entity options."""
+"""Patches of options set on selections of parts of an entity, and the settings recording them in entity options."""
 
 from typing import Annotated, Self
 
@@ -23,7 +23,7 @@ class Geom(_FrozenOptions):
 
     A field given explicitly overrides, for the selected geoms, the material and the coarser selections (see
     ``Rigid.select``). Given as None, it takes the value the asset states, else the solver default. A field left unset,
-    as every field is by default, keeps the value of the coarser levels. The IPC coupler rejects every rule.
+    as every field is by default, keeps the value of the coarser levels. The IPC coupler rejects every patch.
 
     Parameters
     ----------
@@ -59,7 +59,7 @@ class Vertex(_FrozenOptions):
     is_fixed: StrictBool = False
 
 
-class SelectionRule(_FrozenOptions):
+class Patch(_FrozenOptions):
     """Options set on a selection of parts of an entity, as ``select`` records it.
 
     Parameters
@@ -75,14 +75,14 @@ class SelectionRule(_FrozenOptions):
     options: Geom | Vertex
 
     @model_validator(mode="after")
-    def _check_rule(self) -> Self:
+    def _check_patch(self) -> Self:
         if not self.options.model_fields_set:
             gs.raise_exception(f"gs.options.{type(self.options).__name__} sets no field. Give at least one field.")
         return self
 
     @property
     def selection_repr(self) -> str:
-        """The selection of the rule on one line, for error messages."""
+        """The selection of the patch on one line, for error messages."""
         return " then ".join(
             f"{get_public_name(type(selector))}{selector.model_dump(exclude_none=True)}" for selector in self.selectors
         )

@@ -250,7 +250,7 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_fr
     with pytest.raises(gs.GenesisException, match="frozen"):
         box.options.name = "renamed_box"
     with pytest.raises(gs.GenesisException, match="frozen"):
-        box_options.selection_rules = ()
+        box_options.patches = ()
     # A copy records again, deep or not
     box.options.model_copy(deep=True).select(gs.indices.Geom.at(0)).set_friction(3.0)
     with pytest.raises(gs.GenesisException, match="at least 1"):

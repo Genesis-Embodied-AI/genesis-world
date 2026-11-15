@@ -796,7 +796,7 @@ def _postprocess_collision_geoms_impl(
                                 equal_nan=True,
                             )
                             # A fused mesh carries one value of each quantity a geom takes from its asset or a
-                            # selection rule (see 'gs.options.Geom'), so geoms differing in any stay separate. A
+                            # patch (see 'gs.options.Geom'), so geoms differing in any stay separate. A
                             # quantity left unset, or given as None, compares as missing.
                             for name in (*gs.options.Geom.model_fields, "density", "sol_params")
                         )
