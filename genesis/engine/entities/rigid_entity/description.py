@@ -1567,6 +1567,8 @@ class KinematicEntityDescription(EntityDescription):
                 cg_infos.append(g_info)
             if morph.visualization and not is_col:
                 vg_infos.append(g_info)
+                # A visual mesh holds its uvs until the patches of its entity are resolved (see 'Mesh.__init__')
+                g_info["vmesh"]._drop_unsampled_uvs()
 
         # Post-process all collision meshes at once.
         # Destroying the original geometries should be avoided if possible as it will change the way objects

@@ -652,11 +652,11 @@ class RasterizerContext(BuildableMixin):
                     for texture in vgeoms_dynamic_textures.get(geom.uid, ()):
                         is_base_color = rgba is texture.options
                         variants_image = texture.options.get_variants_image(texture.texture_map_type)
-                        variants_is_drawn = texture.options.variants_is_batched
+                        variants_is_batched = texture.options.variants_is_batched
                         variants_envs_layer = np.full((len(variants_image), self.sim.n_envs_), -1, dtype=gs.np_int)
                         layers_image, n_layers = [], 0
-                        for i_variant, (image, is_drawn) in enumerate(zip(variants_image, variants_is_drawn)):
-                            if is_drawn:
+                        for i_variant, (image, is_batched) in enumerate(zip(variants_image, variants_is_batched)):
+                            if is_batched:
                                 image = image[rendered_envs_idx % len(image)]
                                 envs_layer = n_layers + np.arange(len(rendered_envs_idx))
                             else:
@@ -678,8 +678,8 @@ class RasterizerContext(BuildableMixin):
                             texture_array,
                             variants_envs_layer,
                             is_base_color,
-                            None,
-                            Subscriber(to=frozenset((StateChange.VISUAL,))),
+                            node=None,
+                            subscriber=Subscriber(to=frozenset((StateChange.VISUAL,))),
                         )
                         texture.subscribe(binding.subscriber, partial(self._on_dynamic_texture_draw, binding))
                         self._texture_bindings.append(binding)

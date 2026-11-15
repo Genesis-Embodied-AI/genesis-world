@@ -178,7 +178,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             self._mesh.apply_scale(scale)
 
         # The uvs stay even when the surface samples no texture, since the surface of a visual geom may be replaced by
-        # one that does once the patches of its entity are resolved (see 'set_surface')
+        # one that does once the patches of its entity are resolved (see 'set_surface' and '_drop_unsampled_uvs')
         self._check_uvs()
 
         if convexify:
@@ -319,6 +319,11 @@ class Mesh(RBC, serialization.SerializationMixin):
         self._surface = gs.surfaces.Default()
         self._surface.update_texture()
         self._uvs = None
+
+    def _drop_unsampled_uvs(self) -> None:
+        """Drop the uvs of the mesh when its surface samples no texture, once no patch can replace that surface."""
+        if not self._surface.requires_uv:
+            self._uvs = None
 
     def _check_uvs(self) -> None:
         if self._uvs is None and any(
