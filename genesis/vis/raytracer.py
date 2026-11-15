@@ -277,9 +277,6 @@ class Raytracer(BuildableMixin):
     def get_texture(self, texture):
         if texture is None:
             return None
-        if isinstance(texture, (gs.textures.ColorTexture, gs.textures.ImageTexture)) and texture.is_batched:
-            gs.raise_exception("The raytracer does not draw batched textures. Render them with the rasterizer.")
-
         if isinstance(texture, gs.textures.ColorTexture):
             return LuisaRenderPy.ColorTexture(color=texture.color)
         elif isinstance(texture, gs.textures.ImageTexture):

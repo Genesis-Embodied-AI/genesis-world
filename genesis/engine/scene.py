@@ -58,7 +58,7 @@ from genesis.options.morphs import Morph
 from genesis.options.recorders import RecorderOptions, TrajectoryFile
 from genesis.options.renderers import RendererOptions
 from genesis.options.surfaces import Surface
-from genesis.options.textures import ColorTexture, DynamicTexture, ImageTexture
+from genesis.options.textures import DynamicTexture
 from genesis.recorders import RecorderManager
 from genesis.recorders.trajectory import Trajectory, save_checkpoint
 from genesis.repr_base import RBC
@@ -991,13 +991,9 @@ class Scene(BuildableMixin, RBC):
                                     texture.build(n_envs)
                                     self._textures.append(texture)
                                     vgeom._dynamic_textures.append(texture)
-                    elif any(
-                        isinstance(texture, DynamicTexture)
-                        or (isinstance(texture, (ColorTexture, ImageTexture)) and texture.is_batched)
-                        for _, texture in entity.surface
-                    ):
+                    elif any(isinstance(texture, DynamicTexture) for _, texture in entity.surface):
                         gs.raise_exception(
-                            f"Only rigid and kinematic entities draw a dynamic or batched texture, got '{entity.name}'."
+                            f"Only rigid and kinematic entities draw a dynamic texture, got '{entity.name}'."
                         )
 
                 with namespace(self._namespace):

@@ -391,9 +391,9 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
         gs.textures.ImageTexture(image_array=[], is_batched=True)
     with pytest.raises(gs.GenesisException, match="2 or 3 dimensions"):
         gs.textures.ImageTexture(image_array=[np.zeros(4, dtype=np.uint8)], is_batched=True)
-    with pytest.raises(gs.GenesisException, match="batched texture fills"):
+    with pytest.raises(gs.GenesisException, match="variant of a dynamic texture alone"):
         gs.surfaces.Default(
-            normal_texture=gs.textures.ColorTexture(color=((0.5, 0.5, 1.0), (0.5, 0.5, 1.0)), is_batched=True)
+            diffuse_texture=gs.textures.ColorTexture(color=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)), is_batched=True)
         )
     with pytest.raises(gs.GenesisException, match="its own opacity"):
         gs.surfaces.Default(diffuse_texture=gs.textures.DynamicTexture(resolution=(4, 4)), opacity=0.5)
@@ -421,15 +421,11 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
         label.set_texture(0, gs.indices.VGeom.named("lcd"))
     with pytest.raises(gs.GenesisException, match="diffuse_texture"):
         gs.surfaces.Default(roughness_texture=gs.textures.DynamicTexture(resolution=(4, 4)))
-    for texture in (
-        gs.textures.DynamicTexture(resolution=(4, 4)),
-        gs.textures.ColorTexture(color=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)), is_batched=True),
-    ):
-        with pytest.raises(gs.GenesisException, match="texture coordinates"):
-            gs.Scene().add_entity(
-                morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)),
-                surface=gs.surfaces.Emission(emissive_texture=texture),
-            )
+    with pytest.raises(gs.GenesisException, match="texture coordinates"):
+        gs.Scene().add_entity(
+            morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)),
+            surface=gs.surfaces.Emission(emissive_texture=gs.textures.DynamicTexture(resolution=(4, 4))),
+        )
     with pytest.raises(gs.GenesisException, match="custom visual vertices"):
         unsupported_scene = gs.Scene()
         unsupported_scene.add_entity(
@@ -497,9 +493,14 @@ def test_dynamic_texture_side_by_side_envs(show_viewer):
             fixed=True,
         ),
         surface=gs.surfaces.Emission(
-            emissive_texture=gs.textures.ColorTexture(
-                color=((0.0, 1.0, 0.0), (1.0, 0.0, 1.0)),
-                is_batched=True,
+            emissive_texture=gs.textures.DynamicTexture(
+                resolution=(1, 1),
+                variants=(
+                    gs.textures.ColorTexture(
+                        color=((0.0, 1.0, 0.0), (1.0, 0.0, 1.0)),
+                        is_batched=True,
+                    ),
+                ),
             ),
         ),
     )
@@ -511,9 +512,14 @@ def test_dynamic_texture_side_by_side_envs(show_viewer):
         ),
         surface=gs.surfaces.Default(
             color=(0.3, 0.0, 0.0),
-            emissive_texture=gs.textures.ColorTexture(
-                color=((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
-                is_batched=True,
+            emissive_texture=gs.textures.DynamicTexture(
+                resolution=(1, 1),
+                variants=(
+                    gs.textures.ColorTexture(
+                        color=((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+                        is_batched=True,
+                    ),
+                ),
             ),
         ),
     )
@@ -538,7 +544,7 @@ def test_dynamic_texture_side_by_side_envs(show_viewer):
     def get_colors(rgb, i_entity=0):
         return np.stack([rgb[64:][masks[i_entity][0]].mean(axis=0), rgb[:64][masks[i_entity][1]].mean(axis=0)])
 
-    # A batched texture shows its own entry in each environment, as the color of the surface or as an emission added
+    # A batched variant shows its own entry in each environment, as the color of the surface or as an emission added
     # on top of the dark red base color. Each emission is one pixel wide, so its rows are no multiple of 4 bytes.
     rgb = camera.render(rgb=True)[0]
     colors = get_colors(rgb, i_entity=1)
@@ -562,6 +568,42 @@ def test_dynamic_texture_side_by_side_envs(show_viewer):
     colors = get_colors(camera.render(rgb=True)[0])
     assert colors[0, 1] > 150.0 and (colors[0, [0, 2]] < 30.0).all()
     assert colors[1, 0] > 150.0 and (colors[1, 1:] < 30.0).all()
+
+    # A scene without parallel environments shows one variant, which a texture returns alone
+    unbatched_scene = gs.Scene(
+        show_viewer=False,
+    )
+    unbatched_screen = unbatched_scene.add_entity(
+        morph=gs.morphs.Plane(
+            plane_size=(0.4, 1.0),
+            fixed=True,
+        ),
+        surface=gs.surfaces.Emission(
+            emissive_texture=gs.textures.DynamicTexture(
+                resolution=(4, 4),
+                variants={
+                    "red": gs.textures.ColorTexture(
+                        color=(1.0, 0.0, 0.0),
+                    ),
+                    "blue": gs.textures.ColorTexture(
+                        color=(0.0, 0.0, 1.0),
+                    ),
+                },
+            ),
+        ),
+    )
+    unbatched_camera = unbatched_scene.add_camera(
+        pos=(0.0, 0.0, 2.0),
+        lookat=(0.0, 0.0, 0.0),
+        res=(32, 32),
+        fov=20.0,
+    )
+    unbatched_scene.build()
+    (unbatched_vgeom,) = unbatched_screen.vgeoms
+    unbatched_vgeom.set_texture("blue")
+    assert_equal(unbatched_vgeom.get_texture(), 1)
+    color = unbatched_camera.render(rgb=True)[0][16, 16]
+    assert color[2] > 150 and (color[:2] < 30).all()
 
 
 @pytest.mark.required

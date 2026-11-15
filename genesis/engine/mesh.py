@@ -322,12 +322,9 @@ class Mesh(RBC, serialization.SerializationMixin):
     def _check_uvs(self) -> None:
         if self._uvs is None and any(
             isinstance(texture, gs.textures.DynamicTexture)
-            or (isinstance(texture, (gs.textures.ColorTexture, gs.textures.ImageTexture)) and texture.is_batched)
             for texture in (self._surface.texture, self._surface.emission)
         ):
-            gs.raise_exception(
-                "A dynamic or batched texture requires a mesh with texture coordinates, which this mesh lacks."
-            )
+            gs.raise_exception("A dynamic texture requires a mesh with texture coordinates, which this mesh lacks.")
         if self._surface.requires_uv and self._uvs is None:
             if "mesh_path" in self._metadata:
                 gs.logger.warning(
@@ -543,7 +540,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             else:
                 # TODO: support vertex/face colors in luisa
                 color_factor = tuple(np.array(visual.main_color, dtype=np.float32) / 255.0)
-        elif isinstance(surface.texture, gs.textures.ColorTexture) and not surface.texture.is_batched:
+        elif isinstance(surface.texture, gs.textures.ColorTexture):
             color_factor = surface.texture.color
         elif (isinstance(visual, trimesh.visual.color.ColorVisuals) and visual.defined) or (
             isinstance(visual, trimesh.visual.color.VertexColor) and visual.vertex_colors.size > 0
