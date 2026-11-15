@@ -6,11 +6,18 @@ from itertools import combinations
 import numpy as np
 
 import networkx as nx
-from matplotlib.patches import FancyArrowPatch
 
 import genesis as gs
 
 from .cache import get_gel_cache_dir
+
+IS_MATPLOTLIB_AVAILABLE = False
+try:
+    from matplotlib.patches import FancyArrowPatch
+
+    IS_MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    pass
 
 
 def load_hmesh(fpath: str):
@@ -200,20 +207,22 @@ def graph_to_tree(G):
     return Gout, src_node
 
 
-class Arrow3D(FancyArrowPatch):
-    def __init__(self, xs, ys, zs, *args, **kwargs):
-        FancyArrowPatch.__init__(self, (0, 0), (0, 0), *args, **kwargs)
-        self._verts3d = xs, ys, zs
+if IS_MATPLOTLIB_AVAILABLE:
 
-    def do_3d_projection(self, renderer=None):
-        # Importing mpl_toolkits is very slow and not used very often. Let's delay import.
-        from mpl_toolkits.mplot3d import proj3d
+    class Arrow3D(FancyArrowPatch):
+        def __init__(self, xs, ys, zs, *args, **kwargs):
+            FancyArrowPatch.__init__(self, (0, 0), (0, 0), *args, **kwargs)
+            self._verts3d = xs, ys, zs
 
-        xs3d, ys3d, zs3d = self._verts3d
-        xs, ys, zs = proj3d.proj_transform(xs3d, ys3d, zs3d, self.axes.M)
-        self.set_positions((xs[0], ys[0]), (xs[1], ys[1]))
+        def do_3d_projection(self, renderer=None):
+            # Importing mpl_toolkits is very slow and not used very often. Let's delay import.
+            from mpl_toolkits.mplot3d import proj3d
 
-        return np.min(zs)
+            xs3d, ys3d, zs3d = self._verts3d
+            xs, ys, zs = proj3d.proj_transform(xs3d, ys3d, zs3d, self.axes.M)
+            self.set_positions((xs[0], ys[0]), (xs[1], ys[1]))
+
+            return np.min(zs)
 
 
 def plot_nxgraph(
@@ -227,6 +236,9 @@ def plot_nxgraph(
     node_size=100,
     plot_node_num=True,
 ):
+    if not IS_MATPLOTLIB_AVAILABLE:
+        gs.raise_exception("matplotlib is not installed. Please install it with `pip install matplotlib`.")
+
     # Importing matplotlib is very slow and not used very often. Let's delay import.
     import matplotlib.pyplot as plt
 
