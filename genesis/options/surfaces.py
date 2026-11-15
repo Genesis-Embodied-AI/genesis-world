@@ -290,10 +290,10 @@ def _resolve_albedo(base_texture: Texture | None, emissive_texture: Texture | No
     # only when the base is absent or fully black, which keeps zero-base-factor assets (visible imagery authored into
     # emissive) renderable without letting an emissive map override an ordinary authored base color. A batched base
     # decides the fallback per entry: a mixed batch resolves each environment on its own base color rather than on
-    # whether any environment is black.
+    # whether any environment is black. A dynamic emissive is drawn whole, so it replaces a fully black base alone.
     is_batch_texture = isinstance(base_texture, BatchTexture) or isinstance(emissive_texture, BatchTexture)
     base_batch, emissive_batch = _get_entries(base_texture), _get_entries(emissive_texture)
-    if is_batch_texture or len(base_batch) > 1:
+    if (is_batch_texture or len(base_batch) > 1) and not isinstance(emissive_texture, DynamicTexture):
         # Least common multiple keeps every base/emissive pairing, matching how _make_rgba combines batch dimensions.
         count = math.lcm(len(base_batch), len(emissive_batch))
         resolved = [

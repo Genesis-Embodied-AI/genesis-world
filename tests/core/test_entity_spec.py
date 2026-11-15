@@ -136,7 +136,7 @@ def test_entity_spec(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_free_
     mixed_geoms_spec.select(gs.indices.Geom.named("bottom_cap[[]1]")).set(gs.options.Geom(friction=None))
     # The fifth collision geom, and the fifth visual geom, of the entity is the capsule of the second link
     mixed_geoms_spec.select(gs.indices.Geom.at(4)).set_friction_rolling(0.001)
-    mixed_geoms_spec.select(gs.indices.VGeom.at(4)).set_surface(gs.surfaces.Default(color=(0.0, 0.0, 1.0)))
+    mixed_geoms_spec.select(gs.indices.VGeom.at(4)).set_surface(gs.surfaces.Glass(color=(0.0, 0.0, 1.0)))
     mixed_geoms_body = scene.add_entity(spec=mixed_geoms_spec)
     # Geom densities weigh in the mass of an aligned body alone, whose frame stays where its kinematic ghost puts it
     dense_body_spec = gs.entities.Rigid(
@@ -364,3 +364,6 @@ def test_entity_spec(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_free_
     }
     for vgeom in mixed_geoms_body.vgeoms:
         assert_allclose(vgeom.surface.get_rgba().color[:3], vgeoms_color[vgeom.metadata["name"]], tol=gs.EPS)
+    # A selected surface of another type keeps the textures of the entity alone, its other fields being its own
+    (tip,) = mixed_geoms_body.get_vgeoms(gs.indices.VGeom.named("tip"))
+    assert_allclose(tip.surface.ior, gs.surfaces.Glass().ior, tol=gs.EPS)

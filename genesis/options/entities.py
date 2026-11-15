@@ -259,7 +259,7 @@ class _GeomSetters(_PartSelection[SpecT]):
 
 
 class _VGeomSetters(_PartSelection[SpecT]):
-    """The setters of the appearance of visual geoms, which a link selection applies to every visual geom of its links."""
+    """The setters of the appearance of visual geoms, which a link selection applies to each visual geom it holds."""
 
     def set_surface(self, surface: Surface | None) -> Self:
         """Set the surface of the selected visual geoms (see ``gs.options.VGeom.surface``)."""
@@ -309,7 +309,7 @@ class GeomSelection(_GeomSetters[SpecT]):
 
 
 class LinkSelection(_GeomSetters[SpecT], _VGeomSetters[SpecT]):
-    """A selection of links of an entity, whose setters apply to every geom or visual geom of the links (see ``select``).
+    """A selection of links of an entity, whose setters apply to each geom or visual geom of the links (see ``select``).
 
     A kinematic entity has no collision geoms, so its link selections take ``set_surface`` alone.
     """

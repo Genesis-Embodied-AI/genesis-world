@@ -1658,6 +1658,12 @@ class Scene(BuildableMixin, RBC):
         if self._pre_step_callbacks:
             omitted_kinds["pre_step_callback"] += len(self._pre_step_callbacks)
         surfaces = [entity.surface for entity in self.entities]
+        surfaces += [
+            patch.options.surface
+            for entity in self.entities
+            for patch in entity.spec.patches
+            if isinstance(patch.options, gs.options.VGeom) and patch.options.surface is not None
+        ]
         if isinstance(self.options.renderer, gs.renderers.RayTracer) and self.options.renderer.env_surface is not None:
             surfaces.append(self.options.renderer.env_surface)
         omitted_kinds.update(name for surface in surfaces for name in pixel_less_textures(surface))

@@ -676,9 +676,10 @@ class Mesh(RBC, serialization.SerializationMixin):
         self.update_trimesh_visual()
 
     def set_surface(self, surface: Surface):
-        """Replace the surface of the mesh, the fields the given surface leaves unset keeping their current values.
+        """Replace the surface of the mesh, the textures the given surface leaves unset keeping their current images.
 
-        A field keeps its value only where both surface types have it, another type taking its own defaults.
+        Every other field takes the value of the given surface, its defaults included, so a surface of another type
+        renders as that type does.
         """
         surface_fields = type(surface).model_fields
         fields = {
@@ -687,7 +688,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             if name in surface_fields
             and not surface_fields[name].exclude
             and name not in surface.model_fields_set
-            and value is not None
+            and isinstance(value, gs.textures.Texture)
         }
         # A dynamic texture of the given surface shows the texture of the asset that its map held
         slots_texture = dict(self._surface)
