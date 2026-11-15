@@ -10,6 +10,7 @@ genesis/engine/entities/rigid_entity/rigid_geom.py
   s_cb41f35dc251b1::t_1d5cef69d856c1 797
   s_cb41f35dc251b1::t_5302ac2a23dee5 12,14,620-622,734-758,795-796,798
   s_cb41f35dc251b1::t_b338bd89bc0ed1 799
+  s_d39f85b9ab7930::t_64431bfe988367 16
 genesis/vis/raytracer.py
   s_cb41f35dc251b1::t_5302ac2a23dee5 217-218,355-356
 genesis/vis/batch_renderer.py
@@ -23,30 +24,41 @@ genesis/ext/pyrender/texture.py
 genesis/options/entities.py
   s_cb41f35dc251b1::t_3646604376d7ba 107,157,162,165,167,208,210,262-268,270-271,275,277-288,290-291,312-316,327,329-331,333,339-341,346,350
   s_cb41f35dc251b1::t_2d0ebefb6008cd 406-412,418-419,423-426,436-440,442,462-492
+  s_d39f85b9ab7930::t_78e8685ac9abc9 458
+  s_d39f85b9ab7930::t_ea15cecb23fcd2 318
+  s_d39f85b9ab7930::t_f9b98b812b2d02 273,374
+  s_d39f85b9ab7930::t_ae21d03b4cefa6 17,106,108,155-156,158,164,209,230,261,269,272,274,276,289,311,317,319,328,332,347,395,503
 genesis/engine/entities/rigid_entity/description.py
   s_cb41f35dc251b1::t_93c031b90992a5 1441-1442,1450-1459,1468,1473-1477,1483-1484,1486,1497,1501,1503,1505,1508-1511
   s_cb41f35dc251b1::t_8513d5cd712452 1553
   s_cb41f35dc251b1::t_8f998a049c0e8f 1551
   s_cb41f35dc251b1::t_c1f0fb4d1c34a1 1466-1467,1492,1494,1496,1546-1547,1552
+  s_d39f85b9ab7930::t_39553af6d2e62d 1443-1448,1465,1469-1472,1482,1487-1488,1491,1493,1495,1515-1516,1548-1550
 genesis/options/surfaces.py
   s_cb41f35dc251b1::t_5302ac2a23dee5 15,142-171,188-193,217-218,241-242,257-259,270-281,285-286,288-289,298,300,306-312,319-320,371-374,376,545,635,731
 tests/core/test_surface.py
   s_cb41f35dc251b1::t_5302ac2a23dee5 65-68,83-111
 genesis/options/patches.py
   s_cb41f35dc251b1::t_0b527a2665c83d 14,48-61,82,89-91
+  s_d39f85b9ab7930::t_011c3e6914f4a4 85,92
 genesis/ext/pyrender/primitive.py
   s_cb41f35dc251b1::t_5302ac2a23dee5 115-118
 genesis/engine/scene.py
   s_cb41f35dc251b1::t_9d2cb3e4fe3334 2073
   s_cb41f35dc251b1::t_5302ac2a23dee5 24,30,50,266,1007,1010,1044-1046,2069-2072
+  s_d39f85b9ab7930::t_b735b6ee38cb8d 965-976,979-990
+  s_d39f85b9ab7930::t_f9b98b812b2d02 963-964
+  s_d39f85b9ab7930::t_ea15cecb23fcd2 977-978
 genesis/engine/entities/rigid_entity/rigid_entity.py
   s_cb41f35dc251b1::t_ff0b9946b3aad7 11,1237,1255,1266
   s_cb41f35dc251b1::t_1d5cef69d856c1 1238,1241,1245-1246,1248,1262-1264
   s_cb41f35dc251b1::t_13359baed66f40 1281
   s_cb41f35dc251b1::t_5302ac2a23dee5 9-10,12,29,1239,1242-1244,1247,1249-1254,1256-1261,1265,1267-1280
+  s_d39f85b9ab7930::t_4c9e0ad62815c5 1240
 genesis/engine/mesh.py
   s_cb41f35dc251b1::t_5302ac2a23dee5 180,182,317,321-338,547,678-700
   s_cb41f35dc251b1::t_cdbc1b3c3bf22e 701-702
+  s_d39f85b9ab7930::t_4c9e0ad62815c5 181
 genesis/__init__.py
   s_cb41f35dc251b1::t_5302ac2a23dee5 508
 genesis/ext/pyrender/jit_render.py
@@ -54,14 +66,17 @@ genesis/ext/pyrender/jit_render.py
   s_cb41f35dc251b1::t_6bb3d8225ca382 1511
 genesis/options/__init__.py
   s_cb41f35dc251b1::t_5302ac2a23dee5 38
+  s_d39f85b9ab7930::t_5da92c9f64739f 2
 tests/parsers/test_mesh.py
   s_cb41f35dc251b1::t_5302ac2a23dee5 669-670,675-677
 tests/core/test_entity_spec.py
   s_cb41f35dc251b1::t_5302ac2a23dee5 357-360,362-366
   s_cb41f35dc251b1::t_4c608c93e78ccd 361
   s_cb41f35dc251b1::t_c4ef2e59ca24a6 130-132,137,217-218,256,258,284,288,356
+  s_d39f85b9ab7930::t_c39a69475dca9e 139,215-216,257,259,282-283,285-287,289
 examples/rendering/dynamic_texture.py
   s_cb41f35dc251b1::t_5302ac2a23dee5 1-253,255-274,276-347
+  s_d39f85b9ab7930::t_67f648b3d66015 254,275
 genesis/engine/texture.py
   s_cb41f35dc251b1::t_5302ac2a23dee5 1-225
 genesis/engine/state_change.py
@@ -82,6 +97,9 @@ tests/rendering/test_offscreen.py
   s_cb41f35dc251b1::t_5302ac2a23dee5 203-238,257-258,261-262,264-311,313-334,336-406,409-410,412-557
   s_cb41f35dc251b1::t_0f0b6b814c9f7c 240-244,246-256,259-260,312,335,408,411
   s_cb41f35dc251b1::t_e48e6bd16d59c6 407
+  s_d39f85b9ab7930::t_fc48dfc056ad8d 239,245,263
+.github/contributing/ARCHITECTURE.md
+  s_d39f85b9ab7930::t_011c3e6914f4a4 122,124
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -96,6 +114,14 @@ tests/rendering/test_offscreen.py
         "model": "claude-opus-5-5"
       },
       "human_author": null
+    },
+    "s_d39f85b9ab7930": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a73923d6-db95-4649-b538-03d34b310d4a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
     }
   }
 }
