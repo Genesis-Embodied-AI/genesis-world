@@ -18,7 +18,9 @@ from typing import TYPE_CHECKING, NamedTuple, override
 
 import numpy as np
 import torch
+
 import trimesh
+from huggingface_hub import snapshot_download
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -228,6 +230,13 @@ def main():
     scene.add_entity(
         gs.morphs.Plane(),
     )
+    duckurcqa_dir = snapshot_download(
+        repo_type="dataset",
+        repo_id="Genesis-Intelligence/assets",
+        revision="9d9d55ed59c118ed58201b259403d98e035cbb6c",
+        allow_patterns="textures/duckurcqa.png",
+        max_workers=1,
+    )
     width, height = TEXTURE_RESOLUTION
     is_stripe = np.broadcast_to(np.arange(width) // 32 % 2 == 0, (height, width))
     variants = {
@@ -239,7 +248,7 @@ def main():
             image_array=np.where(is_stripe[..., None], [135, 206, 235], [189, 224, 254]).astype(np.uint8),
         ),
         "duckurcqa": gs.textures.ImageTexture(
-            image_path="meshes/duck/duckurcqa.png",
+            image_path=os.path.join(duckurcqa_dir, "textures", "duckurcqa.png"),
         ),
         "paint": gs.textures.AssetTexture(
             is_batched=True,
