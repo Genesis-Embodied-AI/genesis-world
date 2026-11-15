@@ -319,6 +319,11 @@ class Mesh(RBC, serialization.SerializationMixin):
         self._surface.update_texture()
         self._uvs = None
 
+    def _drop_unsampled_uvs(self) -> None:
+        """Drop the uvs of the mesh when its surface samples no texture, once no patch can replace that surface."""
+        if not self._surface.requires_uv:
+            self._uvs = None
+
     def _check_uvs(self) -> None:
         if self._uvs is None and any(
             isinstance(texture, gs.textures.DynamicTexture)
