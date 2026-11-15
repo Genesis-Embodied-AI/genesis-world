@@ -252,16 +252,15 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
             diffuse_texture=gs.textures.DynamicTexture(
                 resolution=(8, 8),
                 variants=(
-                    gs.textures.AssetTexture(),
                     gs.textures.AssetTexture(
                         is_batched=True,
                     ),
+                    gs.textures.AssetTexture(),
                     gs.textures.ColorTexture(
                         color=(1.0, 1.0, 1.0),
                         is_batched=True,
                     ),
                 ),
-                initial_variant=1,
             ),
         ),
     )
@@ -340,7 +339,7 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
     label.set_texture(np.array([[0.0, 1.0, 0.0], [1.0, 1.0, 0.0]])[:, None, None], vgeoms_idx=gs.indices.VGeom.at(0))
     lamp.set_texture(gs.textures.ColorTexture(color=(0.0, 1.0, 0.0)), vgeoms_idx=0)
     assert_equal(screen_vgeom.get_texture(), [0, 1])
-    assert_equal(label_vgeom.get_texture(envs_idx=[1]), [1])
+    assert_equal(label_vgeom.get_texture(envs_idx=[1]), [0])
     # The camera shows the variants as soon as they change, while the sensor renders them at the next step
     scene.step()
     rgb_switched = camera.render(rgb=True)[0]
@@ -374,10 +373,10 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
         screen_vgeom.set_texture(np.zeros((16, 16)))
     with pytest.raises(gs.GenesisException, match="batched variant"):
         screen_vgeom.set_texture(np.zeros((16, 16, 3)))
-    label_vgeom.set_texture(0)
+    label_vgeom.set_texture(1)
     with pytest.raises(gs.GenesisException, match="several batched variants"):
         label_vgeom.set_texture(np.zeros((8, 8, 3)))
-    label_vgeom.set_texture(1)
+    label_vgeom.set_texture(0)
     with pytest.raises(gs.GenesisException, match="one per selected environment"):
         screen_vgeom.set_texture(["red", "blue", "red"])
     hdr_path = tmp_path / "sky.hdr"
@@ -439,10 +438,10 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
         )
         unsupported_scene.build()
 
-    # A reset of one environment shows its initial variants again and erases the pixels drawn in it, so that its
+    # A reset of one environment shows the first variants again and erases the pixels drawn in it, so that its
     # batched variant shows the asset texture again, and a reset of the scene does so in every environment
     scene.reset(envs_idx=[1])
-    assert_equal(label_vgeom.get_texture(), [1, 1])
+    assert_equal(label_vgeom.get_texture(), [0, 0])
     colors = get_colors(camera.render(rgb=True)[0])
     assert colors[0, 1, 1] > 100.0 and colors[0, 1, 0] < 30.0
     assert_allclose(colors[1, 1], colors[1, 3], atol=5.0)

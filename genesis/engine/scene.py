@@ -1055,7 +1055,7 @@ class Scene(BuildableMixin, RBC):
         if envs_idx is None:
             self._recorder_manager.record(self._sim.cur_step_global)
         self._recorder_manager.reset(envs_idx)
-        # The dynamic textures reset first, so that the viewer the reset repaints shows their initial variants
+        # The dynamic textures reset first, so that the viewer the reset repaints shows their first variants
         for texture in self._textures:
             texture.reset(envs_idx)
         self._reset(state, envs_idx=envs_idx)
