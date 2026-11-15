@@ -681,7 +681,7 @@ class DynamicTexture(_ImagelessTexture):
     ) = (None,)
     initial_variant: StrictInt | str = 0
 
-    # The texture an asset gives the map it fills, which its asset texture variants show (see 'resolve_asset_texture')
+    # The texture an asset gives the map it fills, which its asset texture variants show (see '_resolve_asset_texture')
     _asset_texture: "ColorTexture | ImageTexture | None" = PrivateAttr(default=None)
 
     @model_validator(mode="after")
@@ -689,7 +689,7 @@ class DynamicTexture(_ImagelessTexture):
         self.get_variants_idx(self.initial_variant)
         return self
 
-    def resolve_asset_texture(self, asset_texture: Texture | None) -> "DynamicTexture":
+    def _resolve_asset_texture(self, asset_texture: Texture | None) -> "DynamicTexture":
         """Return a copy whose asset texture variants show the texture an asset gives the map.
 
         If 'asset_texture' is itself a dynamic texture, the asset texture that one resolved to is used instead. A
@@ -752,8 +752,3 @@ class DynamicTexture(_ImagelessTexture):
     def get_variants_image(self, texture_map_type: TEXTURE_MAP_TYPE) -> tuple[np.ndarray, ...]:
         """Return the entries of each variant as an RGBA array, in the format of a map (see 'texture_to_rgba')."""
         return tuple(texture_to_rgba(texture, self.resolution, texture_map_type) for texture in self.variants_texture)
-
-    def get_initial_image(self) -> np.ndarray:
-        """Return the image the initial variant shows first, as an RGBA uint8 array of shape (height, width, 4)."""
-        (i_variant,) = self.get_variants_idx(self.initial_variant)
-        return texture_to_rgba(self.variants_texture[i_variant], self.resolution)[0]

@@ -703,7 +703,7 @@ class Mesh(RBC, serialization.SerializationMixin):
                     fields[name] = value
             for name, texture in fields.items():
                 if isinstance(texture, gs.textures.DynamicTexture):
-                    fields[name] = texture.resolve_asset_texture(slots_texture.get(name))
+                    fields[name] = texture._resolve_asset_texture(slots_texture.get(name))
             self._surface = type(surface)(**fields).model_copy(update=shortcuts)
             self.update_trimesh_visual()
         if self._surface.requires_uv and self._uvs is None:
