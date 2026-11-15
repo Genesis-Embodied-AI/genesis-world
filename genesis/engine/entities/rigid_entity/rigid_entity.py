@@ -1222,10 +1222,10 @@ class KinematicEntity(Entity):
     ) -> None:
         """Show a variant, or draw pixels, on the dynamic texture of every selected visual geom of the entity.
 
-        'vgeoms_idx' selects visual geoms by their position among ``vgeoms``, or by a ``gs.indices.VGeom`` resolved as
-        ``select`` on the entity spec resolves it (see ``gs.indices.VGeom``), so that the selection giving a visual geom
-        its surface finds it again. None selects every visual geom showing a dynamic texture, in 'texture_map_type' when
-        given. See ``RigidVisGeom.set_texture`` for 'texture', 'envs_idx' and 'texture_map_type'.
+        'vgeoms_idx' selects visual geoms by their position among ``vgeoms``, or by a ``gs.indices.VGeom`` resolved over
+        the visual geoms of the whole entity, apart for each heterogeneous variant, as a top-level ``select`` on the
+        entity spec resolves it (see ``gs.indices.VGeom``). None selects every visual geom showing a dynamic texture, in
+        'texture_map_type' when given. See ``RigidVisGeom.set_texture`` for the other arguments.
         """
         if isinstance(vgeoms_idx, indices.VGeom):
             vgeoms = self.vgeoms
