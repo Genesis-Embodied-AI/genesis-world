@@ -97,7 +97,7 @@ class TexturePainterPlugin(RaycasterViewerPlugin):
     def build(self, viewer, camera: "Node", scene: "Scene"):
         super().build(viewer, camera, scene)
 
-        for texture in scene.dynamic_textures:
+        for texture in scene.textures:
             variants_is_batched = texture.options.variants_is_batched
             if variants_is_batched.count(True) != 1 or texture.texture_map_type != gs.TEXTURE_MAP_TYPE.DIFFUSE:
                 continue

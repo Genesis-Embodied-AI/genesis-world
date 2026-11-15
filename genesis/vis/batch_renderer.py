@@ -298,7 +298,7 @@ class BatchRenderer(BuildableMixin, RBC):
 
         if gs.backend != gs.cuda:
             gs.raise_exception("BatchRenderer requires CUDA backend.")
-        if self._visualizer.scene.dynamic_textures:
+        if self._visualizer.scene.textures:
             gs.raise_exception("The batch renderer does not draw dynamic textures. Render them with the rasterizer.")
         gpu_id = gs.device.index if gs.device.index is not None else 0
 

@@ -1266,7 +1266,7 @@ class KinematicEntity(Entity):
         elif vgeoms_idx is None:
             vgeoms = dict.fromkeys(
                 dynamic_texture.vgeom
-                for dynamic_texture in self._scene.dynamic_textures
+                for dynamic_texture in self._scene.textures
                 if dynamic_texture.vgeom.entity is self
                 and (texture_map_type is None or dynamic_texture.texture_map_type == texture_map_type)
             )

@@ -214,18 +214,3 @@ class Texture(BatchedMixin):
             for drawing_callback in self._subscribers.values():
                 if drawing_callback is not None:
                     drawing_callback(int(i_variant), variant_envs_idx, variant_image)
-
-
-def get_dynamic_texture(textures: list[Texture], texture_map_type: TEXTURE_MAP_TYPE | None) -> Texture:
-    """Return the dynamic texture filling the map of type 'texture_map_type', or the only one of 'textures' if None.
-
-    'textures' are the dynamic textures of one visual geom, one per map at most.
-    """
-    if texture_map_type is not None:
-        textures = [texture for texture in textures if texture.texture_map_type == texture_map_type]
-    if len(textures) == 1:
-        return textures[0]
-    if not textures:
-        target = "" if texture_map_type is None else f" in the {texture_map_type.name.lower()} map"
-        gs.raise_exception(f"This visual geom draws no dynamic texture{target}.")
-    gs.raise_exception("This visual geom draws a dynamic texture in both maps. Pick one by 'texture_map_type'.")

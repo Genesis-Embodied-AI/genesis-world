@@ -617,7 +617,7 @@ class RasterizerContext(BuildableMixin):
         # untextured ones (without uvs) apart, since each kind is drawn with a material of its own. A visual geom
         # drawing a dynamic texture binds its own texture array, so that it keeps a material of its own.
         vgeoms_dynamic_textures: dict[int, list[Texture]] = {}
-        for texture in self.scene.dynamic_textures:
+        for texture in self.scene.textures:
             vgeoms_dynamic_textures.setdefault(texture.vgeom.uid, []).append(texture)
         vis_materials = {}
         textures_array = {}

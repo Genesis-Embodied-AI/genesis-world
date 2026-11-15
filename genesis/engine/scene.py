@@ -263,7 +263,7 @@ class Scene(BuildableMixin, RBC):
 
         # emitters
         self._emitters = gs.List()
-        self._dynamic_textures: list[Texture] = []
+        self._textures: list[Texture] = []
 
         self._uid = gs.UID()
         self._pre_step_callbacks: list = []
@@ -979,7 +979,7 @@ class Scene(BuildableMixin, RBC):
                                         )
                                     texture = Texture(self, options, texture_map_type, vgeom)
                                     texture.build(n_envs)
-                                    self._dynamic_textures.append(texture)
+                                    self._textures.append(texture)
                                     vgeom._dynamic_textures.append(texture)
                     elif any(
                         isinstance(texture, DynamicTexture)
@@ -1043,7 +1043,7 @@ class Scene(BuildableMixin, RBC):
             self._recorder_manager.record(self._sim.cur_step_global)
         self._recorder_manager.reset(envs_idx)
         # The dynamic textures reset first, so that the viewer the reset repaints shows their initial variants
-        for texture in self._dynamic_textures:
+        for texture in self._textures:
             texture.reset(envs_idx)
         self._reset(state, envs_idx=envs_idx)
 
@@ -2074,9 +2074,12 @@ class Scene(BuildableMixin, RBC):
         return self._emitters
 
     @property
-    def dynamic_textures(self) -> list[Texture]:
-        """The runtime state of the dynamic textures of the scene, one per map of a visual geom, once it is built."""
-        return self._dynamic_textures
+    def textures(self) -> list[Texture]:
+        """The runtime state of the dynamic textures of the scene, one per map of a visual geom, once it is built.
+
+        A renderer subscribes to each texture it draws (see ``Texture``).
+        """
+        return self._textures
 
     @property
     def rigid_solver(self):
