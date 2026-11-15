@@ -1,0 +1,40 @@
+genesis/utils/serialization.py
+  s_d39f85b9ab7930::t_9dc360a471f309 307,316-317
+genesis/engine/mesh.py
+  s_d39f85b9ab7930::t_ade1d0fea69eb2 679,681-682,691
+genesis/options/surfaces.py
+  s_d39f85b9ab7930::t_c0d1c6ab8cea16 293,296
+genesis/engine/scene.py
+  s_d39f85b9ab7930::t_883e5f41cc7f2e 1661-1666
+tests/core/test_surface.py
+  s_d39f85b9ab7930::t_9bcc0cafcd4f19 96-101
+  s_d39f85b9ab7930::t_2645334924bdd8 68
+  s_d39f85b9ab7930::t_d66839e871b913 95,102
+tests/core/test_entity_spec.py
+  s_d39f85b9ab7930::t_4768585e9c8bdf 139,367-369
+genesis/ext/pyrender/texture.py
+  s_d39f85b9ab7930::t_2c938f23ae43ba 236-237,242,246-247
+genesis/options/textures.py
+  s_d39f85b9ab7930::t_cc3f05b3abb416 648-652,669,692-694
+genesis/options/entities.py
+  s_d39f85b9ab7930::t_cc3f05b3abb416 312
+  s_d39f85b9ab7930::t_2c938f23ae43ba 262
+tests/rigid/test_serialization.py
+  s_d39f85b9ab7930::t_93103ab8bdde45 247-249,252,266-274,341
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2422f0545f387d61d7946955065e9b842643f058",
+  "prompts": {},
+  "sessions": {
+    "s_d39f85b9ab7930": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a73923d6-db95-4649-b538-03d34b310d4a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
