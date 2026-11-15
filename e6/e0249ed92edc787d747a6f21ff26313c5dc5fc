@@ -1,0 +1,29 @@
+examples/rigid/ddp_multi_gpu.py
+  s_d39f85b9ab7930::t_b63d8d2268bd5c 69
+tests/core/test_misc.py
+  s_d39f85b9ab7930::t_b63d8d2268bd5c 802,807
+tests/rendering/test_offscreen.py
+  s_d39f85b9ab7930::t_b63d8d2268bd5c 599-615
+tests/rigid/test_asset_loading.py
+  s_d39f85b9ab7930::t_b63d8d2268bd5c 1533,1539
+tests/parsers/conftest.py
+  s_d39f85b9ab7930::t_b63d8d2268bd5c 432,454,456
+tests/rigid/test_constraints.py
+  s_d39f85b9ab7930::t_b63d8d2268bd5c 641-645
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e6e0249ed92edc787d747a6f21ff26313c5dc5fc",
+  "prompts": {},
+  "sessions": {
+    "s_d39f85b9ab7930": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a73923d6-db95-4649-b538-03d34b310d4a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
