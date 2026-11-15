@@ -23,6 +23,7 @@ from genesis.utils.misc import (
     sanitize_index,
 )
 from genesis.utils.tools import StepTimer
+from genesis.utils.warnings import warn_once
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .couplers.rigid_mpm_hybrid import RigidMPMHybrid
@@ -614,6 +615,11 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
     def para_level(self) -> int:
         """The level of parallelization of the loops of the kernels (see gs.PARA_LEVEL)."""
         return self._para_level
+
+    @property
+    def _B(self) -> int:
+        warn_once(self, "'Simulator._B' is deprecated. Please use 'Simulator.n_envs_' instead.")
+        return self.n_envs_
 
     @property
     def rigid_only(self) -> bool:
