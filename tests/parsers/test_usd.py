@@ -22,6 +22,7 @@ from ..conftest import SKIP_NO_OMNIVERSE_KIT
 
 import genesis as gs
 from genesis.engine.scene import SCENE_FORMAT
+from genesis.utils.misc import tensor_to_array
 from genesis.utils.serialization import MANIFEST_NAME
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -557,12 +558,25 @@ def test_collision_filtering(collision_filtering_usd, show_viewer, caplog):
                 pos=(0.0, 0.0, 0.05),
             ),
         )
-    scene.build()
-
     # The link pairs whose colliders are filtered in part alone are reported together, once
     partial_records = [record.getMessage() for record in caplog.records if "but not all of them" in record.getMessage()]
     assert len(partial_records) == 1
     assert "col_e" in partial_records[0] and "col_f" in partial_records[0]
+
+    ghosts = scene.add_stage(
+        spec=gs.entities.Kinematic(
+            morph=gs.morphs.USD(
+                file=collision_filtering_usd,
+                pos=(0.0, 0.0, 0.5),
+            ),
+        ),
+    )
+    stage_spec = gs.entities.Rigid(morph=gs.morphs.USD(file=collision_filtering_usd))
+    stage_spec.select(gs.indices.Link.named("base")).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="selects no part"):
+        scene.add_stage(spec=stage_spec)
+    scene.build()
+    ghosts_pos = [tensor_to_array(ghost.get_pos()) for ghost in ghosts]
 
     for _ in range(50):
         scene.step()
@@ -571,6 +585,10 @@ def test_collision_filtering(collision_filtering_usd, show_viewer, caplog):
     for entity in entities:
         aabb_min, _aabb_max = entity.get_AABB()
         assert -5e-4 < aabb_min[-1] < 0.0
+    # The same stage constructed from a kinematic spec keeps its pose, neither falling nor colliding
+    assert len(ghosts) == len(entities)
+    for ghost, pos in zip(ghosts, ghosts_pos):
+        assert_allclose(ghost.get_pos(), pos, tol=gs.EPS)
 
     # Every link rests on the ground. Among the links overlapping their base, those whose colliders are all filtered
     # against it never collide with it, and those filtered in part alone keep colliding.

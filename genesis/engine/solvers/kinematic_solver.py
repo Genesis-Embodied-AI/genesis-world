@@ -1,6 +1,6 @@
 from collections.abc import Iterator, Sequence
 from dataclasses import asdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -12,7 +12,6 @@ from genesis.engine.entities.rigid_entity.description import KinematicEntityDesc
 from genesis.engine.entities.rigid_entity.rigid_entity import get_variants_kinematics
 from genesis.engine.entities.rigid_entity.rigid_equality import RigidEquality
 from genesis.engine.entities.rigid_entity.rigid_link import KinematicLink
-from genesis.engine.materials import Kinematic
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     IKScratch,
     kernel_forward_kinematics_query,
@@ -26,6 +25,7 @@ from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
+from genesis.options.surfaces import Surface
 from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data
 from genesis.utils.misc import assign_indexed_tensor, broadcast_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
@@ -144,6 +144,8 @@ class KinematicSolver(Solver):
     RigidSolver extends this with physics (collision, constraints, dynamics).
     """
 
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]] = gs.entities.Kinematic
+
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
 
@@ -151,7 +153,6 @@ class KinematicSolver(Solver):
     # The rigid solver deriving from this one reverses its own dynamics.
     is_differentiable = True
 
-    material_cls = Kinematic
     # The kinds of entity this solver builds, each with the morph class it is built from, the most specific first
     _entity_classes = ((Morph, KinematicEntity),)
 
@@ -193,25 +194,19 @@ class KinematicSolver(Solver):
     def add_entity(
         self,
         idx: int,
-        material: Kinematic,
-        morph: Morph | Sequence[Morph] | None,
-        surface: "gs.surfaces.Surface | None",
-        visualize_contact: bool = False,
-        name: str | None = None,
+        surface: Surface | None,
+        spec: "gs.entities.Kinematic | gs.entities.Rigid | None",
         desc: KinematicEntityDescription | None = None,
     ) -> KinematicEntity:
         """Create an entity from its description.
 
-        Given no description, one is resolved from the other arguments (see 'KinematicEntityDescription'), the morph
-        deciding the kind of entity among those the solver builds ('_entity_classes'). The class of a given description
-        says which kind it holds. Creation from a description reads no asset.
+        Given no description, one is resolved from the entity spec and its resolved surface (see
+        'KinematicEntityDescription'), the primary morph deciding the kind of entity ('_entity_classes'). A given
+        description says the kind by its class, and creating from it reads no asset.
         """
         if desc is None:
-            morphs = (morph,) if isinstance(morph, Morph) else tuple(morph)
-            entity_cls = next(cls for morph_cls, cls in self._entity_classes if isinstance(morphs[0], morph_cls))
-            desc = entity_cls._description_cls.resolve(
-                morphs, material, surface, self._options, self._enable_mujoco_compatibility, visualize_contact, name
-            )
+            entity_cls = next(cls for morph_cls, cls in self._entity_classes if isinstance(spec.morphs[0], morph_cls))
+            desc = entity_cls._description_cls.resolve(spec, surface, self._options, self._enable_mujoco_compatibility)
         else:
             for _, entity_cls in self._entity_classes:
                 if entity_cls._description_cls is type(desc):

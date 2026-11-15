@@ -1,5 +1,5 @@
 from collections.abc import Iterator, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -13,7 +13,6 @@ from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.entities.rigid_entity import RigidGeom
 from genesis.engine.entities.rigid_entity.description import RigidEntityDescription, _balanced_variant_mapping
 from genesis.engine.entities.rigid_entity.rigid_equality import RigidEquality
-from genesis.engine.materials import Rigid
 from genesis.engine.solvers.rigid.collider.data import ColliderState
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
 from genesis.engine.solvers.rigid.constraint.solver import cholesky_tile_size_for
@@ -200,7 +199,8 @@ def _sanitize_sol_params(
 
 
 class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
-    material_cls = Rigid
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]] = gs.entities.Rigid
+
     _entity_classes = ((Drone, DroneEntity), (Terrain, TerrainEntity), (Morph, RigidEntity))
     # override typing
     _entities: list[RigidEntity] = gs.List()
@@ -294,14 +294,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def add_entity(
         self,
         idx: int,
-        material: Rigid,
-        morph: Morph | Sequence[Morph] | None,
         surface: Surface | None,
-        visualize_contact: bool = False,
-        name: str | None = None,
+        spec: "gs.entities.Rigid | None",
         desc: RigidEntityDescription | None = None,
     ) -> RigidEntity:
-        entity = super().add_entity(idx, material, morph, surface, visualize_contact, name, desc)
+        entity = super().add_entity(idx, surface, spec, desc)
         self._geoms.extend(entity.geoms)
         self._equalities.extend(entity.equalities)
         self._n_verts += entity.n_verts

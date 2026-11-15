@@ -315,6 +315,12 @@ class IPCCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC)
                     )
             gs.logger.debug(f"Rigid entity {i_e}: coupling type '{coup_type.name.lower()}'")
 
+            if entity.spec.patches:
+                gs.raise_exception(
+                    f"Entity '{entity.name}' sets a density or a friction on selected links or geoms, which the IPC "
+                    "coupler does not support. Set it on the material instead."
+                )
+
             # Resolve link filter from material
             link_filter_names = entity.material.coup_links
             if link_filter_names is not None:
@@ -396,8 +402,14 @@ class IPCCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC)
     def _add_fem_entities_to_ipc(self) -> None:
         """Add FEM entities to the existing IPC scene (includes both volumetric FEM and cloth)"""
 
-        # Create constitutions based on entity types present
         entity: "FEMEntity"
+        for entity in cast(list["FEMEntity"], self.fem_solver.entities):
+            if entity.spec.patches:
+                gs.raise_exception(
+                    f"Entity '{entity.name}' sets quantities on selected vertices, which the IPC coupler does not support."
+                )
+
+        # Create constitutions based on entity types present
         for env_idx in range(self.n_envs_):
             for i_e, entity in enumerate(cast(list["FEMEntity"], self.fem_solver.entities)):
                 is_cloth = isinstance(entity.material, Cloth)

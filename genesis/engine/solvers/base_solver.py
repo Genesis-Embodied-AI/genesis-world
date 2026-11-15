@@ -1,6 +1,6 @@
 from collections.abc import Callable, Iterator, Sequence
 from enum import IntFlag
-from typing import TYPE_CHECKING, NamedTuple, overload
+from typing import TYPE_CHECKING, ClassVar, NamedTuple, overload
 
 import numpy as np
 import torch
@@ -12,7 +12,6 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.force_fields import ForceField, ForceFields
-from genesis.engine.materials.base import Material
 from genesis.engine.state_change import StateChange, Subscriber, mutates
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import RolloutGraph, no_grad
@@ -547,10 +546,10 @@ class GravityMixin(BuildableMixin):
 
 
 class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
-    # The material of the entities this solver simulates, None for a solver holding no entity of its own
-    material_cls: type[Material] | None = None
     # Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must
     is_differentiable: bool = False
+    # The entity spec class whose entities the solver simulates, which the simulator dispatches on
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]]
 
     def __init__(self, sim: "Simulator", options):
         self._uid = gs.UID()

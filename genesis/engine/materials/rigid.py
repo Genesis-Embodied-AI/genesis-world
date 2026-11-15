@@ -12,6 +12,11 @@ if TYPE_CHECKING:
 
 CoupType = Literal["two_way_soft_constraint", "external_articulation", "ipc_only"]
 
+# The friction coefficients a rigid material and the geom quantities set on selections share (see 'gs.options.Geom')
+FrictionType = Annotated[ValidFloat, Field(ge=0.01, le=5.0)]
+FrictionTorsionalType = Annotated[ValidFloat, Field(ge=0.0)]
+FrictionRollingType = Annotated[ValidFloat, Field(ge=0.0)]
+
 
 class Rigid(Kinematic["RigidEntity"]):
     """
@@ -92,9 +97,9 @@ class Rigid(Kinematic["RigidEntity"]):
     use_visual_raycasting: StrictBool = False
 
     rho: ValidFloat | None = None
-    friction: Annotated[ValidFloat, Field(ge=0.01, le=5.0)] | None = None
-    friction_torsional: Annotated[ValidFloat, Field(ge=0.0)] | None = None
-    friction_rolling: Annotated[ValidFloat, Field(ge=0.0)] | None = None
+    friction: FrictionType | None = None
+    friction_torsional: FrictionTorsionalType | None = None
+    friction_rolling: FrictionRollingType | None = None
     needs_coup: StrictBool = True
     coup_friction: NonNegativeFloat = 0.1
     coup_softness: NonNegativeFloat = 0.002

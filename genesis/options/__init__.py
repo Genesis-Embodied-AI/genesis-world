@@ -1,11 +1,12 @@
 from .misc import CoacdOptions, FoamOptions
+from .patches import Geom, Vertex
 from .profiling import ProfilingOptions
 from .scene import SceneOptions
 from .solvers import (
-    KinematicOptions,
     BaseCouplerOptions,
     FEMOptions,
     IPCCouplerOptions,
+    KinematicOptions,
     LegacyCouplerOptions,
     MPMOptions,
     PBDOptions,
@@ -17,12 +18,13 @@ from .solvers import (
 from .vis import ViewerOptions, VisOptions
 
 __all__ = [
-    "KinematicOptions",
     "BaseCouplerOptions",
     "CoacdOptions",
     "FEMOptions",
     "FoamOptions",
+    "Geom",
     "IPCCouplerOptions",
+    "KinematicOptions",
     "LegacyCouplerOptions",
     "MPMOptions",
     "PBDOptions",
@@ -32,6 +34,7 @@ __all__ = [
     "SceneOptions",
     "SimOptions",
     "SPHOptions",
+    "Vertex",
     "ViewerOptions",
     "VisOptions",
 ]

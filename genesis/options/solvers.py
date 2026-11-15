@@ -935,9 +935,10 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
     damping_beta : float, optional
         Rayleigh Damping factor for the implicit solver. Defaults to 5e-4. Only used when `use_implicit_solver` is True.
     max_vertex_constraints : int, optional
-        Maximum number of constrained vertices per environment (see `FEMEntity.set_vertex_constraints`). Constraining
-        one past it raises. A larger value lets more vertices be pinned, at the cost of 56 bytes of memory per slot and
-        per environment in single precision, 100 in double precision. Defaults to 64.
+        Maximum number of constrained vertices per environment (see `FEMEntity.set_vertex_constraints`), on top of the
+        vertices that the vertex options of the entities fix. Constraining one past it raises. A larger value lets more
+        vertices be pinned, at the cost of 56 bytes of memory per slot and per environment in single precision, 100 in
+        double precision. Defaults to 64.
     """
 
     damping: NonNegativeFloat = 0.0

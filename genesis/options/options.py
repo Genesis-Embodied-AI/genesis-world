@@ -132,11 +132,18 @@ class Options(RBC, BaseModel):
         repr_str = f"{colors.CORN}{'─' * (max_attr_len + 3)} {formats.BOLD}{formats.ITALIC}{self.__repr_name__()}{formats.RESET} {colors.CORN}{'─' * (max_attr_len + 3)}\n"
 
         for attr, value in repr_items:
-            formatted_str = f"{colors.BLUE}'{attr}'{formats.RESET}"
+            # A field left at its default is grayed out, so that it reads apart from a value given equal to it
+            name_color, value_color = (
+                (colors.BLUE, colors.MINT) if attr in self.model_fields_set else (colors.GRAY,) * 2
+            )
+            formatted_str = f"{name_color}'{attr}'{formats.RESET}"
 
             content = ru.brief(value)
             idx = content.find(">")
-            formatted_content = f"{colors.MINT}{formats.ITALIC}{content[: idx + 1]}{formats.RESET}{colors.MINT}{content[idx + 1 :]}{formats.RESET}"
+            formatted_content = (
+                f"{value_color}{formats.ITALIC}{content[: idx + 1]}{formats.RESET}"
+                f"{value_color}{content[idx + 1 :]}{formats.RESET}"
+            )
             # in case it's multi-line
             formatted_content = formatted_content.replace("\n", "\n" + " " * (max_attr_len + 4))
 
