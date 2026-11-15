@@ -711,6 +711,14 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         return self._cur_substep_global
 
     @property
+    def cur_substep_local(self) -> int:
+        """The current substep within the step."""
+        warn_once(
+            self, "'Simulator.cur_substep_local' is deprecated. Please use 'cur_substep_global % substeps' instead."
+        )
+        return self._cur_substep_global % self._substeps
+
+    @property
     def step_timer(self) -> StepTimer:
         """The timer of the phases of the steps."""
         return self._step_timer

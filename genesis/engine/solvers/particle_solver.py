@@ -186,7 +186,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         """Get the mass of some particles (see 'set_particles_pos')."""
         # The particles store their mass multiplied by 'particle_mass_scale', the same in every environment
         masses = (qd_to_torch(self._particles_mass) / self.particle_mass_scale)[None].expand(self.n_envs_, -1)
-        masses = masses[indices_to_mask(envs_idx, particles_idx, pair_rows=True)]
+        masses = masses[indices_to_mask(envs_idx, particles_idx, boolean_mask=False, pair_rows=True)]
         return masses[0] if self.n_envs == 0 else masses
 
     def _reset_particles(self, particles_idx: torch.Tensor, envs_idx: torch.Tensor, reset_deformation: bool) -> None:
