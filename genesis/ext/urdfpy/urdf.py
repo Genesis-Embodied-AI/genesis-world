@@ -15,8 +15,8 @@ from genesis.utils.cache import OwnedCache
 
 from .utils import configure_origin, get_filename, load_meshes, parse_origin, unparse_origin
 
-# The meshes loaded from a file, keyed on its path, its modification time and whether they make a collision geometry.
-# The 'Mesh' objects referencing the file own them, so that a URDF using one file in several links loads it once.
+# The meshes loaded from a file, keyed on its path and its modification time. The 'Mesh' objects referencing the file own
+# them, so that a URDF using one file in several links loads it once.
 _MESHES_CACHE = OwnedCache()
 
 
@@ -628,19 +628,26 @@ class Mesh(URDFType):
     def meshes(self):
         """list of :class:`~trimesh.base.Trimesh` : The triangular meshes
         that represent this object.
+
+        The meshes of a visual geometry loaded from its file are shared by every object referencing the same path. They
+        are read-only and must be copied before any in-place modification.
         """
         if self._meshes is None:
-            key = (self._mesh_path, os.path.getmtime(self._mesh_path), self._is_collision)
+            # The path is kept as given, since the materials and textures of the file load from its directory
+            key = (self._mesh_path, os.path.getmtime(self._mesh_path))
             meshes = _MESHES_CACHE.find(key)
             if meshes is None:
                 meshes = load_meshes(self._mesh_path)
-                # Combine collision geometry meshes but keep visual ones separate to preserve colors and textures
-                if self._is_collision:
-                    for m in meshes:
-                        m.visual = trimesh.visual.ColorVisuals(mesh=m)
-                    meshes = [meshes[0] + meshes[1:]]
-            # Each object holds copies of the cached meshes, which their users may transform in place
-            self.meshes = [m.copy(include_cache=True) for m in _MESHES_CACHE.own(self, key, meshes)]
+                # Writing into the shared arrays raises rather than changing the meshes of every object referencing the file
+                for m in meshes:
+                    m.vertices.flags.writeable = False
+                    m.faces.flags.writeable = False
+            meshes = _MESHES_CACHE.own(self, key, meshes)
+            # Combine collision geometry meshes but keep visual ones separate to preserve colors and textures
+            if self._is_collision:
+                meshes = [m.copy(include_cache=True, include_visual=False) for m in meshes]
+                meshes = [meshes[0] + meshes[1:]]
+            self.meshes = meshes
         return self._meshes
 
     @meshes.setter
