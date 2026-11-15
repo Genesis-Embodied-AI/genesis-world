@@ -1,0 +1,24 @@
+genesis/vis/rasterizer_context.py
+  s_d39f85b9ab7930::t_0ab0354aad5c7d 46,228,698,1418
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_d39f85b9ab7930::t_2136bf72b78d42 1251
+  s_d39f85b9ab7930::t_9f348e31460b5f 1248-1250
+genesis/options/textures.py
+  s_d39f85b9ab7930::t_2136bf72b78d42 651-652
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "47358201c3dce7a813d4a95559920736fcc8537c",
+  "prompts": {},
+  "sessions": {
+    "s_d39f85b9ab7930": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a73923d6-db95-4649-b538-03d34b310d4a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
