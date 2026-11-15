@@ -111,7 +111,7 @@ def test_multi_submesh_render_decoupling(n_envs, show_viewer):
     # The two sub-meshes share their boundary vertices, so welding strictly reduces the vertex count.
     n_render_verts = sum(len(vgeom.vmesh.verts) for vgeom in fem.vgeoms)
     assert fem.n_vertices < n_render_verts
-    vertices = tensor_to_array(fem.get_verts_pos())
+    vertices = fem.get_verts_pos()
     for vgeom in fem.vgeoms:
         # Negative indices would wrap around silently.
         assert vgeom.sim_verts_idx.min() >= 0
@@ -1165,8 +1165,8 @@ def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show
     assert_allclose(cubes_overlap, cubes_overlap_ref, rtol=0.02)
 
     # The upper cube of the single entity comes to rest on its lower one as the separate cubes do
-    is_upper = tensor_to_array(cubes.init_positions)[:, 2] > 2 * CUBE_HALFSIZE + CUBES_GAP / 2
-    cubes_pos = tensor_to_array(cubes.get_verts_pos())
+    is_upper = cubes.init_positions[:, 2] > 2 * CUBE_HALFSIZE + CUBES_GAP / 2
+    cubes_pos = cubes.get_verts_pos()
     assert_allclose(cubes.get_verts_vel(), 0.0, atol=1e-3)
     assert_allclose(
         cubes_pos[~is_upper, 2].max() - cubes_pos[is_upper, 2].min(),
@@ -1260,7 +1260,7 @@ def test_sap_coupler_capacity(
         # A capacity holding the candidate pairs of the scene holds, however many tets the boxes of its faces span
         for _ in range(20):
             scene.step()
-        assert (tensor_to_array(box.get_pos())[..., 2] > 2 * SPHERE_RADIUS).all()
+        assert (box.get_pos()[..., 2] > 2 * SPHERE_RADIUS).all()
 
 
 @pytest.mark.required
@@ -1336,11 +1336,11 @@ def test_sap_coupler_default_capacity(show_viewer):
     for _ in range(40):
         scene.step()
 
-    landing_box_pos = tensor_to_array(landing_box.get_pos())
-    sphere_center = tensor_to_array(sphere.get_verts_pos()).mean(axis=-2)
+    landing_box_pos = landing_box.get_pos()
+    sphere_center = sphere.get_verts_pos().mean(dim=-2)
     assert_allclose(landing_box_pos[..., :2], sphere_center[..., :2], atol=0.01)
     assert (landing_box_pos[..., 2] > 2 * SPHERE_RADIUS).all()
-    stacked_box_pos = tensor_to_array(stacked_box.get_pos())
+    stacked_box_pos = stacked_box.get_pos()
     assert_allclose(stacked_box_pos[..., :2], (1.0, 0.0), atol=2e-3)
     assert_allclose(stacked_box_pos[..., 2], 2 * BOX_SIZE + BOX_SIZE / 2, atol=2e-3)
     assert_allclose(stacked_cube.get_verts_pos().mean(dim=-2), (-1.0, 0.0, 3 * BOX_SIZE), atol=2e-3)

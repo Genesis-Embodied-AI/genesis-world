@@ -346,7 +346,7 @@ def test_solve_correctness(show_viewer, noslip_iterations, n_envs):
     boxes = (box_bottom, box_top, box_weld_a, box_weld_b, box_alone)
     heights = np.stack([np.atleast_1d(tensor_to_array(box.get_pos())[..., 2]) for box in boxes])
     assert_allclose(heights, np.array([0.05, 0.15, 0.05, 0.05, 0.05])[:, None], tol=5e-3)
-    weld_offset = tensor_to_array(box_weld_b.get_pos()) - tensor_to_array(box_weld_a.get_pos())
+    weld_offset = box_weld_b.get_pos() - box_weld_a.get_pos()
     assert_allclose(weld_offset, [0.3, 0.0, 0.0], tol=5e-3)
     assert (scene.rigid_solver.get_dofs_velocity().abs() < 1e-4).all()
 
@@ -440,11 +440,11 @@ def test_monolith_seed_oversaturated(show_viewer, monkeypatch):
         scene.step()
 
     z = np.stack([tensor_to_array(box.get_pos())[..., 2] for box in boxes])
-    vel = tensor_to_array(scene.rigid_solver.get_dofs_velocity())
+    vel = scene.rigid_solver.get_dofs_velocity()
     assert not np.isnan(z).any()
     # The boxes rest on the floor at half their size; a stale seed would never apply the contact response.
     assert_allclose(z, 0.05, tol=5e-3)
-    assert np.abs(vel).max() < 0.1
+    assert vel.abs().max() < 0.1
 
 
 @pytest.mark.required
@@ -524,11 +524,11 @@ def test_hibernation_with_pruning(show_viewer, n_envs):
 
     for _ in range(120):
         scene.step()
-        assert all((tensor_to_array(duck.get_pos())[..., 2] > -0.05).all() for duck in ducks)
+        assert all((duck.get_pos()[..., 2] > -0.05).all() for duck in ducks)
         if asleep():
             break
     assert asleep()
-    z_rest = [tensor_to_array(duck.get_pos())[..., 2] for duck in ducks]
+    z_rest = [duck.get_pos()[..., 2] for duck in ducks]
 
     for _ in range(100):
         scene.step()
@@ -937,7 +937,7 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
     # a woken tree is in it; a tree left asleep would hold its contribution at whatever it last ran with.
     mass_mat = solver.get_mass_mat()
     diagonal = mass_mat.diagonal(dim1=-2, dim2=-1) if mass_mat.ndim > 2 else mass_mat.diagonal()
-    assert_allclose(qd_to_numpy(solver.rigid_info.meaninertia), tensor_to_array(diagonal.mean(dim=-1)), tol=tol)
+    assert_allclose(qd_to_numpy(solver.rigid_info.meaninertia), diagonal.mean(dim=-1), tol=tol)
 
     invweight_before = box_armature.get_dofs_invweight()
     box_armature.set_dofs_armature([ARMATURE] * 6)

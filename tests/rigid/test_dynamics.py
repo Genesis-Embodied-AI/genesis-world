@@ -901,7 +901,7 @@ def test_mass_block_partition(xml_path, show_viewer, tol):
     assert_allclose(block_end, [branch] * branch + [n_dofs] * branch, tol=0)
 
     # The two branches do not couple, and the LTDL factor reconstructs the (block-diagonal) mass matrix.
-    mass_mat = tensor_to_array(entity.get_mass_mat(decompose=False))
+    mass_mat = entity.get_mass_mat(decompose=False)
     assert_allclose(mass_mat[:branch, branch:], 0.0, tol=tol)
     mass_mat_L, mass_mat_D_inv = entity.get_mass_mat(decompose=True)
     assert_allclose(mass_mat_L.T @ torch.diag(1.0 / mass_mat_D_inv) @ mass_mat_L, mass_mat, tol=tol)

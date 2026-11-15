@@ -1868,7 +1868,7 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
         assert_allclose(com_offset[0, 0], com_offset[2, 0], tol=tol)
 
     # Inertia matrix: variant B should match explicit URDF values
-    inertial_i = tensor_to_array(het_obj.get_links_inertia())
+    inertial_i = het_obj.get_links_inertia()
     # Variant A: diagonal inertia matches URDF
     assert_allclose(inertial_i[[0, 1], 0], np.eye(3) * sphere_base_inertia_diag, tol=tol)
     assert_allclose(inertial_i[[0, 1], 1], np.eye(3) * sphere_moving_inertia_diag, tol=tol)

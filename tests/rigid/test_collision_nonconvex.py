@@ -186,8 +186,8 @@ def test_inner_corner_multi_contact(obj_shape, show_viewer, tmp_path):
     max_v_seen = 0.0
     for _ in range(200):
         scene.step()
-        v = tensor_to_array(obj.get_dofs_velocity())
-        max_v_seen = max(max_v_seen, float(np.abs(v).max()))
+        v = obj.get_dofs_velocity()
+        max_v_seen = max(max_v_seen, float(v.abs().max()))
     assert max_v_seen < 0.05, f"velocity spike during settling: max |v| = {max_v_seen:.4f}"
 
     contacts = scene.rigid_solver.collider.collider_state.contact_data
@@ -343,11 +343,11 @@ def test_overlap(show_viewer):
     # overlap / timeconst; a spurious deep contact catapults them an order of magnitude above that ceiling.
     # Contact impulses being internal to the pair, its total momentum must stay zero.
     v_sep_max = apples_overlap / float(geom.desc.sol_params[0])
-    assert np.linalg.norm(tensor_to_array(apples[1].get_vel() - apples[0].get_vel())) < v_sep_max
+    assert torch.linalg.norm(apples[1].get_vel() - apples[0].get_vel()) < v_sep_max
     assert_allclose(apples[0].get_vel() + apples[1].get_vel(), 0, atol=1e-6)
     # The apples must separate by at least the overlap, but no more than the stabilization drift accumulates
     # over the simulated horizon.
-    apples_dist = np.linalg.norm(tensor_to_array(apples[1].get_pos() - apples[0].get_pos()))
+    apples_dist = torch.linalg.norm(apples[1].get_pos() - apples[0].get_pos())
     assert 0.5 * apples_overlap < apples_dist - np.linalg.norm(apples_offset) < v_sep_max * 200 * 0.001
 
 

@@ -165,11 +165,11 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
         scene.step()
 
     # Check that the sand moved the box along the negative Y direction
-    pos = tensor_to_array(obj_rigid.get_pos())
+    pos = obj_rigid.get_pos()
     assert (pos[..., 1] + 0.25 < 0.0).all()
 
     # Resetting one environment leaves the other one as it was
-    sand_pos = tensor_to_array(obj_sand.get_particles_pos())
+    sand_pos = obj_sand.get_particles_pos()
     scene.reset(envs_idx=[1])
     assert_equal(obj_rigid.get_pos()[0], pos[0])
     assert_equal(obj_sand.get_particles_pos()[0], sand_pos[0])

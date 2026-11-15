@@ -197,7 +197,7 @@ def test_hanging_rigid_cable(show_viewer, tol):
     )
     scene.build()
 
-    links_pos_0 = tensor_to_array(robot.get_links_pos(relative=False))
+    links_pos_0 = robot.get_links_pos(relative=False)
     links_quat_0 = tensor_to_array(robot.get_links_quat(relative=False))
     links_quat_0 /= np.linalg.norm(links_quat_0, axis=-1, keepdims=True)
 
@@ -205,7 +205,7 @@ def test_hanging_rigid_cable(show_viewer, tol):
     for _ in range(100):
         scene.step()
 
-    links_pos_f = tensor_to_array(robot.get_links_pos(relative=False))
+    links_pos_f = robot.get_links_pos(relative=False)
     links_quat_f = tensor_to_array(robot.get_links_quat(relative=False))
     links_quat_f /= np.linalg.norm(links_quat_f, axis=-1, keepdims=True)
     links_quat_err = 2.0 * np.arccos(np.minimum(np.abs(np.sum(links_quat_f * links_quat_0, axis=-1)), 1.0))

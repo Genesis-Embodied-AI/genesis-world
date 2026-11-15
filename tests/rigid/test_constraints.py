@@ -369,8 +369,8 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
     # The nut descends with the acceleration g_eff of a mass m sliding along the axis while spinning with an axial
     # inertia I, the two being coupled by the travel per radian p: g_eff = g * m * p^2 / (m * p^2 + I). The
     # compliance of the coupling row lets the turn lag the travel slightly, hence the relative tolerances.
-    mass = tensor_to_array(nut_helix.get_links_mass())[0]
-    inertia = tensor_to_array(nut_helix.get_links_inertia())[0, 2, 2]
+    mass = nut_helix.get_links_mass()[0]
+    inertia = nut_helix.get_links_inertia()[0, 2, 2]
     pitch_rad = PITCH / (2.0 * np.pi)
     g_eff = GRAVITY * mass * pitch_rad**2 / (mass * pitch_rad**2 + inertia)
     # Semi-implicit Euler moves a body under a constant acceleration a by -a * dt^2 * n * (n + 1) / 2 after n substeps.

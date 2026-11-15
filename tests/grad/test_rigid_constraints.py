@@ -5,7 +5,7 @@ import pytest
 import torch
 
 import genesis as gs
-from genesis.utils.misc import qd_to_torch, tensor_to_array
+from genesis.utils.misc import qd_to_torch
 
 from ..utils.assertions import assert_allclose
 from .utils import assert_grad_matches_fd, make_diff_scene_pair
@@ -88,7 +88,7 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, show_viewer):
         pair.scene_ana.step()
         loss = (pair.entity_ana.get_qpos()[:, 0] ** 2).sum()
         loss.backward()
-        grads[key] = tensor_to_array(v.grad)
+        grads[key] = v.grad
     assert_allclose(
         grads["on"],
         grads["off"],

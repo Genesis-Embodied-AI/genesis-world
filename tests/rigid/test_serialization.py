@@ -14,11 +14,10 @@ import torch
 import trimesh
 
 import genesis as gs
-import genesis.utils.geom as gu
 from genesis.engine.scene import SCENE_FORMAT, description_digest
 from genesis.ext import urdfpy
 from genesis.recorders.trajectory import CHUNK_MAGIC, TRAJECTORY_FORMAT, Trajectory
-from genesis.utils.misc import get_assets_dir, tensor_to_array
+from genesis.utils.misc import get_assets_dir
 from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -646,7 +645,7 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
     read_arm_qpos = arm.get_qpos()
     if requires_grad:
         qpos_grad = checkpoint.sim.solvers["RigidSolver"].arrays["rigid_info.qpos.grad"]
-        assert_equal((tensor_to_array(qpos_grad) != 0.0).any(), True)
+        assert_equal((qpos_grad != 0.0).any(), True)
         scene.__setstate__(checkpoint)
     for _ in range(10):
         scene.step()

@@ -36,9 +36,9 @@ def test_link_velocity(gs_sim, tol):
 
     gs_robot.set_qpos([0.0, np.pi / 2.0])
     gs_robot.set_dofs_velocity([0.0, 1.2])
-    COM = tensor_to_array(gs_robot.get_links_pos(ref=gs.link_ref_frame.root_COM))[0]
+    COM = gs_robot.get_links_pos(ref=gs.link_ref_frame.root_COM)[0]
     assert_allclose(COM, np.array([0.375, 0.125, 0.0]), tol=tol)
-    xanchor = tensor_to_array(gs_robot.joints[1].get_anchor_pos())
+    xanchor = gs_robot.joints[1].get_anchor_pos()
     assert_allclose(xanchor, np.array([0.5, 0.0, 0.0]), tol=tol)
     cvel_0, cvel_1 = gs_sim.rigid_solver.dyn_state.links.cd_vel.to_numpy()[:, 0]
     assert_allclose(cvel_0, 0, tol=tol)
@@ -264,7 +264,7 @@ def test_jacobian(gs_sim, tol):
 
     p_local = np.array([0.05, -0.02, 0.12], dtype=gs.np_float)
     J_o = tensor_to_array(pendulum.get_jacobian(link))
-    J_p = tensor_to_array(pendulum.get_jacobian(link, p_local))
+    J_p = pendulum.get_jacobian(link, p_local)
 
     c, s = np.cos(angle), np.sin(angle)
     Rx = np.array(
@@ -976,7 +976,7 @@ def test_kinematics_queries(n_envs, show_viewer, tol):
         assert_allclose(links_quat, entity.get_links_quat(relative=False), tol=gs.EPS)
 
     # Callers hand the query whatever array-like configuration they hold, a NumPy trajectory included.
-    links_pos, links_quat = franka.solver.forward_kinematics_query(franka, tensor_to_array(franka.get_qpos()))
+    links_pos, links_quat = franka.solver.forward_kinematics_query(franka, franka.get_qpos())
     assert_allclose(links_pos, franka.get_links_pos(relative=False), tol=gs.EPS)
     assert_allclose(links_quat, franka.get_links_quat(relative=False), tol=gs.EPS)
 

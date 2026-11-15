@@ -189,7 +189,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
         scene_ana.step()
         assert _n_contacts(entities_ana) == nc, "contact set changed during grad window - FD invalid"
     scene_ana.backward(sum(_losses(scene_ana, entities_ana)))
-    ana = tensor_to_array(forces.grad)
+    ana = forces.grad
 
     # The FD reference must also run in diff mode: differentiable scenes route contacts through diff_gjk, whose
     # contact set and forces differ slightly from the production narrowphase, so a production-mode reference would

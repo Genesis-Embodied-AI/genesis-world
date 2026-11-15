@@ -331,21 +331,21 @@ def test_set_vverts(renderer, show_viewer):
     vg.set_vverts(3.0)
     scene.step()
     scene.visualizer.update_visual_states()
-    after_vg = tensor_to_array(entity.get_vverts())
+    after_vg = entity.get_vverts()
     assert_equal(after_vg[..., vg.vvert_start : vg.vvert_end, :], 3.0)
     entity.set_vverts(None)
 
     # get_vverts returns a copy: mutating the result does not change the underlying buffer.
     copy = entity.get_vverts()
     copy[:] = 99.0
-    assert (tensor_to_array(entity.get_vverts()) != 99.0).any()
+    assert (entity.get_vverts() != 99.0).any()
 
     # Mix user-driven and FK-driven envs in the same entity.
     entity.set_vverts(7.0, envs_idx=0)
     entity.set_vverts(9.0, envs_idx=[2])
     scene.step()
     scene.visualizer.update_visual_states()
-    v = tensor_to_array(entity.get_vverts())
+    v = entity.get_vverts()
     assert_equal(v[0], 7.0)
     assert_allclose(v[1], fk_vverts[1], tol=gs.EPS)
     assert_equal(v[2], 9.0)
@@ -450,23 +450,23 @@ def test_set_vverts_sphere_to_box(renderer, show_viewer):
     scene.build()
 
     cam.set_pose(pos=(pos_sphere[0], pos_sphere[1], pos_sphere[2] + cam_dz), lookat=pos_sphere)
-    mask_sphere = tensor_to_array(cam.render(rgb=False, segmentation=True, force_render=True)[2]) > 0
+    mask_sphere = cam.render(rgb=False, segmentation=True, force_render=True)[2] > 0
 
     cam.set_pose(pos=(pos_box[0], pos_box[1], pos_box[2] + cam_dz), lookat=pos_box)
-    mask_box = tensor_to_array(cam.render(rgb=False, segmentation=True, force_render=True)[2]) > 0
+    mask_box = cam.render(rgb=False, segmentation=True, force_render=True)[2] > 0
 
     # The reference primitive sphere uses a different tessellation than the spherified cube grid, so the two circle
     # silhouettes differ by a handful of boundary pixels - bound the symmetric difference at 0.5% of the area.
     sphere_tolerance = max(int(0.005 * mask_sphere.sum()), 1)
 
     cam.set_pose(pos=(pos_deformable[0], pos_deformable[1], pos_deformable[2] + cam_dz), lookat=pos_deformable)
-    mask_deformable_sphere = tensor_to_array(cam.render(rgb=False, segmentation=True, force_render=True)[2]) > 0
+    mask_deformable_sphere = cam.render(rgb=False, segmentation=True, force_render=True)[2] > 0
     assert int((mask_deformable_sphere ^ mask_sphere).sum()) < sphere_tolerance
 
     deformable.set_vverts(cube_verts + np.array(pos_deformable, dtype=gs.np_float))
-    mask_deformable_box = tensor_to_array(cam.render(rgb=False, segmentation=True, force_render=True)[2]) > 0
+    mask_deformable_box = cam.render(rgb=False, segmentation=True, force_render=True)[2] > 0
     assert_equal(mask_deformable_box, mask_box)
 
     deformable.set_vverts(None)
-    mask_deformable_restored = tensor_to_array(cam.render(rgb=False, segmentation=True, force_render=True)[2]) > 0
+    mask_deformable_restored = cam.render(rgb=False, segmentation=True, force_render=True)[2] > 0
     assert int((mask_deformable_restored ^ mask_sphere).sum()) < sphere_tolerance
