@@ -1,4 +1,7 @@
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from io import BytesIO
 from urllib import request
 from urllib.parse import unquote
@@ -18,6 +21,29 @@ from .cache import OwnedCache
 
 # Images of the glTF files, decoded once for all the meshes built from them, and kept as long as any of them lives
 _GLB_IMAGES_CACHE = OwnedCache()
+
+
+# An owner of an 'OwnedCache' entry must support weak references, which a plain object does not
+class _GlbImagesOwner:
+    pass
+
+
+# The object owning the images decoded inside a 'glb_images_context' block
+_ACTIVE_IMAGES_OWNER: ContextVar["_GlbImagesOwner | None"] = ContextVar("glb_images_owner", default=None)
+
+
+@contextmanager
+def glb_images_context() -> Iterator[None]:
+    """Keep the images decoded by every glTF parse made inside the block until the block exits.
+
+    The meshes built from a glTF file own its images (see 'parse_mesh_glb'). A caller that drops these meshes before
+    parsing the next file decodes the images the files share once inside this block.
+    """
+    token = _ACTIVE_IMAGES_OWNER.set(_GlbImagesOwner())
+    try:
+        yield
+    finally:
+        _ACTIVE_IMAGES_OWNER.reset(token)
 
 
 ctype_to_numpy = {
@@ -92,8 +118,8 @@ def get_glb_image(glb, image_index, images, image_type=None):
 
     'images' collects the images a parse of the file reads, by their key in the cache of the decoded images, for the
     meshes it builds to own them (see 'parse_mesh_glb'). An image collected this way is decoded unless the meshes of a
-    former parse still own it, and is read-only because every mesh owning it shares it. With no 'images', the image is
-    decoded anew. 'image_type' is the mode of PIL the image is converted to, if any.
+    former parse or an enclosing 'glb_images_context' block still own it, and is read-only because every owner shares
+    it. With no 'images', the image is decoded anew. 'image_type' is the mode of PIL the image is converted to, if any.
     """
     if image_index is None:
         return None
@@ -342,12 +368,7 @@ def parse_glb_tree(glb, node_index):
     return mesh_list
 
 
-def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface, images_owner=None):
-    """Parse the meshes of a glTF file, each mesh owning the decoded images of its material.
-
-    'images_owner' is an object that owns every decoded image as well, so that later parses decode none of them again
-    for as long as it lives, whether or not the meshes do.
-    """
+def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
     glb = pygltflib.GLTF2().load(path)
     assert glb is not None
     glb.path = path
@@ -465,6 +486,7 @@ def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface, images_
         material_idx = group_idx if group_by_material else group_idx[1]
         for key, image_array in materials_images.get(material_idx, {}).items():
             _GLB_IMAGES_CACHE.own(mesh, key, image_array)
+    images_owner = _ACTIVE_IMAGES_OWNER.get()
     if images_owner is not None:
         for material_images in materials_images.values():
             for key, image_array in material_images.items():

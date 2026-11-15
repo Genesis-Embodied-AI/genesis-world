@@ -206,15 +206,8 @@ def parse_urdf(morph, surface):
                 # One asset may contain multiple meshes (.obj, .glb, ...)
                 mesh_path = urdfpy.utils.get_filename(parent_dir, geometry.filename)
                 if mesh_path.lower().endswith(GLTF_FORMATS):
-                    # The model owns the images decoded for the whole parse, so that the glTF files sharing an image
-                    # decode it once (see 'get_glb_image' in gltf.py)
                     meshes = gltf_utils.parse_mesh_glb(
-                        mesh_path,
-                        group_by_material=False,
-                        scale=None,
-                        is_mesh_zup=True,
-                        surface=surface,
-                        images_owner=robot,
+                        mesh_path, group_by_material=False, scale=None, is_mesh_zup=True, surface=surface
                     )
                     tmeshes, metadatas = zip(*[(mesh.trimesh, mesh.metadata) for mesh in meshes])
                 else:

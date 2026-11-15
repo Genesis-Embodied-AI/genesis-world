@@ -29,7 +29,7 @@ from genesis.options.morphs import Morph
 from genesis.options.options import Options
 from genesis.options.surfaces import Surface
 from genesis.typing import PositiveVec3FType, PositiveVec3IType
-from genesis.utils import geom as gu, mesh as mu, mjcf as mju, terrain as tu, urdf as uu
+from genesis.utils import geom as gu, gltf as gltf_utils, mesh as mu, mjcf as mju, terrain as tu, urdf as uu
 from genesis.utils.cache import MESH_CACHE_MATCH_RTOL
 from genesis.utils.misc import get_assets_dir
 
@@ -927,8 +927,10 @@ class KinematicEntityDescription(EntityDescription):
             l_infos, links_j_infos, links_g_infos, eqs_info = mju.parse_xml(morph, self.surface, resolution.options)
         elif isinstance(morph, (gs.morphs.URDF, gs.morphs.Drone)):
             # Custom "legacy" URDF parser for loading geometries (visual and collision) and equality constraints.
-            # This is necessary because Mujoco cannot parse visual geometries (meshes) reliably for URDF.
-            l_infos, links_j_infos, links_g_infos, eqs_info = uu.parse_urdf(morph, self.surface)
+            # This is necessary because Mujoco cannot parse visual geometries (meshes) reliably for URDF. The glTF meshes
+            # of the links share their images, which the parse drops along with each mesh (see 'glb_images_context').
+            with gltf_utils.glb_images_context():
+                l_infos, links_j_infos, links_g_infos, eqs_info = uu.parse_urdf(morph, self.surface)
 
             # Mujoco's unified MJCF+URDF parser for only link, joints, and collision geometries properties
             morph_ = morph.model_copy(update=dict(visualization=False))
