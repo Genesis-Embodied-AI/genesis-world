@@ -915,6 +915,7 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
         vis_options=gs.options.VisOptions(
             # Disable shadows systematically for Rasterizer because they are forcibly disabled on CPU backend anyway
             shadow=(renderer_type != RENDERER_TYPE.RASTERIZER),
+            split_envs=(renderer_type == RENDERER_TYPE.RASTERIZER),
             segmentation_level="geom",
         ),
         renderer=renderer,
@@ -938,10 +939,11 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
         GUI=show_viewer,
         denoise=False,
     )
-    scene.build()
+    scene.build(n_envs=2)
 
-    # Move the entity after build so rendering exercises the per-sub-mesh vertex update path.
-    fem.set_position([0.0, 0.0, 0.2])
+    # Move the entity after build so rendering exercises the per-sub-mesh vertex update path. The second environment
+    # holds it lower, so that each environment of a split render shows its own copy.
+    fem.set_position([[0.0, 0.0, 0.2], [0.0, 0.0, 0.1]])
 
     # The Apple Software Renderer that macOS CI falls back to differs from hardware on anti-aliased channels, and
     # RayTracer is non-deterministic across GPUs; relax the pixel match for the color-like outputs in both cases.
@@ -954,10 +956,16 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
         rgb, *_ = camera.render(rgb=True)
         assert rgb_array_to_png_bytes(rgb) == png_snapshot
     else:
-        rgb, depth, seg, normal = camera.render(rgb=True, depth=True, segmentation=True, colorize_seg=True, normal=True)
-        assert rgb_array_to_png_bytes(rgb) == png_snapshot
-        assert rgb_array_to_png_bytes(as_grayscale_image(tensor_to_array(depth))) == png_snapshot
-        assert rgb_array_to_png_bytes(normal) == png_snapshot
+        (rgb_0, _), (depth_0, _), (seg_0, seg_1), (normal_0, _) = camera.render(
+            rgb=True, depth=True, segmentation=True, colorize_seg=True, normal=True
+        )
+        # Each environment shows its own copy of the entity, held at a different height.
+        is_fem_0, is_fem_1 = (seg.any(axis=-1) for seg in (seg_0, seg_1))
+        assert is_fem_0.any() and is_fem_1.any()
+        assert (is_fem_0 != is_fem_1).any()
+        assert rgb_array_to_png_bytes(rgb_0) == png_snapshot
+        assert rgb_array_to_png_bytes(as_grayscale_image(tensor_to_array(depth_0))) == png_snapshot
+        assert rgb_array_to_png_bytes(normal_0) == png_snapshot
 
         # Segmentation ids are integer labels rasterized without anti-aliasing, so coverage is fixed by the OpenGL
         # fill rules and identical on every renderer: assert the map bit-exactly. This is the channel that proves
@@ -965,7 +973,7 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
         png_snapshot.extension._std_err_threshold = 0.0
         png_snapshot.extension._ratio_err_threshold = 0.0
         png_snapshot.extension._blurred_kernel_size = 1
-        assert rgb_array_to_png_bytes(seg) == png_snapshot
+        assert rgb_array_to_png_bytes(seg_0) == png_snapshot
 
 
 @pytest.mark.required
