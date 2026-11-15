@@ -365,5 +365,5 @@ def test_entity_spec(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_free_
     for vgeom in mixed_geoms_body.vgeoms:
         assert_allclose(vgeom.surface.get_rgba().color[:3], vgeoms_color[vgeom.metadata["name"]], tol=gs.EPS)
     # A selected surface of another type keeps the textures of the entity alone, its other fields being its own
-    (tip,) = mixed_geoms_body.get_vgeoms(gs.indices.VGeom.named("tip"))
+    tip = next(vgeom for vgeom in mixed_geoms_body.vgeoms if vgeom.metadata["name"] == "tip")
     assert_allclose(tip.surface.ior, gs.surfaces.Glass().ior, tol=gs.EPS)

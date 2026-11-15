@@ -1234,29 +1234,6 @@ class KinematicEntity(Entity):
         """The list of visual geoms (`RigidVisGeom`) in the entity, as a copy."""
         return gs.List(self._vgeoms)
 
-    def get_vgeoms(self, selector: indices.VGeom) -> gs.List[RigidVisGeom]:
-        """Return the visual geoms of the entity that a selector holds, link after link.
-
-        The selector resolves among the visual geoms of the whole entity, apart for each heterogeneous variant, as
-        ``select`` on the entity spec does (see ``gs.indices.VGeom``), so that a selection finds again the visual geoms
-        it gave a surface.
-        """
-        vgeoms = self.vgeoms
-        vgeoms_name = [vgeom.name for vgeom in vgeoms]
-        # An ordinal counts the visual geoms of each variant apart, as the morph of each variant resolves on its own
-        vgeoms_variant = np.zeros(len(vgeoms), dtype=gs.np_int)
-        for i_vg, vgeom in enumerate(vgeoms):
-            variant_ranges = vgeom.link._variant_vgeom_ranges
-            if variant_ranges is not None:
-                vgeoms_variant[i_vg] = next(
-                    i_v for i_v, (start, end) in enumerate(variant_ranges) if start <= vgeom.idx < end
-                )
-        vgeoms_idx = selector._resolve(vgeoms_name, vgeoms_variant)
-        vgeoms = gs.List(vgeoms[i_vg] for i_vg in vgeoms_idx)
-        if not vgeoms:
-            gs.raise_exception(f"No visual geom of entity '{self.name}' matches {selector}.")
-        return vgeoms
-
     @gs.assert_built
     def set_texture(
         self,
@@ -1268,12 +1245,24 @@ class KinematicEntity(Entity):
     ) -> None:
         """Show a variant, or draw pixels, on the dynamic texture of every selected visual geom of the entity.
 
-        'vgeoms_idx' selects visual geoms by their position among ``vgeoms``, or by a ``gs.indices.VGeom`` (see
-        ``get_vgeoms``). None selects every visual geom showing a dynamic texture, in 'texture_map_type' when given. See
-        ``RigidVisGeom.set_texture`` for 'texture', 'envs_idx' and 'texture_map_type'.
+        'vgeoms_idx' selects visual geoms by their position among ``vgeoms``, or by a ``gs.indices.VGeom`` resolved as
+        ``select`` on the entity spec resolves it (see ``gs.indices.VGeom``), so that the selection giving a visual geom
+        its surface finds it again. None selects every visual geom showing a dynamic texture, in 'texture_map_type' when
+        given. See ``RigidVisGeom.set_texture`` for 'texture', 'envs_idx' and 'texture_map_type'.
         """
         if isinstance(vgeoms_idx, indices.VGeom):
-            vgeoms = self.get_vgeoms(vgeoms_idx)
+            vgeoms = self.vgeoms
+            # An ordinal counts the visual geoms of each variant apart, as the morph of each variant resolves on its own
+            vgeoms_variant = np.zeros(len(vgeoms), dtype=gs.np_int)
+            for i_vg, vgeom in enumerate(vgeoms):
+                variant_ranges = vgeom.link._variant_vgeom_ranges
+                if variant_ranges is not None:
+                    vgeoms_variant[i_vg] = next(
+                        i_v for i_v, (start, end) in enumerate(variant_ranges) if start <= vgeom.idx < end
+                    )
+            vgeoms = [vgeoms[i_vg] for i_vg in vgeoms_idx._resolve([vgeom.name for vgeom in vgeoms], vgeoms_variant)]
+            if not vgeoms:
+                gs.raise_exception(f"No visual geom of entity '{self.name}' matches {vgeoms_idx}.")
         elif vgeoms_idx is None:
             vgeoms = dict.fromkeys(
                 dynamic_texture.vgeom
