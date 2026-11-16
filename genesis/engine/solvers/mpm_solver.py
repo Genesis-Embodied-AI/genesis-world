@@ -12,6 +12,7 @@ import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import MPMEntity
+from genesis.engine.entities.particle_entity import ParticleEntityDescription
 from genesis.engine.materials import MPM
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.abd.misc import func_add_external_wrench
@@ -43,7 +44,6 @@ from .base_solver import ErrorCode, kernel_set_actu
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -486,22 +486,26 @@ Please decrease the simulation timestep or adjust the material parameters."""
     def add_entity(
         self,
         idx: int,
-        surface: Surface,
-        spec: "gs.entities.MPM",
-        desc: "EntityDescription | None" = None,
-    ) -> "MPMEntity":
-        self.add_material(spec.material)
+        surface: Surface | None,
+        spec: "gs.entities.MPM | None",
+        desc: ParticleEntityDescription | None = None,
+    ) -> MPMEntity:
+        """Create an entity from its description, resolving one from the entity spec and its surface if none is given."""
+        if desc is None:
+            desc = ParticleEntityDescription.resolve(
+                spec, surface, self._particle_size, self.boundary_lower, self.boundary_upper
+            )
+        self.add_material(desc.spec.material)
 
         entity = MPMEntity(
             scene=self._sim.scene,
             solver=self,
-            surface=surface,
+            desc=desc,
             particle_size=self._particle_size,
             idx=idx,
             particle_start=self.n_particles,
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
-            spec=spec,
         )
         self._entities.append(entity)
         self._n_particles += entity.n_particles
