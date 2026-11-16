@@ -1,0 +1,35 @@
+tests/utils/assets.py
+  s_7b0ebbef89a82c::t_b6a8baf4945046 2,15,57-63,72-77,83-85,92-94,96-98,100-101
+  s_7b0ebbef89a82c::t_ef81e857690b0f 89-91,102,108
+  s_7b0ebbef89a82c::t_191eaaf0cb8a8c 95
+  s_7b0ebbef89a82c::t_38db24f6cfc831 166
+  s_7b0ebbef89a82c::t_6a343303beb30c 39,43,86-88,99,103-106,110-113,120,125,127,130-133,278
+  s_7b0ebbef89a82c::t_bc601fa2db3a2a 41-42,65-66,68-70,78-82,114-119,121-124,126,128-129,134-146,149-165,167-169,256-263
+  s_7b0ebbef89a82c::t_c772eec3425559 40,64
+AGENTS.md
+  s_7b0ebbef89a82c::t_d7a093ddd375b4 236
+  s_7b0ebbef89a82c::t_38db24f6cfc831 237
+.pre-commit-config.yaml
+  s_7b0ebbef89a82c::t_bc601fa2db3a2a 19,21,27
+tests/conftest.py
+  s_7b0ebbef89a82c::t_6a343303beb30c 272,321-322,324-325,815
+  s_7b0ebbef89a82c::t_f48395300abf3b 5,83-84,267-270,273,360-365,762-765,775-779,781-782,816-817,1354-1367,1385,1422-1424
+  s_7b0ebbef89a82c::t_a232861b3a6cd0 80-82
+  s_7b0ebbef89a82c::t_bc601fa2db3a2a 271,780,819-820
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6febc51774c8f0e29043b66a857e930b782c0bbf",
+  "prompts": {},
+  "sessions": {
+    "s_7b0ebbef89a82c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c0f93c17-97fb-4140-8f98-e9c420457a82",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
