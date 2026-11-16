@@ -445,7 +445,7 @@ class ForceFields:
     """The force fields acting on the entities of a solver, which its kernels take as a template."""
 
     def __init__(self) -> None:
-        self.fields: list[ForceField] = []
+        self.fields: tuple[ForceField, ...] = ()
 
     @qd.func
     def add_acc(self, acc: qd.types.vector(3), pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i_p: int):
