@@ -796,15 +796,9 @@ Please decrease the simulation timestep or adjust the material parameters."""
         envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
     ) -> None:
         # The constraints are allocated on first use, so a record holds them only if they existed when it was made: a
-        # record holding them allocates them before they are written back, and one without them leaves none. A
-        # trajectory frame lists an unused array empty (see '_arrays_fields' in recorders/trajectory.py).
+        # record holding them allocates them before they are written back, and one without them leaves none.
         is_constrained_record = checkpoint.arrays.get("particle_constraints.is_constrained")
-        if (
-            is_constrained_record is not None
-            and is_constrained_record.ndim > 0
-            and is_constrained_record.size > 0
-            and not self._is_constrained
-        ):
+        if is_constrained_record is not None and is_constrained_record.ndim > 0 and not self._is_constrained:
             self._init_particle_constraints()
         super().load_checkpoint(checkpoint, boundary_only=boundary_only, envs_idx=envs_idx)
         if is_constrained_record is not None and is_constrained_record.ndim == 0 and self._is_constrained:

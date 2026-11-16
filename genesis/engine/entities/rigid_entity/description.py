@@ -408,7 +408,6 @@ class KinematicEntityDescription(EntityDescription):
     how the geoms are drawn.
     """
 
-    surface: Surface
     links: list[KinematicLinkDescription] = field(default_factory=list)
     variants: list[KinematicVariantDescription] = field(default_factory=list)
     attachment: KinematicAttachmentDescription | None = None

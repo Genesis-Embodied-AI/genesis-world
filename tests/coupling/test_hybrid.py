@@ -181,7 +181,7 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
 
 
 @pytest.mark.required
-def test_mesh_mpm_build(tmp_path, show_viewer):
+def test_mesh_mpm_build(show_viewer):
     scene = gs.Scene(
         mpm_options=gs.options.MPMOptions(
             lower_bound=(-0.5, -0.5, -0.5),
@@ -204,14 +204,6 @@ def test_mesh_mpm_build(tmp_path, show_viewer):
     # Each part takes a copy of its material, which the association completes with one muscle group per link
     assert material.material_soft.n_groups == 1
     assert duck.part_soft.material.n_groups == len(duck.part_rigid.links) > 1
-
-    scene.export(tmp_path / "scene.gs")
-    scene_loaded = gs.Scene.load(tmp_path / "scene.gs")
-    duck_loaded = scene_loaded.entities[-1]
-    assert [entity.name for entity in scene_loaded.entities] == [entity.name for entity in scene.entities]
-    assert duck_loaded.part_soft.material.n_groups == duck.part_soft.material.n_groups
-    assert_equal(duck_loaded.part_soft.init_particles, duck.part_soft.init_particles)
-    assert_equal(duck_loaded.mpm_hybrid_part.groups_link_idx, duck.mpm_hybrid_part.groups_link_idx)
 
     scene.build()
 

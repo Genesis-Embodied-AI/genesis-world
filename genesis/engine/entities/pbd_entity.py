@@ -11,7 +11,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
-from genesis.engine.entities.particle_entity import ParticleEntity, ParticleEntityDescription
+from genesis.engine.entities.particle_entity import ParticleEntity, ParticleEntityDescription, load_morph_vmesh
 from genesis.options.surfaces import Surface
 from genesis.typing import IndexType
 
@@ -22,73 +22,48 @@ if TYPE_CHECKING:
 
 @dataclass(kw_only=True)
 class PBDMeshDescription(ParticleEntityDescription):
-    """Describe one PBD cloth or elastic entity as its resolution left it: its remeshed mesh and its constraints.
+    """Describe one PBD entity simulated on a remeshed mesh as its resolution left it: the mesh and its edges.
 
-    The particles are the vertices of the mesh remeshed at the particle size for a cloth, and of its tetrahedralization
-    for an elastic entity. The rest lengths of the edges and the rest volumes of the elements are taken on them, so an
-    entity created from this remeshes nothing and reads no asset. The inner edges and their rest lengths are those of a
-    cloth, and the elements and their rest volumes those of an elastic entity.
+    The rest lengths of the edges are taken on the particles, so an entity created from this remeshes nothing and reads
+    no asset. The visual mesh stands at the pose of the morph, and 'mesh' is its copy remeshed at the particle size.
     """
 
     mesh: "gs.Mesh"
     mass: float
     edges: np.ndarray
     edges_len_rest: np.ndarray
-    inner_edges: np.ndarray | None = None
-    inner_edges_len_rest: np.ndarray | None = None
-    elems: np.ndarray | None = None
-    elems_vol_rest: np.ndarray | None = None
+
+
+@dataclass(kw_only=True)
+class PBDClothDescription(PBDMeshDescription):
+    """Describe one PBD cloth entity: its particles are the vertices of the remeshed mesh, bent across inner edges.
+
+    Each inner edge joins the two vertices of an edge shared by two faces, then the two vertices facing it, and its rest
+    length is the distance between the last two.
+    """
+
+    inner_edges: np.ndarray
+    inner_edges_len_rest: np.ndarray
 
     @classmethod
     def resolve(cls, spec: "gs.entities.PBD", surface: Surface, particle_size: float) -> Self:
-        """Remesh the morph of a cloth or elastic entity spec at the pose of the morph, and derive its constraints.
+        """Remesh the morph of a cloth entity spec at the pose of the morph, and derive its edges and inner edges.
 
         'surface' is the one resolved from the spec, and the mesh is remeshed with edges 'particle_size' long.
         """
-        morph = spec.morphs[0]
-        meshes = gs.Mesh.from_morph_surface(morph, surface)
-        if len(meshes) > 1:
-            gs.raise_exception("Mesh file with multiple sub-meshes are not supported.")
-        vmesh = meshes[0]
-        # The morph pose offset (e.g. an up-axis conversion) is composed onto the morph pose
-        pos, quat = gu.transform_pos_quat_by_trans_quat(
-            np.array(morph.offset_pos, dtype=gs.np_float),
-            np.array(morph.offset_quat, dtype=gs.np_float),
-            np.array(morph.pos, dtype=gs.np_float),
-            np.array(morph.quat, dtype=gs.np_float),
-        )
+        vmesh, pos, quat = load_morph_vmesh(spec.morphs[0], surface)
         vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
-
-        is_elastic = isinstance(spec.material, gs.materials.PBD.Elastic)
+        if vmesh.area < 1e-6:
+            gs.raise_exception("Input mesh has zero surface area.")
         mesh = vmesh.copy()
-        mesh.remesh(edge_len_abs=particle_size, fix=is_elastic)
-        inner_edges = inner_edges_len_rest = elems = elems_vol_rest = None
-        if is_elastic:
-            if vmesh.volume < 1e-6:
-                gs.raise_exception("Input mesh has zero volume.")
-            mass = vmesh.volume * spec.material.rho
-            tet_cfg = mu.generate_tetgen_config_from_morph(morph)
-            particles, elems, *_ = mesh.tetrahedralize(tet_cfg)
-            particles = particles.astype(gs.np_float, copy=False)
-            elems = elems.astype(gs.np_int, copy=False)
-            # The six edges of each tetrahedron, sorted so that an edge shared by several elements appears once
-            elems_edges = elems[:, ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))].reshape((-1, 2))
-            edges = np.unique(np.sort(elems_edges, axis=1), axis=0)
-            elems_vol_rest = np.linalg.det(particles[elems[:, 1:]] - particles[elems[:, :1]]) / 6.0
-        else:
-            if vmesh.area < 1e-6:
-                gs.raise_exception("Input mesh has zero surface area.")
-            mass = vmesh.area * spec.material.rho
-            particles = np.asarray(mesh.verts, dtype=gs.np_float)
-            edges = np.asarray(mesh.get_unique_edges(), dtype=gs.np_int)
-            # Inner edges are two diagonal edges of each quadrilateral formed by adjacent face pairs
-            adjacency, adjacent_edges = trimesh.graph.face_adjacency(mesh=mesh.trimesh, return_edges=True)
-            v3 = np.sum(mesh.faces[adjacency[:, 0]], axis=1) - adjacent_edges[:, 0] - adjacent_edges[:, 1]
-            v4 = np.sum(mesh.faces[adjacency[:, 1]], axis=1) - adjacent_edges[:, 0] - adjacent_edges[:, 1]
-            inner_edges = np.stack([adjacent_edges[:, 0], adjacent_edges[:, 1], v3, v4], axis=1, dtype=gs.np_int)
-            inner_edges_len_rest = np.linalg.norm(particles[inner_edges[:, 2]] - particles[inner_edges[:, 3]], axis=1)
-        edges_len_rest = np.linalg.norm(particles[edges[:, 0]] - particles[edges[:, 1]], axis=1)
-
+        mesh.remesh(edge_len_abs=particle_size, fix=False)
+        particles = np.asarray(mesh.verts, dtype=gs.np_float)
+        edges = np.asarray(mesh.get_unique_edges(), dtype=gs.np_int)
+        # Inner edges are two diagonal edges of each quadrilateral formed by adjacent face pairs
+        adjacency, adjacent_edges = trimesh.graph.face_adjacency(mesh=mesh.trimesh, return_edges=True)
+        v3 = np.sum(mesh.faces[adjacency[:, 0]], axis=1) - adjacent_edges[:, 0] - adjacent_edges[:, 1]
+        v4 = np.sum(mesh.faces[adjacency[:, 1]], axis=1) - adjacent_edges[:, 0] - adjacent_edges[:, 1]
+        inner_edges = np.stack([adjacent_edges[:, 0], adjacent_edges[:, 1], v3, v4], axis=1, dtype=gs.np_int)
         return cls(
             spec,
             vmesh.surface,
@@ -96,13 +71,53 @@ class PBDMeshDescription(ParticleEntityDescription):
             pos,
             vmesh=vmesh,
             mesh=mesh,
-            mass=mass,
+            mass=vmesh.area * spec.material.rho,
             edges=edges,
-            edges_len_rest=edges_len_rest,
+            edges_len_rest=np.linalg.norm(particles[edges[:, 0]] - particles[edges[:, 1]], axis=1),
             inner_edges=inner_edges,
-            inner_edges_len_rest=inner_edges_len_rest,
+            inner_edges_len_rest=np.linalg.norm(particles[inner_edges[:, 2]] - particles[inner_edges[:, 3]], axis=1),
+        )
+
+
+@dataclass(kw_only=True)
+class PBDElasticDescription(PBDMeshDescription):
+    """Describe one PBD elastic entity: its particles are the vertices of the tetrahedralized remeshed mesh."""
+
+    elems: np.ndarray
+    elems_vol_rest: np.ndarray
+
+    @classmethod
+    def resolve(cls, spec: "gs.entities.PBD", surface: Surface, particle_size: float) -> Self:
+        """Remesh and tetrahedralize the morph of an elastic entity spec at the pose of the morph.
+
+        'surface' is the one resolved from the spec, and the mesh is remeshed with edges 'particle_size' long. The
+        edges are those of the tetrahedra, each listed once.
+        """
+        morph = spec.morphs[0]
+        vmesh, pos, quat = load_morph_vmesh(morph, surface)
+        vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
+        if vmesh.volume < 1e-6:
+            gs.raise_exception("Input mesh has zero volume.")
+        mesh = vmesh.copy()
+        mesh.remesh(edge_len_abs=particle_size, fix=True)
+        particles, elems, *_ = mesh.tetrahedralize(mu.generate_tetgen_config_from_morph(morph))
+        particles = particles.astype(gs.np_float, copy=False)
+        elems = elems.astype(gs.np_int, copy=False)
+        # The six edges of each tetrahedron, sorted so that an edge shared by several elements appears once
+        elems_edges = elems[:, ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))].reshape((-1, 2))
+        edges = np.unique(np.sort(elems_edges, axis=1), axis=0)
+        return cls(
+            spec,
+            vmesh.surface,
+            particles,
+            pos,
+            vmesh=vmesh,
+            mesh=mesh,
+            mass=vmesh.volume * spec.material.rho,
+            edges=edges,
+            edges_len_rest=np.linalg.norm(particles[edges[:, 0]] - particles[edges[:, 1]], axis=1),
             elems=elems,
-            elems_vol_rest=elems_vol_rest,
+            elems_vol_rest=np.linalg.det(particles[elems[:, 1:]] - particles[elems[:, :1]]) / 6.0,
         )
 
 
@@ -292,7 +307,7 @@ class PBD2DEntity(PBDTetEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    desc : PBDMeshDescription
+    desc : PBDClothDescription
         The description the entity is created from, holding its spec, its surface, its mesh and its constraints.
     particle_size : float
         Target size for particle spacing.
@@ -310,11 +325,13 @@ class PBD2DEntity(PBDTetEntity):
         Starting index of this entity's visual faces.
     """
 
+    _description_cls = PBDClothDescription
+
     def __init__(
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        desc: PBDMeshDescription,
+        desc: PBDClothDescription,
         particle_size: float,
         idx: int,
         particle_start: int,
@@ -357,7 +374,7 @@ class PBD3DEntity(PBDTetEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    desc : PBDMeshDescription
+    desc : PBDElasticDescription
         The description the entity is created from, holding its spec, its surface, its mesh and its constraints.
     particle_size : float
         Target size for particle spacing.
@@ -375,11 +392,13 @@ class PBD3DEntity(PBDTetEntity):
         Starting index of this entity's visual faces.
     """
 
+    _description_cls = PBDElasticDescription
+
     def __init__(
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        desc: PBDMeshDescription,
+        desc: PBDElasticDescription,
         particle_size: float,
         idx: int,
         particle_start: int,
@@ -442,6 +461,8 @@ class PBDParticleEntity(PBDBaseEntity):
         Starting index of this entity's particles in the global particle buffer.
     """
 
+    _description_cls = ParticleEntityDescription
+
     def __init__(
         self,
         scene: "Scene",
@@ -494,6 +515,8 @@ class PBDFreeParticleEntity(PBDBaseEntity):
     particle_start : int
         Starting index of this entity's particles in the global particle buffer.
     """
+
+    _description_cls = ParticleEntityDescription
 
     def __init__(
         self,

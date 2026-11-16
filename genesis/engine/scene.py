@@ -1606,14 +1606,13 @@ class Scene(BuildableMixin, RBC):
     # ------------------------------------------------------------------------------------
 
     def _reject_unexportable(self) -> None:
-        """Raise when the scene holds an entity, an emitter or a force field no description covers, and warn about what
+        """Raise when the scene holds an emitter or a force field, which no description covers, and warn about what
         'export' leaves out.
         """
         # A scene holding what alters the simulation is rejected, since a file leaving it out would restore other
         # physics. Everything else is left out with a warning: what observes or draws the simulation, and every
         # callback. Every solver holds the same force fields, so one solver names them all.
-        rejected_kinds = Counter(type(entity).__name__ for entity in self.entities if entity.desc is None)
-        rejected_kinds.update(type(emitter).__name__ for emitter in self._emitters)
+        rejected_kinds = Counter(type(emitter).__name__ for emitter in self._emitters)
         rejected_kinds.update(type(force_field).__name__ for force_field in self._sim.solvers[0].force_fields.fields)
         omitted_kinds = Counter(type(sensor).__name__ for sensor in self.sensors)
         if self._visualizer is not None:
