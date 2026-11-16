@@ -1,6 +1,6 @@
 import fnmatch
+import hashlib
 import os
-import posixpath
 import re
 import subprocess
 import time
@@ -12,7 +12,7 @@ from pathlib import Path
 
 from httpcore import TimeoutException as HTTPTimeoutException
 from httpx import HTTPError as HTTPXError
-from huggingface_hub import HfApi, hf_hub_download, snapshot_download
+from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download, snapshot_download
 from huggingface_hub.errors import LocalEntryNotFoundError
 from huggingface_hub.hf_api import RepoFile
 from PIL import Image, UnidentifiedImageError
@@ -36,6 +36,11 @@ TEST_DIR = os.path.dirname(os.path.dirname(__file__))
 # different snapshots edit different lines and merge without conflict.
 SNAPSHOTS_LOCK_PATH = os.path.join(TEST_DIR, "snapshots.lock")
 
+SNAPSHOTS_REPO_ID = "Genesis-Intelligence/snapshots"
+
+# Revision of a lock line whose local file '--snapshot-update' regenerated, until '--snapshot-sync' pins it
+SNAPSHOTS_PENDING_REVISION = "pending"
+
 
 @cache
 def get_snapshots_revision():
@@ -49,34 +54,118 @@ def write_snapshots_lock(snapshots_revision):
     get_snapshots_revision.cache_clear()
 
 
-def pin_snapshots(pattern, revision):
-    """Pin the snapshots matching a pattern to the files that a commit of the snapshots repository holds for them.
-
-    The pattern is relative to the tests root, and the revision is the full hash of the commit. The lock lines matching
-    the pattern are replaced by one line per matching file at that commit, so a snapshot the commit removed loses its
-    line.
-    """
-    repo_paths = [
-        repo_file.path
-        for repo_file in HfApi().list_repo_tree(
-            repo_id="Genesis-Intelligence/snapshots",
-            path_in_repo=posixpath.dirname(pattern),
-            revision=revision,
-            repo_type="dataset",
-        )
-        if isinstance(repo_file, RepoFile) and fnmatch.fnmatchcase(repo_file.path, pattern)
-    ]
-    if not repo_paths:
-        raise ValueError(f"No snapshot matches '{pattern}' at commit '{revision}' of the snapshots repository.")
-    snapshots_revision = {
-        path: path_revision
-        for path, path_revision in get_snapshots_revision().items()
-        if not fnmatch.fnmatchcase(path, pattern)
+def get_snapshots_digest(pattern):
+    """Return the SHA-256 digest of every local snapshot file matching a pattern relative to the tests root, by path."""
+    return {
+        path.relative_to(TEST_DIR).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in Path(TEST_DIR).glob(pattern)
     }
-    for path in repo_paths:
-        print(f"Pinning snapshot '{path}' to '{revision}'.")
-        snapshots_revision[path] = revision
+
+
+def mark_snapshots_pending(snapshots_digest):
+    """Mark the snapshots that a regeneration changed as pending in the lock, until '--snapshot-sync' publishes them.
+
+    The argument maps the pattern of each regenerated test to the digests of its files before the regeneration, as
+    'get_snapshots_digest' returns them. A file whose bytes differ, or that the test writes for the first time, becomes
+    pending. A file that the test no longer writes loses its line.
+    """
+    snapshots_revision = dict(get_snapshots_revision())
+    for pattern, pattern_digest in snapshots_digest.items():
+        pattern_digest_new = get_snapshots_digest(pattern)
+        for path in pattern_digest.keys() | pattern_digest_new.keys():
+            if pattern_digest.get(path) != pattern_digest_new.get(path):
+                if path in pattern_digest_new:
+                    print(f"Marking regenerated snapshot '{path}' as pending.")
+                    snapshots_revision[path] = SNAPSHOTS_PENDING_REVISION
+                else:
+                    print(f"Removing snapshot '{path}', which its test no longer writes.")
+                    del snapshots_revision[path]
     write_snapshots_lock(snapshots_revision)
+
+
+def get_snapshots_pull_requests():
+    """Return the pull requests of the snapshots repository that belong to the current branch, newest first.
+
+    They are the Hugging Face pull requests whose title names the genesis-world pull request of the current git branch
+    ('genesis-world#<number>'), which the GitHub CLI (gh) looks up, so a title may carry any other text. The title of a
+    new pull request and the address of the genesis-world pull request are returned first.
+    """
+    try:
+        pr_number, pr_url = subprocess.check_output(
+            ["gh", "pr", "view", "--json", "number,url", "--jq", ".number, .url"], cwd=TEST_DIR, encoding="utf-8"
+        ).split()
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        raise RuntimeError(
+            "Publishing snapshots requires a genesis-world pull request for the current branch, found by the GitHub CLI "
+            "'gh'. Open one first, as a draft if needed."
+        ) from e
+    title = f"Update snapshots for genesis-world#{pr_number}"
+    discussions = [
+        discussion
+        for discussion in HfApi().get_repo_discussions(
+            repo_id=SNAPSHOTS_REPO_ID, discussion_type="pull_request", repo_type="dataset"
+        )
+        if re.search(rf"\bgenesis-world#{pr_number}\b", discussion.title)
+    ]
+    return title, pr_url, discussions
+
+
+def sync_snapshots():
+    """Publish the pending snapshots of the lock to the snapshots repository, and pin those that are merged.
+
+    A pending snapshot whose local file matches its content at the merge commit of a merged pull request returned by
+    'get_snapshots_pull_requests' is pinned to that commit, the newest merge first. The other pending snapshots are
+    uploaded in one commit to the open pull request of the branch, or to a new draft pull request, and stay pending
+    until it is merged.
+    """
+    snapshots_revision = dict(get_snapshots_revision())
+    snapshot_paths = [path for path, revision in snapshots_revision.items() if revision == SNAPSHOTS_PENDING_REVISION]
+    if not snapshot_paths:
+        return
+
+    title, pr_url, discussions = get_snapshots_pull_requests()
+    api = HfApi()
+    for discussion in discussions:
+        if discussion.status != "merged" or not snapshot_paths:
+            continue
+        commit_id = api.get_discussion_details(
+            repo_id=SNAPSHOTS_REPO_ID, discussion_num=discussion.num, repo_type="dataset"
+        ).merge_commit_oid
+        for repo_file in api.get_paths_info(
+            repo_id=SNAPSHOTS_REPO_ID, paths=snapshot_paths, revision=commit_id, repo_type="dataset"
+        ):
+            data = Path(TEST_DIR, repo_file.path).read_bytes()
+            # The repository identifies a file stored by Git LFS by its SHA-256, and any other one by its Git blob hash
+            if repo_file.lfs is not None:
+                is_merged = repo_file.lfs.sha256 == hashlib.sha256(data).hexdigest()
+            else:
+                is_merged = repo_file.blob_id == hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+            if is_merged:
+                print(f"Pinning snapshot '{repo_file.path}' to '{commit_id}'.")
+                snapshots_revision[repo_file.path] = commit_id
+        snapshot_paths = [path for path in snapshot_paths if snapshots_revision[path] == SNAPSHOTS_PENDING_REVISION]
+    write_snapshots_lock(snapshots_revision)
+
+    if snapshot_paths:
+        discussion = next((discussion for discussion in discussions if discussion.status in ("draft", "open")), None)
+        if discussion is None:
+            discussion = api.create_pull_request(
+                repo_id=SNAPSHOTS_REPO_ID, title=title, description=pr_url, repo_type="dataset"
+            )
+        api.create_commit(
+            repo_id=SNAPSHOTS_REPO_ID,
+            operations=[
+                CommitOperationAdd(path_in_repo=path, path_or_fileobj=os.path.join(TEST_DIR, path))
+                for path in snapshot_paths
+            ],
+            commit_message=f"Regenerate {len(snapshot_paths)} snapshot(s).",
+            repo_type="dataset",
+            revision=discussion.git_reference,
+        )
+        print(
+            f"Synced {len(snapshot_paths)} pending snapshot(s) with {discussion.url}. Run '--snapshot-sync' again once "
+            "it is merged."
+        )
 
 
 @cache
@@ -164,6 +253,14 @@ def get_hf_dataset(
         snapshot_paths = [path for path in snapshots_revision if fnmatch.fnmatchcase(path, pattern)]
         if not snapshot_paths:
             raise ValueError(f"No snapshot in '{SNAPSHOTS_LOCK_PATH}' matches '{pattern}'.")
+        # A pending snapshot exists only as the local file that '--snapshot-update' wrote
+        for path in snapshot_paths:
+            if snapshots_revision[path] == SNAPSHOTS_PENDING_REVISION and not Path(local_dir, path).is_file():
+                raise ValueError(
+                    f"Snapshot '{path}' is pending in '{SNAPSHOTS_LOCK_PATH}'. Run '--snapshot-sync' where it was "
+                    "regenerated to publish it, then again once its pull request is merged to pin it."
+                )
+        snapshot_paths = [path for path in snapshot_paths if snapshots_revision[path] != SNAPSHOTS_PENDING_REVISION]
         # A local file the lock no longer lists would count as an unused snapshot and fail the session
         for path in Path(local_dir).glob(pattern):
             if path.relative_to(local_dir).as_posix() not in snapshots_revision:
@@ -178,7 +275,7 @@ def get_hf_dataset(
                 for path in snapshot_paths:
                     hf_hub_download(
                         repo_type="dataset",
-                        repo_id=f"Genesis-Intelligence/{repo_name}",
+                        repo_id=SNAPSHOTS_REPO_ID,
                         filename=path,
                         revision=snapshots_revision[path],
                         local_dir=local_dir,
