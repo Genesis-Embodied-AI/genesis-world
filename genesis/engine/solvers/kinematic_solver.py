@@ -7,7 +7,7 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.entities.rigid_entity import KinematicEntity, RigidGeom, RigidJoint, RigidVisGeom
+from genesis.engine.entities.rigid_entity import KinematicEntity, RigidGeom, RigidJoint, RigidSite, RigidVisGeom
 from genesis.engine.entities.rigid_entity.description import KinematicEntityDescription, _balanced_variant_mapping
 from genesis.engine.entities.rigid_entity.rigid_entity import get_variants_kinematics
 from genesis.engine.entities.rigid_entity.rigid_equality import RigidEquality
@@ -169,6 +169,7 @@ class KinematicSolver(Solver):
         self._links: list[KinematicLink] = gs.List()
         self._joints: list[RigidJoint] = gs.List()
         self._vgeoms: list[RigidVisGeom] = gs.List()
+        self._sites: list[RigidSite] = gs.List()
         self._n_qs = 0
         self._n_dofs = 0
         self._n_vverts = 0
@@ -219,6 +220,7 @@ class KinematicSolver(Solver):
         self._links.extend(entity.links)
         self._joints.extend(entity.joints)
         self._vgeoms.extend(entity.vgeoms)
+        self._sites.extend(entity.sites)
         self._n_qs += entity.n_qs
         self._n_dofs += entity.n_dofs
         self._n_vverts += entity.n_vverts
@@ -271,6 +273,8 @@ class KinematicSolver(Solver):
         links_offset_quat = np.tile(gu.identity_quat(), (*offset_shape, 1))
         vgeoms_offset_pos = np.zeros((self.n_vgeoms, 3), dtype=gs.np_float)
         vgeoms_offset_quat = np.tile(gu.identity_quat(), (self.n_vgeoms, 1))
+        sites_offset_pos = np.zeros((self.n_sites, 3), dtype=gs.np_float)
+        sites_offset_quat = np.tile(gu.identity_quat(), (self.n_sites, 1))
         for entity in self._entities:
             if links_offset_per_env and entity._desc.variants:
                 variant_idx = _balanced_variant_mapping(len(entity._desc.variants), self.n_envs_)
@@ -283,12 +287,13 @@ class KinematicSolver(Solver):
                 vgeoms_ranges = entity.base_link._variant_vgeom_ranges
             else:
                 # Each root link carries its own offset; children inherit it through the kinematic chain and stay
-                # identity. Visual geoms get the morph offset conjugated into their own frame.
+                # identity. Visual geoms and sites get the morph offset conjugated into their own frame.
                 for local_idx, link in enumerate(entity.links):
                     links_offset_pos[..., entity._link_start + local_idx, :] = link.desc.offset_pos
                     links_offset_quat[..., entity._link_start + local_idx, :] = link.desc.offset_quat
                 vgeoms_ranges = None
             _fill_base_link_geom_offsets(vgeoms_offset_pos, vgeoms_offset_quat, entity, entity.vgeoms, vgeoms_ranges)
+            _fill_base_link_geom_offsets(sites_offset_pos, sites_offset_quat, entity, entity.sites, None)
         # Per-link identity masks gate the relative get/set/backward paths: a relative set on a link whose offset is
         # identity is a plain passthrough, while a non-identity offset rewrites the world position or drops the
         # composition jacobian. Kept as host-side numpy (never used in kernels) so the gates avoid a GPU->host sync.
@@ -310,6 +315,28 @@ class KinematicSolver(Solver):
         ):
             self._vgeoms_offset_pos = torch.from_numpy(vgeoms_offset_pos).to(device=gs.device, dtype=gs.tc_float)
             self._vgeoms_offset_quat = torch.from_numpy(vgeoms_offset_quat).to(device=gs.device, dtype=gs.tc_float)
+
+        self._sites_offset_pos = self._sites_offset_quat = None
+        if self.n_sites > 0:
+            self._sites_link_idx = torch.tensor(
+                [site.link.idx for site in self._sites], device=gs.device, dtype=torch.long
+            )
+            self._sites_init_pos = torch.from_numpy(
+                np.array([site.init_pos for site in self._sites], dtype=gs.np_float)
+            ).to(device=gs.device, dtype=gs.tc_float)
+            self._sites_init_quat = torch.from_numpy(
+                np.array([site.init_quat for site in self._sites], dtype=gs.np_float)
+            ).to(device=gs.device, dtype=gs.tc_float)
+            if not (
+                np.allclose(sites_offset_pos, 0.0, atol=gs.EPS)
+                and np.allclose(gu.quat_to_xyz(sites_offset_quat), 0.0, atol=gs.EPS)
+            ):
+                self._sites_offset_pos = torch.from_numpy(sites_offset_pos).to(device=gs.device, dtype=gs.tc_float)
+                self._sites_offset_quat = torch.from_numpy(sites_offset_quat).to(device=gs.device, dtype=gs.tc_float)
+        else:
+            self._sites_link_idx = torch.empty((0,), device=gs.device, dtype=torch.long)
+            self._sites_init_pos = torch.empty((0, 3), device=gs.device, dtype=gs.tc_float)
+            self._sites_init_quat = torch.empty((0, 4), device=gs.device, dtype=gs.tc_float)
 
         self.n_qs_ = max(1, self.n_qs)
         self.n_dofs_ = max(1, self.n_dofs)
@@ -1166,6 +1193,47 @@ class KinematicSolver(Solver):
             tensor = gu.transform_quat_by_quat(gu.inv_quat(offset_quat), tensor)
         return tensor[0] if self.n_envs == 0 else tensor
 
+    def _compute_sites_pose(self, sites_idx=None, envs_idx=None, *, relative=False):
+        sel = indices_to_mask(sites_idx, keepdim=True)
+        sites_link_idx = self._sites_link_idx[sel]
+        links_pos, links_quat = self._read_data((self.dyn_state.links.pos, self.dyn_state.links.quat), envs_idx, None)
+        if sites_link_idx.numel() == 0:
+            n_envs_sel = links_pos.shape[0]
+            pos = torch.empty((n_envs_sel, 0, 3), device=gs.device, dtype=gs.tc_float)
+            quat = torch.empty((n_envs_sel, 0, 4), device=gs.device, dtype=gs.tc_float)
+            return pos, quat, sites_link_idx
+        pos, quat = gu.transform_pos_quat_by_trans_quat(
+            self._sites_init_pos[sel],
+            self._sites_init_quat[sel],
+            links_pos[:, sites_link_idx],
+            links_quat[:, sites_link_idx],
+        )
+        if relative and self._sites_offset_pos is not None:
+            offset_pos = self._sites_offset_pos[sel]
+            offset_quat = self._sites_offset_quat[sel]
+            pos = pos - _offset_world_shift(offset_pos, offset_quat, quat)
+            quat = gu.transform_quat_by_quat(gu.inv_quat(offset_quat), quat)
+        return pos, quat, sites_link_idx
+
+    def get_sites_pos(self, sites_idx=None, envs_idx=None, *, relative=False):
+        pos, _, _ = self._compute_sites_pose(sites_idx, envs_idx, relative=relative)
+        return pos[0] if self.n_envs == 0 else pos
+
+    def get_sites_quat(self, sites_idx=None, envs_idx=None, *, relative=False):
+        _, quat, _ = self._compute_sites_pose(sites_idx, envs_idx, relative=relative)
+        return quat[0] if self.n_envs == 0 else quat
+
+    def get_sites_vel(self, sites_idx=None, envs_idx=None, *, relative=False):
+        pos, _, sites_link_idx = self._compute_sites_pose(sites_idx, envs_idx, relative=relative)
+        if sites_link_idx.numel() == 0:
+            return pos[0] if self.n_envs == 0 else pos
+        links_state = self.dyn_state.links
+        cd_vel, cd_ang, root_COM = self._read_data(
+            (links_state.cd_vel, links_state.cd_ang, links_state.root_COM), envs_idx, None
+        )
+        vel = cd_vel[:, sites_link_idx] + cd_ang[:, sites_link_idx].cross(pos - root_COM[:, sites_link_idx], dim=-1)
+        return vel[0] if self.n_envs == 0 else vel
+
     def get_links_vel(self, links_idx=None, envs_idx=None, *, relative=False):
         idx = links_idx if isinstance(links_idx, int) else slice(None)
         is_relative = relative and not self._links_offset_pos_is_identity[idx].all()
@@ -1503,6 +1571,11 @@ class KinematicSolver(Solver):
         return gs.List(self._vgeoms)
 
     @property
+    def sites(self) -> gs.List[RigidSite]:
+        """The attachment / landmark sites of the solver, as a copy."""
+        return gs.List(self._sites)
+
+    @property
     def vfaces_raycast_mask(self) -> torch.Tensor:
         """Per-vface mask, shape (n_vfaces,), selecting the vfaces opted into visual raycasting.
 
@@ -1524,6 +1597,10 @@ class KinematicSolver(Solver):
     @property
     def n_vgeoms(self) -> int:
         return len(self._vgeoms)
+
+    @property
+    def n_sites(self) -> int:
+        return len(self._sites)
 
     @property
     def n_vverts(self) -> int:

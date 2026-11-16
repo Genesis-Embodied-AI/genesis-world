@@ -27,6 +27,7 @@ from .rigid_equality import RigidEquality
 from .rigid_geom import RigidGeom, RigidVisGeom
 from .rigid_joint import RigidJoint
 from .rigid_link import KinematicLink, RigidLink
+from .rigid_site import RigidSite
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
@@ -220,6 +221,7 @@ class KinematicEntity(Entity):
         self._vface_start = solver.n_vfaces
         self._custom_vvert_start = solver.n_custom_vverts
         self._custom_vface_start = solver.n_custom_vfaces
+        self._site_start = solver.n_sites
 
         self._is_attached: bool = False
         self._is_vverts_overridden: bool = False
@@ -286,6 +288,7 @@ class KinematicEntity(Entity):
 
         # Gathered once every variant is added, since the visual geoms of the variants of a link follow its own
         self._vgeoms = gs.List([vgeom for link in self._links for vgeom in link.vgeoms])
+        self._sites = gs.List([site for link in self._links for site in link.sites])
 
     @gs.assert_unbuilt
     def _build(self) -> None:
@@ -358,12 +361,15 @@ class KinematicEntity(Entity):
             vvert_start=self.n_vverts + self._vvert_start,
             vface_start=self.n_vfaces + self._vface_start,
             desc=l_desc,
+            site_start=self.n_sites + self._site_start,
         )
         self._links.append(link)
 
-        # Add visual geometries
+        # Add visual geometries and sites
         for g_desc in l_desc.vgeoms:
             link._add_vgeom(g_desc)
+        for s_desc in l_desc.sites:
+            link._add_site(s_desc)
 
         return link, joints
 
@@ -644,6 +650,41 @@ class KinematicEntity(Entity):
 
         else:
             gs.raise_exception("Neither `name` nor `uid` is provided.")
+
+    def get_site(self, name=None, uid=None) -> RigidSite:
+        """Get a `RigidSite` object by name or uid."""
+        if name is not None:
+            for site in self._sites:
+                if site.name == name:
+                    return site
+            gs.raise_exception(
+                f"Site not found for name: {name}. Available site names: {[site.name for site in self._sites]}."
+            )
+        elif uid is not None:
+            for site in self._sites:
+                if uid in str(site.uid):
+                    return site
+            gs.raise_exception(f"Site not found for uid: {uid}.")
+        else:
+            gs.raise_exception("Neither `name` nor `uid` is provided.")
+
+    @gs.assert_built
+    def get_sites_pos(self, sites_idx_local=None, envs_idx=None, *, relative=True):
+        """Get world positions of the entity's sites."""
+        sites_idx = self._get_global_idx(sites_idx_local, self.n_sites, self._site_start, unsafe=True)
+        return self._solver.get_sites_pos(sites_idx, envs_idx, relative=relative)
+
+    @gs.assert_built
+    def get_sites_quat(self, sites_idx_local=None, envs_idx=None, *, relative=True):
+        """Get world orientation quaternions (w, x, y, z) of the entity's sites."""
+        sites_idx = self._get_global_idx(sites_idx_local, self.n_sites, self._site_start, unsafe=True)
+        return self._solver.get_sites_quat(sites_idx, envs_idx, relative=relative)
+
+    @gs.assert_built
+    def get_sites_vel(self, sites_idx_local=None, envs_idx=None, *, relative=True):
+        """Get world linear velocities of the entity's sites."""
+        sites_idx = self._get_global_idx(sites_idx_local, self.n_sites, self._site_start, unsafe=True)
+        return self._solver.get_sites_vel(sites_idx, envs_idx, relative=relative)
 
     @gs.assert_built
     def get_pos(self, envs_idx=None, *, relative=True):
@@ -1232,6 +1273,26 @@ class KinematicEntity(Entity):
         """The list of visual geoms (`RigidVisGeom`) in the entity, as a copy."""
         return gs.List(self._vgeoms)
 
+    @property
+    def sites(self) -> gs.List[RigidSite]:
+        """The list of sites (`RigidSite`) in the entity, as a copy."""
+        return gs.List(self._sites)
+
+    @property
+    def n_sites(self) -> int:
+        """The number of sites (`RigidSite`) in the entity."""
+        return sum(link.n_sites for link in self._links)
+
+    @property
+    def site_start(self) -> int:
+        """The index of the entity's first `RigidSite` in the scene."""
+        return self._site_start
+
+    @property
+    def site_end(self) -> int:
+        """The index of the entity's last `RigidSite` in the scene *plus one*."""
+        return self._site_start + self.n_sites
+
     @gs.assert_built
     def set_vverts(self, vverts, envs_idx=None):
         """Override this entity's visual vertex positions for rendering and sensors.
@@ -1816,12 +1877,15 @@ class RigidEntity(KinematicEntity):
             vface_start=self.n_vfaces + self._vface_start,
             visualize_contact=self.visualize_contact,
             desc=l_desc,
+            site_start=self.n_sites + self._site_start,
         )
         self._links.append(link)
 
-        # Add visual geometries
+        # Add visual geometries and sites
         for g_desc in l_desc.vgeoms:
             link._add_vgeom(g_desc)
+        for s_desc in l_desc.sites:
+            link._add_site(s_desc)
         coup_links = self.material.coup_links
         for g_desc in l_desc.geoms:
             needs_coup = self.material.needs_coup and (coup_links is None or link.name in coup_links)
