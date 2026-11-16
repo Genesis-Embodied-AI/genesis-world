@@ -120,6 +120,8 @@ class Camera(BuildableMixin, RBC):
         self._batch_renderer = None
 
         self._env_idx = int(env_idx) if env_idx is not None else None
+        # The index of the environment among the rendered ones, for a camera rendering its environment alone
+        self._render_env_idx = None
         self._envs_offset = None
 
         self._is_recording = False
@@ -160,7 +162,9 @@ class Camera(BuildableMixin, RBC):
                 self._is_batched = False
                 self._raytracer.add_camera(self)
             else:
-                self._is_batched = self._visualizer.scene.n_envs > 0 and self._visualizer._context.split_envs
+                self._is_batched = (
+                    self._visualizer.scene.n_envs > 0 and self._visualizer._context.split_envs and self._env_idx is None
+                )
             if self._visualizer.scene.n_envs > 0:
                 if self._env_idx is None:
                     if not self._is_batched:
@@ -172,6 +176,11 @@ class Camera(BuildableMixin, RBC):
                             )
                 elif self._env_idx not in self._visualizer._context.rendered_envs_idx:
                     gs.raise_exception("Environment index bound to the camera not in 'VisOptions.rendered_envs_idx'.")
+                # A bound camera renders its environment alone when the environments are rendered separately. The
+                # raytracer lays out every environment side by side, so the channels the rasterizer renders for a
+                # raytraced camera keep that layout.
+                if self._raytracer is None and self._env_idx is not None and self._visualizer._context.split_envs:
+                    self._render_env_idx = self._visualizer._context.rendered_envs_idx.index(self._env_idx)
             else:
                 assert self._env_idx is None
 
@@ -422,8 +431,8 @@ class Camera(BuildableMixin, RBC):
 
         Note
         ----
-        If `split_envs` in `VisOptions` is set to True, each component will return a stack of images, with the
-        number of images equal to `len(rendered_envs_idx)`.
+        If `split_envs` in `VisOptions` is set to True, an unbound camera returns a stack of images, with the
+        number of images equal to `len(rendered_envs_idx)`. A bound camera returns one image of its environment.
 
         Parameters
         ----------
@@ -472,7 +481,7 @@ class Camera(BuildableMixin, RBC):
         else:
             self._rasterizer.update_scene(force_render)
             rgb_arr, depth_arr, seg_idxc_arr, normal_arr = self._rasterizer.render_camera(
-                self, rgb, depth, segmentation, normal=normal, split_envs=self._is_batched
+                self, rgb, depth, segmentation, normal=normal, split_envs=self._is_batched, env_idx=self._render_env_idx
             )
 
         # Colorize the segmentation map is necessary
@@ -556,7 +565,13 @@ class Camera(BuildableMixin, RBC):
         else:
             self._rasterizer.update_scene(force_render=False)
             _, depth_arr, _, _ = self._rasterizer.render_camera(
-                self, rgb=False, depth=True, segmentation=False, normal=False, split_envs=self._is_batched
+                self,
+                rgb=False,
+                depth=True,
+                segmentation=False,
+                normal=False,
+                split_envs=self._is_batched,
+                env_idx=self._render_env_idx,
             )
 
         # Convert OpenGL projection matrix to camera intrinsics

@@ -292,6 +292,7 @@ class Viewer(BuildableMixin, RBC):
         normal=False,
         skip_markers=False,
         split_envs=False,
+        env_idx=None,
     ):
         return self._pyrender_viewer.render_offscreen(
             camera_node,
@@ -302,6 +303,7 @@ class Viewer(BuildableMixin, RBC):
             normal,
             skip_markers=skip_markers,
             split_envs=split_envs,
+            env_idx=env_idx,
         )
 
     def set_camera_pose(self, pose=None, pos=None, lookat=None):

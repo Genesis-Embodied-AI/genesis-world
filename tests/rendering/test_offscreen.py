@@ -1447,6 +1447,14 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
         debug=True,
         GUI=show_viewer,
     )
+    cam_bound = scene.add_camera(
+        res=CAM_RES,
+        pos=(3.5, 0.0, 2.5),
+        lookat=(0.0, 0.0, 0.5),
+        fov=30,
+        GUI=show_viewer,
+        env_idx=RENDERED_ENVS[1],
+    )
     scene.build(n_envs=4, env_spacing=(0.3, 0.3))
 
     # The rendered environments hold an arm resting against the ground, whose contacts give the contact markers
@@ -1529,8 +1537,18 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
         up=(0.0, 1.0, 0.0),
         envs_idx=RENDERED_ENVS[1],
     )
-    rgb_env, *_ = cam.render(rgb=True)
-    assert_equal(rgb_env, rgb_after)
+    buffers_env = cam.render(rgb=True, depth=True, segmentation=True, normal=True)
+    assert_equal(buffers_env[0], rgb_after)
+    # A camera bound to a rendered environment renders that environment alone, as the batched camera does, whatever
+    # its index among the rendered environments
+    cam_bound.set_pose(
+        pos=(0.0, 0.0, 4.0),
+        lookat=(0.0, 0.0, 0.0),
+        up=(0.0, 1.0, 0.0),
+    )
+    buffers_bound = cam_bound.render(rgb=True, depth=True, segmentation=True, normal=True)
+    for buffer_bound, buffer_env in zip(buffers_bound, buffers_env):
+        assert_equal(buffer_bound, buffer_env[1])
     with pytest.raises(gs.GenesisException):
         cam.set_pose(pos=(0.0, 0.0, 4.0), envs_idx=0)
 
