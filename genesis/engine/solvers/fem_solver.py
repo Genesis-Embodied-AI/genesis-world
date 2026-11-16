@@ -11,7 +11,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.simt as su
-from genesis.engine.entities.fem_entity import FEMEntity
+from genesis.engine.entities.fem_entity import FEMEntity, FEMEntityDescription
 from genesis.engine.materials import FEM
 from genesis.engine.materials.FEM.elastic import (
     FEMModel,
@@ -77,7 +77,6 @@ from .base_solver import (
 )
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -846,21 +845,23 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self,
         idx: int,
-        surface: Surface,
-        spec: "gs.entities.FEM",
-        desc: "EntityDescription | None" = None,
-    ) -> "FEMEntity":
+        surface: Surface | None,
+        spec: "gs.entities.FEM | None",
+        desc: FEMEntityDescription | None = None,
+    ) -> FEMEntity:
+        """Create an entity from its description, resolving one from the entity spec and its surface if none is given."""
+        if desc is None:
+            desc = FEMEntityDescription.resolve(spec, surface)
         entity = FEMEntity(
             scene=self._sim.scene,
             solver=self,
-            surface=surface,
+            desc=desc,
             idx=idx,
             v_start=self.n_vertices,
             el_start=self.n_elements,
             s_start=self.n_surfaces,
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
-            spec=spec,
         )
         self._entities.append(entity)
         self._n_vertices += entity.n_vertices
