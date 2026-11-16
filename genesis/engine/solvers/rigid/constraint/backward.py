@@ -238,6 +238,82 @@ def kernel_load_dL_dqacc_from_acc_grad(
 
 
 @qd.kernel(fastcache=True)
+def kernel_load_dL_defc_force_from_contact_force(
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    rigid_config: qd.template(),
+):
+    """Transpose the adjoint of the net contact force into the gradient of the row forces.
+
+    The forward maps the solved row forces to the net contact force linearly, through the contact-frame directions
+    of every awake contact (see func_contact_constraint_force) and the signed scatter onto the two links of each
+    contact pair (see func_add_contacts_force_to_links). The transpose gathers the adjoint of every awake contact
+    from the links it pairs and distributes it over its rows, adding to efc_force.grad, which the adjoint solve
+    folds into the acceleration seed (see kernel_solve_adjoint_u), consumes in the row gradients, and clears
+    (see kernel_compute_gradients). contact_force.grad is cleared once consumed: each substep overwrites the
+    contact forces, so a read between two steps observed the last substep's write, whose reverse runs first.
+    """
+    qd.loop_config(
+        name="kernel_load_dL_defc_force_from_contact_force",
+        serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL),
+    )
+    for i_c, i_b in qd.ndrange(
+        *collider_state.contact_sort_idx.shape, axes=qd.static(eoa(collider_state.contact_data.force))
+    ):
+        n_first_contact = collider_state.n_contacts_hibernated[i_b]
+        if i_c >= n_first_contact and i_c < collider_state.n_contacts[i_b]:
+            i_col = collider_state.contact_sort_idx[i_c, i_b]
+            i_la = collider_state.contact_data.link_a[i_col, i_b]
+            i_lb = collider_state.contact_data.link_b[i_col, i_b]
+            dL_dforce = -dyn_state.links.contact_force.grad[i_la, i_b] + dyn_state.links.contact_force.grad[i_lb, i_b]
+
+            normal = collider_state.contact_data.normal[i_col, i_b]
+            friction = collider_state.contact_data.friction[i_col, i_b]
+            d1, d2 = gu.qd_orthogonals(normal)
+
+            rows_per_contact = qd.static(rigid_config.rows_per_contact)
+            const_start = (
+                constraint_state.n_constraints_equality[i_b] + constraint_state.n_constraints_frictionloss[i_b]
+            )
+            i_row = (i_c - n_first_contact) * rows_per_contact + const_start
+            if qd.static(rigid_config.enable_elliptic_friction):
+                # The cone rows [normal, t1, t2] carry the whole linear force, the spin and rolling rows torque only
+                # (see func_contact_constraint_force).
+                constraint_state.efc_force.grad[i_row, i_b] = constraint_state.efc_force.grad[i_row, i_b] - normal.dot(
+                    dL_dforce
+                )
+                constraint_state.efc_force.grad[i_row + 1, i_b] = constraint_state.efc_force.grad[
+                    i_row + 1, i_b
+                ] + d1.dot(dL_dforce)
+                constraint_state.efc_force.grad[i_row + 2, i_b] = constraint_state.efc_force.grad[
+                    i_row + 2, i_b
+                ] + d2.dot(dL_dforce)
+            else:
+                for i_dir in qd.static(range(4)):
+                    d = (2 * (i_dir % 2) - 1) * (d1 if i_dir < 2 else d2)
+                    n = d * friction - normal
+                    constraint_state.efc_force.grad[i_row + i_dir, i_b] = constraint_state.efc_force.grad[
+                        i_row + i_dir, i_b
+                    ] + n.dot(dL_dforce)
+                # The torsional and rolling rows share the normal opposition of the linear part.
+                if qd.static(rigid_config.enable_torsional_friction):
+                    for i_dir in qd.static(range(4, rows_per_contact)):
+                        constraint_state.efc_force.grad[i_row + i_dir, i_b] = constraint_state.efc_force.grad[
+                            i_row + i_dir, i_b
+                        ] - normal.dot(dL_dforce)
+
+    qd.loop_config(
+        name="kernel_clear_contact_force_grad",
+        serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL),
+    )
+    for i_l, i_b in qd.ndrange(
+        *dyn_state.links.contact_force.shape, axes=qd.static(eoa(dyn_state.links.contact_force))
+    ):
+        dyn_state.links.contact_force.grad[i_l, i_b] = gs.qd_float(0.0)
+
+
+@qd.kernel(fastcache=True)
 def kernel_accumulate_constraint_solver_grads(
     dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):

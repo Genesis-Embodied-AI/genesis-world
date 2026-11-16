@@ -3099,13 +3099,16 @@ class RigidEntity(KinematicEntity):
         """
         Returns net force applied on each links due to direct external contacts.
 
+        While the operations of the scene are recorded in the autograd graph of a rollout ('requires_grad'), the read
+        joins the graph: the gradient of a loss reading it flows back to the inputs of the contact solve.
+
         Returns
         -------
         entity_links_force : torch.Tensor, shape (n_links, 3) or (n_envs, n_links, 3)
             The net force applied on each links due to direct external contacts.
         """
         links_idx = slice(self.link_start, self.link_end)
-        tensor = qd_to_torch(self._solver.dyn_state.links.contact_force, envs_idx, links_idx, transpose=True, copy=True)
+        tensor = self._solver.get_links_net_contact_force(links_idx, envs_idx)
         return tensor[0] if self._solver.n_envs == 0 else tensor
 
     # ------------------------------------------------------------------------------------

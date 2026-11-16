@@ -2694,6 +2694,15 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         tensor = qd_to_torch(self.dyn_state.links.cacc_ang, envs_idx, links_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
 
+    def get_links_net_contact_force(self, links_idx=None, envs_idx=None):
+        """The net force applied on each link by its direct external contacts.
+
+        While the operations of the solver are recorded in the autograd graph of a rollout, the read joins the graph
+        (see '_read_data'), and its adjoint is consumed by the backward pass of the contact solve.
+        """
+        tensor = self._read_data(self.dyn_state.links.contact_force, envs_idx, links_idx, copy=True)
+        return tensor[0] if self.n_envs == 0 else tensor
+
     def get_links_root_COM(self, links_idx=None, envs_idx=None):
         """
         Returns the center of mass (COM) of the entire kinematic tree to which the specified links belong.

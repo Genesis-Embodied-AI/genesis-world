@@ -13,19 +13,28 @@ from ..utils.assertions import assert_allclose
 
 
 @pytest.mark.parametrize(
-    "shape, backend",
+    "shape, backend, loss_kind",
     [
-        pytest.param("ground_box", gs.cpu, marks=pytest.mark.required),
-        pytest.param("ground_box", gs.gpu, marks=pytest.mark.required),
-        pytest.param("box", gs.cpu, marks=pytest.mark.required),
-        pytest.param("box", gs.gpu, marks=pytest.mark.required),
-        ("sphere", gs.cpu),
-        pytest.param("sphere", gs.gpu, marks=pytest.mark.required),
-        ("capsule", gs.cpu),
-        pytest.param("capsule", gs.gpu, marks=pytest.mark.required),
+        pytest.param("ground_box", gs.cpu, "control_force", marks=pytest.mark.required),
+        pytest.param("ground_box", gs.gpu, "control_force", marks=pytest.mark.required),
+        pytest.param("box", gs.cpu, "control_force", marks=pytest.mark.required),
+        pytest.param("box", gs.gpu, "control_force", marks=pytest.mark.required),
+        ("sphere", gs.cpu, "control_force"),
+        pytest.param("sphere", gs.gpu, "control_force", marks=pytest.mark.required),
+        ("capsule", gs.cpu, "control_force"),
+        pytest.param("capsule", gs.gpu, "control_force", marks=pytest.mark.required),
+        # A loss reading the net contact force exercises its own adjoint path, the transpose of the linear map from
+        # the solved row forces to the per-link forces. One case per contact manifold suffices for it.
+        pytest.param("ground_box", gs.cpu, "net_contact_force", marks=pytest.mark.required),
+        pytest.param("box", gs.cpu, "net_contact_force", marks=pytest.mark.required),
+        ("sphere", gs.cpu, "net_contact_force"),
+        ("capsule", gs.cpu, "net_contact_force"),
+        pytest.param("box", gs.gpu, "net_contact_force", marks=pytest.mark.required),
     ],
 )
-def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsule_ground, precision, show_viewer):
+def test_contact_per_step_force_grad_matches_fd(
+    shape, grad_capsule, grad_capsule_ground, precision, show_viewer, loss_kind
+):
     def _build_contact_scene(shape, mjcf_capsule, mjcf_capsule_ground, *, requires_grad, show_viewer=False):
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(
@@ -135,12 +144,14 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
         return n_contacts
 
     def _losses(scene, entities):
-        # Each entity measures its position from the vertical axis it starts on, which gives every loss term the
-        # magnitude of a single entity at the origin, whose finite differences resolve its small gradient in fp32
-        return [
-            ((entity.get_qpos()[:3] - entity.get_qpos().new_tensor((*entity.morph.pos[:2], 0.0))) ** 2).sum()
-            for entity in entities
-        ]
+        if loss_kind == "control_force":
+            # Each entity measures its position from the vertical axis it starts on, which gives every loss term the
+            # magnitude of a single entity at the origin, whose finite differences resolve its small gradient in fp32
+            return [
+                ((entity.get_qpos()[:3] - entity.get_qpos().new_tensor((*entity.morph.pos[:2], 0.0))) ** 2).sum()
+                for entity in entities
+            ]
+        return [(entity.get_links_net_contact_force() ** 2).sum() for entity in entities]
 
     n_settle = 20
     n_steps = 2
@@ -150,6 +161,14 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
     # only guards the degenerate-FD case.
     fd_rtol = 1e-6 if precision == "64" else 2e-3
     fd_atol = 1e-14 if precision == "64" else 1e-6
+    # The net-contact-force gradients span orders of magnitude, so their fp64 finite-difference floor is absolute:
+    # the convergence noise of the iterative constraint solve under the perturbation. At fp32 the noise of the
+    # squared-force reference swamps the smallest components, whose check the absolute term carries.
+    if loss_kind == "net_contact_force":
+        fd_atol = 1e-6 if precision == "64" else 5.0
+    # The height sensitivity of the squared contact force runs through the stiff-cone derivative, orders of
+    # magnitude above the position loss of the control-force mode, so its fp64 floor sits a decade higher.
+    fd_ground_rtol = fd_rtol if loss_kind == "control_force" else 1e-5
     # The small tangential preload keeps the contact manifold away from a gain / loss transition, which the
     # tangential finite-difference perturbation would otherwise cross (the in-test contact-count guard trips).
     base_force = np.array([0.5, 0.0, -8.0, 0.0, 0.0, 0.0])
@@ -229,7 +248,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                     fd,
                     rtol=fd_rtol,
                     atol=fd_atol,
-                    err_msg=f"contact force.grad mismatch at t={t} entity={i_e} dof={i_d}",
+                    err_msg=f"contact force.grad mismatch ({loss_kind}) at t={t} entity={i_e} dof={i_d}",
                 )
     # The box-box manifold gains or loses a contact within 1e-5 of ground height, a step fp32 finite differences cannot
     # go below
@@ -238,7 +257,9 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
         fd = (loss_at(init_force, -0.1 + eps_height).sum() - loss_at(init_force, -0.1 - eps_height).sum()) / (
             2 * eps_height
         )
-        assert_allclose(ground_pos.grad[2], fd, rtol=fd_rtol, atol=fd_atol, err_msg="ground height grad mismatch")
+        assert_allclose(
+            ground_pos.grad[2], fd, rtol=fd_ground_rtol, atol=fd_atol, err_msg="ground height grad mismatch"
+        )
 
 
 @pytest.mark.required

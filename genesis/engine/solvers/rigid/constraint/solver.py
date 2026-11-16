@@ -569,6 +569,12 @@ class ConstraintSolver:
         if not self._solver._requires_grad:
             gs.raise_exception("Please set `requires_grad` to True in SimOptions to enable differentiable mode.")
 
+        # The adjoint of the net contact force joins the direct gradient of the row forces, which the solve consumes
+        # with the acceleration seed and clears (see kernel_load_dL_defc_force_from_contact_force).
+        backward_constraint_solver.kernel_load_dL_defc_force_from_contact_force(
+            self._solver.dyn_state, self._collider.collider_state, self.constraint_state, self._solver.rigid_config
+        )
+
         # 1. We first need to find a solution to A^T * u = g system.
         backward_constraint_solver.kernel_solve_adjoint_u(
             self.constraint_state, self._solver.dyn_info, self._solver.rigid_info, self._solver.rigid_config
