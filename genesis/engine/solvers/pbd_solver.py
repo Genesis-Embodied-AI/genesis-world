@@ -10,7 +10,8 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
-from genesis.engine.entities.pbd_entity import PBDTetEntity
+from genesis.engine.entities.particle_entity import ParticleEntityDescription
+from genesis.engine.entities.pbd_entity import PBDMeshDescription, PBDTetEntity
 from genesis.engine.materials import PBD
 from genesis.engine.state_change import StateChange, mutates
 from genesis.options.solvers import PBDOptions
@@ -32,7 +33,6 @@ from .base_solver import VFACES, VVERTS, SimulatorState
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -365,15 +365,28 @@ class PBDSolver(ParticleSolver):
     def add_entity(
         self,
         idx: int,
-        surface: Surface,
-        spec: "gs.entities.PBD",
-        desc: "EntityDescription | None" = None,
-    ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
-        if isinstance(spec.material, gs.materials.PBD.Cloth):
+        surface: Surface | None,
+        spec: "gs.entities.PBD | None",
+        desc: ParticleEntityDescription | None = None,
+    ) -> PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity:
+        """Create an entity from its description, resolving one from the entity spec and its surface if none is given.
+
+        The material decides the kind of entity: a cloth or an elastic material is described by its remeshed mesh (see
+        'PBDMeshDescription'), a liquid or a particle material by its sampled particles alone.
+        """
+        material = spec.material if desc is None else desc.spec.material
+        if desc is None:
+            if isinstance(material, (gs.materials.PBD.Cloth, gs.materials.PBD.Elastic)):
+                desc = PBDMeshDescription.resolve(spec, surface, self._particle_size)
+            else:
+                desc = ParticleEntityDescription.resolve(
+                    spec, surface, self._particle_size, self.boundary_lower, self.boundary_upper
+                )
+        if isinstance(material, gs.materials.PBD.Cloth):
             entity = PBD2DEntity(
                 scene=self._sim.scene,
                 solver=self,
-                surface=surface,
+                desc=desc,
                 particle_size=self._particle_size,
                 idx=idx,
                 particle_start=self.n_particles,
@@ -381,13 +394,12 @@ class PBDSolver(ParticleSolver):
                 inner_edge_start=self.n_inner_edges,
                 vvert_start=self.n_vverts,
                 vface_start=self.n_vfaces,
-                spec=spec,
             )
-        elif isinstance(spec.material, gs.materials.PBD.Elastic):
+        elif isinstance(material, gs.materials.PBD.Elastic):
             entity = PBD3DEntity(
                 scene=self._sim.scene,
                 solver=self,
-                surface=surface,
+                desc=desc,
                 particle_size=self._particle_size,
                 idx=idx,
                 particle_start=self.n_particles,
@@ -395,27 +407,24 @@ class PBDSolver(ParticleSolver):
                 elem_start=self.n_elems,
                 vvert_start=self.n_vverts,
                 vface_start=self.n_vfaces,
-                spec=spec,
             )
-        elif isinstance(spec.material, gs.materials.PBD.Liquid):
+        elif isinstance(material, gs.materials.PBD.Liquid):
             entity = PBDParticleEntity(
                 scene=self._sim.scene,
                 solver=self,
-                surface=surface,
+                desc=desc,
                 particle_size=self._particle_size,
                 idx=idx,
                 particle_start=self.n_particles,
-                spec=spec,
             )
-        elif isinstance(spec.material, gs.materials.PBD.Particle):
+        elif isinstance(material, gs.materials.PBD.Particle):
             entity = PBDFreeParticleEntity(
                 scene=self._sim.scene,
                 solver=self,
-                surface=surface,
+                desc=desc,
                 particle_size=self._particle_size,
                 idx=idx,
                 particle_start=self.n_particles,
-                spec=spec,
             )
         else:
             raise NotImplementedError()

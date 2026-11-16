@@ -6,7 +6,7 @@ import quadrants as qd
 
 import genesis as gs
 
-from ..utils.assertions import assert_allclose
+from ..utils.assertions import assert_allclose, assert_equal
 
 
 # Note that "session" scope must NOT be used because the material while be altered without copy when building the scene
@@ -17,7 +17,7 @@ def pbd_material():
 
 
 @pytest.mark.required
-def test_maxvolume(pbd_material, show_viewer, box_obj_path):
+def test_maxvolume(pbd_material, show_viewer, box_obj_path, tmp_path):
     scene = gs.Scene(
         pbd_options=gs.options.PBDOptions(
             particle_size=0.1,
@@ -51,10 +51,17 @@ def test_maxvolume(pbd_material, show_viewer, box_obj_path):
         f"expected more than {pbd1.n_elems} elements without a volume limit."
     )
 
+    scene.export(tmp_path / "scene.gs")
+    scene_loaded = gs.Scene.load(tmp_path / "scene.gs")
+    for pbd, pbd_loaded in zip((pbd1, pbd2), scene_loaded.entities, strict=True):
+        assert pbd_loaded.n_elems == pbd.n_elems
+        assert_equal(pbd_loaded.edges, pbd.edges)
+        assert_equal(pbd_loaded.init_particles, pbd.init_particles)
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_get_mass(n_envs, show_viewer, tol):
+def test_get_mass(n_envs, show_viewer, tol, tmp_path):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=4e-3,
@@ -77,6 +84,11 @@ def test_get_mass(n_envs, show_viewer, tol):
     expected_n = max(n_envs, 1)
     assert mass.shape == (expected_n,), f"Expected shape ({expected_n},), got {mass.shape}"
     assert (mass > 0).all(), f"Expected positive mass, got {mass}"
+
+    scene.export(tmp_path / "scene.gs")
+    scene_loaded = gs.Scene.load(tmp_path / "scene.gs")
+    scene_loaded.build(n_envs=n_envs)
+    assert_equal(scene_loaded.entities[1].get_mass(), mass)
 
 
 @pytest.mark.required
