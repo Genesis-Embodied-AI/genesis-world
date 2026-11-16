@@ -654,21 +654,6 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
     ARRAYS_NAMES = ("rigid_info.qpos", "dyn_state.dofs.vel", "dyn_state.fixed_roots.pos")
     scene = checkpoint_scene
     box, arm, ghost = scene.entities[1], scene.entities[2], scene.entities[4]
-    # A particle and a finite element entity, falling apart from the rigid ones, whose solvers log their state as well
-    mpm_cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.6, 0.0, 0.3),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.MPM.Elastic(),
-    )
-    fem_cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.6, 0.6, 0.3),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(),
-    )
     with pytest.raises(gs.GenesisException):
         pickle.dumps(scene)
     scene.build(n_envs=n_envs)
@@ -772,21 +757,6 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
 def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol):
     scene = checkpoint_scene
     box, arm, ghost = scene.entities[1], scene.entities[2], scene.entities[4]
-    # A particle and a finite element entity, falling apart from the rigid ones, whose solvers log their state as well
-    mpm_cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.6, 0.0, 0.3),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.MPM.Elastic(),
-    )
-    fem_cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.6, 0.6, 0.3),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(),
-    )
     # Every mode logged from one run. Short chunks, so the frames span several chunks and a chunk can be cut off. The
     # run ends with a reset, which every log records the state before, and goes on in the same file.
     N_STEPS, CHUNK_SIZE = 30, 8
@@ -838,7 +808,7 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
     scene.register_pre_step_callback(lambda: is_paused)
     # A frame is the state a step starts from, so the record of frame i is read right before step i. A model parameter
     # changed by a setter halfway is recorded with the frames from there on.
-    states, links_poses, ghosts_pos, times, kps, contacts, dofs_accs, deformables_pos = [], [], [], [], [], [], [], []
+    states, links_poses, ghosts_pos, times, kps, contacts, dofs_accs = [], [], [], [], [], [], []
     for i_step in range(N_STEPS):
         steps_count[0] = i_step
         if i_step == VETO_STEP:
@@ -855,7 +825,6 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         times.append(scene.get_time())
         contacts.append(box.get_contacts())
         dofs_accs.append(scene.rigid_solver.get_dofs_acc())
-        deformables_pos.append((mpm_cube.get_particles_pos(), fem_cube.get_state().pos))
         scene.step()
     final_state = scene.rigid_solver.get_state()
     final_force = box.get_contacts()["force_a"]
@@ -889,17 +858,9 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
             )
             # The first step has no previous one to measure its period from
             assert np.isnan(timings["period"]) == (index == 1)
-    replay_mpm_cube, replay_fem_cube = replay_scene.entities[-2:]
-    for index, (
-        state,
-        (links_pos, links_quat),
-        ghost_pos,
-        time,
-        kp,
-        box_contacts,
-        dofs_acc,
-        (mpm_pos, fem_pos),
-    ) in enumerate(zip(states, links_poses, ghosts_pos, times, kps, contacts, dofs_accs, deformables_pos)):
+    for index, (state, (links_pos, links_quat), ghost_pos, time, kp, box_contacts, dofs_acc) in enumerate(
+        zip(states, links_poses, ghosts_pos, times, kps, contacts, dofs_accs)
+    ):
         # An exact frame puts back everything a step reads or writes, so the scene stands exactly where it stood
         exact_trajectory.seek(index)
         replayed_state = replay_scene.rigid_solver.get_state()
@@ -934,8 +895,6 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         ctrl_pos = exact_trajectory.frame(index)["RigidSolver.dyn_state.dofs.ctrl_pos"]
         assert_allclose(ctrl_pos[arm.dof_start], 0.3 + 0.001 * index, tol=gs.EPS)
         assert_equal(replay_scene.entities[2].get_dofs_kp(), kp)
-        assert_equal(replay_mpm_cube.get_particles_pos(), mpm_pos)
-        assert_equal(replay_fem_cube.get_state().pos, fem_pos)
         # A minimal frame puts back the state and the model parameters, and leaves the poses to forward kinematics,
         # which the mode documents as lossy at the last bits
         minimal_trajectory.seek(index)
@@ -946,8 +905,6 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         assert_allclose(replay_scene.rigid_solver.get_links_quat(), links_quat, tol=tol)
         assert_allclose(replay_scene.entities[4].get_links_pos(), ghost_pos, tol=tol)
         assert_equal(replay_scene.entities[2].get_dofs_kp(), kp)
-        assert_equal(replay_mpm_cube.get_particles_pos(), mpm_pos)
-        assert_equal(replay_fem_cube.get_state().pos, fem_pos)
 
     # A step from a minimal frame recomputes the derived arrays before reading them, so it lands on the same state to
     # the bit whatever the scene held before the seek, and on the recorded run up to the last bits of the poses
@@ -1027,6 +984,52 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         file.write(b"GSTRAJ3\n" + data[len(b"GSTRAJ3\n") :])
     with pytest.raises(gs.GenesisException, match="version 3 of the trajectory format"):
         Trajectory(cut_path, scene=replay_scene)
+
+    # The particle and finite element solvers log their state as well. They need substeps the rigid scene runs
+    # without, so they fall in a scene of their own.
+    deformable_scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=2e-3,
+            substeps=10,
+        ),
+        show_viewer=show_viewer,
+    )
+    deformable_scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    mpm_cube = deformable_scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.3, 0.0, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(),
+    )
+    fem_cube = deformable_scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.3, 0.0, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    deformable_path = tmp_path / f"deformable{TRAJECTORY_FORMAT}"
+    deformable_scene.start_recording(
+        gs.recorders.TrajectoryFile(
+            filename=str(deformable_path),
+            mode="minimal",
+        ),
+    )
+    deformable_scene.build(n_envs=n_envs)
+    deformables_pos = []
+    for _ in range(N_STEPS):
+        deformables_pos.append((mpm_cube.get_particles_pos(), fem_cube.get_verts_pos()))
+        deformable_scene.step()
+    deformable_scene.stop_recording()
+    deformable_trajectory = gs.Scene.load_trajectory(deformable_path, show_viewer=show_viewer)
+    replay_mpm_cube, replay_fem_cube = deformable_trajectory.scene.entities[1:]
+    for index, (mpm_pos, fem_pos) in enumerate(deformables_pos):
+        deformable_trajectory.seek(index)
+        assert_equal(replay_mpm_cube.get_particles_pos(), mpm_pos)
+        assert_equal(replay_fem_cube.get_verts_pos(), fem_pos)
 
 
 @pytest.mark.precision("32")
