@@ -7,7 +7,7 @@ import torch
 import genesis as gs
 from genesis.utils import set_random_seed
 from genesis.utils.geom import R_to_quat
-from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
+from genesis.utils.misc import qd_to_numpy, qd_to_torch, qd_zero_grad, tensor_to_array
 
 from ..utils.assertions import assert_allclose
 
@@ -260,6 +260,147 @@ def test_contact_per_step_force_grad_matches_fd(
         assert_allclose(
             ground_pos.grad[2], fd, rtol=fd_ground_rtol, atol=fd_atol, err_msg="ground height grad mismatch"
         )
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.debug(False)
+def test_contact_force_transpose_matches_fd():
+    # The per-step FD cases above perturb the control forces, under which the contact normals barely move: they
+    # exercise the row-force distribution of the net-contact-force transpose but not its contact-frame chain, the
+    # term the forward gains through the frame directions d1, d2 = qd_orthogonals(normal) of every row. This test
+    # perturbs the row forces and the contact normals directly and checks both transposes against the engine's own
+    # force assembly, re-run per perturbation through kernel_resolve_post with the solve skipped, so the row forces
+    # stay frozen while the frame moves. The integration with the solve and the rest of the backward pass remains
+    # with the per-step cases.
+    # Engine modules resolve gs dtypes at import time, which requires gs.init: import after initialization
+    from genesis.engine.solvers.rigid.constraint.backward import (
+        kernel_load_dL_defc_force_from_contact_force,
+        kernel_load_dL_dnormal_from_contact_force,
+    )
+    from genesis.engine.solvers.rigid.constraint.solver import kernel_resolve_post
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            substeps=2,
+            requires_grad=True,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            constraint_timeconst=0.02,
+            impratio=2.0,
+        ),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane(), vis_mode="collision")
+    # A fixed box with a tilted top face and a sphere pressed into it: the contact normal follows the face, whose
+    # y component exceeds 0.5 and so exercises the second branch of qd_orthogonals.
+    scene.add_entity(
+        gs.morphs.Box(
+            size=(0.4, 0.4, 0.4),
+            pos=(0.0, 0.0, 0.25),
+            euler=(1.05, 0.0, 0.0),
+            fixed=True,
+        ),
+        vis_mode="collision",
+    )
+    scene.add_entity(
+        gs.morphs.Sphere(
+            radius=0.1,
+            pos=(0.0, -0.25, 0.395),
+        ),
+        vis_mode="collision",
+    )
+    # A second sphere pressed into the plane, whose vertical contact normal exercises the first branch.
+    scene.add_entity(
+        gs.morphs.Sphere(
+            radius=0.1,
+            pos=(0.5, 0.5, 0.09),
+        ),
+        vis_mode="collision",
+    )
+    scene.build(n_envs=0)
+    scene.step()
+
+    rigid_solver = scene.rigid_solver
+    dyn_state = rigid_solver.dyn_state
+    collider_state = rigid_solver.collider.collider_state
+    constraint_state = rigid_solver.constraint_solver.constraint_state
+
+    n_contacts = int(qd_to_numpy(collider_state.n_contacts)[0])
+    n_first_contact = int(qd_to_numpy(collider_state.n_contacts_hibernated)[0])
+    assert n_contacts > n_first_contact, "setup error: no awake contact"
+    sort_idx = qd_to_numpy(collider_state.contact_sort_idx)[:, 0]
+    awake_normals = qd_to_numpy(collider_state.contact_data.normal)[sort_idx[n_first_contact:n_contacts], 0, :]
+    # Both branches of qd_orthogonals must be live, or the frame chain is checked on one branch only.
+    on_branch_b = np.abs(awake_normals[:, 1]) >= 0.5
+    assert (~on_branch_b).any() and on_branch_b.any(), f"setup error: single qd_orthogonals branch {awake_normals}"
+
+    # The adjoint differentiates the live rows and contacts alone, so the perturbations stay on them.
+    rows_per_contact = int(rigid_solver.rigid_config.rows_per_contact)
+    const_start = int(qd_to_numpy(constraint_state.n_constraints_equality)[0]) + int(
+        qd_to_numpy(constraint_state.n_constraints_frictionloss)[0]
+    )
+    init_efc = qd_to_numpy(constraint_state.efc_force, copy=True)
+    init_normal = qd_to_numpy(collider_state.contact_data.normal, copy=True)
+    efc_mask = np.zeros(init_efc.shape, dtype=bool)
+    normal_mask = np.zeros(init_normal.shape, dtype=bool)
+    for i_c in range(n_first_contact, n_contacts):
+        row_start = const_start + (i_c - n_first_contact) * rows_per_contact
+        efc_mask[row_start : row_start + rows_per_contact, 0] = True
+        normal_mask[sort_idx[i_c], 0, :] = True
+
+    seed = np.random.randn(*qd_to_numpy(dyn_state.links.contact_force, copy=True).shape)
+    seed_t = torch.from_numpy(seed).to(gs.device)
+    qd_zero_grad(collider_state.contact_data.normal)
+    qd_zero_grad(constraint_state.efc_force)
+    dyn_state.links.contact_force.grad.from_numpy(seed)
+    kernel_load_dL_defc_force_from_contact_force(dyn_state, collider_state, constraint_state, rigid_solver.rigid_config)
+    kernel_load_dL_dnormal_from_contact_force(dyn_state, collider_state, constraint_state, rigid_solver.rigid_config)
+    dL_defc = qd_to_numpy(constraint_state.efc_force.grad, copy=True)
+    dL_dnormal = qd_to_numpy(collider_state.contact_data.normal.grad, copy=True)
+
+    def loss_at(efc, normal):
+        constraint_state.efc_force.from_numpy(efc)
+        collider_state.contact_data.normal.from_numpy(normal)
+        kernel_resolve_post(
+            dyn_state,
+            collider_state,
+            constraint_state,
+            rigid_solver.dyn_info,
+            rigid_solver.rigid_info,
+            rigid_solver.rigid_config,
+            noslip=False,
+            errno=rigid_solver._errno,
+        )
+        contact_force = qd_to_torch(dyn_state.links.contact_force, copy=True)
+        return float((seed_t * contact_force).sum())
+
+    fd_eps = 1e-3
+    trials = 100
+    set_random_seed(0)
+    error = 0.0
+    for _ in range(trials):
+        rand_defc = np.random.randn(*init_efc.shape) * efc_mask
+        rand_defc /= max(np.linalg.norm(rand_defc), gs.EPS)
+        dL = (rand_defc * dL_defc).sum()
+        dL_fd = (
+            loss_at(init_efc + rand_defc * fd_eps, init_normal) - loss_at(init_efc - rand_defc * fd_eps, init_normal)
+        ) / (2 * fd_eps)
+        error += abs(dL - dL_fd) / max(abs(dL), abs(dL_fd), gs.EPS)
+    assert_allclose(error / trials, 0.0, atol=1e-4, err_msg="row-force transpose mismatch")
+    error = 0.0
+    for _ in range(trials):
+        rand_dnormal = np.random.randn(*init_normal.shape) * normal_mask
+        rand_dnormal /= max(np.linalg.norm(rand_dnormal), gs.EPS)
+        dL = (rand_dnormal * dL_dnormal).sum()
+        dL_fd = (
+            loss_at(init_efc, init_normal + rand_dnormal * fd_eps)
+            - loss_at(init_efc, init_normal - rand_dnormal * fd_eps)
+        ) / (2 * fd_eps)
+        error += abs(dL - dL_fd) / max(abs(dL), abs(dL_fd), gs.EPS)
+    assert_allclose(error / trials, 0.0, atol=1e-4, err_msg="contact-frame chain mismatch")
+    constraint_state.efc_force.from_numpy(init_efc)
+    collider_state.contact_data.normal.from_numpy(init_normal)
 
 
 @pytest.mark.required

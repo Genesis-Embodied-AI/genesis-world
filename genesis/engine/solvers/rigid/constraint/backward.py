@@ -251,8 +251,8 @@ def kernel_load_dL_defc_force_from_contact_force(
     contact pair (see func_add_contacts_force_to_links). The transpose gathers the adjoint of every awake contact
     from the links it pairs and distributes it over its rows, adding to efc_force.grad, which the adjoint solve
     folds into the acceleration seed (see kernel_solve_adjoint_u), consumes in the row gradients, and clears
-    (see kernel_compute_gradients). contact_force.grad is cleared once consumed: each substep overwrites the
-    contact forces, so a read between two steps observed the last substep's write, whose reverse runs first.
+    (see kernel_compute_gradients). The same gathered adjoint feeds the contact-frame chain of
+    kernel_load_dL_dnormal_from_contact_force, which zeroes the seed once both consumers ran.
     """
     qd.loop_config(
         name="kernel_load_dL_defc_force_from_contact_force",
@@ -302,6 +302,111 @@ def kernel_load_dL_defc_force_from_contact_force(
                         constraint_state.efc_force.grad[i_row + i_dir, i_b] = constraint_state.efc_force.grad[
                             i_row + i_dir, i_b
                         ] - normal.dot(dL_dforce)
+
+
+@qd.kernel(fastcache=True)
+def kernel_load_dL_dnormal_from_contact_force(
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    rigid_config: qd.template(),
+):
+    """Transpose the adjoint of the net contact force into the gradient of the contact normal.
+
+    Besides its rows, the forward contact force depends on the contact normal through the frame directions
+    d1, d2 = qd_orthogonals(normal) of every row (see func_contact_constraint_force). This reverse gathers the same
+    adjoint as kernel_load_dL_defc_force_from_contact_force, weights it with the solved row forces, and adds the
+    frame chain to contact_data.normal.grad, joining the direct gradient the reverse of the constraint-row assembly
+    wrote (see kernel_manual_add_collision_constraints_bw), before collider.backward_narrowphase consumes the
+    buffer. It reuses the forward intermediates and the reverse of qd_orthogonals of that kernel. contact_force.grad
+    is zeroed on the way out: each substep overwrites the contact forces, so a read between two steps observed the
+    last substep's write, whose reverse runs first.
+    """
+    qd.loop_config(
+        name="kernel_load_dL_dnormal_from_contact_force",
+        serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL),
+    )
+    for i_c, i_b in qd.ndrange(
+        *collider_state.contact_sort_idx.shape, axes=qd.static(eoa(collider_state.contact_data.normal))
+    ):
+        n_first_contact = collider_state.n_contacts_hibernated[i_b]
+        if i_c >= n_first_contact and i_c < collider_state.n_contacts[i_b]:
+            i_col = collider_state.contact_sort_idx[i_c, i_b]
+            i_la = collider_state.contact_data.link_a[i_col, i_b]
+            i_lb = collider_state.contact_data.link_b[i_col, i_b]
+            dL_dforce = -dyn_state.links.contact_force.grad[i_la, i_b] + dyn_state.links.contact_force.grad[i_lb, i_b]
+
+            normal = collider_state.contact_data.normal[i_col, i_b]
+            friction = collider_state.contact_data.friction[i_col, i_b]
+
+            # --- forward intermediates of qd_orthogonals(normal) ---
+            #   b_raw branches on |normal[1]| < 0.5; b = normalize(b_raw)
+            #   d1 = b x normal, d2 = b
+            n0, n1, n2 = normal[0], normal[1], normal[2]
+            is_branch_a = qd.abs(n1) < 0.5
+            b_raw = gs.qd_vec3(0.0, 0.0, 0.0)
+            if is_branch_a:
+                b_raw = gs.qd_vec3(-n0 * n1, 1.0 - n1 * n1, -n2 * n1)
+            else:
+                b_raw = gs.qd_vec3(-n0 * n2, -n1 * n2, 1.0 - n2 * n2)
+            b_raw_norm = b_raw.norm()
+            b = b_raw / b_raw_norm
+            d1 = b.cross(normal)
+            d2 = b
+
+            # Accumulators of the frame chain of this contact.
+            g_normal = gs.qd_vec3(0.0, 0.0, 0.0)
+            g_d1 = gs.qd_vec3(0.0, 0.0, 0.0)
+            g_d2 = gs.qd_vec3(0.0, 0.0, 0.0)
+
+            rows_per_contact = qd.static(rigid_config.rows_per_contact)
+            const_start = (
+                constraint_state.n_constraints_equality[i_b] + constraint_state.n_constraints_frictionloss[i_b]
+            )
+            i_row = (i_c - n_first_contact) * rows_per_contact + const_start
+            if qd.static(rigid_config.enable_elliptic_friction):
+                # f_c = -normal * efc_force[i_row] + d1 * efc_force[i_row + 1] + d2 * efc_force[i_row + 2], the spin
+                # and rolling rows carry torque only (see func_contact_constraint_force).
+                g_normal += -constraint_state.efc_force[i_row, i_b] * dL_dforce
+                g_d1 += constraint_state.efc_force[i_row + 1, i_b] * dL_dforce
+                g_d2 += constraint_state.efc_force[i_row + 2, i_b] * dL_dforce
+            else:
+                for i_dir in qd.static(range(4)):
+                    s_i = 2.0 * (i_dir % 2) - 1.0
+                    # n = d * friction - normal with d = s_i * (d1 if i_dir < 2 else d2)
+                    efc_row = constraint_state.efc_force[i_row + i_dir, i_b]
+                    g_normal += -efc_row * dL_dforce
+                    g_d = efc_row * friction * dL_dforce
+                    if i_dir < 2:
+                        g_d1 += s_i * g_d
+                    else:
+                        g_d2 += s_i * g_d
+                # The torsional and rolling rows share the normal opposition of the linear part.
+                if qd.static(rigid_config.enable_torsional_friction):
+                    for i_dir in qd.static(range(4, rows_per_contact)):
+                        g_normal += -constraint_state.efc_force[i_row + i_dir, i_b] * dL_dforce
+
+            # Reverse qd_orthogonals: d1 = b x normal, d2 = b, b = normalize(b_raw(normal)).
+            dL_db = g_d2 + normal.cross(g_d1)
+            g_normal += g_d1.cross(b)
+            # b = b_raw / |b_raw|
+            dL_db_raw = (dL_db - dL_db.dot(b) * b) / b_raw_norm
+            # b_raw(normal) branch Jacobian
+            if is_branch_a:
+                # b_raw = (-n0 n1, 1 - n1^2, -n2 n1)
+                g_normal[0] += dL_db_raw[0] * (-n1)
+                g_normal[1] += dL_db_raw[0] * (-n0) + dL_db_raw[1] * (-2.0 * n1) + dL_db_raw[2] * (-n2)
+                g_normal[2] += dL_db_raw[2] * (-n1)
+            else:
+                # b_raw = (-n0 n2, -n1 n2, 1 - n2^2)
+                g_normal[0] += dL_db_raw[0] * (-n2)
+                g_normal[1] += dL_db_raw[1] * (-n2)
+                g_normal[2] += dL_db_raw[0] * (-n0) + dL_db_raw[1] * (-n1) + dL_db_raw[2] * (-2.0 * n2)
+
+            for j in qd.static(range(3)):
+                collider_state.contact_data.normal.grad[i_col, i_b][j] = (
+                    collider_state.contact_data.normal.grad[i_col, i_b][j] + g_normal[j]
+                )
 
     qd.loop_config(
         name="kernel_clear_contact_force_grad",

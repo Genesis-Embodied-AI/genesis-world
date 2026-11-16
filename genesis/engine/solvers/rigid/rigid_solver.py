@@ -124,6 +124,7 @@ from .collider.collider import Collider
 from .constraint import solver_breakdown
 from .constraint.backward import (
     kernel_accumulate_constraint_solver_grads,
+    kernel_load_dL_dnormal_from_contact_force,
     kernel_load_dL_dqacc_from_acc_grad,
     kernel_manual_add_collision_constraints_bw,
     kernel_manual_add_equality_constraints_bw,
@@ -1528,6 +1529,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 constraint_state,
                 self.dyn_info,
                 self.rigid_info,
+                self.rigid_config,
+            )
+            # The contact-force adjoint joins the contact normal's gradient after the assembly reverse assigned it,
+            # before the narrowphase reverse consumes the buffer (see kernel_load_dL_dnormal_from_contact_force).
+            kernel_load_dL_dnormal_from_contact_force(
+                self.dyn_state,
+                collider_state,
+                constraint_state,
                 self.rigid_config,
             )
             self.collider.backward_narrowphase()
