@@ -302,20 +302,19 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
 
     monkeypatch.setattr("genesis.ext.pyrender.viewer.Viewer._get_save_filename", get_save_filename)
 
-    # Record losslessly, so that the decoded video holds the very frames the viewer handed over, whatever the encoder.
-    # The encoding of a frame blocks until released, which must not hold up the simulation.
+    # Encoding is lossy, so the frames handed to the encoder are intercepted to compare them exactly. The encoding of a
+    # frame blocks until released, which must not hold up the simulation.
     is_encoding, is_encoder_released = threading.Event(), threading.Event()
+    frames_encoded = []
 
     class BlockingVideoEncoder(VideoEncoder):
         def write(self, frame):
             is_encoding.set()
             is_encoder_released.wait()
+            frames_encoded.append(frame.copy())
             super().write(frame)
 
-    monkeypatch.setattr(
-        "genesis.ext.pyrender.viewer.VideoEncoder",
-        functools.partial(BlockingVideoEncoder, codec="libx264rgb", codec_options={"qp": "0"}, pix_fmt="rgb24"),
-    )
+    monkeypatch.setattr("genesis.ext.pyrender.viewer.VideoEncoder", BlockingVideoEncoder)
 
     # Mock 'on_key_release' to determine whether requests have been processed
     n_key_releases = 0
@@ -390,8 +389,7 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
     pyrender_viewer.dispatch_event("on_key_release", Key.R, 0)
     wait_for_viewer_events(pyrender_viewer, lambda: n_key_releases == 3)
     with av.open(VIDEO_FILENAME) as container:
-        frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)]
-    assert len(frames) == 2
+        assert sum(1 for _ in container.decode(video=0)) == len(frames_encoded) == 2
 
     # The frames of the links show once toggled on, and leave once toggled off
     rgbs = []
@@ -421,7 +419,7 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
     # Make sure that the result is valid
     with open(IMAGE_FILENAME, "rb") as f:
         assert f.read() == png_snapshot
-    for frame in frames:
+    for frame in frames_encoded:
         assert rgb_array_to_png_bytes(frame) == png_snapshot
 
 
