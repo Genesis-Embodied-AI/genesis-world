@@ -19,6 +19,7 @@ RECORDING_DEFAULT_FPS = 60
 class Camera(BuildableMixin, RBC):
     """
     A camera which can be used to render RGB, depth, and segmentation images.
+
     Supports either rasterizer or raytracer for rendering, specified by `scene.renderer`.
 
     Parameters
@@ -62,11 +63,11 @@ class Camera(BuildableMixin, RBC):
     env_idx : int, optional
         The index of the environment to track the camera.
     debug : bool, optional
-        Whether to use the debug camera. It enables to create cameras that can used to monitor / debug the
-        simulation without being part of the "sensors". Their output is rendered by the usual simple Rasterizer
-        systematically, no matter if BatchRayTracer is enabled. This way, it is possible to record the
-        simulation with arbitrary resolution and camera pose, without interfering with what robots can perceive
-        from their environment. Defaults to False.
+        Whether the camera is a debug camera, which draws what the interactive viewer draws without its interaction:
+        the markers, and each entity in its debug representation while the viewer shows it (see ``VisOptions.debug``).
+        The Rasterizer renders it whatever the renderer of the scene, so that it records the simulation at any
+        resolution and from any pose without interfering with what robots perceive from their environment. Defaults to
+        False.
     """
 
     def __init__(
@@ -991,8 +992,8 @@ class Camera(BuildableMixin, RBC):
         return self._env_idx
 
     @property
-    def debug(self):
-        """Whether the camera is a debug camera."""
+    def debug(self) -> bool:
+        """Whether the camera is a debug camera, which draws what the interactive viewer draws."""
         return self._debug
 
     @property

@@ -12,6 +12,7 @@ import igl
 import Imath
 import numba as nb
 import OpenEXR
+import skimage
 import tetgen
 import trimesh
 from PIL import Image
@@ -1649,3 +1650,27 @@ def check_exr_compression(exr_path):
 
     exr_file.close()
     return exr_path
+
+
+def sdf_grid_to_trimesh(sdf_val: np.ndarray, T_mesh_to_sdf: np.ndarray) -> trimesh.Trimesh:
+    """Return the zero level set of a signed distance field (SDF) grid, in the frame of its mesh.
+
+    A grid positive everywhere holds no surface, which gives an empty mesh.
+
+    Parameters
+    ----------
+    sdf_val : np.ndarray
+        The value of the field at each node of the grid.
+    T_mesh_to_sdf : np.ndarray
+        The transform mapping the frame of the mesh to the indices of the nodes.
+    """
+    if sdf_val.min() >= 0:
+        gs.logger.warning("SDF is positive everywhere. Returning empty mesh.")
+        return trimesh.Trimesh(vertices=[], faces=[])
+    vertices, faces, _, _ = skimage.measure.marching_cubes(sdf_val, level=0)
+    vertices = gu.transform_by_T(vertices, np.linalg.inv(T_mesh_to_sdf))
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    mesh.visual = trimesh.visual.ColorVisuals(
+        vertex_colors=np.tile(np.array([[1.0, 1.0, 0.6, 1.0]]), [len(vertices), 1])
+    )
+    return mesh

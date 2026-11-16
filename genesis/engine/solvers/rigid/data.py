@@ -7,7 +7,7 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.solvers.base_solver import VFACES, VVERTS, ErrorCode
+from genesis.engine.solvers.base_solver import ErrorCode
 from genesis.utils.data import ENVS, Config, Data, DataKind, Size, field, is_opted_in
 from genesis.utils.simt import ExactSums
 
@@ -160,8 +160,6 @@ FACES = Size("faces")
 EDGES = Size("edges")
 FREE_VERTS = Size("free_verts")
 FIXED_VERTS = Size("fixed_verts")
-CUSTOM_VVERTS = Size("custom_vverts")
-VGEOMS = Size("vgeoms")
 CANDIDATE_EQUALITIES = Size("candidate_equalities")
 DOFS_INFO_ENVS = Size("dofs_info_envs")
 LINKS_INFO_ENVS = Size("links_info_envs")
@@ -245,11 +243,9 @@ class LinksInfo(Data, kind=DataKind.INFO, shape=(LINKS, LINKS_INFO_ENVS)):
     inertial_i: qd.Tensor = field((float, (3, 3)))
     inertial_mass: qd.Tensor = field(float)
     entity_idx: qd.Tensor = field(int)
-    # The geoms and visual geoms of each link, which heterogeneous environments vary
+    # The geoms of each link, which heterogeneous environments vary
     geom_start: qd.Tensor = field(int)
     geom_end: qd.Tensor = field(int)
-    vgeom_start: qd.Tensor = field(int)
-    vgeom_end: qd.Tensor = field(int)
 
 
 class LinksState(Data, kind=DataKind.DERIVED, shape=(LINKS, ENVS)):
@@ -406,55 +402,6 @@ class VertsState(Data, kind=DataKind.DERIVED):
     pos: qd.Tensor = field((float, 3))
 
 
-class VVertsInfo(Data, kind=DataKind.CONSTANT, shape=(VVERTS,)):
-    """The vertices of the visual meshes of the rigid geoms, in the frame of their visual geom."""
-
-    init_pos: qd.Tensor = field((float, 3))
-    init_vnormal: qd.Tensor = field((float, 3))
-    vgeom_idx: qd.Tensor = field(int)
-    vverts_state_idx: qd.Tensor = field(int)
-
-
-class VVertsState(Data, kind=DataKind.STATE, shape=(CUSTOM_VVERTS, ENVS)):
-    """The world positions of the visual vertices of the entities opted into custom visual vertices.
-
-    They are state, since 'set_vverts' writes them from one step to the next.
-    """
-
-    pos: qd.Tensor = field(
-        (float, 3),
-        oversize_hint="Consider opting fewer kinematic entities into 'enable_custom_vverts=True', or reducing "
-        "'n_envs'.",
-    )
-
-
-class VFacesInfo(Data, kind=DataKind.CONSTANT, shape=(VFACES,)):
-    """The triangles of the visual meshes of the rigid geoms."""
-
-    vverts_idx: qd.Tensor = field((int, 3))
-    vgeom_idx: qd.Tensor = field(int)
-
-
-class VGeomsInfo(Data, kind=DataKind.CONSTANT, shape=(VGEOMS,)):
-    """The model parameters of each visual geom of the rigid solver: its pose on its link, mesh ranges and color."""
-
-    pos: qd.Tensor = field((float, 3))
-    quat: qd.Tensor = field((float, 4))
-    link_idx: qd.Tensor = field(int)
-    vvert_start: qd.Tensor = field(int)
-    vvert_end: qd.Tensor = field(int)
-    vface_start: qd.Tensor = field(int)
-    vface_end: qd.Tensor = field(int)
-    color: qd.Tensor = field((float, 4))
-
-
-class VGeomsState(Data, kind=DataKind.DERIVED, shape=(VGEOMS, ENVS)):
-    """The world pose of each visual geom of the rigid solver in each environment."""
-
-    pos: qd.Tensor = field((float, 3))
-    quat: qd.Tensor = field((float, 4))
-
-
 class EqualitiesInfo(Data, kind=DataKind.INFO, shape=(CANDIDATE_EQUALITIES, ENVS)):
     """The equality constraints of each environment: type, bound objects, data and solver parameters."""
 
@@ -497,9 +444,6 @@ class DynInfo(Data):
     verts: VertsInfo = field(labels=DYNAMICS)
     faces: FacesInfo = field(labels=DYNAMICS)
     edges: EdgesInfo = field(labels=DYNAMICS)
-    vverts: VVertsInfo
-    vfaces: VFacesInfo
-    vgeoms: VGeomsInfo
     equalities: EqualitiesInfo = field(labels=DYNAMICS)
 
 
@@ -513,8 +457,6 @@ class DynState(Data):
     geoms: GeomsState = field(labels=DYNAMICS)
     free_verts: VertsState = field(shape=(FREE_VERTS, ENVS), labels=DYNAMICS)
     fixed_verts: VertsState = field(shape=(FIXED_VERTS,), labels=DYNAMICS)
-    vverts: VVertsState
-    vgeoms: VGeomsState
 
 
 class RigidConfig(Config):
@@ -665,10 +607,6 @@ class RigidData(Data):
             roots=solver.n_roots_,
             trees=solver.n_trees_,
             entities=solver.n_entities_,
-            vverts=solver.n_vverts_,
-            custom_vverts=solver.n_custom_vverts_,
-            vfaces=solver.n_vfaces_,
-            vgeoms=solver.n_vgeoms_,
             dofs_info_envs=solver.n_envs_ if options.batch_dofs_info else (),
             links_info_envs=solver.n_envs_ if options.batch_links_info else (),
             joints_info_envs=solver.n_envs_ if options.batch_joints_info else (),

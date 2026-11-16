@@ -11,7 +11,7 @@ import genesis as gs
 from genesis.ext.pyrender.overlay import ImGuiOverlayPlugin
 
 from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_IMGUI_BUNDLE, is_imgui_bundle_supported
-from ..utils.assertions import assert_allclose, assert_pixel_match, rgb_array_to_png_bytes
+from ..utils.assertions import assert_allclose, assert_equal, assert_pixel_match, rgb_array_to_png_bytes
 
 
 def _apply_deterministic_imgui_overrides(monkeypatch):
@@ -389,9 +389,46 @@ def test_scene_rebuild():
     # A checkpoint restore compares against the cached digest, so the cache must follow the edit
     assert scene._desc_digest != digest_before
 
-    # Switching the visual mode of an entity gives its geoms fresh nodes, which must keep following the simulation:
-    # the arm sags under gravity once unpaused, so the frames before and after must differ
-    interactive.set_entity_vis_mode(scene.get_entity("panda"), "collision")
+    # The runtime controls of the panel change what the window draws, and back: the frames of the links and their size,
+    # and the representation of the robot alone.
+    rigid_context = scene.rigid_solver.render_context
+    robot = scene.get_entity("panda")
+    rgbs = []
+    for method, args in (
+        (rigid_context.set_link_frames, (False,)),
+        (rigid_context.set_link_frames, (True,)),
+        (rigid_context.set_link_frame_size, (0.4,)),
+        (rigid_context.set_debug, (robot, True)),
+        (rigid_context.set_link_frames, (False,)),
+        (rigid_context.set_debug, (robot, None)),
+    ):
+        method(*args)
+        rgb, *_ = window_before.render_offscreen(
+            window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
+        )
+        rgbs.append(rgb)
+    rgb_looks, rgb_frames, rgb_frames_large, rgb_robot_debug, _, rgb_restored = rgbs
+    is_frame = (rgb_frames != rgb_looks).any(axis=-1)
+    assert is_frame.any() and (rgb_frames_large != rgb_looks).any(axis=-1).sum() > is_frame.sum()
+    assert (rgb_robot_debug != rgb_frames_large).any()
+    assert_equal(rgb_restored, rgb_looks)
+
+    # The frames of the links drawn at runtime keep being drawn at their size once the scene is rebuilt
+    scene.visualizer.set_link_frames(True)
+    rgb_frames_before, *_ = window_before.render_offscreen(
+        window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
+    )
+    interactive.rebuild(entities_kwargs=plugin._pending_entities_kwargs)
+    scene.step()
+    rgb_frames_after, *_ = window_before.render_offscreen(
+        window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
+    )
+    assert_pixel_match(rgb_frames_after, rgb_frames_before, err_msg="Rebuilt scene draws other link frames.")
+    rigid_context = scene.rigid_solver.render_context
+
+    # Switching the viewer to the debug representation gives the geoms fresh nodes, which must keep following the
+    # simulation: the arm sags under gravity once unpaused, so the frames before and after must differ.
+    interactive.set_debug_view(True)
     interactive.resume()
     rgb_collision_before, *_ = window_before.render_offscreen(
         window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
@@ -402,6 +439,17 @@ def test_scene_rebuild():
         window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
     )
     assert (rgb_collision_after != rgb_collision_before).any(axis=-1).mean() > 0.01
+
+    # The contacts of the cube resting on the ground show once asked for, the arrows of their force cyan
+    rigid_context.set_visualize_contact(scene.get_entity("cube"), True)
+    rgb_contacts, *_ = window_before.render_offscreen(
+        window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
+    )
+    arrow_pixel_counts = []
+    for rgb in (rgb_collision_after, rgb_contacts):
+        red, green, blue = np.moveaxis(rgb, -1, 0)
+        arrow_pixel_counts.append(((blue > 120) & (green > 120) & (red < 60)).sum())
+    assert arrow_pixel_counts[1] > arrow_pixel_counts[0]
 
 
 @pytest.mark.required

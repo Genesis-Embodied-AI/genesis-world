@@ -1,7 +1,8 @@
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 from pydantic import Field
 
+from genesis.constants import STRUCTURE
 from genesis.typing import NonNegativeFloat, PositiveFloat, ValidFloat
 
 from ..base import Material
@@ -34,6 +35,8 @@ class Base(Material["FEMEntity"]):
         IPC contact resistance/stiffness override for this material. ``None`` means
         use the IPC coupler global default (``IPCCouplerOptions.contact_resistance``).
     """
+
+    structure: ClassVar[STRUCTURE] = STRUCTURE.DEFORMABLE
 
     E: PositiveFloat = 1e6
     nu: Annotated[ValidFloat, Field(gt=-1.0, lt=0.5)] = 0.2

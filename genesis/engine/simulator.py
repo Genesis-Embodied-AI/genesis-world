@@ -28,6 +28,7 @@ from genesis.utils.warnings import warn_once
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .couplers.rigid_mpm_hybrid import RigidMPMHybrid
 from .entities import HybridEntity
+from .render_context import RenderContext
 from .sensors import SensorManager
 from .solvers import FEMSolver, KinematicSolver, MPMSolver, PBDSolver, RigidSolver, SPHSolver
 from .solvers.base_solver import (
@@ -163,6 +164,9 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
 
         # sensors
         self._sensor_manager = SensorManager(self)
+
+        # The visual data of the scene, to which the components of the scene add their scoped context as they build
+        self._render_context = RenderContext(options.vis.debug)
 
     def add_entity(
         self,
@@ -325,6 +329,9 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
             ]
 
         self._step_timer.add_phases("physics", "sensors")
+
+        # The sensors build after the render context, since some of them read it as they build
+        self._render_context.build(n_envs, self._active_solvers, self.sanitize_envs_idx)
         self._sensor_manager.build(n_envs)
 
         self._is_built = True
@@ -332,6 +339,7 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
     def destroy(self):
         self._is_built = False
         self._sensor_manager.destroy()
+        self._render_context.destroy()
         for solver in self._solvers:
             solver.destroy()
         self._coupler.destroy()
@@ -367,6 +375,8 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         else:
             self._steps[indices_to_mask(envs_idx)] = 0
         self._restart(envs_idx)
+        # The appearance the render context holds, such as the variant of DynamicVertices shown, goes back to its start
+        self._render_context.reset(self.sanitize_envs_idx(envs_idx))
 
     def _restart(self, envs_idx=None):
         """Restart the coupler, the autograd graph of the rollout and the sensors."""
@@ -385,6 +395,7 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
 
         # reset sensors state
         self._sensor_manager.reset(envs_idx=envs_idx)
+        self._render_context.invalidate()
 
     def data(self, kinds: frozenset[DataKind]) -> Iterator[DataItem]:
         """Yield every item of the requested kinds that the simulator and its active systems hold.
@@ -489,6 +500,8 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
                 # A step the graph does not record overwrites the state the last recorded operation returned
                 self._rollout_graph.mark_state_changed()
                 self._step()
+
+        self._render_context.advance()
 
         # The flags of the step are merged once, as it is over, which leaves the checks and the mask of the flagged envs
         # mere reads of them (see 'Solver.update_errno')
@@ -629,8 +642,8 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
     def sanitize_envs_idx(self, envs_idx: IndexType | None) -> torch.Tensor:
         """Return the indices of the given parallel environments as a tensor, all of them if None.
 
-        A selection by a slice, a range or an integer returns a view of the indices of all the environments. A scene
-        without parallel environments takes no selection.
+        A selection by a slice, a range, an integer or a list of contiguous indices returns a view of the indices of all
+        the environments. A scene without parallel environments takes no selection.
         """
         if envs_idx is None:
             return self._envs_idx
@@ -652,8 +665,24 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
             if envs_idx < 0:
                 envs_idx = envs_idx + self.n_envs
             return self._envs_idx[envs_idx : envs_idx + 1]
+        if isinstance(envs_idx, (list, tuple)) and envs_idx and not isinstance(envs_idx[0], bool):
+            # A contiguous run of indices given on the host, such as the environments a renderer draws, takes the view
+            # of a slice rather than a copy of the indices on the device. A list of booleans is a mask.
+            start, n_envs = envs_idx[0], len(envs_idx)
+            if (
+                isinstance(start, (int, np.integer))
+                and 0 <= start
+                and start + n_envs <= self.n_envs
+                and list(envs_idx) == list(range(start, start + n_envs))
+            ):
+                return self._envs_idx if n_envs == self.n_envs else self._envs_idx[start : start + n_envs]
 
         return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
+
+    @property
+    def render_context(self) -> RenderContext:
+        """The visual data of the scene, which the renderers and the ray casting on visual geoms read."""
+        return self._render_context
 
     @property
     def sensor_manager(self) -> SensorManager:

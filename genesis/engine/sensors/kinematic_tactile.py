@@ -8,6 +8,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
+from genesis.engine.render_context import Shape
 from genesis.engine.solvers.rigid.collider.data import ColliderState
 from genesis.engine.solvers.rigid.collider.utils import func_point_in_geom_aabb
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
@@ -20,7 +21,14 @@ from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_
 from genesis.utils.raycast_qd import CandidateGeoms
 from genesis.utils.sdf import SDFInfo
 
-from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
+from .base_sensor import (
+    RigidSensorMetadataMixin,
+    RigidSensorMixin,
+    SimpleSensor,
+    SimpleSensorMetadata,
+    func_sensor_link_motion,
+    func_sensor_link_pose,
+)
 from .contact_force import ContactFilterMetadataMixin, _func_link_is_filtered
 from .probe import ProbeSensorMetadataMixin, ProbeSensorMixin, func_noised_probe_radius, get_measured_bufs
 from .raycaster import RaycastContext
@@ -35,9 +43,7 @@ from .tactile_shared import (
 )
 
 if TYPE_CHECKING:
-    from genesis.ext.pyrender.mesh import Mesh
     from genesis.utils.ring_buffer import TensorRingBuffer
-    from genesis.vis.rasterizer_context import RasterizerContext
 
     from .sensor_manager import SensorManager
 
@@ -273,9 +279,10 @@ def _func_kinematic_spring_damper(
             contact_vel = dyn_state.links.cd_vel[contact_link, i_b] + dyn_state.links.cd_ang[contact_link, i_b].cross(
                 probe_pos - dyn_state.links.root_COM[contact_link, i_b]
             )
-            sensor_vel = dyn_state.links.cd_vel[sensor_link_idx, i_b] + dyn_state.links.cd_ang[
-                sensor_link_idx, i_b
-            ].cross(probe_pos - dyn_state.links.root_COM[sensor_link_idx, i_b])
+            sensor_cd_vel, sensor_cd_ang, _, _, sensor_root_com = func_sensor_link_motion(
+                sensor_link_idx, i_b, dyn_state.links
+            )
+            sensor_vel = sensor_cd_vel + sensor_cd_ang.cross(probe_pos - sensor_root_com)
             rel_vel_world = contact_vel - sensor_vel
             rel_vel_local = gu.qd_inv_transform_by_quat(rel_vel_world, link_quat)
 
@@ -283,7 +290,7 @@ def _func_kinematic_spring_damper(
             v_t_local = rel_vel_local - contact_normal_local * vn_dot
             force_local += contact_normal_local * (normal_damping * s * vn_dot) - shear_scalar * v_t_local
 
-            rel_ang_world = dyn_state.links.cd_ang[contact_link, i_b] - dyn_state.links.cd_ang[sensor_link_idx, i_b]
+            rel_ang_world = dyn_state.links.cd_ang[contact_link, i_b] - sensor_cd_ang
             omega_n = rel_ang_world.dot(contact_normal)
             torque_local = probe_pos_local.cross(force_local) - contact_normal_local * (twist_scalar * omega_n)
         else:
@@ -345,8 +352,7 @@ def _kernel_kinematic_taxel(
         )
 
         sensor_link_idx = links_idx[i_s]
-        link_pos = dyn_state.links.pos[sensor_link_idx, i_b]
-        link_quat = dyn_state.links.quat[sensor_link_idx, i_b]
+        link_pos, link_quat = func_sensor_link_pose(sensor_link_idx, i_b, dyn_state.links)
 
         probe_pos = link_pos + gu.qd_transform_by_quat(probe_pos_local, link_quat)
 
@@ -465,8 +471,7 @@ def _kernel_contact_depth_probe(
         )
 
         sensor_link_idx = links_idx[i_s]
-        link_pos = dyn_state.links.pos[sensor_link_idx, i_b]
-        link_quat = dyn_state.links.quat[sensor_link_idx, i_b]
+        link_pos, link_quat = func_sensor_link_pose(sensor_link_idx, i_b, dyn_state.links)
 
         probe_pos = link_pos + gu.qd_transform_by_quat(probe_pos_local, link_quat)
 
@@ -569,8 +574,7 @@ def _kernel_contact_depth_probe_bvh(
         )
 
         sensor_link_idx = links_idx[i_s]
-        link_pos = dyn_state.links.pos[sensor_link_idx, i_b]
-        link_quat = dyn_state.links.quat[sensor_link_idx, i_b]
+        link_pos, link_quat = func_sensor_link_pose(sensor_link_idx, i_b, dyn_state.links)
 
         probe_pos = link_pos + gu.qd_transform_by_quat(probe_pos_local, link_quat)
 
@@ -643,8 +647,7 @@ def _kernel_kinematic_taxel_bvh(
         )
 
         sensor_link_idx = links_idx[i_s]
-        link_pos = dyn_state.links.pos[sensor_link_idx, i_b]
-        link_quat = dyn_state.links.quat[sensor_link_idx, i_b]
+        link_pos, link_quat = func_sensor_link_pose(sensor_link_idx, i_b, dyn_state.links)
 
         probe_pos = link_pos + gu.qd_transform_by_quat(probe_pos_local, link_quat)
 
@@ -845,15 +848,8 @@ class ContactDepthProbeSensor(
             ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
         measured.copy_(measured_cols_b.T)
 
-    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
-        def mask(batch_envs_idx):
-            depth = self.read_ground_truth(batch_envs_idx)
-            if self._options.history_length > 0:
-                depth = depth.select(1 if self._manager.n_envs > 0 else 0, -1)
-            return depth >= gs.EPS
-
-        nodes, *_ = self._draw_debug_probes(context, envs_idx, self._tactile_color_groups_fn(mask))
-        return [(None, node, None) for node in nodes]
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
+        return self._update_probes_markers(markers, envs_idx, is_contact=self.read_ground_truth(envs_idx) >= gs.EPS)
 
 
 @dataclass
@@ -926,15 +922,8 @@ class ContactProbeSensor(
         prev_state = timeline.at(0, copy=False)
         return above_enter | (prev_state & above_exit)
 
-    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
-        def mask(batch_envs_idx):
-            contact = self.read_ground_truth(batch_envs_idx)
-            if self._options.history_length > 0:
-                contact = contact.select(1 if self._manager.n_envs > 0 else 0, -1)
-            return contact
-
-        nodes, *_ = self._draw_debug_probes(context, envs_idx, self._tactile_color_groups_fn(mask))
-        return [(None, node, None) for node in nodes]
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
+        return self._update_probes_markers(markers, envs_idx, self.read_ground_truth(envs_idx))
 
 
 class KinematicTaxelReturnType(NamedTuple):
@@ -1127,12 +1116,6 @@ class KinematicTaxelSensor(
             ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
         measured.copy_(measured_cols_b.T)
 
-    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
-        def mask(batch_envs_idx):
-            force = self.read_ground_truth(batch_envs_idx).force
-            if self._options.history_length > 0:
-                force = force.select(1 if self._manager.n_envs > 0 else 0, -1)
-            return torch.linalg.norm(force, dim=-1) >= gs.EPS
-
-        nodes, *_ = self._draw_debug_probes(context, envs_idx, self._tactile_color_groups_fn(mask))
-        return [(None, node, None) for node in nodes]
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
+        force = self.read_ground_truth(envs_idx).force
+        return self._update_probes_markers(markers, envs_idx, is_contact=torch.linalg.norm(force, dim=-1) >= gs.EPS)

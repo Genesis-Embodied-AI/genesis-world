@@ -1,9 +1,10 @@
-from typing import Any
+from typing import Any, ClassVar
 
 import quadrants as qd
 from pydantic import StrictBool
 
 import genesis as gs
+from genesis.constants import STRUCTURE
 
 from .base import Base
 
@@ -24,6 +25,8 @@ class Liquid(Base):
     viscous : bool, optional
         Whether the liquid is viscous. Simply sets mu to zero when non-viscous. Default is False.
     """
+
+    structure: ClassVar[STRUCTURE] = STRUCTURE.AMORPHOUS
 
     viscous: StrictBool = False
 

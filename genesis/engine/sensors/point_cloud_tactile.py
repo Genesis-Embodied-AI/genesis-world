@@ -1,6 +1,5 @@
 import dataclasses
 import math
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, NamedTuple
 
@@ -13,6 +12,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.bvh import func_aabb_intersects_aabb, func_bvh_traverse
+from genesis.engine.render_context import Points, Shape
 from genesis.engine.solvers.rigid.data import DynInfo, DynState
 from genesis.options.sensors import (
     ElastomerTaxel as ElastomerTaxelSensorOptions,
@@ -24,7 +24,14 @@ from genesis.utils.point_cloud import sample_mesh_point_cloud
 from genesis.utils.raycast_qd import CandidateGeoms, ClosestQuery, func_sphere_intersects_aabb
 from genesis.utils.sdf import SDFInfo
 
-from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
+from .base_sensor import (
+    RigidSensorMetadataMixin,
+    RigidSensorMixin,
+    SimpleSensor,
+    SimpleSensorMetadata,
+    func_sensor_link_motion,
+    func_sensor_link_pose,
+)
 from .probe import (
     ProbeSensorMetadataMixin,
     ProbeSensorMixin,
@@ -57,10 +64,8 @@ from .tactile_shared import (
 _ELASTOMER_RAYCAST_QUERY_DIST = 0.1
 
 if TYPE_CHECKING:
-    from genesis.ext.pyrender.mesh import Mesh
     from genesis.options.sensors import SensorOptions
     from genesis.utils.ring_buffer import TensorRingBuffer
-    from genesis.vis.rasterizer_context import RasterizerContext
 
     from .sensor_manager import SensorManager
 
@@ -399,8 +404,7 @@ def _kernel_point_cloud_proximity_taxel_bvh(
     for i_p, i_b in qd.ndrange(total_n_probes, n_batches):
         i_s = probe_sensor_idx[i_p]
         sensor_link_idx = links_idx[i_s]
-        s_pos = dyn_state.links.pos[sensor_link_idx, i_b]
-        s_quat = dyn_state.links.quat[sensor_link_idx, i_b]
+        s_pos, s_quat = func_sensor_link_pose(sensor_link_idx, i_b, dyn_state.links)
 
         k_stiff = stiffness[i_s]
         k_shear = shear_coupling[i_s]
@@ -410,9 +414,7 @@ def _kernel_point_cloud_proximity_taxel_bvh(
         cache_start = sensor_cache_start[i_s]
         _i_p = i_p - sensor_probe_start[i_s]
 
-        s_vel = dyn_state.links.cd_vel[sensor_link_idx, i_b]
-        s_ang = dyn_state.links.cd_ang[sensor_link_idx, i_b]
-        s_com = dyn_state.links.root_COM[sensor_link_idx, i_b]
+        s_vel, s_ang, _, _, s_com = func_sensor_link_motion(sensor_link_idx, i_b, dyn_state.links)
 
         probe_local = func_vec3_at(i_p, probe_positions_local)
         probe_world = s_pos + gu.qd_transform_by_quat(probe_local, s_quat)
@@ -564,13 +566,16 @@ class PointCloudTactileSensorMixin[PointCloudTactileSensorMetadataMixinT: PointC
 ):
     def __init__(self, options: "SensorOptions", idx: int, shared_context, shared_metadata, manager: "SensorManager"):
         super().__init__(options, idx, shared_context, shared_metadata, manager)
-        self._probe_start_idx = -1
-        self._debug_pc_chunks: list[tuple[int, torch.Tensor, torch.Tensor]] | None = None
+        # The tracked links the points of the sensor are on, the rank of the link of each point among them, the points
+        # in the frame of their link, and whether each environment holds each point.
+        self._debug_pc_links_idx: torch.Tensor | None = None
+        self._debug_pc_links_rank: torch.Tensor | None = None
+        self._debug_pc_pos_local: torch.Tensor | None = None
+        self._debug_pc_is_active: torch.Tensor | None = None
 
     @gs.assert_unbuilt
     def build(self):
         super().build()
-        self._probe_start_idx = int(self._shared_metadata.sensor_probe_start[self._idx].item())
 
         pc_start_row = self._shared_metadata.pc_pos_link.shape[0]
         idx_cat, pos_cat, nrm_cat, active_cat = _sample_track_links_point_cloud_tensors(
@@ -579,14 +584,6 @@ class PointCloudTactileSensorMixin[PointCloudTactileSensorMetadataMixinT: PointC
             self._options.n_sample_points,
             self._options.use_visual_mesh,
         )
-        if self._options.draw_debug:
-            self._debug_pc_chunks = []
-            for lid in torch.unique(idx_cat):
-                mask = idx_cat == lid
-                self._debug_pc_chunks.append((int(lid.item()), pos_cat[mask].clone(), active_cat[mask].clone()))
-        else:
-            self._debug_pc_chunks = None
-
         self._shared_metadata.pc_link_idx = concat_with_tensor(
             self._shared_metadata.pc_link_idx, idx_cat, expand=(idx_cat.shape[0],)
         )
@@ -616,53 +613,37 @@ class PointCloudTactileSensorMixin[PointCloudTactileSensorMetadataMixinT: PointC
             points.is_active.from_numpy(tensor_to_array(self._shared_metadata.pc_active_envs_mask))
             self._shared_metadata.points = points
 
-    def _draw_debug_probes(
-        self,
-        context: "RasterizerContext",
-        rendered_envs_idx: list[int],
-        color_groups_fn: Callable[[list[int] | None], list[tuple]] | None = None,
-    ) -> tuple[list["Mesh"], list[int] | None, int, np.ndarray | None]:
-        nodes, envs_idx, n_debug_envs, env_offsets = super()._draw_debug_probes(
-            context, rendered_envs_idx, color_groups_fn
-        )
-
-        if self._debug_pc_chunks is None:
-            return nodes, envs_idx, n_debug_envs, env_offsets
-        world_chunks: list[np.ndarray] = []
-        for link_idx, pos_local, active_envs_mask in self._debug_pc_chunks:
-            track_link = self._shared_metadata.solver.links[link_idx]
-            if envs_idx is not None:
-                active_mask = tensor_to_array(active_envs_mask[:, envs_idx].T).astype(bool)
-                if not active_mask.any():
-                    continue
-                track_pos = track_link.get_pos(envs_idx, relative=False)[:, None, :]
-                track_quat = track_link.get_quat(envs_idx, relative=False)[:, None, :]
-                pc_world = gu.transform_by_trans_quat(pos_local[None, :, :], track_pos, track_quat)
-                pc_world = tensor_to_array(pc_world) + env_offsets[:, None, :]
-                world_chunks.append(pc_world[active_mask])
-            else:
-                active_mask = active_envs_mask[:, 0]
-                pos_active = pos_local[active_mask]
-                if pos_active.numel() == 0:
-                    continue
-                track_pos = track_link.get_pos(envs_idx, relative=False).reshape(3)
-                track_quat = track_link.get_quat(envs_idx, relative=False).reshape(4)
-                world_chunks.append(tensor_to_array(gu.transform_by_trans_quat(pos_active, track_pos, track_quat)))
-        if world_chunks:
-            nodes.append(
-                context.make_debug_spheres(
-                    poss=np.concatenate(world_chunks, axis=0),
-                    radius=float(self._options.debug_point_cloud_radius),
-                    color=self._options.debug_point_cloud_color,
-                )
+    def _update_probes_markers(
+        self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None, is_contact: torch.Tensor | None
+    ) -> tuple[Points, ...]:
+        # The points of the point cloud of the tracked links follow the markers of the probes
+        if markers:
+            pc_marker = markers[-1]
+        else:
+            pc_start = int(self._shared_metadata.sensor_pc_start[self._idx])
+            pc_slice = slice(pc_start, pc_start + int(self._shared_metadata.sensor_pc_n[self._idx]))
+            self._debug_pc_links_idx, self._debug_pc_links_rank = torch.unique(
+                self._shared_metadata.pc_link_idx[pc_slice], return_inverse=True
             )
-        return nodes, envs_idx, n_debug_envs, env_offsets
-
-    def _debug_probe_buffer_magnitudes(self, buffer: torch.Tensor, envs_idx: list[int] | None) -> np.ndarray:
-        values = buffer[self._probe_start_idx : self._probe_start_idx + self._n_probes]
-        if envs_idx is None:
-            return tensor_to_array(values[:, 0])
-        return tensor_to_array(values[:, envs_idx].T)
+            self._debug_pc_pos_local = self._shared_metadata.pc_pos_link[pc_slice].clone()
+            self._debug_pc_is_active = self._shared_metadata.pc_active_envs_mask[pc_slice].T.clone()
+            pc_marker = Points(
+                torch.zeros((*self._debug_pc_is_active.shape, 3), dtype=gs.tc_float, device=gs.device),
+                self._options.debug_point_cloud_radius,
+                self._options.debug_point_cloud_color,
+                is_active=torch.zeros_like(self._debug_pc_is_active),
+            )
+        solver = self._shared_metadata.solver
+        links_pos = solver.get_links_pos(self._debug_pc_links_idx, envs_idx)
+        links_quat = solver.get_links_quat(self._debug_pc_links_idx, envs_idx)
+        pc_pos, pc_is_active = pc_marker.pos, pc_marker.is_active
+        pc_pos[envs_idx] = gu.transform_by_trans_quat(
+            self._debug_pc_pos_local,
+            links_pos[..., self._debug_pc_links_rank, :],
+            links_quat[..., self._debug_pc_links_rank, :],
+        )
+        pc_is_active[envs_idx] = self._debug_pc_is_active[envs_idx]
+        return (*super()._update_probes_markers(markers[:-1], envs_idx, is_contact), pc_marker)
 
 
 class ProximityTaxelReturnType(NamedTuple):
@@ -795,18 +776,10 @@ class ProximityTaxelSensor(
             ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
         measured.copy_(measured_cols_b.T)
 
-    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
-        nodes, *_ = self._draw_debug_probes(
-            context,
-            envs_idx,
-            self._tactile_color_groups_fn(
-                lambda batch_envs_idx: (
-                    self._debug_probe_buffer_magnitudes(self._shared_metadata.taxel_signal_buf, batch_envs_idx)
-                    >= gs.EPS
-                )
-            ),
-        )
-        return [(None, node, None) for node in nodes]
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
+        probes_slice = slice(self._probe_start_idx, self._probe_start_idx + self._n_probes)
+        taxel_signal = self._shared_metadata.taxel_signal_buf[probes_slice, self._sanitize_envs_idx(envs_idx)]
+        return self._update_probes_markers(markers, envs_idx, is_contact=taxel_signal.T >= gs.EPS)
 
 
 @qd.func
@@ -2077,12 +2050,6 @@ class ElastomerTaxelSensor(
             ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
         measured.copy_(current_ground_truth_data_T.T)
 
-    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
-        def mask(batch_envs_idx):
-            disp = self.read_ground_truth(batch_envs_idx)
-            if self._options.history_length > 0:
-                disp = disp.select(1 if self._manager.n_envs > 0 else 0, -1)
-            return torch.linalg.norm(disp, dim=-1) >= gs.EPS
-
-        nodes, *_ = self._draw_debug_probes(context, envs_idx, self._tactile_color_groups_fn(mask))
-        return [(None, node, None) for node in nodes]
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
+        disp = self.read_ground_truth(envs_idx)
+        return self._update_probes_markers(markers, envs_idx, is_contact=torch.linalg.norm(disp, dim=-1) >= gs.EPS)

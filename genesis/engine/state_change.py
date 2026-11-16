@@ -13,40 +13,30 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import torch
 
 from genesis.engine.entities.base_entity import Entity
-from genesis.utils.misc import sanitize_index, tensor_to_array
+from genesis.utils.misc import tensor_to_array
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.base_solver import Solver
 
 
 class StateChange(enum.Enum):
-    """Category of solver scene-state mutation broadcast to subscribers (see `Solver.subscribe`).
+    """Category of scene-state mutation broadcast to subscribers (see `Solver.subscribe` and `RenderContext.subscribe`).
 
     Solver-agnostic: it names what kind of state changed, never an index space (links, dofs, particles, ...), which
     differs from one solver to the next. GEOMETRY is the kinematic configuration that places or deforms the world
     surface (link poses, qpos, vertices). DYNAMICS is the velocity state. MODEL is what every later step reads besides
     the state: the model parameters (mass, inertia, friction, gains, limits, gravity) and the constraints attached to
-    the state (particle and vertex constraints).
+    the state (particle and vertex constraints). VISUAL is the appearance alone, which the physics never reads, such as
+    the visual vertices of a visual geom: the render context reports it, never a solver.
     """
 
     GEOMETRY = enum.auto()
     DYNAMICS = enum.auto()
     MODEL = enum.auto()
-
-
-class MutatedLinks(enum.Enum):
-    """Which links a @mutates-tagged method can affect, consumed by link-filtered subscribers (see Subscriber).
-
-    ALL: any link (the conservative default). ARTICULATED: only links whose pose is a function of the configuration. A
-    configuration-space setter (qpos, dofs) can never displace a fixed link, which carries no degree of freedom (fixed
-    links move only through explicit base-pose setters, whose reach is their link selection). A method whose reach is an
-    explicit link selection instead declares the name of its links-index argument.
-    """
-
-    ALL = enum.auto()
-    ARTICULATED = enum.auto()
+    VISUAL = enum.auto()
 
 
 class Subscriber:
@@ -58,9 +48,9 @@ class Subscriber:
       - lazy (no callback): matching changes accumulate into `pending` until the owner calls clear() - e.g. a sensor
         that rebuilds a cache on its next update rather than on every set_pos.
 
-    `links_filter` (global link indices, normalized by Solver.subscribe) restricts the subscription to changes that
-    can affect those links: a notification whose mutated links (see mutates) are disjoint from the filter is dropped;
-    a notification with an unbounded reach always passes.
+    `links_filter` (global link indices) restricts the subscription to changes that can affect those links: a
+    notification whose mutated links (see mutates) cannot move a filtered link is dropped, while a notification with an
+    unbounded reach always passes. The solver resolves the filter as the subscriber subscribes (see 'Solver.subscribe').
     """
 
     def __init__(
@@ -74,12 +64,6 @@ class Subscriber:
         self.links_filter = links_filter
         self._pending: set[StateChange] = set()
 
-    def is_watching(self, links_idx: np.ndarray | None) -> bool:
-        """Whether a change affecting `links_idx` (None meaning possibly any link) concerns this subscriber."""
-        if self.links_filter is None or links_idx is None:
-            return True
-        return bool(np.isin(links_idx, self.links_filter).any())
-
     @property
     def pending(self) -> frozenset[StateChange]:
         """Categories accumulated since the last clear() (always empty in eager mode)."""
@@ -89,29 +73,58 @@ class Subscriber:
         """Drop the accumulated changes, once they have been handled."""
         self._pending.clear()
 
+    def notify(self, change: StateChange, envs_idx=None):
+        """Notify the subscriber of a change in some environments.
+
+        A change outside 'to' is ignored. An eager subscriber is called back right away, while a lazy one accumulates
+        the change until 'clear'.
+
+        Parameters
+        ----------
+        change : StateChange
+            The kind of change.
+        envs_idx : None | int | array_like, optional
+            The environments changed, all of them if None.
+        """
+        if change not in self.to:
+            return
+        if self.callback is None:
+            self._pending.add(change)
+        else:
+            self.callback(change, envs_idx)
+
 
 def mutates(
     *changes: StateChange,
-    links: str | MutatedLinks = MutatedLinks.ALL,
+    links: str | None = None,
     differentiable: bool = True,
     derived: bool = False,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Tag a state-mutating method of a solver or of one of its entities with the StateChange categories it produces.
-
-    One method may produce several (set_state changes both GEOMETRY and DYNAMICS), and an input of the next step such as
-    a control target produces none. `differentiable=False` declares a method whose inputs carry no gradient, and
-    `derived=True` one that only refreshes quantities derived from the state.
 
     Notification is deferred to the outermost tagged call: a setter that internally calls other tagged setters fires a
     single notification per StateChange that occurred, when the outermost call returns, rather than one per nested
     call. The outermost call's `envs_idx` (None meaning all envs) is forwarded. Untagged methods, reads included, never
     notify, so a subscriber only ever wakes on a genuine mutation.
 
-    `links` declares which links the method can affect, so link-filtered subscribers can drop notifications that
-    cannot concern them: the name of the argument holding the targeted global link indices (e.g. "links_idx"),
-    MutatedLinks.ARTICULATED for configuration-space setters, or MutatedLinks.ALL when any link may change. The reach of
-    named links closes over their kinematic subtrees, since forward kinematics carries a new pose to every descendant,
-    fixed children included. Nested tagged calls union their mutated links, an unbounded reach absorbing the rest.
+    Parameters
+    ----------
+    *changes : StateChange
+        The categories the method produces. One method may produce several (set_state changes both GEOMETRY and
+        DYNAMICS), and an input of the next step such as a control target produces none.
+    links : str | None, optional
+        The name of the argument holding the targeted global indices of links ("links_idx"), of degrees of freedom
+        ("dofs_idx") or of configuration entries ("qs_idx"), the latter two reaching the links holding them, or None
+        when any link may change. Link-filtered subscribers drop the notifications that cannot concern them. A selection
+        of links left to None reaches any link, and one of degrees of freedom or configuration entries every link
+        holding one. A change of a link moves its whole kinematic subtree, which the filters of the subscribers account
+        for (see 'Solver.subscribe'). Nested tagged calls union their mutated links, an unbounded reach absorbing the
+        rest. The reach is resolved only for a subscriber filtering on links and listening to the change, an unbounded
+        reach standing for it otherwise. Defaults to None.
+    differentiable : bool, optional
+        Whether the inputs of the method carry a gradient. Defaults to True.
+    derived : bool, optional
+        Whether the method only refreshes quantities derived from the state. Defaults to False.
     """
     triggered = frozenset(changes)
     is_recorded = StateChange.MODEL not in triggered
@@ -120,35 +133,31 @@ def mutates(
         signature = inspect.signature(method)
 
         def resolve_mutated_links_idx(self: "Solver", bound_arguments) -> np.ndarray | None:
-            if links is MutatedLinks.ARTICULATED:
-                return self._articulated_links_idx
-            if links is MutatedLinks.ALL:
+            if links is None or self._links_parent_idx is None:
                 return None
-            links_idx = bound_arguments.get(links)
-            if links_idx is None or self._links_parent_idx is None:
-                # The setter substitutes its own default selection (potentially reaching any link), or the solver
-                # exposes no kinematic structure to close the reach over: stay unbounded.
-                return None
-            # sanitize_index covers every index form the setters accept (int, sequence, slice, bool mask, tensor). The
-            # reach set lives host-side, where the subscriber filters compare.
-            links_idx = tensor_to_array(sanitize_index(links_idx, -1, self.n_links, 0, links))
-            # Close the selection over the kinematic subtrees, one tree level per pass (a link joins when its parent is
-            # a member), which terminates after at most the tree depth
-            is_affected = np.zeros(self._links_parent_idx.shape[0], dtype=bool)
-            is_affected[links_idx] = True
-            has_parent = self._links_parent_idx >= 0
-            while True:
-                is_expanded = is_affected.copy()
-                is_expanded[has_parent] |= is_affected[self._links_parent_idx[has_parent]]
-                if (is_expanded == is_affected).all():
-                    return np.flatnonzero(is_affected)
-                is_affected = is_expanded
+            indices = bound_arguments.get(links)
+            # The links holding each degree of freedom or configuration entry, None for indices of links
+            indices_link_idx = self._indices_link_idx.get(links)
+            if indices is None:
+                return None if indices_link_idx is None else self._articulated_links_idx
+            # The indices are read on the host as they come: only a selection on the device syncs it
+            n_indices = len(self._links_parent_idx) if indices_link_idx is None else len(indices_link_idx)
+            if isinstance(indices, torch.Tensor):
+                indices = tensor_to_array(indices)
+            if isinstance(indices, (slice, range)):
+                indices = np.arange(n_indices)[indices]
+            indices = np.atleast_1d(np.asarray(indices))
+            if indices.dtype == np.bool_:
+                indices = np.flatnonzero(indices)
+            return indices if indices_link_idx is None else indices_link_idx[indices]
 
         def run_notifying(self: "Solver", *args: Any, **kwargs: Any) -> Any:
             if not triggered or not self._subscribers:
                 return method(self, *args, **kwargs)
             bound_arguments = signature.bind(self, *args, **kwargs).arguments
-            mutated_links_idx = resolve_mutated_links_idx(self, bound_arguments)
+            mutated_links_idx = None
+            if triggered & self._links_watched_changes:
+                mutated_links_idx = resolve_mutated_links_idx(self, bound_arguments)
             if self._is_mutating:
                 # Nested tagged call: record the changes and mutated links, let the outermost call do the single
                 # notification.
@@ -171,13 +180,11 @@ def mutates(
             if self._mutation_links_idx_list is not None:
                 links_idx = np.concatenate(self._mutation_links_idx_list)
             for subscriber in self._subscribers:
-                if not subscriber.is_watching(links_idx):
+                links_watched = self._subscribers_links_watched.get(subscriber)
+                if links_watched is not None and links_idx is not None and not links_watched[links_idx].any():
                     continue
                 for changed in self._mutation_changes & subscriber.to:
-                    if subscriber.callback is None:
-                        subscriber._pending.add(changed)
-                    else:
-                        subscriber.callback(changed, envs_idx)
+                    subscriber.notify(changed, envs_idx)
             return result
 
         @functools.wraps(method)

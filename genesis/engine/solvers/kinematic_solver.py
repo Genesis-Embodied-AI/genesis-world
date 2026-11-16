@@ -7,11 +7,28 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.entities.rigid_entity import KinematicEntity, RigidGeom, RigidJoint, RigidVisGeom
+from genesis.engine.entities.rigid_entity import DroneEntity, KinematicEntity, RigidGeom, RigidJoint, RigidVisGeom
 from genesis.engine.entities.rigid_entity.description import KinematicEntityDescription, _balanced_variant_mapping
 from genesis.engine.entities.rigid_entity.rigid_entity import get_variants_kinematics
 from genesis.engine.entities.rigid_entity.rigid_equality import RigidEquality
 from genesis.engine.entities.rigid_entity.rigid_link import KinematicLink
+from genesis.engine.render_context import (
+    ArrayRef,
+    DynamicMesh,
+    EntityAsset,
+    Floor,
+    Frames,
+    MeshAsset,
+    MeshGeometry,
+    MeshSource,
+    PrimitiveAsset,
+    ScopedRenderContext,
+    Shape,
+    ShapeRoles,
+    StaticMeshBatch,
+    TexturePaths,
+    select_view_shapes,
+)
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     IKScratch,
     kernel_forward_kinematics_query,
@@ -21,13 +38,20 @@ from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_set_ik_targets,
 )
 from genesis.engine.solvers.rigid.data import RigidConfig, RigidData
-from genesis.engine.state_change import MutatedLinks, StateChange, mutates
+from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
 from genesis.options.surfaces import Surface
 from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data
-from genesis.utils.misc import assign_indexed_tensor, broadcast_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
+from genesis.utils.misc import (
+    assign_indexed_tensor,
+    broadcast_tensor,
+    indices_to_mask,
+    qd_to_numpy,
+    qd_to_torch,
+    tensor_to_array,
+)
 
 from .base_solver import Solver
 from .rigid.abd.accessor import (
@@ -39,28 +63,35 @@ from .rigid.abd.accessor import (
     kernel_set_links_pos,
     kernel_set_links_quat,
     kernel_set_qpos,
-    kernel_set_vverts,
 )
 from .rigid.abd.forward_kinematics import (
     kernel_forward_kinematics,
     kernel_forward_velocity,
     kernel_masked_forward_kinematics,
     kernel_masked_forward_velocity,
-    kernel_update_vverts_for_vgeoms,
 )
 from .rigid.abd.misc import (
     kernel_init_dof_fields,
     kernel_init_entity_fields,
     kernel_init_joint_fields,
     kernel_init_link_fields,
-    kernel_init_vgeom_fields,
-    kernel_init_vvert_fields,
-    kernel_update_heterogeneous_links_vgeom,
+)
+from .rigid.render import (
+    ASSET_VARIANT_IDX,
+    VARIANTS,
+    RigidRenderData,
+    kernel_add_propellers_revs,
+    kernel_reset_propellers_revs,
+    kernel_reset_vverts_variant,
+    kernel_set_batched_vverts,
+    kernel_set_vverts_variant,
+    kernel_update_dynamic_vverts,
+    kernel_update_render_vgeoms,
 )
 
 if TYPE_CHECKING:
-    from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
+    from genesis.typing import IndexType
 
 
 TERRAIN_HEIGHT_QUERY_TILT_TOLERANCE = 1e-3
@@ -173,8 +204,6 @@ class KinematicSolver(Solver):
         self._n_dofs = 0
         self._n_vverts = 0
         self._n_vfaces = 0
-        self._n_custom_vverts = 0
-        self._n_custom_vfaces = 0
 
         self.collider = None
         self.constraint_solver = None
@@ -184,8 +213,6 @@ class KinematicSolver(Solver):
 
         self._is_forward_pos_updated: bool = False
         self._is_forward_vel_updated: bool = False
-
-        self._vfaces_raycast_mask: torch.Tensor | None = None
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- add_entity -------------------------------------
@@ -223,9 +250,6 @@ class KinematicSolver(Solver):
         self._n_dofs += entity.n_dofs
         self._n_vverts += entity.n_vverts
         self._n_vfaces += entity.n_vfaces
-        if entity._morph.enable_custom_vverts:
-            self._n_custom_vverts += entity.n_vverts
-            self._n_custom_vfaces += entity.n_vfaces
         # An attachment names an entity added before this one, which 'attach' requires, so it is restored here
         if desc.attachment is not None:
             entity.attach(self._sim.get_entity(desc.attachment.entity_name), desc.attachment.link_name)
@@ -240,8 +264,13 @@ class KinematicSolver(Solver):
         super().build(n_envs)
 
         # Resolve the link-reach structures of @mutates notifications; see Solver.__init__.
-        self._articulated_links_idx = np.array([link.idx for link in self.links if not link.is_fixed])
-        self._links_parent_idx = np.array([link.parent_idx for link in self.links])
+        joints = self.joints
+        joints_link_idx = np.array([joint.link.idx for joint in joints], dtype=gs.np_int)
+        joints_n_dofs = np.array([joint.n_dofs for joint in joints], dtype=gs.np_int)
+        self._articulated_links_idx = np.unique(joints_link_idx[joints_n_dofs > 0])
+        self._links_parent_idx = np.array([link.parent_idx for link in self.links], dtype=gs.np_int)
+        self._indices_link_idx["dofs_idx"] = np.repeat(joints_link_idx, joints_n_dofs)
+        self._indices_link_idx["qs_idx"] = np.repeat(joints_link_idx, [joint.n_qs for joint in joints])
 
         base_links_idx = []
         for link in self.links:
@@ -315,11 +344,6 @@ class KinematicSolver(Solver):
         self.n_dofs_ = max(1, self.n_dofs)
         self.n_links_ = max(1, self.n_links)
         self.n_joints_ = max(1, self.n_joints)
-        self.n_vgeoms_ = max(1, self.n_vgeoms)
-        self.n_vfaces_ = max(1, self.n_vfaces)
-        self.n_vverts_ = max(1, self.n_vverts)
-        self.n_custom_vverts_ = max(1, self.n_custom_vverts)
-        self.n_custom_vfaces_ = max(1, self.n_custom_vfaces)
         self.n_entities_ = max(1, self.n_entities)
 
         # The kinematic roots and trees, see roots_link_idx and trees_root_idx in rigid/data.py. A link no dof moves,
@@ -363,34 +387,15 @@ class KinematicSolver(Solver):
         self._create_data_manager()
 
         self._init_dof_fields()
-        self._init_vvert_fields()
-        self._init_vgeom_fields()
         self._init_link_fields()
         self._init_tree_fields()
         self._init_entity_fields()
-        self._init_vfaces_raycast_mask()
-
-        self._init_vverts_state()
 
         # The entities, their links, joints and geoms read the data of the solver, which exists from now on. The rest
         # of the build of the rigid solver calls their accessors, and theirs alike.
         for entity in self._entities:
             entity._build()
         self._is_built = True
-
-    def _init_vverts_state(self):
-        # Seed vverts_state.pos with one FK pass so opt-in entities show their initial pose from frame 0 even before
-        # the user touches the buffer with set_vverts.
-        if self.n_custom_vverts == 0:
-            return
-        opt_in_vgeoms_idx = np.array(
-            [vgeom.idx for entity in self._entities if entity._morph.enable_custom_vverts for vgeom in entity.vgeoms],
-            dtype=gs.np_int,
-        )
-        if opt_in_vgeoms_idx.size == 0:
-            return
-        kernel_forward_kinematics(self._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
-        self.update_vverts_for_vgeoms(opt_in_vgeoms_idx)
 
     def _build_config(self):
         # Static config with all physics disabled
@@ -609,8 +614,6 @@ class KinematicSolver(Solver):
                 np.array([link._entity_idx_in_solver for link in links], dtype=gs.np_int),
                 np.array([link.geom_start for link in links], dtype=gs.np_int),
                 np.array([link.geom_end for link in links], dtype=gs.np_int),
-                np.array([link.vgeom_start for link in links], dtype=gs.np_int),
-                np.array([link.vgeom_end for link in links], dtype=gs.np_int),
                 np.array([link.is_fixed for link in links], dtype=gs.np_bool),
                 np.array([link.desc.pos for link in links], dtype=gs.np_float),
                 np.array([link.desc.quat for link in links], dtype=gs.np_float),
@@ -744,7 +747,7 @@ class KinematicSolver(Solver):
             self.dyn_state.links.quat.from_numpy(links_state_quat)
 
     def _dispatch_heterogeneous_vgeoms(self):
-        """Override per-link vgeom ranges for heterogeneous variants. RigidSolver extends this."""
+        """Mark the environments holding each visual geom of a heterogeneous variant."""
         for link in self.links:
             if link._variant_vgeom_ranges is None:
                 continue
@@ -754,66 +757,10 @@ class KinematicSolver(Solver):
 
             vgeom_starts = np.array([link._variant_vgeom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
             vgeom_ends = np.array([link._variant_vgeom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
-
-            kernel_update_heterogeneous_links_vgeom(
-                link.idx, vgeom_starts, vgeom_ends, self.dyn_info, self.rigid_config
-            )
-
             for vgeom in link.vgeoms:
                 active_envs_mask = (vgeom_starts <= vgeom.idx) & (vgeom.idx < vgeom_ends)
                 vgeom.active_envs_mask = torch.tensor(active_envs_mask, device=gs.device)
                 (vgeom.active_envs_idx,) = np.where(active_envs_mask)
-
-    def _init_vvert_fields(self):
-        if self.n_vverts == 0:
-            return
-
-        vgeoms = self.vgeoms
-        vverts = np.concatenate([vg.init_vverts for vg in vgeoms], dtype=gs.np_float)
-        vnormals = np.concatenate([vg.init_vnormals for vg in vgeoms], dtype=gs.np_float)
-        vfaces = np.concatenate([vg.init_vfaces + vg._vvert_start for vg in vgeoms], dtype=gs.np_int)
-        vverts_vgeom_idx = np.concatenate([np.full(vg.n_vverts, vg.idx) for vg in vgeoms], dtype=gs.np_int)
-        vverts_state_idx = np.full(self.n_vverts, -1, dtype=gs.np_int)
-        for entity in self._entities:
-            if not entity._morph.enable_custom_vverts:
-                continue
-            entity_custom_offset = entity._custom_vvert_start - entity._vvert_start
-            for vgeom in entity.vgeoms:
-                local = np.arange(vgeom.n_vverts, dtype=gs.np_int)
-                vverts_state_idx[vgeom._vvert_start + local] = vgeom._vvert_start + entity_custom_offset + local
-        kernel_init_vvert_fields(
-            vverts_vgeom_idx, vverts_state_idx, vverts, vfaces, vnormals, self.dyn_info, self.rigid_config
-        )
-
-    def _init_vgeom_fields(self):
-        if self.n_vgeoms > 0:
-            vgeoms = self.vgeoms
-            kernel_init_vgeom_fields(
-                np.array([vgeom.link.idx for vgeom in vgeoms], dtype=gs.np_int),
-                np.array([vgeom.vvert_start for vgeom in vgeoms], dtype=gs.np_int),
-                np.array([vgeom.vface_start for vgeom in vgeoms], dtype=gs.np_int),
-                np.array([vgeom.vvert_end for vgeom in vgeoms], dtype=gs.np_int),
-                np.array([vgeom.vface_end for vgeom in vgeoms], dtype=gs.np_int),
-                np.array([vgeom.init_pos for vgeom in vgeoms], dtype=gs.np_float),
-                np.array([vgeom.init_quat for vgeom in vgeoms], dtype=gs.np_float),
-                np.array([vgeom.desc.vmesh.color for vgeom in vgeoms], dtype=gs.np_float),
-                self.dyn_info,
-                self.rigid_config,
-            )
-
-    def _init_vfaces_raycast_mask(self):
-        """Fit the static per-vface visual-raycasting opt-in mask; see the vfaces_raycast_mask property.
-
-        Sized over the padded vgeom count so the gather also covers a solver holding no vgeom at all, whose vface
-        fields still carry one padding slot: nothing opts in there, so every entry stays 0.
-        """
-        vgeom_enabled = torch.zeros(self.n_vgeoms_, dtype=gs.tc_bool, device=gs.device)
-        for entity in self.entities:
-            if not entity.material.use_visual_raycasting:
-                continue
-            for vgeom in entity.vgeoms:
-                vgeom_enabled[vgeom.idx] = 1
-        self._vfaces_raycast_mask = vgeom_enabled[qd_to_torch(self.dyn_info.vfaces.vgeom_idx)]
 
     def _init_entity_fields(self):
         if self._entities:
@@ -997,7 +944,7 @@ class KinematicSolver(Solver):
             self._is_forward_pos_updated = False
             self._is_forward_vel_updated = False
 
-    @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
+    @mutates(StateChange.GEOMETRY, links="qs_idx")
     def set_qpos(self, qpos, qs_idx=None, envs_idx=None, *, skip_forward=False):
         if gs.use_zerocopy:
             data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
@@ -1029,7 +976,7 @@ class KinematicSolver(Solver):
             self._is_forward_pos_updated = False
             self._is_forward_vel_updated = False
 
-    @mutates(StateChange.DYNAMICS, links=MutatedLinks.ARTICULATED)
+    @mutates(StateChange.DYNAMICS, links="dofs_idx")
     def set_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None, *, skip_forward=False):
         if gs.use_zerocopy:
             vel = qd_to_torch(self.dyn_state.dofs.vel, transpose=True, copy=False)
@@ -1062,7 +1009,7 @@ class KinematicSolver(Solver):
         else:
             self._is_forward_vel_updated = False
 
-    @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
+    @mutates(StateChange.GEOMETRY, links="dofs_idx")
     def set_dofs_position(self, position, dofs_idx=None, envs_idx=None):
         position, dofs_idx, envs_idx = self._sanitize_io_variables(
             position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
@@ -1151,16 +1098,16 @@ class KinematicSolver(Solver):
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_vgeoms_pos(self, vgeoms_idx=None, envs_idx=None, *, relative=False):
-        tensor = qd_to_torch(self.dyn_state.vgeoms.pos, envs_idx, vgeoms_idx, transpose=True, copy=True)
+        tensor = self.render_context.get_vgeoms_pose(vgeoms_idx, envs_idx, is_quat=False)
         if relative and self._vgeoms_offset_pos is not None:
-            quat = qd_to_torch(self.dyn_state.vgeoms.quat, envs_idx, vgeoms_idx, transpose=True, copy=True)
+            quat = self.render_context.get_vgeoms_pose(vgeoms_idx, envs_idx, is_quat=True)
             offset_pos = self._vgeoms_offset_pos if vgeoms_idx is None else self._vgeoms_offset_pos[vgeoms_idx]
             offset_quat = self._vgeoms_offset_quat if vgeoms_idx is None else self._vgeoms_offset_quat[vgeoms_idx]
             tensor = tensor - _offset_world_shift(offset_pos, offset_quat, quat)
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_vgeoms_quat(self, vgeoms_idx=None, envs_idx=None, *, relative=False):
-        tensor = qd_to_torch(self.dyn_state.vgeoms.quat, envs_idx, vgeoms_idx, transpose=True, copy=True)
+        tensor = self.render_context.get_vgeoms_pose(vgeoms_idx, envs_idx, is_quat=True)
         if relative and self._vgeoms_offset_quat is not None:
             offset_quat = self._vgeoms_offset_quat if vgeoms_idx is None else self._vgeoms_offset_quat[vgeoms_idx]
             tensor = gu.transform_quat_by_quat(gu.inv_quat(offset_quat), tensor)
@@ -1234,50 +1181,6 @@ class KinematicSolver(Solver):
             return
         kernel_forward_kinematics(self._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         self._is_forward_pos_updated = True
-
-    def update_vverts_for_vgeoms(self, vgeoms_idx):
-        """Refresh the vverts_state.pos slice for the requested vgeoms by re-running FK.
-
-        Used by set_vverts(None, ...) and at scene-build time to initialize the custom buffer with a meaningful pose.
-        The kernel is a no-op for vgeoms whose vverts have no state slot.
-        """
-        if self.n_custom_vverts == 0:
-            return
-        kernel_update_vverts_for_vgeoms(vgeoms_idx, self.dyn_state, self.dyn_info, self.rigid_config)
-
-    @mutates(StateChange.GEOMETRY)
-    def set_vverts(self, custom_vvert_start, custom_vvert_end, vgeoms_idx, vverts, envs_idx=None):
-        """Write the slice [custom_vvert_start:custom_vvert_end] of vverts_state.pos.
-
-        vverts=None re-populates the slice from FK by running update_vverts_for_vgeoms over the vgeoms owning the slice.
-        Otherwise vverts is broadcast to the slice shape and written directly. vverts_state.pos is always batched;
-        envs_idx selects which envs to write to.
-        """
-        if vverts is None:
-            self.update_vverts_for_vgeoms(vgeoms_idx)
-            return
-
-        if gs.use_zerocopy:
-            data = qd_to_torch(self.dyn_state.vverts.pos, transpose=True, copy=False)
-            vverts_mask = indices_to_mask(slice(custom_vvert_start, custom_vvert_end))
-            pos_mask = (0, *vverts_mask) if self.n_envs == 0 else indices_to_mask(envs_idx, *vverts_mask)
-            assign_indexed_tensor(data, pos_mask, vverts)
-            return
-
-        envs_idx = self._sim.sanitize_envs_idx(envs_idx)
-        target_shape = (envs_idx.shape[0], custom_vvert_end - custom_vvert_start, 3)
-        vverts = broadcast_tensor(vverts, gs.tc_float, target_shape, ("envs", "vverts", "xyz")).contiguous()
-        kernel_set_vverts(custom_vvert_start, envs_idx, vverts, self.dyn_state, self.rigid_config)
-
-    def get_vverts(self, custom_vvert_start, custom_vvert_end, envs_idx=None):
-        """Return a copy of the vverts_state.pos slice for the given custom-vvert range.
-
-        Shape: (len(envs_idx), custom_vvert_end - custom_vvert_start, 3). envs_idx=None returns every env.
-        """
-        tensor = qd_to_torch(
-            self.dyn_state.vverts.pos, envs_idx, slice(custom_vvert_start, custom_vvert_end), transpose=True, copy=True
-        )
-        return tensor[0] if self.n_envs == 0 else tensor
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Jacobian & IK ------------------------------------
@@ -1503,17 +1406,6 @@ class KinematicSolver(Solver):
         return gs.List(self._vgeoms)
 
     @property
-    def vfaces_raycast_mask(self) -> torch.Tensor:
-        """Per-vface mask, shape (n_vfaces,), selecting the vfaces opted into visual raycasting.
-
-        A vface is opted in iff its owning vgeom belongs to an entity whose material has use_visual_raycasting=True.
-        Both the entity materials and the vface-to-vgeom mapping are fixed once the scene is built, so the mask is
-        fitted at build time and shared by every visual raycast BVH (raycaster sensors, viewer plugins) to gate which
-        vfaces contribute.
-        """
-        return self._vfaces_raycast_mask
-
-    @property
     def n_links(self) -> int:
         return len(self._links)
 
@@ -1534,14 +1426,6 @@ class KinematicSolver(Solver):
         return self._n_vfaces
 
     @property
-    def n_custom_vverts(self) -> int:
-        return self._n_custom_vverts
-
-    @property
-    def n_custom_vfaces(self) -> int:
-        return self._n_custom_vfaces
-
-    @property
     def n_qs(self) -> int:
         return self._n_qs
 
@@ -1554,3 +1438,504 @@ class KinematicSolver(Solver):
         if self._entities:
             return np.concatenate([entity.init_qpos for entity in self._entities], dtype=gs.np_float)
         return np.array([], dtype=gs.np_float)
+
+
+class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
+    """The visual meshes of the visual geoms of a kinematic or rigid solver, posed by their link, and its link frames.
+
+    'set_vverts', 'get_vverts', 'get_vgeoms_pose' and 'add_propellers_rpm' are the interface of the visual geoms and the
+    drones of the solver to the appearance the scoped context holds.
+    """
+
+    def build(self) -> None:
+        solver = self.owner
+        # The visual geoms take a slot each, those posed by their link first, so that their poses form one contiguous
+        # block, the visual geoms of the entities a deprecated 'vis_mode' shows in their debug representation after the
+        # others, so that the block of the scene as it looks leaves them out, then those showing DynamicVertices, which
+        # own a slice of the dynamic vertices: the vertices of the variant each environment shows placed at the pose of
+        # the visual geom.
+        vgeoms = solver.vgeoms
+        vgeoms_order = [
+            (vgeom.desc.dynamic_vertices is not None, vgeom.entity.surface.vis_mode is not None, vgeom.idx)
+            for vgeom in vgeoms
+        ]
+        self._slots_vgeom = [vgeoms[i_vg] for *_, i_vg in sorted(vgeoms_order)]
+        self._n_posed_vgeoms = sum(not is_dynamic for is_dynamic, *_ in vgeoms_order)
+        self._n_drawn_vgeoms = sum(not (is_dynamic or is_pinned) for is_dynamic, is_pinned, _ in vgeoms_order)
+        self._vgeoms_slot = np.empty(len(vgeoms), dtype=gs.np_int)
+        self._vgeoms_slot[[vgeom.idx for vgeom in self._slots_vgeom]] = np.arange(len(vgeoms), dtype=gs.np_int)
+        # The start of the slice of each visual geom among the dynamic vertices of the solver, -1 for a posed one, and
+        # among the vertices of the batched variants, -1 for a visual geom without.
+        self._vgeoms_dynamic_vvert_start = np.full(len(vgeoms), -1, dtype=gs.np_int)
+        self._vgeoms_batched_vvert_start = np.full(len(vgeoms), -1, dtype=gs.np_int)
+        dynamic_vgeoms = self._slots_vgeom[self._n_posed_vgeoms :]
+        # The variants of the vertices of the visual geoms showing DynamicVertices, None for the mesh of the asset
+        variants_vverts: list[np.ndarray | None] = []
+        vgeoms_variant_start = []
+        n_dynamic_vverts = n_batched_vverts = 0
+        for vgeom in dynamic_vgeoms:
+            if isinstance(vgeom.entity.main_morph, gs.morphs.Plane):
+                gs.raise_exception("A plane cannot show DynamicVertices.")
+            self._vgeoms_dynamic_vvert_start[vgeom.idx] = n_dynamic_vverts
+            n_dynamic_vverts += vgeom.n_vverts
+            if vgeom.desc.dynamic_vertices.is_batched:
+                self._vgeoms_batched_vvert_start[vgeom.idx] = n_batched_vverts
+                n_batched_vverts += vgeom.n_vverts
+            variants = vgeom.desc.dynamic_vertices.variants
+            vgeoms_variant_start.append(len(variants_vverts))
+            for variant in variants.values() if isinstance(variants, dict) else variants:
+                if variant is not None and variant.shape != (vgeom.n_vverts, 3):
+                    gs.raise_exception(
+                        f"A variant of the DynamicVertices of a visual geom of entity '{vgeom.entity.name}' holds the "
+                        f"position of each of its {vgeom.n_vverts} vertices, of shape ({vgeom.n_vverts}, 3), got "
+                        f"{variant.shape}."
+                    )
+                variants_vverts.append(variant)
+        self._has_variants = any(vgeom.active_envs_mask is not None for vgeom in vgeoms)
+        self._data = RigidRenderData(
+            sizes=dict(
+                vgeoms=len(vgeoms),
+                vverts=solver.n_vverts,
+                vfaces=solver.n_vfaces,
+                propellers=sum(
+                    entity.n_propellers
+                    for entity in solver.entities
+                    if isinstance(entity, DroneEntity) and entity.propellers_vgeom_idx is not None
+                ),
+                dynamic_vgeoms=len(dynamic_vgeoms),
+                dynamic_vverts=n_dynamic_vverts,
+                batched_vverts=n_batched_vverts,
+                vgeoms_variants=len(variants_vverts),
+                variants_vverts=sum(len(variant) for variant in variants_vverts if variant is not None),
+                envs=solver.n_envs_,
+            ),
+            unused={VARIANTS: not self._has_variants},
+        )
+        # The first propeller of each drone whose propellers turn as drawn
+        self._drones_propeller_start: dict[DroneEntity, int] = {}
+        # The frames of the links, drawn while 'link_frames' holds
+        links = solver.dyn_state.links
+        self._link_frames = Frames(ArrayRef(links.pos), ArrayRef(links.quat), solver.options.vis.link_frame_size)
+        self._is_link_frames_shown = solver.options.vis.link_frames and solver.n_links > 0
+        # The shapes of the visual geoms
+        self._shapes: tuple[Shape, ...] = ()
+        if not vgeoms:
+            return
+        data = self._data
+
+        slots_propeller_idx = np.full(len(vgeoms), -1, dtype=gs.np_int)
+        slots_propeller_rad_per_rev = np.zeros(len(vgeoms), dtype=gs.np_float)
+        n_propellers = 0
+        for drone in solver.entities:
+            if isinstance(drone, DroneEntity) and drone.propellers_vgeom_idx is not None:
+                self._drones_propeller_start[drone] = n_propellers
+                propellers_slot = self._vgeoms_slot[tensor_to_array(drone.propellers_vgeom_idx)]
+                slots_propeller_idx[propellers_slot] = n_propellers + np.arange(drone.n_propellers)
+                # The propellers accumulate their speed in revolutions per minute once per step
+                slots_propeller_rad_per_rev[propellers_slot] = (
+                    tensor_to_array(drone.propellers_spin) * solver.sim.substep_dt * np.pi / 30.0
+                )
+                n_propellers += drone.n_propellers
+        slots_n_vverts = np.array([vgeom.n_vverts for vgeom in self._slots_vgeom], dtype=gs.np_int)
+        self._slots_vvert_start = np.cumsum(slots_n_vverts, dtype=gs.np_int) - slots_n_vverts
+        slots_n_vfaces = np.array([vgeom.n_vfaces for vgeom in self._slots_vgeom], dtype=gs.np_int)
+        self._slots_vface_start = np.cumsum(slots_n_vfaces, dtype=gs.np_int) - slots_n_vfaces
+        data.vgeoms_info.pos.from_numpy(np.array([vgeom.init_pos for vgeom in self._slots_vgeom], dtype=gs.np_float))
+        data.vgeoms_info.quat.from_numpy(np.array([vgeom.init_quat for vgeom in self._slots_vgeom], dtype=gs.np_float))
+        data.vgeoms_info.vvert_start.from_numpy(self._slots_vvert_start)
+        data.vgeoms_info.vvert_end.from_numpy(self._slots_vvert_start + slots_n_vverts)
+        data.vgeoms_info.link_idx.from_numpy(np.array([vgeom.link.idx for vgeom in self._slots_vgeom], dtype=gs.np_int))
+        data.vgeoms_info.propeller_idx.from_numpy(slots_propeller_idx)
+        data.vgeoms_info.propeller_rad_per_rev.from_numpy(slots_propeller_rad_per_rev)
+        data.vverts_info.init_pos.from_numpy(
+            np.concatenate([vgeom.init_vverts for vgeom in self._slots_vgeom], dtype=gs.np_float)
+        )
+        data.vverts_info.init_normal.from_numpy(
+            np.concatenate([vgeom.init_vnormals for vgeom in self._slots_vgeom], dtype=gs.np_float)
+        )
+        data.vfaces_info.vverts_idx.from_numpy(
+            np.concatenate(
+                [
+                    vgeom.init_vfaces + vvert_start
+                    for vgeom, vvert_start in zip(self._slots_vgeom, self._slots_vvert_start)
+                ],
+                dtype=gs.np_int,
+            )
+        )
+        if self._has_variants:
+            slots_is_active = np.ones((len(vgeoms), solver.n_envs_), dtype=gs.np_bool)
+            for i_s, vgeom in enumerate(self._slots_vgeom):
+                if vgeom.active_envs_mask is not None:
+                    slots_is_active[i_s] = tensor_to_array(vgeom.active_envs_mask)
+            data.vgeoms.is_active.from_numpy(slots_is_active)
+        if dynamic_vgeoms:
+            dynamic_vverts = data.dynamic_vverts
+            dynamic_vverts.vgeoms_slot.from_numpy(np.arange(self._n_posed_vgeoms, len(vgeoms), dtype=gs.np_int))
+            dynamic_vgeoms_idx = [vgeom.idx for vgeom in dynamic_vgeoms]
+            dynamic_vverts.vgeoms_vvert_start.from_numpy(self._vgeoms_dynamic_vvert_start[dynamic_vgeoms_idx])
+            dynamic_vverts.vgeoms_batched_vvert_start.from_numpy(self._vgeoms_batched_vvert_start[dynamic_vgeoms_idx])
+            dynamic_vverts.vgeoms_variant_start.from_numpy(np.array(vgeoms_variant_start, dtype=gs.np_int))
+            variants_size = np.array([0 if variant is None else len(variant) for variant in variants_vverts])
+            variants_vvert_start = np.where(variants_size > 0, np.cumsum(variants_size) - variants_size, -1)
+            dynamic_vverts.variants_vvert_start.from_numpy(variants_vvert_start.astype(gs.np_int))
+            if variants_size.any():
+                dynamic_vverts.variants_pos.from_numpy(
+                    np.concatenate([variant for variant in variants_vverts if variant is not None], dtype=gs.np_float)
+                )
+            # The batched variants start as the mesh of the asset in every environment
+            if n_batched_vverts > 0:
+                init_vverts = np.concatenate(
+                    [vgeom.init_vverts for vgeom in dynamic_vgeoms if vgeom.desc.dynamic_vertices.is_batched],
+                    dtype=gs.np_float,
+                )
+                dynamic_vverts.batched_pos.from_numpy(
+                    np.ascontiguousarray(np.broadcast_to(init_vverts[:, None], (n_batched_vverts, solver.n_envs_, 3)))
+                )
+        # The file each entity drawn as loaded is loaded from, which a visual geom of a surface of its own or showing
+        # DynamicVertices draws apart.
+        entities_asset: dict[int, EntityAsset | None] = {}
+        for entity in solver.entities:
+            morph = entity.main_morph
+            entities_asset[entity.idx] = None
+            is_drawn_apart = any(isinstance(patch.options, gs.options.VGeom) for patch in entity.spec.patches) or any(
+                vgeom.desc.dynamic_vertices is not None for vgeom in entity.vgeoms
+            )
+            if isinstance(morph, gs.morphs.FileMorph) and entity.vgeoms and not is_drawn_apart:
+                is_zup = bool(entity.vgeoms[0].metadata.get("imported_as_zup", False))
+                is_merged = False
+                if isinstance(morph, (gs.morphs.URDF, gs.morphs.Drone)):
+                    is_zup, is_merged = morph.file_meshes_are_zup, morph.merge_fixed_links
+                entities_asset[entity.idx] = EntityAsset(
+                    morph.file,
+                    is_zup,
+                    is_merged,
+                    scale=(morph.scale,) * 3 if isinstance(morph.scale, float) else tuple(morph.scale),
+                    pos=(0.0, 0.0, 0.0) if morph.pos is None else tuple(morph.pos),
+                    quat=(1.0, 0.0, 0.0, 0.0) if morph.quat is None else tuple(morph.quat),
+                )
+        shapes: list[Shape] = []
+        geometries = []
+        for i_s, vgeom in enumerate(self._slots_vgeom):
+            entity = vgeom.entity
+            morph = entity.main_morph
+            seg_keys = vgeom.seg_keys
+            is_ray_target = entity.spec.use_visual_raycasting
+            if i_s < self._n_drawn_vgeoms:
+                # The origin of the vertices of the mesh, None for a mesh computed in memory, such as the meshes an
+                # MJCF parser makes of its geoms or a terrain.
+                metadata = vgeom.metadata
+                textures_path = TexturePaths(
+                    metadata.get("texture_path"),
+                    metadata.get("normal_texture_path"),
+                    metadata.get("emissive_texture_path"),
+                )
+                is_visual_overwritten = bool(metadata.get("is_visual_overwritten", False))
+                primitive = None
+                if isinstance(morph, gs.morphs.Box):
+                    primitive = PrimitiveAsset(gs.GEOM_TYPE.BOX, tuple(morph.size))
+                elif isinstance(morph, gs.morphs.Sphere):
+                    primitive = PrimitiveAsset(gs.GEOM_TYPE.SPHERE, (morph.radius,))
+                elif isinstance(morph, gs.morphs.Cylinder):
+                    primitive = PrimitiveAsset(gs.GEOM_TYPE.CYLINDER, (morph.radius, morph.height))
+                elif isinstance(morph, gs.morphs.Plane):
+                    primitive = PrimitiveAsset(gs.GEOM_TYPE.PLANE, tuple(morph.plane_size))
+                source = None
+                if primitive is not None:
+                    source = MeshSource(
+                        file=None,
+                        is_zup=False,
+                        primitive=primitive,
+                        scale=(1.0, 1.0, 1.0),
+                        is_visual_overwritten=is_visual_overwritten,
+                        textures_path=textures_path,
+                    )
+                elif not isinstance(morph, gs.morphs.MJCF) and "mesh_path" in metadata:
+                    scale = (morph.scale,) * 3 if isinstance(morph.scale, float) else tuple(morph.scale)
+                    is_zup = bool(metadata.get("imported_as_zup", False))
+                    source = MeshSource(
+                        metadata["mesh_path"],
+                        is_zup,
+                        primitive=None,
+                        scale=scale,
+                        is_visual_overwritten=is_visual_overwritten,
+                        textures_path=textures_path,
+                    )
+                entity_asset = entities_asset[entity.idx]
+                vvert_start, vface_start = self._slots_vvert_start[i_s], self._slots_vface_start[i_s]
+                geometries.append(
+                    MeshGeometry(
+                        vgeom.surface,
+                        vgeom.uvs,
+                        vgeom.trimesh.visual,
+                        seg_keys,
+                        source,
+                        asset=None
+                        if entity_asset is None
+                        else MeshAsset(entity_asset, vgeom.link.name, vgeom.link.vgeoms.index(vgeom)),
+                        floor=Floor(morph.normal, morph.plane_size) if isinstance(morph, gs.morphs.Plane) else None,
+                        verts_ref=ArrayRef(data.vverts_info.init_pos, slice(vvert_start, vvert_start + vgeom.n_vverts)),
+                        normals_ref=ArrayRef(
+                            data.vverts_info.init_normal, slice(vvert_start, vvert_start + vgeom.n_vverts)
+                        ),
+                        faces_ref=ArrayRef(
+                            data.vfaces_info.vverts_idx, slice(vface_start, vface_start + vgeom.n_vfaces)
+                        ),
+                        is_ray_target=is_ray_target,
+                    )
+                )
+            elif i_s >= self._n_posed_vgeoms and entity.surface.vis_mode is None:
+                dynamic_vvert_start = self._vgeoms_dynamic_vvert_start[vgeom.idx]
+                shapes.append(
+                    DynamicMesh(
+                        vgeom.init_vfaces,
+                        vgeom.surface,
+                        ArrayRef(
+                            data.dynamic_vverts.pos, slice(dynamic_vvert_start, dynamic_vvert_start + vgeom.n_vverts)
+                        ),
+                        vgeom.uvs,
+                        seg_keys,
+                        is_active=None if vgeom.active_envs_mask is None else ArrayRef(data.vgeoms.is_active, i_s),
+                        is_ray_target=is_ray_target,
+                        roles=ShapeRoles.of(entity.idx, is_looks=True, is_debug=False),
+                    )
+                )
+        if geometries:
+            vgeoms_cols = slice(0, self._n_drawn_vgeoms)
+            shapes.insert(
+                0,
+                StaticMeshBatch(
+                    tuple(geometries),
+                    ArrayRef(data.vgeoms.pos, vgeoms_cols),
+                    ArrayRef(data.vgeoms.quat, vgeoms_cols),
+                    is_active=ArrayRef(data.vgeoms.is_active, vgeoms_cols) if self._has_variants else None,
+                    roles=ShapeRoles.of(
+                        [vgeom.entity.idx for vgeom in self._slots_vgeom[: self._n_drawn_vgeoms]],
+                        is_looks=True,
+                        is_debug=False,
+                    ),
+                ),
+            )
+        self._shapes = tuple(shapes)
+
+    def reset(self, envs_idx: torch.Tensor) -> None:
+        """Show the first variant of the DynamicVertices of every visual geom again, and stop the propellers."""
+        if self._n_posed_vgeoms < len(self._slots_vgeom):
+            kernel_reset_vverts_variant(envs_idx, self._data.dynamic_vverts)
+        if self._drones_propeller_start:
+            kernel_reset_propellers_revs(envs_idx, self._data.propellers)
+
+    def update_shapes(self, envs_idx: torch.Tensor | None, view: str) -> tuple[Shape, ...]:
+        solver = self.owner
+        if envs_idx is not None:
+            # The visual and collision geoms follow the poses of the links, current once forward kinematics ran
+            solver.update_forward_pos()
+            # The poses and the dynamic vertices of every environment are placed at once, passing a selection costing as
+            # much as a placement this light.
+            if self._slots_vgeom:
+                kernel_update_render_vgeoms(solver.dyn_state.links, self._data)
+                if self._n_posed_vgeoms < len(self._slots_vgeom):
+                    kernel_update_dynamic_vverts(self._data)
+        return select_view_shapes(self._shapes, view)
+
+    def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:
+        if not self._is_link_frames_shown:
+            return ()
+        # The frames of the links view their poses, up to date once forward kinematics ran, which hidden frames skip
+        if not self.is_hidden(self._link_frames):
+            self.owner.update_forward_pos()
+        return (self._link_frames,)
+
+    @property
+    def link_frames(self) -> bool:
+        """Whether the frames of the links are drawn (see ``KinematicVisOptions.link_frames``)."""
+        return self._is_link_frames_shown
+
+    def set_link_frames(self, link_frames: bool) -> None:
+        """Draw the frames of the links, or stop drawing them (see ``KinematicVisOptions.link_frames``)."""
+        self._is_link_frames_shown = link_frames and self.owner.n_links > 0
+        self._context.invalidate((self,))
+
+    @property
+    def link_frame_size(self) -> float:
+        """The length of the axes of the frames of the links (see ``KinematicVisOptions.link_frame_size``)."""
+        return self._link_frames.length
+
+    def set_link_frame_size(self, link_frame_size: float) -> None:
+        """Set the length of the axes of the frames of the links (see ``KinematicVisOptions.link_frame_size``)."""
+        # The frames keep their identity, and so their resources in the renderers, which redraw them at their new size
+        object.__setattr__(self._link_frames, "length", link_frame_size)
+        self._context.invalidate((self,))
+
+    def add_propellers_rpm(self, drone: DroneEntity, propellers_rpm: torch.Tensor) -> None:
+        """Add the speed of the propellers of a drone in revolutions per minute to the revolutions they accumulated.
+
+        A drone drawing no propeller is left as is.
+
+        Parameters
+        ----------
+        drone : DroneEntity
+            The drone.
+        propellers_rpm : torch.Tensor
+            The speed of each propeller, one row per environment (see 'DroneEntity.set_propellers_rpm').
+        """
+        propeller_start = self._drones_propeller_start.get(drone)
+        if propeller_start is None:
+            return
+        revs_period = 60.0 / self.owner.sim.dt
+        if gs.use_zerocopy:
+            revs = qd_to_torch(self._data.propellers.revs, transpose=True, copy=False)
+            drone_revs = revs[:, propeller_start : propeller_start + drone.n_propellers]
+            torch.remainder(drone_revs + propellers_rpm, revs_period, out=drone_revs)
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+        else:
+            propellers_rpm = propellers_rpm.contiguous()
+            kernel_add_propellers_revs(propeller_start, propellers_rpm, self._data.propellers, revs_period=revs_period)
+
+    def set_vverts(
+        self,
+        vgeom: "RigidVisGeom",
+        vverts: "np.typing.ArrayLike | None",
+        envs_idx: "IndexType | None",
+        variant: "int | str | Sequence[int | str] | None",
+    ) -> None:
+        """Write the batched variant of the DynamicVertices of a visual geom and show it, or show one of its variants,
+        in some environments.
+
+        See 'RigidVisGeom.set_vverts'. The subscribers of the render context are notified of the change of appearance.
+        """
+        solver = self.owner
+        if gs.use_zerocopy and solver.n_envs == 0 and envs_idx is not None:
+            gs.raise_exception("A scene without parallel environments takes no 'envs_idx'.")
+        dynamic_vverts = self._data.dynamic_vverts
+        i_dg = int(self._vgeoms_slot[vgeom.idx]) - self._n_posed_vgeoms
+        variants = vgeom.desc.dynamic_vertices.variants
+        if vverts is None:
+            variants_name = tuple(variants) if isinstance(variants, dict) else ()
+            variants_idx = []
+            for variant_given in np.atleast_1d(np.array(variant, dtype=object)).tolist():
+                if variant_given is None:
+                    variant_idx = ASSET_VARIANT_IDX
+                elif isinstance(variant_given, str):
+                    if variant_given not in variants_name:
+                        gs.raise_exception(
+                            f"No variant is named '{variant_given}'. Existing names: {list(variants_name)}."
+                        )
+                    variant_idx = variants_name.index(variant_given)
+                elif not isinstance(variant_given, (int, np.integer)) or isinstance(variant_given, bool):
+                    gs.raise_exception(
+                        "A variant of DynamicVertices is given by an integer position or a name, got "
+                        f"{variant_given!r}."
+                    )
+                elif not 0 <= variant_given < len(variants):
+                    gs.raise_exception(f"Variant {variant_given} is out of range for {len(variants)} variants.")
+                else:
+                    variant_idx = variant_given
+                variants_idx.append(variant_idx)
+            # A single variant is shown in every selected environment
+            variants_idx = variants_idx if len(variants_idx) > 1 else variants_idx[0]
+            if gs.use_zerocopy:
+                variant_view = qd_to_torch(dynamic_vverts.vgeoms_variant_idx, transpose=True, copy=False)
+                mask = (0, i_dg) if solver.n_envs == 0 else indices_to_mask(envs_idx, i_dg)
+                assign_indexed_tensor(variant_view, mask, variants_idx)
+            else:
+                envs_idx = solver.sim.sanitize_envs_idx(envs_idx)
+                variants_idx = broadcast_tensor(variants_idx, gs.tc_int, envs_idx.shape).contiguous()
+                kernel_set_vverts_variant(envs_idx, i_dg, variants_idx, dynamic_vverts)
+        else:
+            vvert_start = int(self._vgeoms_batched_vvert_start[vgeom.idx])
+            if vvert_start < 0:
+                gs.raise_exception(
+                    "Writing the vertices of a visual geom requires its batched variant, which "
+                    "'gs.surfaces.DynamicVertices(is_batched=True)' allocates. Show one of its variants instead."
+                )
+            vverts_mask = indices_to_mask(slice(vvert_start, vvert_start + vgeom.n_vverts))
+            if gs.use_zerocopy:
+                variant_view = qd_to_torch(dynamic_vverts.vgeoms_variant_idx, transpose=True, copy=False)
+                pos_view = qd_to_torch(dynamic_vverts.batched_pos, transpose=True, copy=False)
+                if solver.n_envs == 0:
+                    variant_mask, pos_mask = (0, i_dg), (0, *vverts_mask)
+                else:
+                    variant_mask, pos_mask = indices_to_mask(envs_idx, i_dg), indices_to_mask(envs_idx, *vverts_mask)
+                assign_indexed_tensor(pos_view, pos_mask, vverts)
+                assign_indexed_tensor(variant_view, variant_mask, -1)
+            else:
+                envs_idx = solver.sim.sanitize_envs_idx(envs_idx)
+                target_shape = (envs_idx.shape[0], vgeom.n_vverts, 3)
+                vverts = broadcast_tensor(vverts, gs.tc_float, target_shape, ("envs", "vverts", "xyz")).contiguous()
+                kernel_set_batched_vverts(envs_idx, i_dg, vvert_start, vverts, dynamic_vverts)
+        if gs.use_zerocopy and gs.backend == gs.metal:
+            torch.mps.synchronize()
+        self._context.invalidate((self,), change=StateChange.VISUAL)
+
+    def get_vgeoms_pose(
+        self, vgeoms_idx: "IndexType | None" = None, envs_idx: "IndexType | None" = None, *, is_quat: bool
+    ) -> torch.Tensor:
+        """Return a copy of the world position or orientation of some visual geoms of the solver.
+
+        Parameters
+        ----------
+        vgeoms_idx : None | int | array_like, optional
+            The visual geoms, all of them if None. Defaults to None.
+        envs_idx : None | int | array_like, optional
+            The environments, all of them if None. Defaults to None.
+        is_quat : bool
+            Whether the orientation is returned, as a quaternion, rather than the position.
+        """
+        # The arrays of the visual geoms are refreshed first
+        self.get_shapes()
+        if vgeoms_idx is None:
+            vgeoms_slot = self._vgeoms_slot
+        elif isinstance(vgeoms_idx, int):
+            vgeoms_slot = int(self._vgeoms_slot[vgeoms_idx])
+        else:
+            vgeoms_slot = self._vgeoms_slot[tensor_to_array(vgeoms_idx)]
+        if not isinstance(vgeoms_slot, int):
+            vgeoms_slot = torch.as_tensor(vgeoms_slot, device=gs.device)
+        vgeoms = self._data.vgeoms
+        return qd_to_torch(
+            value=vgeoms.quat if is_quat else vgeoms.pos,
+            row_mask=envs_idx,
+            col_mask=vgeoms_slot,
+            transpose=True,
+            copy=True,
+        )
+
+    def get_vverts(self, vgeoms: "Sequence[RigidVisGeom]", envs_idx: "IndexType | None" = None) -> torch.Tensor:
+        """Return a copy of the world position of the vertices of some visual geoms of the solver, as drawn, those of
+        each visual geom following those of the previous one."""
+        vgeoms_idx = np.array([vgeom.idx for vgeom in vgeoms], dtype=gs.np_int)
+        vgeoms_n_vverts = np.array([vgeom.n_vverts for vgeom in vgeoms], dtype=gs.np_int)
+        vgeoms_is_dynamic = self._vgeoms_dynamic_vvert_start[vgeoms_idx] >= 0
+        vverts_is_dynamic = torch.as_tensor(np.repeat(vgeoms_is_dynamic, vgeoms_n_vverts), device=gs.device)
+        # The vertices posed by their visual geom are placed at once, each vertex taking the pose of its visual geom
+        vgeoms_pos = self.get_vgeoms_pose(vgeoms_idx[~vgeoms_is_dynamic], envs_idx, is_quat=False)
+        vgeoms_quat = self.get_vgeoms_pose(vgeoms_idx[~vgeoms_is_dynamic], envs_idx, is_quat=True)
+        static_n_vverts = torch.as_tensor(vgeoms_n_vverts[~vgeoms_is_dynamic], device=gs.device)
+        static_init_vverts = np.zeros((0, 3), dtype=gs.np_float)
+        if not vgeoms_is_dynamic.all():
+            static_init_vverts = np.concatenate(
+                [vgeom.init_vverts for vgeom, is_dynamic in zip(vgeoms, vgeoms_is_dynamic) if not is_dynamic]
+            )
+        static_init_vverts = torch.as_tensor(static_init_vverts, dtype=gs.tc_float, device=gs.device)
+        vverts = vgeoms_pos.new_empty((len(vgeoms_pos), int(vgeoms_n_vverts.sum()), 3))
+        vverts[:, ~vverts_is_dynamic] = gu.transform_by_trans_quat(
+            static_init_vverts,
+            vgeoms_pos.repeat_interleave(static_n_vverts, dim=-2),
+            vgeoms_quat.repeat_interleave(static_n_vverts, dim=-2),
+        )
+        if vgeoms_is_dynamic.any():
+            dynamic_vverts_idx = np.concatenate(
+                [
+                    np.arange(vvert_start, vvert_start + n_vverts)
+                    for vvert_start, n_vverts in zip(
+                        self._vgeoms_dynamic_vvert_start[vgeoms_idx[vgeoms_is_dynamic]],
+                        vgeoms_n_vverts[vgeoms_is_dynamic],
+                    )
+                ]
+            )
+            dynamic_vverts_idx = torch.as_tensor(dynamic_vverts_idx, device=gs.device)
+            vverts[:, vverts_is_dynamic] = qd_to_torch(
+                self._data.dynamic_vverts.pos, envs_idx, dynamic_vverts_idx, transpose=True
+            )
+        return vverts

@@ -8,6 +8,7 @@ import igl
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.render_context import Lines, Points
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -88,7 +89,7 @@ def test_interior_tetrahedralized_vertex(cube_verts_and_faces, box_obj_path, sho
     # geom's sim_verts_idx, while surface_triangles reflects the refined tetrahedral boundary: the two meshes
     # differ in granularity, so the invariant to check is per-vertex tracking.
     (vgeom,) = fem.vgeoms
-    (fem_node_primitive,) = scene.visualizer.context.static_nodes[(0, vgeom.uid)].mesh.primitives
+    (fem_node_primitive,) = scene.visualizer.context.nodes_by_seg_keys[vgeom.seg_keys][0].mesh.primitives
     viz_verts = fem_node_primitive.positions
     assert_allclose(viz_verts, vertices[vgeom.sim_verts_idx], tol=gs.EPS)
 
@@ -121,8 +122,9 @@ def test_multi_submesh_render_decoupling(n_envs, show_viewer):
         assert_allclose(vertices[..., vgeom.sim_verts_idx, :], vgeom.vmesh.verts, tol=gs.EPS)
 
     # The rasterizer must register one node per visual geom and environment.
-    static_nodes = scene.visualizer.context.static_nodes
-    assert all((i_b, vgeom.uid) in static_nodes for i_b in range(max(n_envs, 1)) for vgeom in fem.vgeoms)
+    nodes_by_seg_keys = scene.visualizer.context.nodes_by_seg_keys
+    for vgeom in fem.vgeoms:
+        assert len(nodes_by_seg_keys[vgeom.seg_keys]) == max(n_envs, 1)
 
 
 @pytest.mark.required
@@ -571,6 +573,9 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
             damping=DAMPING,
             damping_alpha=DAMPING,
             damping_beta=DAMPING_BETA,
+            vis=gs.options.FEMVisOptions(
+                constraints=True,
+            ),
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, 0.6, HEIGHT + 0.5),
@@ -815,6 +820,20 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
         assert_allclose(verts_pos[:, is_fixed], init_verts_pos[is_fixed], tol=1e-8)
         is_opposite = morph_verts_pos[:, 2] < morph_verts_pos[:, 2].min() + 1e-3
         assert (init_verts_pos[is_opposite, 2] - verts_pos[:, is_opposite, 2] > 1e-2).all()
+
+    # The markers of the vertex constraints stand at the constrained vertices of every entity in every environment,
+    # each joined by a line of zero length to its target, which it holds.
+    markers = scene.sim.render_context.get_markers()
+    constrained_points = next(shape for shape in markers if isinstance(shape, Points))
+    target_lines = next(shape for shape in markers if isinstance(shape, Lines))
+    constrained_verts_pos = [box.get_verts_pos()[..., VERTICES_IDX, :]]
+    for fixed_box in (rotated_box, hanging_box):
+        morph = fixed_box.spec.morph
+        morph_verts_pos = (tensor_to_array(fixed_box.init_positions) - morph.pos) @ gu.quat_to_R(np.array(morph.quat))
+        is_fixed = morph_verts_pos[:, 2] > morph_verts_pos[:, 2].max() - 1e-3
+        constrained_verts_pos.append(fixed_box.get_verts_pos()[..., is_fixed, :])
+    assert_allclose(constrained_points.pos, torch.cat(constrained_verts_pos, dim=-2), tol=gs.EPS)
+    assert_allclose(target_lines.end, target_lines.start, tol=1e-8)
 
     # Disable constraints
     box.remove_vertex_constraints()

@@ -1,10 +1,11 @@
 import math
-from typing import Any, Literal
+from typing import Any, ClassVar
 
 import quadrants as qd
 from pydantic import Field
 
 import genesis as gs
+from genesis.constants import STRUCTURE
 from genesis.typing import PositiveFloat, ValidFloat
 
 from .base import Base, SamplerType
@@ -28,6 +29,8 @@ class Sand(Base):
     friction_angle : float, optional
         Friction angle in degrees, used to compute internal pressure-dependent plasticity. Default is 45.
     """
+
+    structure: ClassVar[STRUCTURE] = STRUCTURE.AMORPHOUS
 
     sampler: SamplerType = "random"
     friction_angle: PositiveFloat = 45.0

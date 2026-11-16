@@ -83,7 +83,8 @@ class SensorOptions[SensorT: "Sensor"](Options):
         The jitter in seconds modeled as a random additive delay sampled uniformly in ``[0, jitter)`` each step.
         Jitter cannot be greater than delay.
     draw_debug : bool
-        If True and visualizer is active, the sensor will draw debug shapes in the scene. Defaults to False.
+        Whether the readings of the sensor are drawn as markers, which the interactive viewer and the debug cameras
+        draw. Defaults to False.
     """
 
     history_length: NonNegativeInt = 0
@@ -171,8 +172,11 @@ class RigidSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMixin[Sen
 
 class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[SensorT]):
     """
-    Options for a sensor bound to a whole RigidEntity (e.g. joint-space sensors), where the attachment is mandatory:
-    entity_idx must refer to an existing RigidEntity, static sensors are not allowed.
+    Options for a sensor that measures nothing without a RigidEntity.
+
+    The attachment is mandatory: entity_idx must refer to an existing RigidEntity, static sensors are not allowed. Such
+    are the joint-space sensors, bound to a whole entity, and the sensors measuring a quantity of their link (contacts,
+    contact force, temperature).
 
     The link offset parameters are inherited from RigidSensorOptionsMixin but ignored by joint-space sensors.
     """
@@ -342,7 +346,11 @@ class JointTorque(RigidEntitySensorOptionsMixin["JointTorqueSensor"], SimpleSens
             )
 
 
-class Contact(ContactFilterOptionsMixin["ContactSensor"], SimpleSensorOptions["ContactSensor"]):
+class Contact(
+    RigidEntitySensorOptionsMixin["ContactSensor"],
+    ContactFilterOptionsMixin["ContactSensor"],
+    SimpleSensorOptions["ContactSensor"],
+):
     """
     Sensor that returns bool based on whether associated RigidLink is in contact.
 
@@ -363,7 +371,11 @@ class Contact(ContactFilterOptionsMixin["ContactSensor"], SimpleSensorOptions["C
     debug_color: UnitIntervalVec4Type = (1.0, 0.0, 1.0, 0.5)
 
 
-class ContactForce(ContactFilterOptionsMixin["ContactForceSensor"], SimpleSensorOptions["ContactForceSensor"]):
+class ContactForce(
+    RigidEntitySensorOptionsMixin["ContactForceSensor"],
+    ContactFilterOptionsMixin["ContactForceSensor"],
+    SimpleSensorOptions["ContactForceSensor"],
+):
     """
     Sensor that returns the total contact force being applied to the associated RigidLink in its local frame.
 
@@ -418,7 +430,9 @@ class TemperatureProperties(NamedTuple):
     emissivity: float = 0.9
 
 
-class TemperatureGrid(RigidSensorOptionsMixin["TemperatureGridSensor"], SimpleSensorOptions["TemperatureGridSensor"]):
+class TemperatureGrid(
+    RigidEntitySensorOptionsMixin["TemperatureGridSensor"], SimpleSensorOptions["TemperatureGridSensor"]
+):
     """
     Sensor that returns the temperature in Celsius of the associated RigidLink in its local frame.
 

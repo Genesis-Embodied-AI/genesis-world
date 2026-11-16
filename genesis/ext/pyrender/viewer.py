@@ -36,6 +36,7 @@ from .constants import (
     TARGET_OPEN_GL_MINOR,
     TEXT_PADDING,
     RenderFlags,
+    ViewFlags,
     TextAlign,
 )
 from .light import DirectionalLight
@@ -172,6 +173,7 @@ class Viewer(pyglet.window.Window):
         plane_reflection=False,
         plugins=None,
         enable_help_text=True,
+        debug_view=False,
         **kwargs,
     ):
         #######################################################################
@@ -223,6 +225,8 @@ class Viewer(pyglet.window.Window):
             "rgb": True,
             "seg": False,
             "depth": False,
+            # Whether the view draws the markers and the debug representation of the entities
+            "debug_view": debug_view,
         }
         self._default_viewer_flags = {
             "mouse_pressed": False,
@@ -733,9 +737,9 @@ class Viewer(pyglet.window.Window):
         depth=False,
         seg=False,
         normal=False,
-        skip_markers=False,
         split_envs=False,
         env_idx=None,
+        debug_view=True,
     ):
         if not self.is_active:
             # A viewer in its own thread stores what ended it rather than raising it where nobody waits, so the call
@@ -747,7 +751,7 @@ class Viewer(pyglet.window.Window):
         self.render_flags["rgb"] = rgb
         self.render_flags["seg"] = seg
         self.render_flags["depth"] = depth
-        self._offscreen_pending_render = (camera_node, render_target, normal, skip_markers, split_envs, env_idx)
+        self._offscreen_pending_render = (camera_node, render_target, normal, split_envs, env_idx, debug_view)
         if self._run_in_thread:
             # Send offscreen request
             self._offscreen_event.set()
@@ -786,7 +790,7 @@ class Viewer(pyglet.window.Window):
 
             if self._offscreen_pending_render is not None:
                 # Extract request right away
-                camera, target, normal, skip_markers, split_envs, env_idx = self._offscreen_pending_render
+                camera, target, normal, split_envs, env_idx, debug_view = self._offscreen_pending_render
                 self._offscreen_pending_render = None
 
                 # Update context, just in case is not already done before
@@ -794,8 +798,8 @@ class Viewer(pyglet.window.Window):
 
                 self._offscreen_results = []
                 self.render_flags["offscreen"] = True
-                self.render_flags["skip_markers"] = skip_markers
                 self.render_flags["split_envs"] = split_envs
+                self.render_flags["debug_view"] = debug_view
                 if target is self._renderer:
                     # The interactive window's own renderer tracks the OS window content area, which the OS may clamp
                     # below the requested resolution (e.g. a viewport larger than a macOS runner can allocate). Force
@@ -815,8 +819,8 @@ class Viewer(pyglet.window.Window):
                     retval = self._render(camera, target, normal, env_idx)
                 self._offscreen_result = retval if retval else (None, None)
                 self.render_flags["offscreen"] = False
-                self.render_flags["skip_markers"] = False
                 self.render_flags["split_envs"] = False
+                self.render_flags["debug_view"] = self._default_render_flags["debug_view"]
 
             if self._run_in_thread:
                 self._offscreen_semaphore.release()
@@ -1117,10 +1121,12 @@ class Viewer(pyglet.window.Window):
 
         if self.render_flags["offscreen"]:
             flags |= RenderFlags.OFFSCREEN
-        if self.render_flags.get("skip_markers", False):
-            flags |= RenderFlags.SKIP_MARKERS
-        else:
+        # A debug view draws the markers, seen through what hides them, and the debug representation of the entities
+        if self.render_flags["debug_view"]:
             flags |= RenderFlags.MARKER_XRAY
+        else:
+            flags |= RenderFlags.SKIP_MARKERS
+        renderer.jit.view = ViewFlags.DEBUG if self.render_flags["debug_view"] else ViewFlags.NORMAL
 
         seg_node_map = None
         if self.render_flags["seg"]:
@@ -1146,7 +1152,7 @@ class Viewer(pyglet.window.Window):
             flags = RenderFlags.FLAT | RenderFlags.OFFSCREEN
             if self.render_flags.get("split_envs", False):
                 flags |= RenderFlags.ENV_SEPARATE
-            if self.render_flags.get("skip_markers", False):
+            if not self.render_flags["debug_view"]:
                 flags |= RenderFlags.SKIP_MARKERS
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
             normal_arr, *_ = renderer.render(scene, flags, is_first_pass=not first_pass_done, env_idx=env_idx)

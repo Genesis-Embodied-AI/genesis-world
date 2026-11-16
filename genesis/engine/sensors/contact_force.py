@@ -1,24 +1,22 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Type
+from typing import TYPE_CHECKING
 
-import numpy as np
-import quadrants as qd
 import torch
 
+import quadrants as qd
+
 import genesis as gs
+from genesis.engine.render_context import Arrows, Points, Shape
 from genesis.options.sensors import Contact as ContactSensorOptions
 from genesis.options.sensors import ContactForce as ContactForceSensorOptions
 from genesis.utils.geom import inv_transform_by_quat, qd_inv_transform_by_quat, transform_by_quat
-from genesis.utils.misc import concat_with_tensor, make_tensor_field, qd_to_torch, tensor_to_array
-from genesis.utils.ring_buffer import TensorRingBuffer
+from genesis.utils.misc import concat_with_tensor, make_tensor_field
 
-from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, Sensor, SimpleSensor, SimpleSensorMetadata
+from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
     from genesis.engine.solvers import RigidSolver
-    from genesis.ext.pyrender.mesh import Mesh
-    from genesis.vis.rasterizer_context import RasterizerContext
 
     from .sensor_manager import SensorManager
 
@@ -213,20 +211,16 @@ class ContactSensor(SimpleSensor[ContactSensorOptions, None, ContactSensorMetada
     ) -> torch.Tensor:
         return tensor > shared_metadata.thresholds
 
-    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
-        """Make a sphere at the link of the sensor while it detects a contact, for the first rendered environment."""
-        if 0 not in envs_idx:
-            return []
-        env_idx = context.rendered_envs_idx[0] if self._manager.n_envs > 0 else None
-
-        pos = self._link.get_pos(env_idx, relative=False).reshape((3,))
-        is_contact = self.read(env_idx)
-        if not is_contact:
-            return []
-        sphere = context.make_debug_sphere(
-            pos=pos, radius=self._options.debug_sphere_radius, color=self._options.debug_color
-        )
-        return [(None, sphere, None)]
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Points]:
+        # The sphere at the link of the sensor is drawn while it detects a contact
+        if not markers:
+            pos = torch.zeros((self._manager.n_envs_, 1, 3), dtype=gs.tc_float, device=gs.device)
+            is_active = torch.zeros(pos.shape[:-1], dtype=gs.tc_bool, device=gs.device)
+            markers = (Points(pos, self._options.debug_sphere_radius, self._options.debug_color, is_active=is_active),)
+        pos, is_active = markers[0].pos, markers[0].is_active
+        pos[envs_idx] = self._link.get_pos(envs_idx, relative=False)[..., None, :]
+        is_active[envs_idx] = self.read(envs_idx)
+        return markers
 
 
 # ==========================================================================================================
@@ -335,17 +329,15 @@ class ContactForceSensor(
         out = out.masked_fill(out.abs() < shared_metadata.min_force, 0.0)
         return out.reshape(tensor.shape)
 
-    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
-        """Make an arrow showing the contact force measured by the sensor, for the first rendered environment."""
-        if 0 not in envs_idx:
-            return []
-        env_idx = context.rendered_envs_idx[0] if self._manager.n_envs > 0 else None
-
-        pos = self._link.get_pos(env_idx, relative=False).reshape((3,))
-        quat = self._link.get_quat(env_idx, relative=False).reshape((4,))
-
-        force = self.read(env_idx).reshape((3,))
-        vec = tensor_to_array(transform_by_quat(force * self._options.debug_scale, quat))
-
-        arrow = context.make_debug_arrow(pos=pos, vec=vec, color=self._options.debug_color)
-        return [] if arrow is None else [(None, arrow, None)]
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Arrows]:
+        if not markers:
+            pos = torch.zeros((self._manager.n_envs_, 1, 3), dtype=gs.tc_float, device=gs.device)
+            markers = (Arrows(pos, torch.zeros_like(pos), radius=0.006, color=self._options.debug_color),)
+        # The force is measured in the frame of the link
+        link_quat = self._link.get_quat(envs_idx, relative=False)
+        pos, vec = markers[0].pos, markers[0].vec
+        pos[envs_idx] = self._link.get_pos(envs_idx, relative=False)[..., None, :]
+        vec[envs_idx] = transform_by_quat(v=self.read(envs_idx) * self._options.debug_scale, quat=link_quat)[
+            ..., None, :
+        ]
+        return markers

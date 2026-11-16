@@ -1374,6 +1374,15 @@ def T_to_trans_quat(T):
     return T_to_trans(T), T_to_quat(T)
 
 
+def T_to_trans_quat_scale(T):
+    """Split transforms into their translation, their rotation as a quaternion, and the 3x3 linear map their rotation
+    applies after, which holds their scale and their shear.
+    """
+    # The rotation is proper, the linear map taking the reflection of a transform mirroring space (see 'polar')
+    R, scale = polar(T[..., :3, :3])
+    return T[..., :3, 3], R_to_quat(R), scale
+
+
 @nb.jit(nopython=True, cache=True)
 def _np_quat_mul(u, v, out=None):
     assert u.shape == v.shape

@@ -4,6 +4,7 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.render_context import Lines
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -90,6 +91,11 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
     HANGING_BOX_POS = (0.0, 1.0, 0.48)
 
     scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            vis=gs.options.RigidVisOptions(
+                constraints=True,
+            ),
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.8, 0.0, 0.6),
             camera_lookat=(0.2, 0.0, 0.3),
@@ -134,6 +140,14 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
             file=connected_boxes,
             pos=(0.0, -1.0, 0.0),
         ),
+    )
+    # The camera watches the cube and the fixed box of the third environment, which a weld added at runtime binds
+    cam = scene.add_camera(
+        res=(128, 128),
+        pos=(0.3, 2.2, 1.2),
+        lookat=(0.3, 0.5, 0.3),
+        env_idx=2,
+        debug=True,
     )
     scene.build(n_envs=4, env_spacing=(3.0, 3.0))
 
@@ -217,6 +231,20 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
     assert_allclose(gu.quat_to_rotvec(tensor_to_array(box_hung.get_quat())), (0.0, rest_angle, 0.0), atol=1e-2)
     assert_allclose(box_welded.get_pos(), welded_pos, tol=1e-3)
     assert_allclose(box_welded.get_quat(), welded_quat, tol=1e-3)
+
+    # The marker of the connect constraint ends at its anchor on the hung box, which the constraint holds at the pivot
+    connect_line = next(shape for shape in scene.sim.render_context.get_markers() if isinstance(shape, Lines))
+    pivot_pos = tensor_to_array(boxes.get_link("box_fixed").get_pos()) + connect.eq_data[:3]
+    assert_allclose(connect_line.end[:, 0], pivot_pos, tol=1e-3)
+
+    # A weld added at runtime is drawn as a line while it exists, the line going away once the weld is removed
+    rgb_before, *_ = cam.render(rgb=True, force_render=True)
+    scene.rigid_solver.add_weld_constraint(cube.base_link.idx, fixed_box.base_link.idx, envs_idx=[2])
+    rgb_added, *_ = cam.render(rgb=True, force_render=True)
+    scene.rigid_solver.delete_weld_constraint(cube.base_link.idx, fixed_box.base_link.idx, envs_idx=[2])
+    rgb_removed, *_ = cam.render(rgb=True, force_render=True)
+    assert np.abs(rgb_added.astype(np.float32) - rgb_before.astype(np.float32)).max() > 100.0
+    assert_equal(rgb_removed, rgb_before)
 
 
 @pytest.mark.required

@@ -343,8 +343,6 @@ def kernel_init_link_fields(
     links_entity_idx: qd.types.ndarray(),
     links_geom_start: qd.types.ndarray(),
     links_geom_end: qd.types.ndarray(),
-    links_vgeom_start: qd.types.ndarray(),
-    links_vgeom_end: qd.types.ndarray(),
     links_is_fixed: qd.types.ndarray(),
     links_pos: qd.types.ndarray(),
     links_quat: qd.types.ndarray(),
@@ -372,8 +370,6 @@ def kernel_init_link_fields(
         dyn_info.links.entity_idx[I_l] = links_entity_idx[i_l]
         dyn_info.links.geom_start[I_l] = links_geom_start[i_l]
         dyn_info.links.geom_end[I_l] = links_geom_end[i_l]
-        dyn_info.links.vgeom_start[I_l] = links_vgeom_start[i_l]
-        dyn_info.links.vgeom_end[I_l] = links_vgeom_end[i_l]
 
         for j in qd.static(range(4)):
             dyn_info.links.quat[I_l][j] = links_quat[i_l, j]
@@ -428,30 +424,10 @@ def kernel_init_link_dynamics(
 
 
 @qd.kernel(fastcache=True)
-def kernel_update_heterogeneous_links_vgeom(
-    i_l: qd.i32,
-    links_vgeom_start: qd.types.ndarray(),
-    links_vgeom_end: qd.types.ndarray(),
-    # Quadrants variables
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
-):
-    """Update per-environment links vgeom for heterogeneous entities."""
-    _B = links_vgeom_start.shape[0]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_b in range(_B):
-        dyn_info.links.vgeom_start[i_l, i_b] = links_vgeom_start[i_b]
-        dyn_info.links.vgeom_end[i_l, i_b] = links_vgeom_end[i_b]
-
-
-@qd.kernel(fastcache=True)
 def kernel_update_heterogeneous_link_info(
     i_l: qd.i32,
     links_geom_start: qd.types.ndarray(),
     links_geom_end: qd.types.ndarray(),
-    links_vgeom_start: qd.types.ndarray(),
-    links_vgeom_end: qd.types.ndarray(),
     links_inertial_mass: qd.types.ndarray(),
     links_inertial_pos: qd.types.ndarray(),
     links_inertial_quat: qd.types.ndarray(),
@@ -467,8 +443,6 @@ def kernel_update_heterogeneous_link_info(
     for i_b in range(_B):
         dyn_info.links.geom_start[i_l, i_b] = links_geom_start[i_b]
         dyn_info.links.geom_end[i_l, i_b] = links_geom_end[i_b]
-        dyn_info.links.vgeom_start[i_l, i_b] = links_vgeom_start[i_b]
-        dyn_info.links.vgeom_end[i_l, i_b] = links_vgeom_end[i_b]
         dyn_info.links.inertial_mass[i_l, i_b] = links_inertial_mass[i_b]
 
         for j in qd.static(range(3)):
@@ -549,35 +523,6 @@ def kernel_init_vert_fields(
         dyn_info.edges.length[i_ed] = (
             dyn_info.verts.init_pos[edges[i_ed, 0]] - dyn_info.verts.init_pos[edges[i_ed, 1]]
         ).norm()
-
-
-@qd.kernel(fastcache=True)
-def kernel_init_vvert_fields(
-    vverts_vgeom_idx: qd.types.ndarray(),
-    vverts_state_idx: qd.types.ndarray(),
-    vverts: qd.types.ndarray(),
-    vfaces: qd.types.ndarray(),
-    vnormals: qd.types.ndarray(),
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
-):
-    n_vverts = vverts.shape[0]
-    n_vfaces = vfaces.shape[0]
-
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_vv in range(n_vverts):
-        for j in qd.static(range(3)):
-            dyn_info.vverts.init_pos[i_vv][j] = vverts[i_vv, j]
-            dyn_info.vverts.init_vnormal[i_vv][j] = vnormals[i_vv, j]
-
-        dyn_info.vverts.vgeom_idx[i_vv] = vverts_vgeom_idx[i_vv]
-        dyn_info.vverts.vverts_state_idx[i_vv] = vverts_state_idx[i_vv]
-
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_vf in range(n_vfaces):
-        for j in qd.static(range(3)):
-            dyn_info.vfaces.vverts_idx[i_vf][j] = vfaces[i_vf, j]
-        dyn_info.vfaces.vgeom_idx[i_vf] = vverts_vgeom_idx[vfaces[i_vf, 0]]
 
 
 @qd.kernel(fastcache=True)
@@ -705,40 +650,6 @@ def kernel_init_geom_fields(
         *dyn_state.geoms.friction_ratio.shape, axes=qd.static(eoa(dyn_state.geoms.friction_ratio))
     ):
         dyn_state.geoms.friction_ratio[i_g, i_b] = 1.0
-
-
-@qd.kernel(fastcache=True)
-def kernel_init_vgeom_fields(
-    vgeoms_link_idx: qd.types.ndarray(),
-    vgeoms_vvert_start: qd.types.ndarray(),
-    vgeoms_vface_start: qd.types.ndarray(),
-    vgeoms_vvert_end: qd.types.ndarray(),
-    vgeoms_vface_end: qd.types.ndarray(),
-    vgeoms_pos: qd.types.ndarray(),
-    vgeoms_quat: qd.types.ndarray(),
-    vgeoms_color: qd.types.ndarray(),
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
-):
-    n_vgeoms = vgeoms_pos.shape[0]
-
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_vg in range(n_vgeoms):
-        for j in qd.static(range(3)):
-            dyn_info.vgeoms.pos[i_vg][j] = vgeoms_pos[i_vg, j]
-
-        for j in qd.static(range(4)):
-            dyn_info.vgeoms.quat[i_vg][j] = vgeoms_quat[i_vg, j]
-
-        dyn_info.vgeoms.vvert_start[i_vg] = vgeoms_vvert_start[i_vg]
-        dyn_info.vgeoms.vvert_end[i_vg] = vgeoms_vvert_end[i_vg]
-
-        dyn_info.vgeoms.vface_start[i_vg] = vgeoms_vface_start[i_vg]
-        dyn_info.vgeoms.vface_end[i_vg] = vgeoms_vface_end[i_vg]
-
-        dyn_info.vgeoms.link_idx[i_vg] = vgeoms_link_idx[i_vg]
-        for j in qd.static(range(4)):
-            dyn_info.vgeoms.color[i_vg][j] = vgeoms_color[i_vg, j]
 
 
 @qd.kernel(fastcache=True)

@@ -62,17 +62,19 @@ def main():
     sphere_tri = trimesh.Trimesh(vertices=sphere_verts, faces=sphere_tri.faces, process=False)
 
     kin_sphere = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=(sphere_tri,),
-            pos=(0, 0, 0),
-            fixed=True,
-            enable_custom_vverts=True,
-        ),
-        material=gs.materials.Kinematic(
+        spec=gs.entities.Kinematic(
+            morph=gs.morphs.MeshSet(
+                files=(sphere_tri,),
+                pos=(0, 0, 0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.8, 0.4),
+            ),
+            dynamic_vertices=gs.surfaces.DynamicVertices(
+                is_batched=True,
+            ),
             use_visual_raycasting=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.8, 0.4),
         ),
     )
 

@@ -1,5 +1,6 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
+from genesis.constants import STRUCTURE
 from genesis.typing import NonNegativeFloat, PositiveFloat, ValidFloat
 
 from .base import Base
@@ -33,6 +34,8 @@ class Elastic(Base["PBD3DEntity"]):
     volume_relaxation : float, optional
         The volume relaxation. Default is 0.1.
     """
+
+    structure: ClassVar[STRUCTURE] = STRUCTURE.DEFORMABLE
 
     rho: PositiveFloat = 1000.0
     static_friction: NonNegativeFloat = 0.15

@@ -1,4 +1,4 @@
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from enum import IntEnum, auto
 from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
@@ -33,9 +33,23 @@ from genesis.engine.materials.FEM.muscle import (
     func_muscle_fiber_stress,
     func_muscle_stress,
 )
+from genesis.engine.render_context import (
+    CONSTRAINT_COLOR,
+    CONSTRAINT_LINE_RADIUS,
+    CONSTRAINT_POINT_RADIUS,
+    ArrayRef,
+    DynamicMesh,
+    Lines,
+    MeshKey,
+    Points,
+    ScopedRenderContext,
+    SegmentationKeys,
+    Shape,
+    ShapeRoles,
+    select_view_shapes,
+)
 from genesis.engine.solvers.rigid.data import LinksState
 from genesis.engine.state_change import StateChange, mutates
-from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.grad.bridge import custom_backward, no_grad
 from genesis.options.solvers import FEMOptions
 from genesis.options.surfaces import Surface
@@ -63,11 +77,8 @@ from genesis.utils.misc import (
     qd_zero_grad,
     tensor_to_array,
 )
-from genesis.utils.warnings import warn_once
 
 from .base_solver import (
-    VFACES,
-    VVERTS,
     ErrorCode,
     GravityMixin,
     Solver,
@@ -78,7 +89,6 @@ from .base_solver import (
 
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import EntityDescription
-    from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
 # The most clusters an entity splits into, which bounds the size of its coarse matrix, the fewest vertices a cluster
@@ -92,6 +102,17 @@ MAX_SCENE_CLUSTERS = 16
 # Default threshold of the PCG solves of a forward simulation on their squared residual relative to its initial one, by
 # precision (see FEMOptions)
 PCG_THRESHOLD_DEFAULT = {np.float64: 1e-9, np.float32: 1e-6}
+
+
+class FEMVerticesConstraint(NamedTuple):
+    """The constraint of each FEM vertex in some environments (see 'FEMSolver.get_vertices_constraint')."""
+
+    is_constrained: torch.Tensor
+    """Whether a constraint holds the vertex."""
+    target_pos: torch.Tensor
+    """The target of the constraint."""
+    is_link_target: torch.Tensor
+    """Whether the target follows a rigid link."""
 
 
 class FEMErrorCode(ErrorCode):
@@ -281,12 +302,6 @@ class FEMSolveLoops(Data, kind=DataKind.SCRATCH, shape=()):
     linesearch_counter: qd.Tensor = field(qd.i32, ndarray=True)
 
 
-class FEMVVertsRender(Data, kind=DataKind.SCRATCH, shape=(VVERTS, ENVS)):
-    """The visual vertices as drawn, each one at the position of the simulated vertex it stands for."""
-
-    pos: qd.Tensor = field((float, 3))
-
-
 class FEMState(Data, kind=DataKind.STATE):
     """Runtime state of the finite element method (FEM) solver."""
 
@@ -299,7 +314,6 @@ class FEMState(Data, kind=DataKind.STATE):
     envs_solve: FEMEnvsSolve = field(labels=IMPLICIT)
     coarse_solve: FEMCoarseSolve = field(labels=IMPLICIT)
     solve_loops: FEMSolveLoops = field(labels=IMPLICIT)
-    vverts_render: FEMVVertsRender
 
 
 class FEMElementsInfo(Data, kind=DataKind.CONSTANT, shape=(ELEMENTS,)):
@@ -356,10 +370,6 @@ class FEMInfo(Data, kind=DataKind.CONSTANT):
     elements: FEMElementsInfo
     vertices: FEMVerticesInfo
     surfaces: FEMSurfacesInfo
-    # The simulated vertex each visual vertex stands for
-    vverts_vert_idx: qd.Tensor = field(int, shape=(VVERTS,))
-    vverts_uvs: qd.Tensor = field((float, 2), shape=(VVERTS,))
-    vfaces_indices: qd.Tensor = field((int, 3), shape=(VFACES,))
     gravity: qd.Tensor = field((float, 3), shape=(ENVS,), kind=DataKind.INFO)
     substep_dt: qd.Tensor = field(float, shape=())
     dt2: qd.Tensor = field(float, shape=())
@@ -538,9 +548,7 @@ class FEMData(Data):
                 envs=solver.n_envs_,
                 vertices=solver.n_vertices,
                 elements=solver.n_elements,
-                vverts=solver.n_vverts,
                 surfaces=solver.n_surfaces,
-                vfaces=solver.n_vfaces,
                 surface_vertices=n_surface_vertices,
                 surface_elements=n_surface_elements,
                 clusters=len(clusters.clusters_entity_idx),
@@ -551,7 +559,7 @@ class FEMData(Data):
             ),
             values=dict(fem_info=info_values),
             env_first={
-                (FEMData.fem_state.vertices, FEMData.fem_state.elements, FEMData.fem_state.vverts_render): False,
+                (FEMData.fem_state.vertices, FEMData.fem_state.elements): False,
                 (
                     FEMData.fem_state.elements_material,
                     FEMData.fem_state.elements_energy,
@@ -607,8 +615,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._n_vertices = 0
         self._n_elements = 0
         self._n_surfaces = 0
-        self._n_vverts = 0
-        self._n_vfaces = 0
 
         self.fem_state: FEMState | None = None
         self.fem_info: FEMInfo | None = None
@@ -858,16 +864,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             v_start=self.n_vertices,
             el_start=self.n_elements,
             s_start=self.n_surfaces,
-            vvert_start=self.n_vverts,
-            vface_start=self.n_vfaces,
             spec=spec,
         )
         self._entities.append(entity)
         self._n_vertices += entity.n_vertices
         self._n_elements += entity.n_elements
         self._n_surfaces += entity.n_surfaces
-        self._n_vverts += entity.n_vverts
-        self._n_vfaces += entity.n_vfaces
         return entity
 
     def add_elements(
@@ -910,22 +912,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         placeholder values and each surface triangle references itself as element.
         """
         kernel_add_cloth(v_start, s_start, verts, tri2v, tri2el, self.fem_state, self.fem_info)
-
-    def add_vverts(
-        self,
-        vvert_start: int,
-        vface_start: int,
-        v_start: int,
-        verts_idx: np.ndarray,
-        uvs: np.ndarray,
-        vfaces: np.ndarray,
-    ) -> None:
-        """Add the visual vertices and faces of a visual geom, the former standing for the given simulated vertices."""
-        kernel_add_vverts(vvert_start, vface_start, v_start, verts_idx, uvs, vfaces, self.fem_info)
-
-    # ------------------------------------------------------------------------------------
-    # ------------------------------------ stepping --------------------------------------
-    # ------------------------------------------------------------------------------------
 
     def substep_pre_coupling(self) -> None:
         if not self.is_active:
@@ -1050,31 +1036,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
-
-    def get_state_render(self, f: int | None = None):
-        """
-        Refresh and return the render geometry of every visual geom, laid out contiguously.
-
-        Parameters
-        ----------
-        f : int, optional
-            Deprecated and ignored.
-
-        Returns
-        -------
-        tuple
-            (vverts_pos, vverts_uvs, vfaces_indices) - environment-offset render vertex positions with shape
-            (n_vverts, B), their UV coordinates, and the render triangles in global render vertex space.
-        """
-        if f is not None:
-            warn_once(
-                self, "The argument of 'get_state_render' is deprecated and ignored. Call 'get_state_render()' instead."
-            )
-        if not self.is_active or self.n_vverts == 0:
-            return None, None, None
-
-        kernel_update_vverts_render(self.fem_state, self.fem_info)
-        return self.fem_state.vverts_render.pos, self.fem_info.vverts_uvs, self.fem_info.vfaces_indices
 
     @gs.assert_built
     @mutates(StateChange.GEOMETRY)
@@ -1281,6 +1242,26 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         )
         kernel_remove_vertex_constraints(verts_idx, envs_idx, self.vertex_constraints)
 
+    def get_vertices_constraint(self, envs_idx: IndexType | None = None) -> "FEMVerticesConstraint":
+        """Return the constraint of each vertex in some environments, all of them if None (see
+        'set_vertex_constraints').
+
+        Each vertex carries whether a constraint holds it, the target of the constraint, and whether the target follows
+        a rigid link, the target of a free vertex being meaningless.
+        """
+        constraints = self.vertex_constraints
+        vertices_slot = qd_to_torch(constraints.vertices_slot, envs_idx, transpose=True)
+        slots_target_pos = qd_to_torch(constraints.target_pos, envs_idx, transpose=True)
+        slots_link_idx = qd_to_torch(constraints.link_idx, envs_idx, transpose=True)
+        rows = torch.arange(len(vertices_slot), device=gs.device)[:, None]
+        vertices_slot_ = vertices_slot.clamp(min=0)
+        is_constrained = vertices_slot >= 0
+        return FEMVerticesConstraint(
+            is_constrained,
+            slots_target_pos[rows, vertices_slot_],
+            is_link_target=is_constrained & (slots_link_idx[rows, vertices_slot_] >= 0),
+        )
+
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
@@ -1302,14 +1283,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         return self._n_surfaces
 
     @property
-    def n_vverts(self) -> int:
-        return self._n_vverts
-
-    @property
-    def n_vfaces(self) -> int:
-        return self._n_vfaces
-
-    @property
     def vol_scale(self) -> float:
         return self._vol_scale
 
@@ -1320,6 +1293,79 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     @property
     def n_surface_elements(self) -> int:
         return self.fem_info.surface_elements.shape[0]
+
+
+class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
+    """The visual meshes of the FEM entities, the surface of their tetrahedra, and the markers of their constraints.
+
+    Each vertex of a visual mesh stands at the position of the simulated vertex it stands for. The surface of the
+    tetrahedra of an entity is its debug representation ('tet' debug_vis_mode).
+    """
+
+    debug_vis_modes = gs.entities.FEM._debug_vis_modes
+    # The vertex constraints are part of the model
+    stale_on = frozenset((StateChange.GEOMETRY, StateChange.MODEL))
+
+    def build(self) -> None:
+        solver = self.owner
+        # Every mesh views the simulated vertices of the whole solver, so that a renderer reads them once for all
+        verts_pos = ArrayRef(solver.fem_state.vertices.pos)
+        shapes = []
+        for entity in solver.entities:
+            # The deprecated 'vis_mode' of an entity shows its tetrahedra as the scene looks, and nothing else
+            is_pinned = entity.surface.vis_mode is not None
+            vgeoms_roles = ShapeRoles.of(entity.idx, is_looks=not is_pinned, is_debug=False)
+            meshes = [
+                (vgeom.vmesh.faces, vgeom.surface, vgeom.uvs, vgeom.seg_keys, vgeom.sim_verts_idx, vgeoms_roles, ())
+                for vgeom in entity.vgeoms
+            ]
+            # The surface of the tetrahedra follows the visual geoms in the segmentation keys of the entity
+            tets_seg_keys = SegmentationKeys(entity.idx, entity.idx, MeshKey(entity.idx, len(entity.vgeoms)))
+            tets_roles = ShapeRoles.of(entity.idx, is_looks=is_pinned, is_debug=True)
+            tets_verts_idx = np.arange(entity.n_vertices)
+            meshes.append(
+                (entity.surface_triangles, entity.surface, None, tets_seg_keys, tets_verts_idx, tets_roles, ("tet",))
+            )
+            for faces, surface, uvs, seg_keys, verts_idx, roles, views in meshes:
+                shapes.append(
+                    DynamicMesh(
+                        faces,
+                        surface,
+                        verts_pos,
+                        uvs,
+                        seg_keys,
+                        verts_idx=entity.v_start + verts_idx,
+                        roles=roles,
+                        _views=frozenset(views),
+                    )
+                )
+        self._shapes = tuple(shapes)
+
+    def update_shapes(self, envs_idx: torch.Tensor | None, view: str) -> tuple[Shape, ...]:
+        return select_view_shapes(self._shapes, view)
+
+    def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:
+        """Return a point at each constrained vertex, and a line to a target that follows no rigid link."""
+        solver = self.owner
+        if not solver.options.vis.constraints:
+            return ()
+        constraint = solver.get_vertices_constraint(envs_idx)
+        verts_idx = torch.nonzero(constraint.is_constrained.any(dim=0))[:, 0]
+        if len(verts_idx) == 0:
+            return ()
+        verts_pos = qd_to_torch(solver.fem_state.vertices.pos, envs_idx, verts_idx, transpose=True)
+        has_line = (constraint.is_constrained & ~constraint.is_link_target)[:, verts_idx]
+        verts_target_pos = torch.where(has_line[..., None], constraint.target_pos[:, verts_idx], verts_pos)
+        return (
+            Points(
+                verts_pos,
+                CONSTRAINT_POINT_RADIUS,
+                CONSTRAINT_COLOR,
+                is_active=constraint.is_constrained[:, verts_idx],
+                envs_idx=envs_idx,
+            ),
+            Lines(verts_pos, verts_target_pos, CONSTRAINT_LINE_RADIUS, CONSTRAINT_COLOR, envs_idx=envs_idx),
+        )
 
 
 # ------------------------------------------------------------------------------------
@@ -3151,32 +3197,6 @@ def kernel_add_cloth(
 ):
     """Add the vertices and surface triangles of a cloth entity, each triangle being its own element."""
     func_add_vertices_and_surfaces(v_start, s_start, s_start, 1.0, 0.0, verts, tri2v, tri2el, fem_state, fem_info)
-
-
-@qd.kernel(fastcache=True)
-def kernel_add_vverts(
-    vvert_start: int,
-    vface_start: int,
-    v_start: int,
-    verts_idx: qd.types.ndarray(),
-    uvs: qd.types.ndarray(element_dim=1),
-    vfaces: qd.types.ndarray(element_dim=1),
-    fem_info: FEMInfo,
-):
-    for i_vv_ in range(verts_idx.shape[0]):
-        fem_info.vverts_vert_idx[i_vv_ + vvert_start] = verts_idx[i_vv_] + v_start
-    for i_vv_ in range(uvs.shape[0]):
-        fem_info.vverts_uvs[i_vv_ + vvert_start] = uvs[i_vv_]
-    for i_vf_ in range(vfaces.shape[0]):
-        fem_info.vfaces_indices[i_vf_ + vface_start] = vfaces[i_vf_] + vvert_start
-
-
-@qd.kernel(fastcache=True)
-def kernel_update_vverts_render(fem_state: FEMState, fem_info: FEMInfo):
-    """Move the visual vertices to the position of the simulated vertex each one stands for, in single precision."""
-    for i_vv, i_b in qd.ndrange(*fem_state.vverts_render.pos.shape, axes=qd.static(eoa(fem_state.vverts_render.pos))):
-        i_v = fem_info.vverts_vert_idx[i_vv]
-        fem_state.vverts_render.pos[i_vv, i_b] = qd.cast(fem_state.vertices.pos[i_v, i_b], qd.f32)
 
 
 # ------------------------------------------------------------------------------------

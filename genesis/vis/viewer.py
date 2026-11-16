@@ -43,6 +43,7 @@ class Viewer(BuildableMixin, RBC):
         self._run_in_thread = options.run_in_thread
         self._refresh_rate = options.refresh_rate
         self._realtime_factor = options.realtime_factor
+        self._update_on_setters = options.update_on_setters
         self._camera_init_pos = np.asarray(options.camera_pos, dtype=np.float64)
         self._camera_init_lookat = np.asarray(options.camera_lookat, dtype=np.float64)
         self._camera_up = np.asarray(options.camera_up, dtype=np.float64)
@@ -61,6 +62,7 @@ class Viewer(BuildableMixin, RBC):
 
         self._pyrender_viewer = None
         self.context = context
+        self.context.add_view(self, is_debug=True)
         self.scene = None
 
         self._followed_entity = None
@@ -140,6 +142,7 @@ class Viewer(BuildableMixin, RBC):
                         plane_reflection=self.context.plane_reflection,
                         enable_help_text=self._enable_help_text,
                         plugins=self._plugins,
+                        debug_view=True,
                         viewer_flags={
                             "window_title": f"Genesis {gs.__version__}",
                             "refresh_rate": self._refresh_rate,
@@ -191,6 +194,7 @@ class Viewer(BuildableMixin, RBC):
 
     def destroy(self):
         self.stop()
+        self.context.remove_view(self)
         self._is_built = False
 
     def is_alive(self):
@@ -233,7 +237,7 @@ class Viewer(BuildableMixin, RBC):
             self._last_refresh_time = now
             with self.lock:
                 # A step changes the state of every solver, so every solver is synced at each refresh. A setter syncs
-                # its own solver right away (see 'Visualizer.build').
+                # right away (see 'Visualizer.build').
                 self.context.update(force_render=True)
 
                 # Refresh viewer by default if and if this is possible
@@ -290,9 +294,9 @@ class Viewer(BuildableMixin, RBC):
         depth=False,
         seg=False,
         normal=False,
-        skip_markers=False,
         split_envs=False,
         env_idx=None,
+        debug_view=True,
     ):
         return self._pyrender_viewer.render_offscreen(
             camera_node,
@@ -301,9 +305,9 @@ class Viewer(BuildableMixin, RBC):
             depth,
             seg,
             normal,
-            skip_markers=skip_markers,
             split_envs=split_envs,
             env_idx=env_idx,
+            debug_view=debug_view,
         )
 
     def set_camera_pose(self, pose=None, pos=None, lookat=None):
@@ -524,6 +528,11 @@ class Viewer(BuildableMixin, RBC):
             self._step_pacer = None
         else:
             self._step_pacer = Rate(value / self.scene.sim.dt)
+
+    @property
+    def update_on_setters(self) -> bool:
+        """Whether the viewer shows the changes of a setter right away (see ``ViewerOptions.update_on_setters``)."""
+        return self._update_on_setters
 
     @property
     def camera_pos(self):

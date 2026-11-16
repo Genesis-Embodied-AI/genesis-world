@@ -2,7 +2,6 @@
 Camera sensors for rendering: Rasterizer, Raytracer, and Batch Renderer.
 """
 
-import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
@@ -10,6 +9,7 @@ import numpy as np
 import torch
 
 import genesis as gs
+from genesis.engine.render_context import Shape
 from genesis.options.renderers import BatchRenderer as BatchRendererOptions
 from genesis.options.sensors import (
     BatchRendererCameraOptions,
@@ -34,7 +34,6 @@ from genesis.vis.rasterizer_context import RasterizerContext
 from .base_sensor import KinematicSensorMetadataMixin, KinematicSensorMixin, OptionsT, Sensor, SharedSensorMetadata
 
 if TYPE_CHECKING:
-    from genesis.ext.pyrender.mesh import Mesh
     from genesis.utils.ring_buffer import TensorRingBuffer
     from genesis.vis.batch_renderer import BatchRenderer
     from genesis.vis.rasterizer import Rasterizer
@@ -272,9 +271,9 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
         # every environment. Extend the caching mechanism to be env-aware so envs_idx only refreshes the reset envs.
         shared_metadata.last_render_timestep = -1
 
-    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
         """No debug drawing for cameras."""
-        return []
+        return ()
 
     # ========================== Attachment handling ==========================
 
@@ -488,7 +487,6 @@ class RasterizerCameraSensor(
             )
         vis_options = VisOptions(
             show_world_frame=False,
-            show_link_frame=False,
             show_cameras=False,
             rendered_envs_idx=range(max(self._manager.n_envs_, 1)),
         )
@@ -761,7 +759,6 @@ class BatchRendererCameraSensor(
 
             vis_options = VisOptions(
                 show_world_frame=False,
-                show_link_frame=False,
                 show_cameras=False,
                 rendered_envs_idx=range(max(self._manager.n_envs_, 1)),
             )

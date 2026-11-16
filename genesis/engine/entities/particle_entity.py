@@ -23,10 +23,6 @@ if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.solvers.particle_solver import ParticleSolver
 
-# Number of vvert-particle distances computed at once when searching the supports of the vverts. Their difference
-# vectors take 24 MiB in double precision, while chunks of this size still amortize the per-chunk overhead of numpy.
-VVERTS_DIST2_MAX_SIZE = 2**20
-
 
 def check_particles_inside_boundary(
     particles_pos: np.ndarray, boundary_lower: np.ndarray, boundary_upper: np.ndarray
@@ -82,10 +78,6 @@ class ParticleEntity(Entity):
         Index of this entity in the simulation.
     particle_start : int
         Global index offset for this entity's particles in the solver.
-    vvert_start : int, optional
-        Global index offset for vertex-based rendering, used for skinning.
-    vface_start : int, optional
-        Global index offset for visual faces, used for skinning.
     need_skinning : bool, default=True
         Whether to enable skinning for rendering this entity's mesh.
     """
@@ -99,8 +91,6 @@ class ParticleEntity(Entity):
         idx: int,
         particle_start: int,
         spec: "gs.entities.MPM | gs.entities.SPH | gs.entities.PBD",
-        vvert_start: int | None = None,
-        vface_start: int | None = None,
         need_skinning: bool = True,
     ) -> None:
         super().__init__(idx, scene, solver, surface, spec)
@@ -109,12 +99,6 @@ class ParticleEntity(Entity):
         self._particle_start = particle_start
 
         self._need_skinning = need_skinning
-        if need_skinning:
-            self._vvert_start = vvert_start
-            self._vface_start = vface_start
-        else:
-            self._vvert_start = -1
-            self._vface_start = -1
 
         # visual mesh
         if isinstance(self._morph, gs.options.morphs.MeshSet):
@@ -171,41 +155,11 @@ class ParticleEntity(Entity):
         self.active = not isinstance(self._morph, gs.options.morphs.Nowhere)
 
         self._add_particles_to_solver()
-        if self._need_skinning:
-            self._add_vverts_to_solver()
 
         self._is_built = True
 
     def _add_particles_to_solver(self):
         raise NotImplementedError
-
-    def _add_vverts_to_solver(self):
-        """Compute the supports of the vverts among their neighboring particles, for rendering.
-
-        The vverts are processed by chunks whose distances to all the particles take a bounded memory. A chunk holds one
-        vvert at least, whose distances take as much memory as the positions of the particles.
-        """
-        n_supports = self.solver.n_vvert_supports
-        chunk_size = max(VVERTS_DIST2_MAX_SIZE // len(self._particles), 1)
-        support_idxs = np.empty((len(self._vverts), n_supports), dtype=gs.np_int)
-        for i_vv_start in range(0, len(self._vverts), chunk_size):
-            vverts_chunk = self._vverts[i_vv_start : i_vv_start + chunk_size]
-            dist2 = np.sum(np.square(vverts_chunk[:, None, :] - self._particles), axis=-1)
-            chunk_support_idxs = np.argpartition(dist2, n_supports - 1, axis=1)[:, :n_supports]
-            chunk_support_dist2 = np.take_along_axis(dist2, chunk_support_idxs, axis=1)
-            sorted_order = np.lexsort((chunk_support_idxs, chunk_support_dist2))
-            support_idxs[i_vv_start : i_vv_start + chunk_size] = np.take_along_axis(
-                chunk_support_idxs, sorted_order, axis=1
-            )
-        support_idxs = np.clip(support_idxs, 0, len(self._particles) - 1)
-
-        all_ps = self._particles[support_idxs]
-        Ps = all_ps[:, :-1].swapaxes(-2, -1) - np.expand_dims(all_ps[:, -1], axis=-1)
-        P_invs = np.linalg.pinv(Ps)
-
-        self._solver.add_vverts(
-            self._vvert_start, self._particle_start, self._vverts, self._particles, P_invs, support_idxs
-        )
 
     def sample(self):
         """
@@ -585,26 +539,6 @@ class ParticleEntity(Entity):
     def particle_end(self):
         """Ending index (exclusive) of the entity's particles."""
         return self._particle_start + self._n_particles
-
-    @property
-    def vvert_start(self):
-        """Starting index for visual mesh vertices."""
-        return self._vvert_start
-
-    @property
-    def vvert_end(self):
-        """Ending index (exclusive) for visual mesh vertices."""
-        return self._vvert_start + self.n_vverts
-
-    @property
-    def vface_start(self):
-        """Starting index for visual mesh faces."""
-        return self._vface_start
-
-    @property
-    def vface_end(self):
-        """Ending index (exclusive) for visual mesh faces."""
-        return self._vface_start + self.n_vfaces
 
     @property
     def particle_size(self):

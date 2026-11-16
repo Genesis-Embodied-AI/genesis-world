@@ -906,9 +906,9 @@ def test_mjcf_2d_texture_mapping(textured_mjcf):
 
     rgba_arrays = [vgeom.vmesh.surface.get_rgba().image_array for vgeom in vgeoms.values()]
     assert all([array is rgba_arrays[0] for array in rgba_arrays])
-    rigid_nodes = scene.visualizer.context.rigid_nodes
+    nodes_by_seg_keys = scene.visualizer.context.nodes_by_seg_keys
     base_color_textures = [
-        rigid_nodes[vgeom.uid].mesh.primitives[0].material.baseColorTexture for vgeom in vgeoms.values()
+        nodes_by_seg_keys[vgeom.seg_keys][0].mesh.primitives[0].material.baseColorTexture for vgeom in vgeoms.values()
     ]
     assert base_color_textures[0] is not None
     assert all([texture is base_color_textures[0] for texture in base_color_textures])
@@ -920,25 +920,27 @@ def test_mjcf_2d_texture_mapping(textured_mjcf):
 
 
 @pytest.mark.required
-def test_surface_reconstruction(show_viewer):
+@pytest.mark.parametrize("recon_backend", ["splashsurf", "levelset"])
+def test_surface_reconstruction(recon_backend, show_viewer):
     # The particle size differs from the one of MPM, so that each solver must reconstruct its liquid at its own size
     scene = gs.Scene(
         sph_options=gs.options.SPHOptions(
             particle_size=0.04,
+            vis=gs.options.ParticleVisOptions(
+                recon_backend=recon_backend,
+            ),
         ),
         pbd_options=gs.options.PBDOptions(
             particle_size=0.04,
+            vis=gs.options.PBDVisOptions(
+                recon_backend=recon_backend,
+            ),
         ),
         show_viewer=show_viewer,
     )
-    # The liquids of each backend are placed symmetrically with respect to the camera, so that they look the same
+    # The liquids of both solvers are placed symmetrically with respect to the camera, so that they look the same
     liquids = []
-    for material, recon_backend, pos_y in (
-        (gs.materials.SPH.Liquid(), "splashsurf", -0.2),
-        (gs.materials.PBD.Liquid(), "splashsurf", 0.2),
-        (gs.materials.SPH.Liquid(), "levelset", -0.6),
-        (gs.materials.PBD.Liquid(), "levelset", 0.6),
-    ):
+    for material, pos_y in ((gs.materials.SPH.Liquid(), -0.2), (gs.materials.PBD.Liquid(), 0.2)):
         liquids.append(
             scene.add_entity(
                 material=material,
@@ -948,8 +950,6 @@ def test_surface_reconstruction(show_viewer):
                 ),
                 surface=gs.surfaces.Default(
                     color=(0.2, 0.6, 1.0, 1.0),
-                    vis_mode="recon",
-                    recon_backend=recon_backend,
                 ),
             )
         )
@@ -960,12 +960,12 @@ def test_surface_reconstruction(show_viewer):
     )
     scene.build()
 
-    # Both liquids of a backend fill the same box, so their surfaces cover the same area of the image
+    # Both liquids fill the same box, so their surfaces cover the same area of the image
     _, _, seg, _ = cam.render(rgb=False, depth=False, segmentation=True, colorize_seg=False, normal=False)
     seg_idx = {seg_key: idx for idx, seg_key in scene.segmentation_idx_dict.items()}
     liquids_n_pixels = np.array([(seg == seg_idx[liquid.idx]).sum() for liquid in liquids])
     assert (liquids_n_pixels > 0).all()
-    assert_allclose(liquids_n_pixels[1::2], liquids_n_pixels[::2], rtol=0.15)
+    assert_allclose(liquids_n_pixels[1], liquids_n_pixels[0], rtol=0.15)
 
 
 # ==================== Mesh Processing/Caching Tests ====================

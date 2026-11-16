@@ -12,6 +12,8 @@ import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.entities.rigid_entity import RigidLink
+from genesis.engine.render_context import MeshKey, SegmentationKeys
+from genesis.options.patches import resolve_patch_parts
 from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
 from genesis.utils.misc import broadcast_tensor, tensor_to_array, unique_rows
@@ -31,11 +33,9 @@ class FEMVisGeom(RBC):
     geoms or duplicated by texture seams share a single simulated vertex).
     """
 
-    def __init__(self, entity, vvert_start, vface_start, vmesh, sim_verts_idx):
+    def __init__(self, entity, vmesh, sim_verts_idx):
         self._uid = gs.UID()
         self._entity = entity
-        self._vvert_start = vvert_start
-        self._vface_start = vface_start
         self._vmesh = vmesh
         self._sim_verts_idx = sim_verts_idx
 
@@ -52,6 +52,12 @@ class FEMVisGeom(RBC):
     def entity(self):
         """The FEM entity the vgeom belongs to."""
         return self._entity
+
+    @property
+    def seg_keys(self) -> SegmentationKeys:
+        """The keys identifying the visual geom in segmentation maps."""
+        entity_idx = self._entity.idx
+        return SegmentationKeys(entity_idx, entity_idx, MeshKey(entity_idx, self._entity.vgeoms.index(self)))
 
     @property
     def vmesh(self):
@@ -87,26 +93,6 @@ class FEMVisGeom(RBC):
     def n_vfaces(self):
         """Number of render faces of the vgeom."""
         return len(self._vmesh.faces)
-
-    @property
-    def vvert_start(self):
-        """Starting index of the vgeom's render vertices in the FEM solver."""
-        return self._vvert_start
-
-    @property
-    def vface_start(self):
-        """Starting index of the vgeom's render faces in the FEM solver."""
-        return self._vface_start
-
-    @property
-    def vvert_end(self):
-        """Ending index of the vgeom's render vertices in the FEM solver."""
-        return self._vvert_start + self.n_vverts
-
-    @property
-    def vface_end(self):
-        """Ending index of the vgeom's render faces in the FEM solver."""
-        return self._vface_start + self.n_vfaces
 
 
 def assert_muscle(method):
@@ -145,10 +131,6 @@ class FEMEntity(Entity):
         Starting index of this entity's elements in the global element array (default is 0).
     s_start : int, optional
         Starting index of this entity's surface triangles in the global surface array (default is 0).
-    vvert_start : int, optional
-        Starting index of this entity's render vertices in the global render vertex array (default is 0).
-    vface_start : int, optional
-        Starting index of this entity's render faces in the global render face array (default is 0).
     """
 
     def __init__(
@@ -161,16 +143,12 @@ class FEMEntity(Entity):
         v_start: int = 0,
         el_start: int = 0,
         s_start: int = 0,
-        vvert_start: int = 0,
-        vface_start: int = 0,
     ) -> None:
         super().__init__(idx, scene, solver, surface, spec)
 
         self._v_start = v_start  # offset for vertex index of elements
         self._el_start = el_start  # offset for element index
         self._s_start = s_start  # offset for surface triangles
-        self._vvert_start = vvert_start  # offset for render vertices
-        self._vface_start = vface_start  # offset for render faces
         self._step_global_added = None
         self.sample()
 
@@ -362,6 +340,8 @@ class FEMEntity(Entity):
         verts_pos_morph = verts - self._morph.pos
         verts_is_fixed = np.zeros(len(verts), dtype=np.bool_)
         for patch in self._spec.patches:
+            if not isinstance(patch.options, gs.options.Vertex):
+                continue
             # Each selector resolves among the vertices the selectors before it hold, an ordinal counting those alone
             verts_idx = np.arange(len(verts))
             for vertex_index in patch.selectors:
@@ -391,23 +371,29 @@ class FEMEntity(Entity):
         the simulated vertices.
         """
         meshes = gs.Mesh.from_morph_surface(self._morph, self._surface)
+        # The visual geoms form a single level, so that the later of two selections holding a visual geom applies, and
+        # a surface given as None keeps that of the entity.
+        vgeoms_name = [mesh.metadata.get("name", "") for mesh in meshes]
+        vgeoms_surface: list[Surface | None] = [None] * len(meshes)
+        for patch in self._spec.patches:
+            if not isinstance(patch.options, gs.options.VGeom):
+                continue
+            vgeoms_idx = np.flatnonzero(resolve_patch_parts(patch, vgeoms_name))
+            if vgeoms_idx.size == 0:
+                gs.raise_exception(
+                    f"The selection {patch.selection_repr} holds no visual geom of entity '{self.name}'."
+                )
+            for i_vg in vgeoms_idx:
+                vgeoms_surface[i_vg] = patch.options.surface
+        for mesh, surface in zip(meshes, vgeoms_surface):
+            if surface is not None:
+                mesh.set_surface(surface)
         surface_verts, surface_faces, verts_maps = mu.merge_submeshes(
             [mesh.verts for mesh in meshes], [mesh.faces for mesh in meshes]
         )
         self._vgeoms = gs.List()
-        vvert_start, vface_start = self._vvert_start, self._vface_start
         for mesh, verts_idx in zip(meshes, verts_maps):
-            self._vgeoms.append(
-                FEMVisGeom(
-                    entity=self,
-                    vvert_start=vvert_start,
-                    vface_start=vface_start,
-                    vmesh=mesh,
-                    sim_verts_idx=verts_idx,
-                )
-            )
-            vvert_start += len(mesh.verts)
-            vface_start += len(mesh.faces)
+            self._vgeoms.append(FEMVisGeom(entity=self, vmesh=mesh, sim_verts_idx=verts_idx))
 
         if isinstance(self.material, gs.materials.FEM.Cloth):
             # Cloth needs no tetrahedralization: the welded surface triangles are the simulation elements.
@@ -457,20 +443,6 @@ class FEMEntity(Entity):
                 elems=elems_np,
                 tri2v=self._surface_tri_np,
                 tri2el=self._surface_el_np,
-            )
-
-        for vgeom in self._vgeoms:
-            # A vgeom without a texture carries no UVs; an empty array leaves its slice of the solver buffer zeroed.
-            uvs = vgeom.uvs
-            if uvs is None:
-                uvs = np.zeros((0, 2), dtype=gs.np_float)
-            self._solver.add_vverts(
-                vvert_start=vgeom.vvert_start,
-                vface_start=vgeom.vface_start,
-                v_start=self._v_start,
-                verts_idx=vgeom.sim_verts_idx,
-                uvs=uvs,
-                vfaces=vgeom.vmesh.faces.astype(gs.np_int, copy=False),
             )
 
         self._is_built = True
@@ -692,26 +664,6 @@ class FEMEntity(Entity):
     def n_vfaces(self):
         """Number of render faces in the FEM entity, summed over its visual geoms."""
         return sum(vgeom.n_vfaces for vgeom in self._vgeoms)
-
-    @property
-    def vvert_start(self):
-        """Global render vertex index offset for this entity."""
-        return self._vvert_start
-
-    @property
-    def vface_start(self):
-        """Global render face index offset for this entity."""
-        return self._vface_start
-
-    @property
-    def vvert_end(self):
-        """Global render vertex index past this entity's last one."""
-        return self._vvert_start + self.n_vverts
-
-    @property
-    def vface_end(self):
-        """Global render face index past this entity's last one."""
-        return self._vface_start + self.n_vfaces
 
     @property
     def n_surface_vertices(self):

@@ -1347,6 +1347,9 @@ def test_align_urdf(show_viewer, tol):
     # pose has its link frame origin at the collision geometry COM (auto-align for basic rigid objects).
     assert_allclose(fork.get_pos(relative=True), INIT_POS, tol=tol)
     assert_allclose(fork.get_links_pos(ref=gs.link_ref_frame.link_COM), fork.get_pos(relative=False), tol=tol)
+    # The kinematic entity anchors the asset at the pose the rigid entity of the default material anchors it at
+    assert_allclose(ghost_fork.get_pos(relative=False), fork.get_pos(relative=False), tol=gs.EPS)
+    assert_allclose(ghost_fork.get_quat(relative=False), fork.get_quat(relative=False), tol=gs.EPS)
 
     # Same qpos on rigid and kinematic entities must yield matching vAABB
     qpos = (0.3, -0.2, 1.0, 0.6, 0.5, 0.3, 0.0)

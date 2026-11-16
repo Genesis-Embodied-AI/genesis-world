@@ -25,8 +25,9 @@ def launch(
         camera_fov=40,
         enable_gui=True,
     )
+    # The collision geoms are shown in the debug view
     vis_options = gs.options.VisOptions(
-        show_link_frame=show_link_frame,
+        debug=collision,
         show_world_frame=True,
     )
 
@@ -44,20 +45,16 @@ def launch(
         if filename is not None:
             filename_lower = filename.lower()
             material = gs.materials.Rigid()
-            # Morphs load collision geometry by default, so the overlay's collision vis-mode has something to show; the
-            # -c flag only selects which representation is displayed first.
-            surface = gs.surfaces.Default(vis_mode="visual" if not collision else "collision")
 
             if filename_lower.endswith(USD_FORMATS):
                 morph = gs.morphs.USD(file=filename, scale=scale)
-                entities = scene.add_stage(morph=morph, vis_mode=surface.vis_mode)
+                entities = scene.add_stage(morph=morph)
             elif filename_lower.endswith((URDF_FORMAT, XACRO_FORMAT)):
                 morph_cls = gs.morphs.URDF
                 entities = [
                     scene.add_entity(
                         morph_cls(file=filename, scale=scale),
                         material=material,
-                        surface=surface,
                     )
                 ]
             elif filename_lower.endswith(MJCF_FORMAT):
@@ -66,7 +63,6 @@ def launch(
                     scene.add_entity(
                         morph_cls(file=filename, scale=scale),
                         material=material,
-                        surface=surface,
                     )
                 ]
             elif filename_lower.endswith(MESH_FORMATS):
@@ -75,7 +71,6 @@ def launch(
                     scene.add_entity(
                         morph_cls(file=filename, scale=scale),
                         material=material,
-                        surface=surface,
                     )
                 ]
             else:
@@ -85,6 +80,8 @@ def launch(
                 )
 
     scene.build()
+    if show_link_frame:
+        scene.visualizer.set_link_frames(link_frames=True)
 
     # 'enable_gui=True' auto-attaches the ImGui overlay, which owns the simulation through an InteractiveScene:
     # play/pause/step/reset and per-joint sliders (editable while paused) live in the overlay. Start paused so the
@@ -112,6 +109,9 @@ def play(filename=None, collision=False, scale=1.0, backend=gs.cpu):
             camera_lookat=(0.0, 0.0, 0.5),
             enable_gui=True,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=collision,
+        ),
         show_viewer=True,
     )
 
@@ -120,19 +120,15 @@ def play(filename=None, collision=False, scale=1.0, backend=gs.cpu):
         scene.add_entity(gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"))
     else:
         filename_lower = filename.lower()
-        surface = gs.surfaces.Default(vis_mode="visual" if not collision else "collision")
 
         if filename_lower.endswith(USD_FORMATS):
-            scene.add_stage(
-                morph=gs.morphs.USD(file=filename, scale=scale),
-                vis_mode=surface.vis_mode,
-            )
+            scene.add_stage(morph=gs.morphs.USD(file=filename, scale=scale))
         elif filename_lower.endswith(URDF_FORMAT):
-            scene.add_entity(gs.morphs.URDF(file=filename, scale=scale), surface=surface)
+            scene.add_entity(gs.morphs.URDF(file=filename, scale=scale))
         elif filename_lower.endswith(MJCF_FORMAT):
-            scene.add_entity(gs.morphs.MJCF(file=filename, scale=scale), surface=surface)
+            scene.add_entity(gs.morphs.MJCF(file=filename, scale=scale))
         elif filename_lower.endswith(MESH_FORMATS):
-            scene.add_entity(gs.morphs.Mesh(file=filename, scale=scale), surface=surface)
+            scene.add_entity(gs.morphs.Mesh(file=filename, scale=scale))
         else:
             gs.raise_exception(
                 f"Unsupported file format for 'gs play'. Expected {URDF_FORMAT}, "

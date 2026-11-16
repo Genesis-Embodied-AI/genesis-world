@@ -6,6 +6,7 @@ import torch
 import quadrants as qd
 
 import genesis as gs
+from genesis.constants import STRUCTURE
 from genesis.options.surfaces import Surface
 from genesis.utils.misc import broadcast_tensor
 
@@ -47,10 +48,6 @@ class MPMEntity(ParticleEntity):
         Unique index of the entity.
     particle_start : int
         Starting particle index.
-    vvert_start : int
-        Start index for visual vertices (unused if no skinning).
-    vface_start : int
-        Start index for visual faces (unused if no skinning).
     """
 
     def __init__(
@@ -61,13 +58,8 @@ class MPMEntity(ParticleEntity):
         particle_size: float,
         idx: int,
         particle_start: int,
-        vvert_start: int,
-        vface_start: int,
         spec: "gs.entities.MPM",
     ) -> None:
-        need_skinning = not isinstance(
-            spec.material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
-        )
         super().__init__(
             scene,
             solver,
@@ -75,9 +67,7 @@ class MPMEntity(ParticleEntity):
             particle_size,
             idx,
             particle_start,
-            vvert_start=vvert_start,
-            vface_start=vface_start,
-            need_skinning=need_skinning,
+            need_skinning=spec.material.structure == STRUCTURE.TEARABLE,
             spec=spec,
         )
 
