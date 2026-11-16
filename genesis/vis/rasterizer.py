@@ -67,18 +67,18 @@ class Rasterizer(BuildableMixin, RBC):
         del self._camera_targets[camera.uid]
 
     @gs.assert_built
-    def render_camera(self, camera, rgb=True, depth=False, segmentation=False, normal=False, *, split_envs):
+    def render_camera(
+        self, camera, rgb=True, depth=False, segmentation=False, normal=False, *, split_envs, env_idx=None
+    ):
         """Render a camera. With 'split_envs', the environments are rendered one by one from the pose the camera
-        holds in each, and stacked; otherwise one image is rendered of the environments laid out side by side."""
+        holds in each, and stacked; otherwise one image is rendered of the environments laid out side by side. With
+        'env_idx', the index of an environment among the rendered ones, that environment alone is rendered."""
         # Update camera
         self.update_camera(camera)
 
         rgb_arr, depth_arr, seg_idxc_arr, normal_arr = None, None, None, None
         skip_markers = not camera.debug if isinstance(camera, Camera) else True
-        env_idx = None
-        if isinstance(camera, Camera) and camera.env_idx is not None and self._context.split_envs:
-            env_idx = self._context.rendered_envs_idx.index(camera.env_idx)
-            split_envs = True
+        split_envs = split_envs or env_idx is not None
         if self._offscreen:
             # Set the context
             self._renderer.make_current()
