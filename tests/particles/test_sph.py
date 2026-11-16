@@ -296,12 +296,11 @@ def test_resume_from_pickle(show_viewer):
     # one substep to the next is part of the state a restore resumes from
     for _ in range(10):
         scene.step()
-    # Pickling the scene rejects particle entities, which have no description yet, so the simulator state goes alone
-    checkpoint_bytes = pickle.dumps(scene.sim.__getstate__())
+    checkpoint_bytes = pickle.dumps(scene.__getstate__())
     for _ in range(10):
         scene.step()
     entities_state = [(entity.get_particles_pos(), entity.get_particles_vel()) for entity in (sph_liquid, pbd_liquid)]
-    scene.sim.__setstate__(pickle.loads(checkpoint_bytes))
+    scene.__setstate__(pickle.loads(checkpoint_bytes))
     for _ in range(10):
         scene.step()
     for entity, (pos, vel) in zip((sph_liquid, pbd_liquid), entities_state):
