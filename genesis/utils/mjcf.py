@@ -21,6 +21,9 @@ from .misc import get_assets_dir, redirect_libc_stderr, unique_rows
 
 
 MIN_TIMECONST = np.finfo(np.double).eps
+# Static equalities (CONNECT, WELD, JOINT) read entries 0..10 in kernel_init_equality_fields; MuJoCo >= 3.17 widened
+# mjModel.eq_data to 12 columns while URDF mimic equalities allocate 11.
+EQUALITY_DATA_WIDTH = 11
 
 
 def get_model_name(file_path):
@@ -772,7 +775,10 @@ def parse_equalities(mj, scale):
 
         eq_info = dict()
         eq_info["name"] = mj_equality.name
-        eq_info["data"] = mj.eq_data[i_e]
+        eq_data = np.zeros(EQUALITY_DATA_WIDTH, dtype=np.float64)
+        n_eq_data = min(EQUALITY_DATA_WIDTH, len(mj.eq_data[i_e]))
+        eq_data[:n_eq_data] = mj.eq_data[i_e, :n_eq_data]
+        eq_info["data"] = eq_data
         eq_info["sol_params"] = np.concatenate((mj.eq_solref[i_e], mj.eq_solimp[i_e]))
 
         objs_idx = [mj.eq_obj1id[i_e], mj.eq_obj2id[i_e]]
