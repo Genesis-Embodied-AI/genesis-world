@@ -13,6 +13,7 @@ import genesis.utils.mesh as mu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import MPMEntity
+from genesis.engine.entities.particle_entity import ParticleEntityDescription
 from genesis.engine.materials import MPM
 from genesis.engine.render_context import (
     LABELS_HUE_STEP,
@@ -52,7 +53,6 @@ from .base_solver import ErrorCode, kernel_set_actu
 from .particle_solver import ParticleScopedRenderContext, ParticleSolver
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.simulator import Simulator
 
 
@@ -500,20 +500,24 @@ Please decrease the simulation timestep or adjust the material parameters."""
     def add_entity(
         self,
         idx: int,
-        surface: Surface,
-        spec: "gs.entities.MPM",
-        desc: "EntityDescription | None" = None,
-    ) -> "MPMEntity":
-        self._materials_idx.setdefault(spec.material, len(self._materials_idx))
+        surface: Surface | None,
+        spec: "gs.entities.MPM | None",
+        desc: ParticleEntityDescription | None = None,
+    ) -> MPMEntity:
+        """Create an entity from its description, resolving one from the entity spec and its surface if none is given."""
+        if desc is None:
+            desc = ParticleEntityDescription.resolve(
+                spec, surface, self._particle_size, self.boundary_lower, self.boundary_upper
+            )
+        self._materials_idx.setdefault(desc.spec.material, len(self._materials_idx))
 
         entity = MPMEntity(
             scene=self._sim.scene,
             solver=self,
-            surface=surface,
+            desc=desc,
             particle_size=self._particle_size,
             idx=idx,
             particle_start=self.n_particles,
-            spec=spec,
         )
         self._entities.append(entity)
         self._n_particles += entity.n_particles

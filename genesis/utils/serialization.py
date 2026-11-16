@@ -401,8 +401,8 @@ def _export_value(value, expect, exported: "Exported"):
         given = vars(value)
         declared = _declared_fields(type(value))
         if issubclass(type(value), Options):
-            # A field excluded from serialization is derived when the option object is built (a shortcut resolved into
-            # the fields it stands for), or a callback, which no file can hold
+            # A field excluded from serialization is derived when the option object is built: a shortcut resolved
+            # into the fields it stands for, or a callback chosen by the kind of material.
             declared = {
                 name: annotation for name, annotation in declared.items() if not type(value).model_fields[name].exclude
             }
