@@ -1,0 +1,23 @@
+tests/particles/test_pbd.py
+  s_f6265a3405f7f1::t_de4aedc61a9da2 316-318
+genesis/engine/force_fields.py
+  s_f6265a3405f7f1::t_1b2d8538fd1843 14-15
+genesis/engine/materials/hybrid.py
+  s_f6265a3405f7f1::t_1b2d8538fd1843 6,44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c944be77ed8f2d5c786c9f83e29a8b7237f51c5c",
+  "prompts": {},
+  "sessions": {
+    "s_f6265a3405f7f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "530d9a68-9efd-4ee3-acb9-89e9d6b16510",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
