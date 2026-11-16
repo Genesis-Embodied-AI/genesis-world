@@ -220,23 +220,28 @@ class ErrnoMixin:
         the copy the previous call enqueued is checked instead: an error raises one call later, with the context of the
         call that enqueued it, and the host only waits for the device when it runs ahead of it by more than the interval
         between two calls. A blocking check raises what no copy has reported yet with the context of the last one.
-        `context` says where the check runs, ahead of the message.
+        `context` says where the check runs, ahead of the message. In a scene with parallel environments, the message
+        ends with the environments flagged with the error it reports, summarized as numpy does beyond six of them.
         """
         if not self._error_reports:
             return
         if not blocking and self._errno_host is not None:
             self._errno_event.synchronize()
-            errno = np.bitwise_or.reduce(self._errno_host.numpy())
+            errno_envs = self._errno_host.numpy()
+            errno = np.bitwise_or.reduce(errno_envs)
             context, self._errno_host_context = self._errno_host_context, context
             # The flags stay raised on the device until a reset, so a copy that raises is cleared rather than renewed,
-            # which spares raising it again once a valid state is set.
+            # which spares raising it again once a valid state is set. The message reads the flags of the copy, which
+            # its clearing overwrites.
             if errno:
+                errno_envs = errno_envs.copy()
                 self._errno_host.zero_()
             else:
                 self._errno_host.copy_(self._errno_latched, non_blocking=True)
                 self._errno_event.record()
         else:
-            errno = np.bitwise_or.reduce(tensor_to_array(self._errno_latched))
+            errno_envs = tensor_to_array(self._errno_latched)
+            errno = np.bitwise_or.reduce(errno_envs)
             if context is None:
                 context = self._errno_host_context
             self._errno_host_context = None
@@ -245,6 +250,14 @@ class ErrnoMixin:
         for code, report in self._error_reports.items():
             if errno & code:
                 message = report()
+                if self.n_envs > 0:
+                    envs_idx = np.flatnonzero(errno_envs & code)
+                    envs_idx_str = np.array2string(envs_idx, separator=", ", threshold=6, edgeitems=3)
+                    if envs_idx.size > 6:
+                        envs_idx_str = f"({envs_idx.size}): {envs_idx_str}"
+                    else:
+                        envs_idx_str = f": {envs_idx_str}"
+                    message = f"{message} Failing environments{envs_idx_str}."
                 gs.raise_exception(message if context is None else f"{context}: {message}")
 
 
