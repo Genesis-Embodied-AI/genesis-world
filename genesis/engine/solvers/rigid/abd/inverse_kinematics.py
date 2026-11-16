@@ -27,6 +27,8 @@ from genesis.utils.misc import qd_isfinite
 IK_TARGETS = Size("ik_targets")
 # The pose residuals of the targets stacked, six per target
 IK_ERRORS = 6 * IK_TARGETS
+# The rows of the damped normal matrix, the smaller of the error and dof spaces (see func_inverse_kinematics)
+IK_NORMAL = Size("ik_normal")
 
 
 class IKState(Data, kind=DataKind.SCRATCH):
@@ -38,11 +40,11 @@ class IKState(Data, kind=DataKind.SCRATCH):
     jacobian_stacked: qd.Tensor = field(float, shape=(IK_ERRORS, ENTITY_DOFS, ENVS))
     # Lower Cholesky factor of the damped normal matrix, J J^T + damping^2 I in the error space or J^T J + damping^2 I
     # in the dof space, whichever is smaller (see func_inverse_kinematics), its upper triangle unused
-    chol: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    chol: qd.Tensor = field(float, shape=(IK_NORMAL, IK_NORMAL, ENVS))
     # Pose residual of all targets stacked, the best one across restarts, and the solution of the normal equations
     err_pose: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
     err_pose_best: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
-    vec: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
+    vec: qd.Tensor = field(float, shape=(IK_NORMAL, ENVS))
     # Joint-space step, and the best configuration across restarts
     delta_qpos: qd.Tensor = field(float, shape=(ENTITY_DOFS, ENVS))
     qpos_best: qd.Tensor = field(float, shape=(ENTITY_QS, ENVS))

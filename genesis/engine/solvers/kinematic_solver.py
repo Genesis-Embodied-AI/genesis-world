@@ -1294,14 +1294,16 @@ class KinematicSolver(Solver):
         # allocated by the first solve and a scene that never solves inverse kinematics allocates none of it
         if self._ik_scratch is None:
             entities = self.entities
+            entity_dofs = max([entity.n_dofs for entity in entities], default=0)
             self._ik_scratch = IKScratch(
                 sizes=dict(
                     envs=self.n_envs_,
                     entity_qs=max([entity.n_qs for entity in entities], default=0),
-                    entity_dofs=max([entity.n_dofs for entity in entities], default=0),
+                    entity_dofs=entity_dofs,
                     entity_links=max([entity.n_links for entity in entities], default=0),
                     entity_joints=max([entity.n_joints for entity in entities], default=0),
                     ik_targets=n_tgts,
+                    ik_normal=min(6 * n_tgts, entity_dofs),
                 ),
                 # The initial configuration of an environment is read as a whole
                 env_first={IKScratch.targets.init_qpos: True},
