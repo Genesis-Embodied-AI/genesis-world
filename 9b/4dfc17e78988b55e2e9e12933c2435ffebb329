@@ -1,0 +1,24 @@
+tests/utils/assets.py
+  s_b7321d10028ded::t_5fa2c28ad7ba03 125-126
+  s_b7321d10028ded::t_0a4507d26fdf88 1,14,33-42,123-124,127-129,135-153
+AGENTS.md
+  s_b7321d10028ded::t_2aed67d475d8ff 236-237
+tests/snapshots.lock
+  s_b7321d10028ded::t_2645dc799ab769 1-478
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9b4dfc17e78988b55e2e9e12933c2435ffebb329",
+  "prompts": {},
+  "sessions": {
+    "s_b7321d10028ded": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "59942b26-a143-42c8-9729-16111d41853d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

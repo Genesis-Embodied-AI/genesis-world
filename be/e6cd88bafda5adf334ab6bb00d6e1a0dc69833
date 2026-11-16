@@ -1,0 +1,23 @@
+tests/utils/assets.py
+  s_b7321d10028ded::t_e05fb349eb1bda 41
+.pre-commit-config.yaml
+  s_b7321d10028ded::t_a301d144b5b8d0 10-29
+AGENTS.md
+  s_b7321d10028ded::t_63a3774d5dd96c 237
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bee6cd88bafda5adf334ab6bb00d6e1a0dc69833",
+  "prompts": {},
+  "sessions": {
+    "s_b7321d10028ded": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "59942b26-a143-42c8-9729-16111d41853d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

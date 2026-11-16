@@ -1,0 +1,25 @@
+tests/utils/assets.py
+  s_c8be7b204882a0::t_3ae6eeebe58539 14,37-40,48-55,57-58,60-66,68-74,76-93,181-182
+tests/conftest.py
+  s_c8be7b204882a0::t_396d609ee7d151 264,312-317,804,807,809-810,1354-1358,1364,1366,1393-1396,1398-1401
+  s_c8be7b204882a0::t_240bae7883f2b2 79-80,764-769
+  s_c8be7b204882a0::t_649c73b687b121 81,770-771
+AGENTS.md
+  s_c8be7b204882a0::t_a9d48cd83b9dfd 236-237
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ee729a5c024ebcedc09090473cc2f60f2e509e62",
+  "prompts": {},
+  "sessions": {
+    "s_c8be7b204882a0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "924a54ab-4c44-428d-9958-11ba46f679c5",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

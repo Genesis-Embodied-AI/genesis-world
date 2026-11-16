@@ -1,0 +1,19 @@
+tests/snapshots.lock
+  s_c8be7b204882a0::t_55238200392756 459-460
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c53554214189ad7052dd22432df0c6423fa640fc",
+  "prompts": {},
+  "sessions": {
+    "s_c8be7b204882a0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "924a54ab-4c44-428d-9958-11ba46f679c5",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
