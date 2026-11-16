@@ -1287,10 +1287,17 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             equalities_sol_params = np.array([equality.desc.sol_params for equality in equalities], dtype=gs.np_float)
             _sanitize_sol_params(equalities_sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
 
+            # The solver initializes a fixed 11-entry slice per static equality; normalize described rows so MJCF,
+            # URDF and custom equalities of differing widths pack into one array.
+            equalities_eq_data = np.zeros((len(equalities), 11), dtype=gs.np_float)
+            for i_eq, equality in enumerate(equalities):
+                n_data = min(11, len(equality.eq_data))
+                equalities_eq_data[i_eq, :n_data] = equality.eq_data[:n_data]
+
             kernel_init_equality_fields(
                 np.array([equality.eq_obj1id for equality in equalities], dtype=gs.np_int),
                 np.array([equality.eq_obj2id for equality in equalities], dtype=gs.np_int),
-                np.array([equality.eq_data for equality in equalities], dtype=gs.np_float),
+                equalities_eq_data,
                 np.array([equality.type for equality in equalities], dtype=gs.np_int),
                 equalities_sol_params,
                 self.dyn_info,
