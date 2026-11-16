@@ -3108,8 +3108,7 @@ class RigidEntity(KinematicEntity):
             The net force applied on each links due to direct external contacts.
         """
         links_idx = slice(self.link_start, self.link_end)
-        tensor = self._solver.get_links_net_contact_force(links_idx, envs_idx)
-        return tensor[0] if self._solver.n_envs == 0 else tensor
+        return self._solver.get_links_net_contact_force(links_idx, envs_idx)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- friction ---------------------------------------
