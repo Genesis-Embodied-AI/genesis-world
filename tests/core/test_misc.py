@@ -13,7 +13,7 @@ import trimesh
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.point_cloud as pc
-from genesis.utils.cache import disable_owned_cache_release, enable_owned_cache_release
+from genesis.utils.cache import disable_owned_cache_release, enable_owned_cache_release, get_fps_pc_cache_dir
 from genesis.utils.misc import assign_indexed_tensor, broadcast_tensor, indices_to_mask, sanitize_index, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -482,6 +482,11 @@ def test_fps_cache_round_trip():
         first = pc.sample_mesh_point_cloud(verts=mesh.vertices, **kwargs, use_cache=True)
         assert_equal(first, pc.sample_mesh_point_cloud(verts=mesh.vertices, **kwargs, use_cache=True))
         assert_equal(first, pc.sample_mesh_point_cloud(verts=reexported_verts, **kwargs, use_cache=True))
+
+    # A random seed cannot be requested again, hence sampling with one must leave the cache untouched
+    cache_buckets = set(os.listdir(get_fps_pc_cache_dir()))
+    pc.sample_mesh_point_cloud(verts=mesh.vertices, faces=mesh.faces, n_points=5, seed=None, use_cache=True)
+    assert set(os.listdir(get_fps_pc_cache_dir())) == cache_buckets
 
 
 @pytest.mark.required
