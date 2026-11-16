@@ -182,7 +182,7 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
 
 
 @pytest.mark.required
-def test_mesh_mpm_build(show_viewer):
+def test_mesh_mpm_build(tmp_path, show_viewer):
     scene = gs.Scene(
         mpm_options=gs.options.MPMOptions(
             lower_bound=(-0.5, -0.5, -0.5),
@@ -211,6 +211,15 @@ def test_mesh_mpm_build(show_viewer):
     for duck in ducks:
         assert scene.entities[duck.idx] is duck
         assert duck.part_rigid.material.needs_coup
+
+    scene.export(tmp_path / "scene.gs")
+    scene_loaded = gs.Scene.load(tmp_path / "scene.gs")
+    assert [entity.name for entity in scene_loaded.entities] == [entity.name for entity in scene.entities]
+    for duck in ducks:
+        duck_loaded = scene_loaded.entities[duck.idx]
+        assert duck_loaded.part_soft.material.n_groups == duck.part_soft.material.n_groups
+        assert_equal(duck_loaded.part_soft.init_particles, duck.part_soft.init_particles)
+        assert_equal(duck_loaded.mpm_hybrid_part.groups_link_idx, duck.mpm_hybrid_part.groups_link_idx)
 
 
 @pytest.mark.debug(False)  # Disable debug for speedup

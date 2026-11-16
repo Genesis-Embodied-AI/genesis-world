@@ -29,6 +29,7 @@ from genesis.utils.warnings import warn_once
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .couplers.rigid_mpm_hybrid import RigidMPMHybrid
 from .entities import HybridEntity
+from .entities.hybrid_entity import HybridEntityDescription
 from .render_context import RenderContext
 from .sensors import SensorManager
 from .solvers import FEMSolver, KinematicSolver, MPMSolver, PBDSolver, RigidSolver, SPHSolver
@@ -178,8 +179,10 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         if desc is not None:
             spec = desc.spec
         if isinstance(spec, gs.entities.Hybrid):
-            # A hybrid entity adds its parts to the scene itself, as entities of their own
-            entity = HybridEntity(self.scene, surface, spec)
+            # A hybrid entity adds its parts to the scene as entities of their own, before itself
+            if desc is None:
+                desc = HybridEntityDescription.resolve(self.scene, spec, surface)
+            entity = HybridEntity(self.n_entities, self.scene, desc)
         else:
             solver = next(
                 (
