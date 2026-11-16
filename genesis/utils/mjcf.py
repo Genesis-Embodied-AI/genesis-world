@@ -97,23 +97,44 @@ def build_model(
             is_urdf_file = root.tag == "robot"
             mjcf = ET.SubElement(root, "mujoco") if is_urdf_file else root
 
-        # Parse all included sub-models recursively
+        # Parse all included sub-models recursively, splicing <include> elements in place inside any parent element.
         root_parent_stack = [(mjcf, Path(""))]
         while root_parent_stack:
-            xml_root, parent_path = root_parent_stack.pop()
-            for elem in tuple(xml_root.findall("include")):
-                include_path = parent_path / elem.attrib["file"]
-                include_root = ET.parse(Path(asset_path) / include_path).getroot()
-                # Mesh file paths in the included file are relative to that file's directory, whereas meshdir
-                # points at the top-level model, so rewrite them to stay valid once inlined. Only <asset> meshes
-                # reference a file; a <mesh> under <default> is a default class setting attributes (e.g.
-                # maxhullvert) and a vertex mesh under <asset> is procedural, both carrying no file to rewrite.
-                for include_elem in include_root.findall(".//asset/mesh[@file]"):
-                    include_elem.attrib["file"] = str(include_path.parent / include_elem.attrib["file"])
-                for child in include_root:
-                    mjcf.append(child)
-                mjcf.remove(elem)
-                root_parent_stack.append((include_root, include_path))
+            xml_root, parent_dir = root_parent_stack.pop()
+            for parent in tuple(xml_root.iter()):
+                for elem in tuple(parent.findall("include")):
+                    rel_include = Path(elem.attrib["file"])
+                    candidate = parent_dir / rel_include
+                    include_path = candidate if (Path(asset_path) / candidate).exists() else rel_include
+                    include_root = ET.parse(Path(asset_path) / include_path).getroot()
+                    for inc_comp in include_root.findall("compiler"):
+                        for name in ("assetdir", "meshdir", "texturedir"):
+                            if (
+                                name in inc_comp.attrib
+                                and (Path(asset_path) / include_path.parent / inc_comp.attrib[name]).exists()
+                            ):
+                                inc_comp.attrib[name] = str(include_path.parent / inc_comp.attrib[name])
+                    # Asset file paths authored relative to the included file's directory are rewritten when found
+                    # there, while paths authored against a shared top-level <compiler meshdir="..."/> stay untouched.
+                    # Only <asset> elements carry files; <default> classes and procedural vertex meshes carry none.
+                    for tag in ("mesh", "texture", "hfield"):
+                        for include_elem in include_root.findall(f".//asset/{tag}[@file]"):
+                            asset_file = include_elem.attrib["file"]
+                            if (
+                                not os.path.isabs(asset_file)
+                                and (Path(asset_path) / include_path.parent / asset_file).exists()
+                            ):
+                                # os.path.abspath normalizes '..' without resolving symlinks (preserving extensions).
+                                include_elem.attrib["file"] = os.path.abspath(
+                                    Path(asset_path) / include_path.parent / asset_file
+                                )
+                    elem_idx = list(parent).index(elem)
+                    parent.remove(elem)
+                    children = list(include_root)
+                    for offset, child in enumerate(children):
+                        parent.insert(elem_idx + offset, child)
+                    for child in reversed(children):
+                        root_parent_stack.append((child, include_path.parent))
 
         # Drop ground planes authored directly under the worldbody so a model that embeds its own floor can be
         # loaded into a scene that already provides a ground. Removing the source geoms before compilation leaves
@@ -124,14 +145,21 @@ def build_model(
                     if geom.attrib.get("type") == "plane":
                         worldbody.remove(geom)
 
-        # Make sure compiler options are defined
-        compiler = mjcf.find("compiler")
-        if compiler is None:
-            compiler = ET.SubElement(mjcf, "compiler")
+        # Make sure compiler options are defined across every <compiler> block (included fragments may add their own).
+        compilers = mjcf.findall("compiler")
+        if not compilers:
+            compilers = [ET.SubElement(mjcf, "compiler")]
+        compiler = compilers[-1]
 
-        # Set absolute asset search directory
+        # Resolve any explicitly authored asset directories on each <compiler>, and seed defaults on the first block
+        # so a later <compiler angle="radian"/> without meshdir does not clobber an earlier meshdir.
+        for comp in compilers:
+            for name in ("assetdir", "meshdir", "texturedir"):
+                if name in comp.attrib:
+                    val = comp.attrib[name]
+                    comp.attrib[name] = val if os.path.isabs(val) else str(Path(asset_path) / val)
         for name in ("assetdir", "meshdir", "texturedir"):
-            compiler.attrib[name] = str(Path(asset_path) / compiler.attrib.get(name, ""))
+            compilers[0].attrib.setdefault(name, str(Path(asset_path)))
 
         # Set default constraint solver time constant.
         # Note that these default options are ignored when parsing URDF files.

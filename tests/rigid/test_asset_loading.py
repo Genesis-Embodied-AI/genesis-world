@@ -90,6 +90,54 @@ def test_mjcf_include_rewrites_asset_mesh_and_skips_default_mesh(mjcf_include_de
 
 
 @pytest.mark.required
+def test_mjcf_nested_body_include_and_multiple_compilers(tmp_path):
+    import trimesh
+
+    extents = (0.3, 0.2, 0.5)
+    meshes_dir = tmp_path / "shared_meshes"
+    frag_dir = tmp_path / "models" / "arm" / "assets"
+    decor_dir = tmp_path / "models" / "scene"
+    meshes_dir.mkdir(parents=True)
+    frag_dir.mkdir(parents=True)
+    decor_dir.mkdir(parents=True)
+
+    trimesh.creation.box(extents=extents).export(meshes_dir / "humerus.obj")
+
+    (frag_dir / "arm_assets.xml").write_text(
+        '<mujocoinclude><compiler angle="radian"/><asset><mesh name="humerus" file="humerus.obj"/></asset></mujocoinclude>',
+        encoding="utf-8",
+    )
+    (decor_dir / "decor.xml").write_text(
+        '<mujocoinclude><body name="tip" pos="0 0 0.25"><geom type="sphere" size="0.04"/></body></mujocoinclude>',
+        encoding="utf-8",
+    )
+    (frag_dir / "arm_body.xml").write_text(
+        '<mujocoinclude><worldbody><body name="upper_arm" pos="0 0 0.5">'
+        '<joint name="shoulder" type="hinge" axis="0 1 0"/>'
+        '<geom type="mesh" mesh="humerus"/>'
+        '<include file="../../scene/decor.xml"/>'
+        "</body></worldbody></mujocoinclude>",
+        encoding="utf-8",
+    )
+    top_xml = tmp_path / "models" / "arm" / "arm.xml"
+    top_xml.write_text(
+        '<mujoco model="nested_arm">'
+        '<compiler meshdir="../../shared_meshes"/>'
+        '<include file="assets/arm_assets.xml"/>'
+        '<include file="assets/arm_body.xml"/>'
+        "</mujoco>",
+        encoding="utf-8",
+    )
+
+    scene = gs.Scene(show_viewer=False, show_FPS=False)
+    entity = scene.add_entity(gs.morphs.MJCF(file=str(top_xml)))
+    scene.build()
+    link_names = {link.name for link in entity.links}
+    assert {"upper_arm", "tip"} <= link_names
+    assert entity.get_link("tip").parent_idx == entity.get_link("upper_arm").idx
+
+
+@pytest.mark.required
 def test_ground_plane_preservation(box_plan):
     mjcf = ET.tostring(box_plan, encoding="unicode")
 
