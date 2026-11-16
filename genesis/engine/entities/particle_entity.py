@@ -209,7 +209,6 @@ class ParticleEntity(Entity):
 
         self._need_skinning = need_skinning
 
-        self.sampler = resolve_sampler(self.material.sampler)
         self._vmesh = desc.vmesh
         if need_skinning and desc.vmesh is not None:
             self._vverts = np.asarray(desc.vmesh.verts, dtype=gs.np_float)
@@ -224,6 +223,11 @@ class ParticleEntity(Entity):
 
         # Note that this attribute must only be used in forward pass
         self.active = False
+
+    @property
+    def sampler(self) -> str:
+        """The particle sampler of the material, which samples the particles that an emitter adds."""
+        return resolve_sampler(self.material.sampler)
 
     @property
     def desc(self) -> ParticleEntityDescription:

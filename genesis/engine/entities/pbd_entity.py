@@ -1,7 +1,7 @@
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Self
 
 import numpy as np
-import torch
 
 import trimesh
 
@@ -10,7 +10,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
-from genesis.engine.entities.particle_entity import ParticleEntity
+from genesis.engine.entities.particle_entity import ParticleEntity, ParticleEntityDescription
 from genesis.engine.render_context import DynamicTextureMixin
 from genesis.options.surfaces import Surface
 from genesis.typing import IndexType
@@ -18,6 +18,92 @@ from genesis.typing import IndexType
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.solvers.pbd_solver import PBDSolver
+
+
+@dataclass(kw_only=True)
+class PBDMeshDescription(ParticleEntityDescription):
+    """Describe one PBD cloth or elastic entity as its resolution left it: its remeshed mesh and its constraints.
+
+    The particles are the vertices of the mesh remeshed at the particle size for a cloth, and of its tetrahedralization
+    for an elastic entity. The rest lengths of the edges and the rest volumes of the elements are taken on them, so an
+    entity created from this remeshes nothing and reads no asset. The inner edges and their rest lengths are those of a
+    cloth, and the elements and their rest volumes those of an elastic entity.
+    """
+
+    mesh: "gs.Mesh"
+    mass: float
+    edges: np.ndarray
+    edges_len_rest: np.ndarray
+    inner_edges: np.ndarray | None = None
+    inner_edges_len_rest: np.ndarray | None = None
+    elems: np.ndarray | None = None
+    elems_vol_rest: np.ndarray | None = None
+
+    @classmethod
+    def resolve(cls, spec: "gs.entities.PBD", surface: Surface, particle_size: float) -> Self:
+        """Remesh the morph of a cloth or elastic entity spec at the pose of the morph, and derive its constraints.
+
+        'surface' is the one resolved from the spec, and the mesh is remeshed with edges 'particle_size' long.
+        """
+        morph = spec.morphs[0]
+        meshes = gs.Mesh.from_morph_surface(morph, surface)
+        if len(meshes) > 1:
+            gs.raise_exception("Mesh file with multiple sub-meshes are not supported.")
+        vmesh = meshes[0]
+        # The morph pose offset (e.g. an up-axis conversion) is composed onto the morph pose
+        pos, quat = gu.transform_pos_quat_by_trans_quat(
+            np.array(morph.offset_pos, dtype=gs.np_float),
+            np.array(morph.offset_quat, dtype=gs.np_float),
+            np.array(morph.pos, dtype=gs.np_float),
+            np.array(morph.quat, dtype=gs.np_float),
+        )
+        vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
+
+        is_elastic = isinstance(spec.material, gs.materials.PBD.Elastic)
+        mesh = vmesh.copy()
+        mesh.remesh(edge_len_abs=particle_size, fix=is_elastic)
+        inner_edges = inner_edges_len_rest = elems = elems_vol_rest = None
+        if is_elastic:
+            if vmesh.volume < 1e-6:
+                gs.raise_exception("Input mesh has zero volume.")
+            mass = vmesh.volume * spec.material.rho
+            tet_cfg = mu.generate_tetgen_config_from_morph(morph)
+            particles, elems, *_ = mesh.tetrahedralize(tet_cfg)
+            particles = particles.astype(gs.np_float, copy=False)
+            elems = elems.astype(gs.np_int, copy=False)
+            # The six edges of each tetrahedron, sorted so that an edge shared by several elements appears once
+            elems_edges = elems[:, ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))].reshape((-1, 2))
+            edges = np.unique(np.sort(elems_edges, axis=1), axis=0)
+            elems_vol_rest = np.linalg.det(particles[elems[:, 1:]] - particles[elems[:, :1]]) / 6.0
+        else:
+            if vmesh.area < 1e-6:
+                gs.raise_exception("Input mesh has zero surface area.")
+            mass = vmesh.area * spec.material.rho
+            particles = np.asarray(mesh.verts, dtype=gs.np_float)
+            edges = np.asarray(mesh.get_unique_edges(), dtype=gs.np_int)
+            # Inner edges are two diagonal edges of each quadrilateral formed by adjacent face pairs
+            adjacency, adjacent_edges = trimesh.graph.face_adjacency(mesh=mesh.trimesh, return_edges=True)
+            v3 = np.sum(mesh.faces[adjacency[:, 0]], axis=1) - adjacent_edges[:, 0] - adjacent_edges[:, 1]
+            v4 = np.sum(mesh.faces[adjacency[:, 1]], axis=1) - adjacent_edges[:, 0] - adjacent_edges[:, 1]
+            inner_edges = np.stack([adjacent_edges[:, 0], adjacent_edges[:, 1], v3, v4], axis=1, dtype=gs.np_int)
+            inner_edges_len_rest = np.linalg.norm(particles[inner_edges[:, 2]] - particles[inner_edges[:, 3]], axis=1)
+        edges_len_rest = np.linalg.norm(particles[edges[:, 0]] - particles[edges[:, 1]], axis=1)
+
+        return cls(
+            spec,
+            vmesh.surface,
+            particles,
+            pos,
+            vmesh=vmesh,
+            mesh=mesh,
+            mass=mass,
+            edges=edges,
+            edges_len_rest=edges_len_rest,
+            inner_edges=inner_edges,
+            inner_edges_len_rest=inner_edges_len_rest,
+            elems=elems,
+            elems_vol_rest=elems_vol_rest,
+        )
 
 
 class PBDBaseEntity(ParticleEntity):
@@ -105,10 +191,8 @@ class PBDTetEntity(DynamicTextureMixin, PBDBaseEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    spec : gs.entities.PBD
-        The entity spec the entity is constructed from, whose morph gives its geometry.
-    surface : Surface
-        Surface or texture representation.
+    desc : PBDMeshDescription
+        The description the entity is created from, holding its spec, its surface, its mesh and its constraints.
     particle_size : float
         Target size for particle spacing.
     idx : int
@@ -123,23 +207,19 @@ class PBDTetEntity(DynamicTextureMixin, PBDBaseEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        surface: Surface,
+        desc: PBDMeshDescription,
         particle_size: float,
         idx: int,
         particle_start: int,
         edge_start: int,
-        spec: "gs.entities.PBD",
     ) -> None:
-        super().__init__(
-            scene,
-            solver,
-            surface,
-            particle_size,
-            idx,
-            particle_start,
-            spec=spec,
-        )
+        super().__init__(scene, solver, desc, particle_size, idx, particle_start)
         self._edge_start = edge_start
+        self._mesh = desc.mesh
+        self._mass = desc.mass
+        self._particle_mass = desc.mass / len(self._particles)
+        self._edges = desc.edges
+        self._edges_len_rest = desc.edges_len_rest
 
     def _add_particles_to_solver(self):
         self._solver.add_particles(
@@ -163,30 +243,6 @@ class PBDTetEntity(DynamicTextureMixin, PBDBaseEntity):
             self._edges,
             self._edges_len_rest,
         )
-
-    def sample(self):
-        """
-        Sample and preprocess the mesh for the PBD tetrahedral entity.
-
-        Applies transformation from the morph, stores mesh vertices and faces, and performs remeshing based on the
-        particle size.
-        """
-        # We don't use ParticleEntity.sample() because we need to maintain the remeshed self._mesh as well. The morph
-        # pose offset (e.g. an up-axis conversion) is composed onto the morph pose.
-        pos, quat = gu.transform_pos_quat_by_trans_quat(
-            np.array(self._morph.offset_pos, dtype=gs.np_float),
-            np.array(self._morph.offset_quat, dtype=gs.np_float),
-            np.array(self._morph.pos, dtype=gs.np_float),
-            np.array(self._morph.quat, dtype=gs.np_float),
-        )
-        # Composed world placement, used as the origin for the particle offsets in the subclasses' 'sample'.
-        self._sampled_pos = pos
-        self._vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
-        self._vverts = np.asarray(self._vmesh.verts, dtype=gs.np_float)
-        self._vfaces = np.asarray(self._vmesh.faces, dtype=gs.np_int)
-
-        self._mesh = self._vmesh.copy()
-        self._mesh.remesh(edge_len_abs=self.particle_size, fix=isinstance(self, PBD3DEntity))
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -219,10 +275,8 @@ class PBD2DEntity(PBDTetEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    spec : gs.entities.PBD
-        The entity spec the entity is constructed from, whose morph gives its geometry.
-    surface : Surface
-        Surface or texture representation.
+    desc : PBDMeshDescription
+        The description the entity is created from, holding its spec, its surface, its mesh and its constraints.
     particle_size : float
         Target size for particle spacing.
     idx : int
@@ -239,58 +293,18 @@ class PBD2DEntity(PBDTetEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        surface: Surface,
+        desc: PBDMeshDescription,
         particle_size: float,
         idx: int,
         particle_start: int,
         edge_start: int,
         inner_edge_start: int,
-        spec: "gs.entities.PBD",
     ) -> None:
-        super().__init__(
-            scene,
-            solver,
-            surface,
-            particle_size,
-            idx,
-            particle_start,
-            edge_start,
-            spec=spec,
-        )
-
+        super().__init__(scene, solver, desc, particle_size, idx, particle_start, edge_start)
         self._inner_edge_start = inner_edge_start
+        self._inner_edges = desc.inner_edges
+        self._inner_edges_len_rest = desc.inner_edges_len_rest
         self._material_type = int(self.solver.MATERIAL.CLOTH)
-
-    def sample(self):
-        """Sample and preprocess the 2D mesh for the PBD cloth-like entity."""
-        super().sample()
-
-        if self._vmesh.area < 1e-6:
-            gs.raise_exception("Input mesh has zero surface area.")
-        self._mass = self._vmesh.area * self.material.rho
-
-        self._particles = np.asarray(self._mesh.verts, dtype=gs.np_float)
-        self._init_particles_offset = torch.tensor(
-            self._particles - self._sampled_pos, dtype=gs.tc_float, device=gs.device
-        )
-
-        self._edges = np.asarray(self._mesh.get_unique_edges(), dtype=gs.np_int)
-
-        self._particle_mass = self._mass / len(self._particles)
-
-        # Inner edges are two diagonal edges of each quadrilateral formed by adjacent face pairs
-        adjacency, inner_edges = trimesh.graph.face_adjacency(mesh=self._mesh.trimesh, return_edges=True)
-        v3 = np.sum(self._mesh.faces[adjacency[:, 0]], axis=1) - inner_edges[:, 0] - inner_edges[:, 1]
-        v4 = np.sum(self._mesh.faces[adjacency[:, 1]], axis=1) - inner_edges[:, 0] - inner_edges[:, 1]
-        self._inner_edges = np.stack([inner_edges[:, 0], inner_edges[:, 1], v3, v4], axis=1, dtype=gs.np_int)
-
-        self._edges_len_rest = np.linalg.norm(
-            self._particles[self._edges[:, 0]] - self._particles[self._edges[:, 1]], axis=1
-        )
-        self._inner_edges_len_rest = np.linalg.norm(
-            self._particles[self._inner_edges[:, 2]] - self._particles[self._inner_edges[:, 3]], axis=1
-        )
-        self._n_particles = len(self._particles)
 
     def _add_particles_to_solver(self):
         super()._add_particles_to_solver()
@@ -320,10 +334,8 @@ class PBD3DEntity(PBDTetEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    spec : gs.entities.PBD
-        The entity spec the entity is constructed from, whose morph gives its geometry.
-    surface : Surface
-        Surface or texture representation.
+    desc : PBDMeshDescription
+        The description the entity is created from, holding its spec, its surface, its mesh and its constraints.
     particle_size : float
         Target size for particle spacing.
     idx : int
@@ -340,56 +352,18 @@ class PBD3DEntity(PBDTetEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        surface: Surface,
+        desc: PBDMeshDescription,
         particle_size: float,
         idx: int,
         particle_start: int,
         edge_start: int,
         elem_start: int,
-        spec: "gs.entities.PBD",
     ) -> None:
-        super().__init__(
-            scene,
-            solver,
-            surface,
-            particle_size,
-            idx,
-            particle_start,
-            edge_start,
-            spec=spec,
-        )
-
+        super().__init__(scene, solver, desc, particle_size, idx, particle_start, edge_start)
         self._elem_start = elem_start
-
+        self._elems = desc.elems
+        self._elems_vol_rest = desc.elems_vol_rest
         self._material_type = int(self.solver.MATERIAL.ELASTIC)
-
-    def sample(self):
-        super().sample()
-
-        if self._vmesh.volume < 1e-6:
-            gs.raise_exception("Input mesh has zero volume.")
-        self._mass = self._vmesh.volume * self.material.rho
-
-        tet_cfg = mu.generate_tetgen_config_from_morph(self.morph)
-        particles, elems, *_ = self._mesh.tetrahedralize(tet_cfg)
-        self._particles = particles.astype(gs.np_float, copy=False)
-        self._init_particles_offset = torch.tensor(
-            self._particles - self._sampled_pos, dtype=gs.tc_float, device=gs.device
-        )
-
-        self._elems = elems.astype(gs.np_int, copy=False)
-        # The six edges of each tetrahedron, sorted so that an edge shared by several elements appears once
-        elems_edges = self._elems[:, ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))].reshape((-1, 2))
-        self._edges = np.unique(np.sort(elems_edges, axis=1), axis=0)
-        self._particle_mass = self._mass / len(self._particles)
-
-        self._edges_len_rest = np.linalg.norm(
-            self._particles[self._edges[:, 0]] - self._particles[self._edges[:, 1]], axis=1
-        )
-        self._elems_vol_rest = (
-            np.linalg.det(self._particles[self._elems[:, 1:]] - self._particles[self._elems[:, :1]]) / 6.0
-        )
-        self._n_particles = len(self._particles)
 
     def _add_particles_to_solver(self):
         super()._add_particles_to_solver()
@@ -429,10 +403,8 @@ class PBDParticleEntity(PBDBaseEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    spec : gs.entities.PBD
-        The entity spec the entity is constructed from, whose morph gives its geometry.
-    surface : Surface
-        Surface or texture representation.
+    desc : ParticleEntityDescription
+        The description the entity is created from, holding its spec, its surface and its particles.
     particle_size : float
         Target size for particle spacing.
     idx : int
@@ -445,22 +417,12 @@ class PBDParticleEntity(PBDBaseEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        surface: Surface,
+        desc: ParticleEntityDescription,
         particle_size: float,
         idx: int,
         particle_start: int,
-        spec: "gs.entities.PBD",
     ) -> None:
-        super().__init__(
-            scene,
-            solver,
-            surface,
-            particle_size,
-            idx,
-            particle_start,
-            need_skinning=False,
-            spec=spec,
-        )
+        super().__init__(scene, solver, desc, particle_size, idx, particle_start, need_skinning=False)
 
     def _add_particles_to_solver(self):
         self._solver.add_particles(
@@ -494,10 +456,8 @@ class PBDFreeParticleEntity(PBDBaseEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    spec : gs.entities.PBD
-        The entity spec the entity is constructed from, whose morph gives its geometry.
-    surface : Surface
-        Surface or texture representation.
+    desc : ParticleEntityDescription
+        The description the entity is created from, holding its spec, its surface and its particles.
     particle_size : float
         Target size for particle spacing.
     idx : int
@@ -510,22 +470,12 @@ class PBDFreeParticleEntity(PBDBaseEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        surface: Surface,
+        desc: ParticleEntityDescription,
         particle_size: float,
         idx: int,
         particle_start: int,
-        spec: "gs.entities.PBD",
     ) -> None:
-        super().__init__(
-            scene,
-            solver,
-            surface,
-            particle_size,
-            idx,
-            particle_start,
-            need_skinning=False,
-            spec=spec,
-        )
+        super().__init__(scene, solver, desc, particle_size, idx, particle_start, need_skinning=False)
 
     def _add_particles_to_solver(self):
         self._solver.add_particles(
