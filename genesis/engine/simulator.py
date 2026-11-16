@@ -195,8 +195,7 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
             assert solver is not None
             entity = solver.add_entity(self.n_entities, surface, spec, desc)
         self._entities.append(entity)
-        if entity.desc is not None:
-            self.scene._desc.entities.append(entity.desc)
+        self.scene._desc.entities.append(entity.desc)
         return entity
 
     def add_force_field(self, force_field):

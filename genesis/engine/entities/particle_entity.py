@@ -59,6 +59,26 @@ def resolve_sampler(sampler: str) -> str:
     return "pbs-32" if sampler == "pbs" else sampler
 
 
+def load_morph_vmesh(
+    morph: "gs.morphs.Primitive | gs.morphs.Mesh", surface: Surface
+) -> tuple["gs.Mesh", np.ndarray, np.ndarray]:
+    """Load the visual mesh of a morph holding one mesh, and return it unposed with the pose of the morph.
+
+    The returned position and quaternion compose the pose offset of the morph (e.g. an up-axis conversion) onto its
+    pose, which the caller applies to the mesh once it no longer needs it unposed.
+    """
+    meshes = gs.Mesh.from_morph_surface(morph, surface)
+    if len(meshes) > 1:
+        gs.raise_exception("Mesh file with multiple sub-meshes are not supported.")
+    pos, quat = gu.transform_pos_quat_by_trans_quat(
+        np.array(morph.offset_pos, dtype=gs.np_float),
+        np.array(morph.offset_quat, dtype=gs.np_float),
+        np.array(morph.pos, dtype=gs.np_float),
+        np.array(morph.quat, dtype=gs.np_float),
+    )
+    return meshes[0], pos, quat
+
+
 def assert_active(method):
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
@@ -78,7 +98,6 @@ class ParticleEntityDescription(EntityDescription):
     initial offset of each particle is taken from (see 'ParticleEntity.set_position').
     """
 
-    surface: Surface
     init_particles: np.ndarray
     origin: np.ndarray
     vmesh: "gs.Mesh | None" = None
@@ -126,19 +145,10 @@ class ParticleEntityDescription(EntityDescription):
             vmesh = mu.trimesh_to_mesh(combined_tmesh, 1, surface)
             origin = np.mean(morph.poss, axis=0, dtype=gs.np_float)
         elif isinstance(morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
-            meshes = gs.Mesh.from_morph_surface(morph, surface)
-            if len(meshes) > 1:
-                gs.raise_exception("Mesh file with multiple sub-meshes are not supported.")
-            vmesh = meshes[0]
+            vmesh, pos, quat = load_morph_vmesh(morph, surface)
             surface = vmesh.surface
+            # Sample before posing the mesh, so the lattice and the sampling cache depend on the shape alone
             particles = vmesh.particlize(particle_size, sampler)
-            # The morph pose offset (e.g. an up-axis conversion) is composed onto the morph pose
-            pos, quat = gu.transform_pos_quat_by_trans_quat(
-                np.array(morph.offset_pos, dtype=gs.np_float),
-                np.array(morph.offset_quat, dtype=gs.np_float),
-                np.array(morph.pos, dtype=gs.np_float),
-                np.array(morph.quat, dtype=gs.np_float),
-            )
             vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
             particles = gu.transform_by_trans_quat(particles, pos, quat)
             origin = pos
@@ -199,17 +209,15 @@ class ParticleEntity(Entity):
         particle_start: int,
         need_skinning: bool = True,
     ) -> None:
-        super().__init__(idx, scene, solver, desc.surface, desc.spec)
-        # The scene names an entity as it is added, so the description takes the spec recording that name
-        desc.spec = self._spec
-        self._desc = desc
+        super().__init__(idx, scene, solver, desc)
 
         self._particle_size = particle_size
         self._particle_start = particle_start
 
         self._need_skinning = need_skinning
 
-        self._vmesh = desc.vmesh
+        # The renderer deforms the visual mesh of the entity, so the description keeps its own at rest
+        self._vmesh = desc.vmesh.copy() if desc.vmesh is not None else None
         if need_skinning and desc.vmesh is not None:
             self._vverts = np.asarray(desc.vmesh.verts, dtype=gs.np_float)
             self._vfaces = np.asarray(desc.vmesh.faces, dtype=gs.np_int)
@@ -228,11 +236,6 @@ class ParticleEntity(Entity):
     def sampler(self) -> str:
         """The particle sampler of the material, which samples the particles that an emitter adds."""
         return resolve_sampler(self.material.sampler)
-
-    @property
-    def desc(self) -> ParticleEntityDescription:
-        """The description this entity was created from, holding its sampled particles and posed visual mesh."""
-        return self._desc
 
     def _add_to_solver(self):
         # For nowhere entity, it will be activated when particles are later added.

@@ -67,7 +67,6 @@ class HybridEntityDescription(EntityDescription):
     once, at resolution, and only what they returned stands here.
     """
 
-    surface: Surface
     part_rigid_name: str
     part_soft_name: str
     association: HybridAssociationDescription | None = None
@@ -171,10 +170,7 @@ class HybridEntity(Entity):
     """
 
     def __init__(self, idx: int, scene: "Scene", desc: HybridEntityDescription) -> None:
-        super().__init__(idx, scene, None, desc.surface, desc.spec)
-        # The scene names an entity as it is added, so the description takes the spec recording that name
-        desc.spec = self._spec
-        self._desc = desc
+        super().__init__(idx, scene, None, desc)
 
         self._part_rigid = scene.get_entity(desc.part_rigid_name)
         self._part_soft = scene.get_entity(desc.part_soft_name)
@@ -196,11 +192,6 @@ class HybridEntity(Entity):
                 particles_idx=np.arange(self._part_soft.particle_start, self._part_soft.particle_end),
                 particles_init_pos=self._part_soft.init_particles,
             )
-
-    @property
-    def desc(self) -> HybridEntityDescription:
-        """The description this entity was created from, naming its parts and associating them."""
-        return self._desc
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------

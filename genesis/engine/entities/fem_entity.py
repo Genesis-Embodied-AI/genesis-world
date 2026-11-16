@@ -124,7 +124,6 @@ class FEMEntityDescription(EntityDescription):
     taken from (see 'FEMEntity.set_position'), and 'fixed_verts_idx' lists the vertices the patches of the spec fix.
     """
 
-    surface: Surface
     vgeoms: list[FEMVisGeomDescription]
     init_positions: np.ndarray
     init_positions_COM: np.ndarray
@@ -273,10 +272,7 @@ class FEMEntity(DynamicTextureMixin, Entity):
         el_start: int = 0,
         s_start: int = 0,
     ) -> None:
-        super().__init__(idx, scene, solver, desc.surface, desc.spec)
-        # The scene names an entity as it is added, so the description takes the spec recording that name
-        desc.spec = self._spec
-        self._desc = desc
+        super().__init__(idx, scene, solver, desc)
 
         self._v_start = v_start  # offset for vertex index of elements
         self._el_start = el_start  # offset for element index
@@ -637,11 +633,6 @@ class FEMEntity(DynamicTextureMixin, Entity):
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
-
-    @property
-    def desc(self) -> FEMEntityDescription:
-        """The description this entity was created from, holding its simulation mesh and its visual geoms."""
-        return self._desc
 
     @property
     def n_vertices(self):

@@ -208,6 +208,10 @@ def _frame_arrays(frame: np.ndarray, fields: list[FrameField], kinds: frozenset[
     arrays = {}
     for field in fields:
         if field.kind in kinds:
+            # An unused array is listed 0-d and empty, and is given back as the placeholder a checkpoint holds
+            if not field.shape and not field.nbytes:
+                arrays[field.name] = np.zeros((), dtype=field.dtype)
+                continue
             array = frame[field.offset : field.offset + field.nbytes].view(field.dtype)
             arrays[field.name] = array.reshape([field.shape[i] for i in field.axes]).transpose(np.argsort(field.axes))
     return arrays
@@ -216,7 +220,7 @@ def _frame_arrays(frame: np.ndarray, fields: list[FrameField], kinds: frozenset[
 def _arrays_fields(sim: "Simulator", kinds: frozenset[DataKind], drop_unused: bool) -> list[FrameField]:
     """Lay out the arrays of the given kinds back to back, from the start of a frame.
 
-    With 'drop_unused', an unused array is listed empty. Where zero-copy views exist, an array keeps the memory order
+    With 'drop_unused', an unused array is listed 0-d and empty. Where zero-copy views exist, an array keeps the memory order
     of its view, a permutation of its canonical axes. Otherwise it is canonical.
     """
     fields = []
@@ -226,7 +230,7 @@ def _arrays_fields(sim: "Simulator", kinds: frozenset[DataKind], drop_unused: bo
             array = data_to_array(item.array)
             # An unused array is a 0-d placeholder (see 'unused' in Data), which a restore leaves as built
             if drop_unused and not item.array.shape and not isinstance(item.array, torch.Tensor):
-                fields.append(FrameField(item.name, item.kind, (0,), array.dtype.str, offset, 0, (0,)))
+                fields.append(FrameField(item.name, item.kind, (), array.dtype.str, offset, 0, ()))
                 continue
             axes = tuple(range(array.ndim))
             # The memory order of the view, so that a frame is copied from the views as they lie, layout-tagged arrays

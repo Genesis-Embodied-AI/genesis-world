@@ -80,7 +80,7 @@ def checkpoint_scene(mimic_hinges, requires_grad, show_viewer):
 
 @pytest.mark.parametrize("model_name", ["free_boxes_and_slider"])
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
-def test_export_and_load_rigid(
+def test_export_and_load(
     n_envs, xml_path, mimic_hinges, urdf_with_external_assets, xacro_robot, tmp_path, show_viewer, caplog
 ):
     scene = gs.Scene(
@@ -480,6 +480,103 @@ def test_export_and_load_rigid(
         scene.export(tmp_path / f"reset{SCENE_FORMAT}")
     left_out = " ".join(record.getMessage() for record in caplog.records)
     assert "visual vertices" not in left_out and "dynamic textures" not in left_out
+
+    # Particle, finite element and hybrid entities need substeps far below the time step of the rigid scene, so they
+    # stand in a scene of their own
+    deformable_scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=2e-3,
+            substeps=10,
+        ),
+        show_viewer=show_viewer,
+    )
+    # A random sampler draws other particles at every resolution, so only the particles of the file reproduce them
+    mpm_cube = deformable_scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.5, -0.5, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(
+            sampler="random",
+        ),
+    )
+    sph_liquid = deformable_scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.5, 0.5, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.SPH.Liquid(),
+    )
+    pbd_liquid = deformable_scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.5, -0.5, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.PBD.Liquid(),
+    )
+    pbd_cloth = deformable_scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file="meshes/cloth.obj",
+            pos=(0.5, 0.5, 0.5),
+            scale=0.3,
+        ),
+        material=gs.materials.PBD.Cloth(),
+    )
+    pbd_elastic = deformable_scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.5, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.PBD.Elastic(),
+    )
+    fem_spec = gs.entities.FEM(
+        morph=gs.morphs.Box(
+            pos=(0.0, -0.5, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    fem_spec.select(gs.indices.Vertex.at(0)).set_is_fixed(True)
+    fem_cube = deformable_scene.add_entity(spec=fem_spec)
+    hybrid_duck = deformable_scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file="meshes/duck.obj",
+            scale=0.1,
+            pos=(0.0, 0.0, 0.3),
+        ),
+        material=gs.materials.Hybrid(
+            material_rigid=gs.materials.Rigid(),
+            material_soft=gs.materials.MPM.Muscle(),
+        ),
+    )
+    deformable_path = tmp_path / f"deformable{SCENE_FORMAT}"
+    deformable_scene.export(deformable_path)
+    restored_deformable = gs.Scene.load(deformable_path)
+    assert [entity.name for entity in restored_deformable.entities] == [
+        entity.name for entity in deformable_scene.entities
+    ]
+    for entity in (mpm_cube, sph_liquid, pbd_liquid, pbd_cloth, pbd_elastic):
+        assert_equal(restored_deformable.get_entity(entity.name).init_particles, entity.init_particles)
+    # A cloth and an elastic entity hold the remeshed mesh, the tetrahedralization included, and its edges
+    restored_cloth = restored_deformable.get_entity(pbd_cloth.name)
+    assert_equal(restored_cloth.edges, pbd_cloth.edges)
+    assert restored_cloth.n_inner_edges == pbd_cloth.n_inner_edges
+    restored_elastic = restored_deformable.get_entity(pbd_elastic.name)
+    assert_equal(restored_elastic.edges, pbd_elastic.edges)
+    assert restored_elastic.n_elems == pbd_elastic.n_elems
+    restored_fem = restored_deformable.get_entity(fem_cube.name)
+    assert_equal(restored_fem.elems, fem_cube.elems)
+    assert_equal(restored_fem.desc.fixed_verts_idx, fem_cube.desc.fixed_verts_idx)
+    # A hybrid entity names its parts, which the file holds as entities of their own, and follows the same links
+    restored_duck = restored_deformable.get_entity(hybrid_duck.name)
+    assert restored_duck.part_rigid.name == hybrid_duck.part_rigid.name
+    assert restored_duck.part_soft.name == hybrid_duck.part_soft.name
+    assert restored_duck.part_soft.material.n_groups == hybrid_duck.part_soft.material.n_groups
+    assert_equal(restored_duck.mpm_hybrid_part.groups_link_idx, hybrid_duck.mpm_hybrid_part.groups_link_idx)
+    deformable_scene.build(n_envs=n_envs)
+    restored_deformable.build(n_envs=n_envs)
+    assert_equal(restored_cloth.get_mass(), pbd_cloth.get_mass())
+    assert_equal(restored_fem.get_verts_pos(), fem_cube.get_verts_pos())
 
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])

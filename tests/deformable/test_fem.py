@@ -159,7 +159,7 @@ def test_maxvolume(box_obj_path, show_viewer):
 
 
 @pytest.mark.required
-def test_offset_pos(box_obj_path, tmp_path, show_viewer):
+def test_offset_pos(box_obj_path, show_viewer):
     POS = (0.2, -0.1, 0.3)
     OFFSET_POS = (0.05, 0.0, 0.1)
 
@@ -179,17 +179,10 @@ def test_offset_pos(box_obj_path, tmp_path, show_viewer):
         ),
         material=gs.materials.FEM.Elastic(),
     )
-    scene.export(tmp_path / "scene.gs")
-    restored = gs.Scene.load(tmp_path / "scene.gs")
     scene.build()
-    restored.build()
 
     offset = box.get_verts_pos() - box_no_offset.get_verts_pos()
     assert_allclose(offset, OFFSET_POS, tol=gs.EPS)
-    # A loaded scene holds the simulation mesh it was exported with, rather than tetrahedralizing its asset again
-    for entity, restored_entity in zip(scene.entities, restored.entities, strict=True):
-        assert_equal(restored_entity.elems, entity.elems)
-        assert_equal(restored_entity.get_verts_pos(), entity.get_verts_pos())
 
 
 @pytest.mark.required
