@@ -9,7 +9,7 @@ from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.required
-def test_particle_constraints(show_viewer, tol):
+def test_particle_constraints(tmp_path, show_viewer, tol):
     GRAVITY = 9.81
     N_STEPS = 5
     # A density that single precision cannot represent
@@ -93,6 +93,15 @@ def test_particle_constraints(show_viewer, tol):
             sampler="regular",
         ),
     )
+    with pytest.raises(gs.GenesisException, match="at least one mesh file"):
+        scene.add_entity(morph=gs.morphs.MeshSet(files=()), material=gs.materials.MPM.Elastic())
+
+    # A loaded scene holds the particles the export sampled, the random sampler of the cube included
+    scene.export(tmp_path / "scene.gs")
+    scene_loaded = gs.Scene.load(tmp_path / "scene.gs")
+    for entity in (mpm_cube, mpm_mesh_set, mpm_follower, mpm_held_block):
+        assert_equal(scene_loaded.get_entity(entity.name).init_particles, entity.init_particles)
+
     scene.build(n_envs=2)
 
     # The mass of the particles follows the density at the precision of the simulation

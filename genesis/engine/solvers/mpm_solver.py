@@ -781,6 +781,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
 
     def _init_particle_constraints(self) -> None:
         # Allocated once some particles are constrained, which most scenes never do
+        # FIXME: A trajectory file fixes its frame layout at build, so constraints set after it are never recorded.
         self.particle_constraints = MPMParticleConstraints(
             sizes=dict(particles=self._n_particles, envs=self.n_envs_), env_first=False
         )
