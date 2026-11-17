@@ -1,0 +1,23 @@
+genesis/engine/material_physics.py
+  s_8e3e09cbc07082::t_74fb9aa68561b2 4-5,8,14,18-21,28-46,57-58
+genesis/engine/solvers/mpm_material_physics.py
+  s_8e3e09cbc07082::t_1f606aa5e95447 4-5,19,62-63,89-90,92-93,96,104,135,158,179
+tests/particles/test_mpm.py
+  s_8e3e09cbc07082::t_34367b3af009b1 181,189-197,229-242,292,302-303
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ec512d38dd6a000e40aa38781e8772c18c4c918f",
+  "prompts": {},
+  "sessions": {
+    "s_8e3e09cbc07082": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a8f0475a-f9de-4602-9bce-61f4c50730a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
