@@ -58,8 +58,10 @@ def make_diff_scene_pair(
             show_viewer=show_viewer and requires_grad,
         )
         entity = scene.add_entity(
-            gs.morphs.MJCF(
-                file=mjcf,
+            spec=gs.entities.Rigid(
+                morph=gs.morphs.MJCF(
+                    file=mjcf,
+                ),
             ),
         )
         scene.build(n_envs=n_envs)

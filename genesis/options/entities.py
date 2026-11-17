@@ -14,7 +14,7 @@ from genesis.repr_base import get_public_name
 from . import indices
 from .morphs import Morph
 from .options import Options
-from .patches import Geom, Patch, Vertex, _FrozenOptions
+from .patches import Geom, Patch, Vertex, VGeom, _FrozenOptions
 from .surfaces import Surface
 
 if TYPE_CHECKING:
@@ -103,10 +103,9 @@ class Spec(_FrozenOptions, Generic[EntityT]):
 
     # Whether the kind of entity admits several morphs, one per variant of a heterogeneous entity
     _admits_variants: ClassVar[bool] = False
-    # Selectors of the parts of the entity, from the coarsest level to the finest, and patches of the options set on
-    # them, that the kind of entity admits
-    _selector_types: ClassVar[tuple[type[indices.Link | indices.Geom | indices.Vertex], ...]] = ()
-    _patch_types: ClassVar[tuple[type[Geom | Vertex], ...]] = ()
+    # The patches of options the kind of entity admits, each with the selectors of the parts it is set on, from the
+    # coarsest level to the finest
+    _patches_selector_types: ClassVar[dict[type[Options], tuple[type[Options], ...]]] = {}
 
     # Checked by instance alone, since validation would run the validators of 'Morph' on the sequence of morphs
     morph: InstanceOf[Morph] | Annotated[tuple[InstanceOf[Morph], ...], Field(min_length=1, strict=False)] | None = None
@@ -153,20 +152,21 @@ class Spec(_FrozenOptions, Generic[EntityT]):
         return spec
 
     def _check_patch(self, patch: Patch) -> None:
+        options_name = type(patch.options).__name__
+        selector_types = self._patches_selector_types.get(type(patch.options))
+        if selector_types is None:
+            gs.raise_exception(f"gs.entities.{type(self).__name__} sets no gs.options.{options_name} on its parts.")
         # Each selector selects at the level of the one before it or a finer one
         levels = []
         for selector in patch.selectors:
-            if not isinstance(selector, self._selector_types):
+            if not isinstance(selector, selector_types):
                 gs.raise_exception(
-                    f"gs.entities.{type(self).__name__} selects no part with gs.{get_public_name(type(selector))}."
+                    f"gs.entities.{type(self).__name__} sets no gs.options.{options_name} on parts selected with "
+                    f"gs.{get_public_name(type(selector))}."
                 )
-            levels.append(next(i for i, cls in enumerate(self._selector_types) if isinstance(selector, cls)))
+            levels.append(next(i for i, cls in enumerate(selector_types) if isinstance(selector, cls)))
         if any(level < previous_level for previous_level, level in zip(levels, levels[1:])):
             gs.raise_exception(f"A selection selects at its own level or a finer one, got {patch.selection_repr}.")
-        if not isinstance(patch.options, self._patch_types):
-            gs.raise_exception(
-                f"gs.entities.{type(self).__name__} sets no gs.options.{type(patch.options).__name__} on its parts."
-            )
 
     @property
     def morphs(self) -> tuple[Morph, ...]:
@@ -205,7 +205,9 @@ class _PartSelection(Generic[SpecT]):
     from, and ``with`` binds the selection to a name for a patch.
     """
 
-    def __init__(self, spec: SpecT, selectors: tuple[indices.Link | indices.Geom | indices.Vertex, ...]) -> None:
+    def __init__(
+        self, spec: SpecT, selectors: tuple[indices.Link | indices.Geom | indices.VGeom | indices.Vertex, ...]
+    ) -> None:
         self._spec = spec
         self._selectors = selectors
 
@@ -225,7 +227,7 @@ class _PartSelection(Generic[SpecT]):
         """
         return self._spec
 
-    def _set(self, patches_options: tuple[Geom | Vertex, ...]) -> Self:
+    def _set(self, patches_options: tuple[Geom | VGeom | Vertex, ...]) -> Self:
         self._spec._record(
             tuple(Patch(selectors=self._selectors, options=patch_options) for patch_options in patches_options)
         )
@@ -256,6 +258,37 @@ class _GeomSetters(_PartSelection[SpecT]):
         return self._set((Geom(friction_rolling=friction_rolling),))
 
 
+class _VGeomSetters(_PartSelection[SpecT]):
+    """The setters of the appearance of visual geoms, which a link selection applies to each visual geom it holds."""
+
+    def set_surface(self, surface: Surface | None) -> Self:
+        """Set the surface of the selected visual geoms (see ``gs.options.VGeom.surface``)."""
+        return self._set((VGeom(surface=surface),))
+
+
+class VGeomSelection(_VGeomSetters[SpecT]):
+    """A selection of visual geoms of an entity (see ``gs.entities.Rigid.select``)."""
+
+    def set(self, *options: VGeom) -> Self:
+        """Set on the selected visual geoms the fields each of the options gives, overriding an earlier call."""
+        return self._set(options)
+
+    def select(self, selector: indices.VGeom) -> "VGeomSelection[SpecT]":
+        """Return the selection of the visual geoms of this selection that the selector holds, resolved among them.
+
+        Two rules decide which surface a visual geom takes:
+
+        1. A surface set on a finer level overrides one set on a coarser level: the entity, then a link selection, then
+           a visual geom selection. The level is that of the finest selector, however the selection is written.
+        2. Between two selections of one level, the later call applies.
+        """
+        if not isinstance(selector, indices.VGeom):
+            gs.raise_exception(
+                f"A visual geom selection selects with gs.indices.VGeom, got gs.{get_public_name(type(selector))}."
+            )
+        return VGeomSelection(self._spec, (*self._selectors, selector))
+
+
 class GeomSelection(_GeomSetters[SpecT]):
     """A selection of collision geoms of an entity (see ``gs.entities.Rigid.select``)."""
 
@@ -275,8 +308,15 @@ class GeomSelection(_GeomSetters[SpecT]):
         return GeomSelection(self._spec, (*self._selectors, selector))
 
 
-class LinkSelection(_GeomSetters[SpecT]):
-    """A selection of links of an entity, whose geom setters apply to every geom of the links (see ``select``)."""
+class LinkSelection(_GeomSetters[SpecT], _VGeomSetters[SpecT]):
+    """A selection of links of an entity, whose setters apply to each geom or visual geom of the links (see ``select``).
+
+    A kinematic entity has no collision geoms, so its link selections take ``set_surface`` alone.
+    """
+
+    def set(self, *options: Geom | VGeom) -> Self:
+        """Set on the geoms of the selected links the fields each of the options gives, overriding an earlier call."""
+        return self._set(options)
 
     @overload
     def select(self, selector: indices.Link) -> "LinkSelection[SpecT]": ...
@@ -284,22 +324,30 @@ class LinkSelection(_GeomSetters[SpecT]):
     @overload
     def select(self, selector: indices.Geom) -> GeomSelection[SpecT]: ...
 
-    def select(self, selector: indices.Link | indices.Geom) -> "LinkSelection[SpecT] | GeomSelection[SpecT]":
-        """Return the selection of the links, or the geoms, of this selection that the selector holds.
+    @overload
+    def select(self, selector: indices.VGeom) -> VGeomSelection[SpecT]: ...
+
+    def select(
+        self, selector: indices.Link | indices.Geom | indices.VGeom
+    ) -> "LinkSelection[SpecT] | GeomSelection[SpecT] | VGeomSelection[SpecT]":
+        """Return the selection of the links, the geoms or the visual geoms of this selection that the selector holds.
 
         The selector resolves among these links, and a geom ordinal counts each link apart (see ``gs.indices.Geom.at``).
 
         Two rules decide which value a field of a geom takes:
 
-        1. A value set on a finer level overrides one set on a coarser level: the material, then a link selection, then
-           a geom selection. The level is that of the finest selector, however the selection is written.
+        1. A value set on a finer level overrides one set on a coarser level: the material, or the surface of the
+           entity, then a link selection, then a geom or visual geom selection. The level is that of the finest
+           selector, however the selection is written.
         2. Between two selections of one level, the later call applies.
         """
         if isinstance(selector, indices.Geom):
             return GeomSelection(self._spec, (*self._selectors, selector))
+        if isinstance(selector, indices.VGeom):
+            return VGeomSelection(self._spec, (*self._selectors, selector))
         if not isinstance(selector, indices.Link):
             gs.raise_exception(
-                "A link selection selects with gs.indices.Link or gs.indices.Geom, got "
+                "A link selection selects with gs.indices.Link, gs.indices.Geom or gs.indices.VGeom, got "
                 f"gs.{get_public_name(type(selector))}."
             )
         return LinkSelection(self._spec, (*self._selectors, selector))
@@ -323,7 +371,7 @@ class VertexSelection(_PartSelection[SpecT]):
         return VertexSelection(self._spec, (*self._selectors, selector))
 
     def set(self, *options: Vertex) -> Self:
-        """Set on the selected vertices the fields each of the options gives explicitly, overriding an earlier call."""
+        """Set on the selected vertices the fields each of the options gives, overriding an earlier call."""
         return self._set(options)
 
     def set_is_fixed(self, is_fixed: bool) -> Self:
@@ -344,8 +392,7 @@ class Rigid(Spec["RigidEntity"]):
     """
 
     _admits_variants = True
-    _selector_types = (indices.Link, indices.Geom)
-    _patch_types = (Geom,)
+    _patches_selector_types = {Geom: (indices.Link, indices.Geom), VGeom: (indices.Link, indices.VGeom)}
 
     material: materials.Rigid = Field(default_factory=materials.Rigid)
     visualize_contact: StrictBool = False
@@ -356,20 +403,25 @@ class Rigid(Spec["RigidEntity"]):
     @overload
     def select(self, selector: indices.Geom) -> GeomSelection[Self]: ...
 
-    def select(self, selector: indices.Link | indices.Geom) -> LinkSelection[Self] | GeomSelection[Self]:
-        """Select the links, or the collision geoms, that the selector holds, to set the quantities of geoms on.
+    @overload
+    def select(self, selector: indices.VGeom) -> VGeomSelection[Self]: ...
+
+    def select(
+        self, selector: indices.Link | indices.Geom | indices.VGeom
+    ) -> LinkSelection[Self] | GeomSelection[Self] | VGeomSelection[Self]:
+        """Select the links, the collision geoms or the visual geoms that the selector holds, to set quantities on.
 
         Selectors combine with ``|`` and ``&``, each resolving over the whole entity. A selection selects again with
         ``select``, at its own level or a finer one, the nested selector resolving among the parts the selection holds:
         ``spec.select(fingers).select(gs.indices.Geom.at(slice(1, 6)))`` holds geoms 1 to 5 of each finger, and
         ``spec.select(fingers).select(gs.indices.Geom.named("pad*")).select(gs.indices.Geom.at(0))`` the first pad of
-        each finger. A quantity set on links applies to every collision geom of those links.
+        each finger. A quantity set on links applies to every collision geom of them, a surface to every visual geom.
 
         Two rules decide which value a field of a geom takes:
 
-        1. A value set on a finer level overrides one set on a coarser level: the material, then a link selection, then
-           a geom selection. The level is that of the finest selector of the selection, so how a selection is written
-           (nesting, ``|``, ``&``, several names) never makes it more specific.
+        1. A value set on a finer level overrides one set on a coarser level: the material or the entity surface, then a
+           link selection, then a geom or visual geom selection. The level is that of the finest selector of the
+           selection, so how a selection is written (nesting, ``|``, ``&``, several names) never makes it more specific.
         2. Between two selections of one level, the later call applies. The three calls here select links, so the thumb
            ends at 1.0::
 
@@ -379,13 +431,15 @@ class Rigid(Spec["RigidEntity"]):
 
         A selection that holds no geom of the entity, or of one of its heterogeneous variants, raises in ``add_entity``.
         """
-        if not isinstance(selector, self._selector_types):
-            gs.raise_exception(
-                f"gs.entities.Rigid selects with gs.indices.Link or gs.indices.Geom, got "
-                f"gs.{get_public_name(type(selector))}."
-            )
         if isinstance(selector, indices.Geom):
             return GeomSelection(self, (selector,))
+        if isinstance(selector, indices.VGeom):
+            return VGeomSelection(self, (selector,))
+        if not isinstance(selector, indices.Link):
+            gs.raise_exception(
+                "gs.entities.Rigid selects with gs.indices.Link, gs.indices.Geom or gs.indices.VGeom, got "
+                f"gs.{get_public_name(type(selector))}."
+            )
         return LinkSelection(self, (selector,))
 
 
@@ -399,8 +453,38 @@ class Kinematic(Spec["KinematicEntity"]):
     """
 
     _admits_variants = True
+    _patches_selector_types = {VGeom: (indices.Link, indices.VGeom)}
 
     material: materials.Kinematic = Field(default_factory=materials.Kinematic)
+
+    @overload
+    def select(self, selector: indices.Link) -> LinkSelection[Self]: ...
+
+    @overload
+    def select(self, selector: indices.VGeom) -> VGeomSelection[Self]: ...
+
+    def select(self, selector: indices.Link | indices.VGeom) -> LinkSelection[Self] | VGeomSelection[Self]:
+        """Select the links, or the visual geoms, that the selector holds, to set their surface on.
+
+        Selectors combine with ``|`` and ``&``, and a selection selects again with ``select``, as for
+        ``gs.entities.Rigid.select``. A kinematic entity has no collision geoms, so its selections set surfaces alone.
+
+        Two rules decide which surface a visual geom takes:
+
+        1. A surface set on a finer level overrides one set on a coarser level: the entity, then a link selection, then
+           a visual geom selection. The level is that of the finest selector of the selection.
+        2. Between two selections of one level, the later call applies.
+
+        A selection holding no visual geom of the entity, or of a heterogeneous variant, raises in ``add_entity``.
+        """
+        if isinstance(selector, indices.VGeom):
+            return VGeomSelection(self, (selector,))
+        if not isinstance(selector, indices.Link):
+            gs.raise_exception(
+                "gs.entities.Kinematic selects with gs.indices.Link or gs.indices.VGeom, got "
+                f"gs.{get_public_name(type(selector))}."
+            )
+        return LinkSelection(self, (selector,))
 
 
 class FEM(Spec["FEMEntity"]):
@@ -412,8 +496,7 @@ class FEM(Spec["FEMEntity"]):
         One of ``gs.materials.FEM.Elastic``, ``Muscle`` or ``Cloth``, a Cloth entity alone refusing any selection.
     """
 
-    _selector_types = (indices.Vertex,)
-    _patch_types = (Vertex,)
+    _patches_selector_types = {Vertex: (indices.Vertex,)}
 
     material: materials.FEM.Base
 

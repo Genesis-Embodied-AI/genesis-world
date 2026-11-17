@@ -1115,9 +1115,11 @@ def test_genuine_interpenetration(show_viewer):
     asset_entities = {
         convexify: [
             scene.add_entity(
-                gs.morphs.MJCF(
-                    file=f"{get_hf_dataset(pattern=f'{name}/*')}/{name}/{xml}",
-                    convexify=convexify,
+                spec=gs.entities.Rigid(
+                    morph=gs.morphs.MJCF(
+                        file=f"{get_hf_dataset(pattern=f'{name}/*')}/{name}/{xml}",
+                        convexify=convexify,
+                    ),
                 ),
             )
             for name, xml in (
@@ -1372,10 +1374,12 @@ def test_logger_raw_theme_plain_text(capsys):
     try:
         scene = gs.Scene(show_viewer=False)
         scene.add_entity(
-            morph=gs.morphs.Box(
-                size=(0.1, 0.1, 0.1),
+            spec=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(0.1, 0.1, 0.1),
+                ),
+                name="box",
             ),
-            name="box",
         )
         gs.logger.warning("Watch ~<this>~.")
     finally:

@@ -126,10 +126,11 @@ class _OrdinalIndex(_Selection):
 
         The index is local to the selection it is selected in, as the ``*_idx_local`` arguments of the entity getters
         are local to the entity. Selected on the entity spec, it counts the elements of the whole entity. Selected on
-        a link selection, it counts the collision geoms of each selected link apart, so
+        a link selection, it counts the geoms of each selected link apart, so
         ``spec.select(fingers).select(gs.indices.Geom.at(0))`` selects the first geom of every finger. The elements
         count in the order the entity lists them: its collision geoms link after link in the order of ``entity.links``,
-        as the asset states them before post-processing (see ``Geom``), or the vertices of its volume mesh.
+        as the asset states them before post-processing (see ``Geom``), its visual geoms link after link as the asset
+        splits them (see ``VGeom``), or the vertices of its volume mesh.
         """
         if isinstance(idx, slice):
             return cls(span=(idx.start, idx.stop, idx.step))
@@ -213,6 +214,16 @@ class Geom(_NamedOrdinalIndex):
     into convex pieces and fuses geoms with identical properties, which renumbers ``entity.geoms``, so an ordinal counts
     the geoms as the asset states them, and selecting one selects every piece of it. Geoms whose values differ never
     fuse, so a value set on a selection never reaches a geom it does not hold.
+
+    Names match as ``named`` states.
+    """
+
+
+class VGeom(_NamedOrdinalIndex):
+    """Select visual geoms by their ordinal in the asset or by name.
+
+    An ordinal counts the visual geoms of the selection it is selected in (see ``at``), as the asset splits them: a
+    mesh holding several materials loads as one visual geom per material.
 
     Names match as ``named`` states.
     """

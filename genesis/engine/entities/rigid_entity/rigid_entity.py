@@ -6,8 +6,10 @@ import numpy as np
 import torch
 
 import genesis as gs
-from genesis.constants import link_ref_frame
-from genesis.typing import UnitVec4FType, Vec3FType
+from genesis.constants import TEXTURE_MAP_TYPE, link_ref_frame
+from genesis.engine.texture import TextureValueType
+from genesis.options import indices
+from genesis.typing import IndexType, UnitVec4FType, Vec3FType
 from genesis.utils import geom as gu
 from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_to_torch
 
@@ -1231,6 +1233,49 @@ class KinematicEntity(Entity):
     def vgeoms(self) -> gs.List[RigidVisGeom]:
         """The list of visual geoms (`RigidVisGeom`) in the entity, as a copy."""
         return gs.List(self._vgeoms)
+
+    @gs.assert_built
+    def set_texture(
+        self,
+        texture: TextureValueType,
+        vgeoms_idx: indices.VGeom | IndexType | None = None,
+        envs_idx: IndexType | None = None,
+        *,
+        texture_map_type: TEXTURE_MAP_TYPE | None = None,
+    ) -> None:
+        """Show a variant, or draw pixels, on the dynamic texture of every selected visual geom of the entity.
+
+        'vgeoms_idx' selects visual geoms by their position among ``vgeoms``, or by a ``gs.indices.VGeom`` resolved over
+        the visual geoms of the whole entity, apart for each heterogeneous variant, as a top-level ``select`` on the
+        entity spec resolves it (see ``gs.indices.VGeom``). None selects every visual geom showing a dynamic texture, in
+        'texture_map_type' when given. See ``RigidVisGeom.set_texture`` for the other arguments.
+        """
+        if isinstance(vgeoms_idx, indices.VGeom):
+            vgeoms = self.vgeoms
+            # An ordinal counts the visual geoms of each variant apart, as the morph of each variant resolves on its own
+            vgeoms_variant = np.zeros(len(vgeoms), dtype=gs.np_int)
+            for i_vg, vgeom in enumerate(vgeoms):
+                variant_ranges = vgeom.link._variant_vgeom_ranges
+                if variant_ranges is not None:
+                    vgeoms_variant[i_vg] = next(
+                        i_v for i_v, (start, end) in enumerate(variant_ranges) if start <= vgeom.idx < end
+                    )
+            vgeoms = [vgeoms[i_vg] for i_vg in vgeoms_idx._resolve([vgeom.name for vgeom in vgeoms], vgeoms_variant)]
+            if not vgeoms:
+                gs.raise_exception(f"No visual geom of entity '{self.name}' matches {vgeoms_idx}.")
+        elif vgeoms_idx is None:
+            vgeoms = dict.fromkeys(
+                dynamic_texture.vgeom
+                for dynamic_texture in self._scene.textures
+                if dynamic_texture.vgeom.entity is self
+                and (texture_map_type is None or dynamic_texture.texture_map_type == texture_map_type)
+            )
+            if not vgeoms:
+                gs.raise_exception(f"No visual geom of entity '{self.name}' draws a dynamic texture.")
+        else:
+            vgeoms = [self.vgeoms[i_vg] for i_vg in self._get_global_idx(vgeoms_idx, self.n_vgeoms)]
+        for vgeom in vgeoms:
+            vgeom.set_texture(texture, envs_idx, texture_map_type=texture_map_type)
 
     @gs.assert_built
     def set_vverts(self, vverts, envs_idx=None):

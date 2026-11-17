@@ -96,8 +96,10 @@ def test_state_query_grad_parity(show_viewer):
         show_viewer=show_viewer,
     )
     robot = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+            ),
         ),
     )
     scene.build()
@@ -168,9 +170,11 @@ def test_closed_loop_rollout_follows_torch_semantics(grad_revolute, precision, s
         for y in (-0.3, 0.3):
             arms.append(
                 scene.add_entity(
-                    gs.morphs.MJCF(
-                        file=grad_revolute,
-                        pos=(0.0, y, 0.0),
+                    spec=gs.entities.Rigid(
+                        morph=gs.morphs.MJCF(
+                            file=grad_revolute,
+                            pos=(0.0, y, 0.0),
+                        ),
                     ),
                 )
             )

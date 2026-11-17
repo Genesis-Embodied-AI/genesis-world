@@ -18,34 +18,40 @@ scene = gs.Scene(
 )
 
 plane = scene.add_entity(
-    morph=gs.morphs.Plane(),
+    spec=gs.entities.Rigid(
+        morph=gs.morphs.Plane(),
+    ),
 )
 
 cloth_1 = scene.add_entity(
-    material=gs.materials.PBD.Cloth(),
-    morph=gs.morphs.Mesh(
-        file="meshes/cloth.obj",
-        scale=2.0,
-        pos=(0, 0, 0.5),
-        euler=(0.0, 0, 0.0),
-    ),
-    surface=gs.surfaces.Default(
-        color=(0.2, 0.4, 0.8, 1.0),
-        vis_mode="visual",
+    spec=gs.entities.PBD(
+        morph=gs.morphs.Mesh(
+            file="meshes/cloth.obj",
+            scale=2.0,
+            pos=(0, 0, 0.5),
+            euler=(0.0, 0, 0.0),
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.2, 0.4, 0.8, 1.0),
+            vis_mode="visual",
+        ),
+        material=gs.materials.PBD.Cloth(),
     ),
 )
 
 cloth_2 = scene.add_entity(
-    material=gs.materials.PBD.Cloth(),
-    morph=gs.morphs.Mesh(
-        file="meshes/cloth.obj",
-        scale=2.0,
-        pos=(0, 0, 1.0),
-        euler=(0.0, 0, 0.0),
-    ),
-    surface=gs.surfaces.Default(
-        color=(0.8, 0.4, 0.2, 1.0),
-        vis_mode="particle",
+    spec=gs.entities.PBD(
+        morph=gs.morphs.Mesh(
+            file="meshes/cloth.obj",
+            scale=2.0,
+            pos=(0, 0, 1.0),
+            euler=(0.0, 0, 0.0),
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.8, 0.4, 0.2, 1.0),
+            vis_mode="particle",
+        ),
+        material=gs.materials.PBD.Cloth(),
     ),
 )
 

@@ -22,18 +22,20 @@ if TYPE_CHECKING:
 
 
 class StateChange(enum.Enum):
-    """Category of solver scene-state mutation broadcast to subscribers (see `Solver.subscribe`).
+    """Category of scene-state mutation broadcast to subscribers (see `Solver.subscribe` and `Texture.subscribe`).
 
     Solver-agnostic: it names what kind of state changed, never an index space (links, dofs, particles, ...), which
     differs from one solver to the next. GEOMETRY is the kinematic configuration that places or deforms the world
     surface (link poses, qpos, vertices). DYNAMICS is the velocity state. MODEL is what every later step reads besides
     the state: the model parameters (mass, inertia, friction, gains, limits, gravity) and the constraints attached to
-    the state (particle and vertex constraints).
+    the state (particle and vertex constraints). VISUAL is what the renderers draw and the physics never reads: the
+    variant each environment shows on a dynamic texture.
     """
 
     GEOMETRY = enum.auto()
     DYNAMICS = enum.auto()
     MODEL = enum.auto()
+    VISUAL = enum.auto()
 
 
 class MutatedLinks(enum.Enum):
@@ -50,10 +52,10 @@ class MutatedLinks(enum.Enum):
 
 
 class Subscriber:
-    """A unique handle for the solver state changes whose category is in `to`.
+    """A unique handle for the state changes whose category is in `to`.
 
-    A consumer constructs a Subscriber and registers it with a solver via Solver.subscribe. The mode is fixed at
-    construction by whether a callback is given:
+    A consumer constructs a Subscriber and passes it to the 'subscribe' method of whatever it follows the changes of.
+    The mode is fixed at construction by whether a callback is given:
       - eager (callback given): each matching change immediately calls callback(change, envs_idx);
       - lazy (no callback): matching changes accumulate into `pending` until the owner calls clear() - e.g. a sensor
         that rebuilds a cache on its next update rather than on every set_pos.
@@ -88,6 +90,13 @@ class Subscriber:
     def clear(self):
         """Drop the accumulated changes, once they have been handled."""
         self._pending.clear()
+
+    def notify(self, change: StateChange, envs_idx: object) -> None:
+        """Call the callback with a change, or accumulate it into `pending` when there is no callback."""
+        if self.callback is None:
+            self._pending.add(change)
+        else:
+            self.callback(change, envs_idx)
 
 
 def mutates(
@@ -174,10 +183,7 @@ def mutates(
                 if not subscriber.is_watching(links_idx):
                     continue
                 for changed in self._mutation_changes & subscriber.to:
-                    if subscriber.callback is None:
-                        subscriber._pending.add(changed)
-                    else:
-                        subscriber.callback(changed, envs_idx)
+                    subscriber.notify(changed, envs_idx)
             return result
 
         @functools.wraps(method)

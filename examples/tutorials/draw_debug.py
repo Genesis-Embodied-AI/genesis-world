@@ -20,7 +20,11 @@ def main():
     )
 
     # Add a plane for reference
-    scene.add_entity(morph=gs.morphs.Plane())
+    scene.add_entity(
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+        ),
+    )
     scene.build()
 
     # Create debug objects
