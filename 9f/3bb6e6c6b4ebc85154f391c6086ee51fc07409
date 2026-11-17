@@ -1,0 +1,40 @@
+genesis/engine/entities/mpm_entity.py
+  s_8e3e09cbc07082::t_3ca1d4eb491b05 48-49,65,71,94
+genesis/engine/solvers/mpm_solver.py
+  s_8e3e09cbc07082::t_3ca1d4eb491b05 43,305,310-311,328,333,335,353,358,360,407-409,435,440,495,503,515,520-526,528,531,533-534
+  s_8e3e09cbc07082::t_01cc2b631e0b39 516
+genesis/engine/material_physics.py
+  s_8e3e09cbc07082::t_914324eb26eb74 1-43
+genesis/engine/materials/MPM/base.py
+  s_8e3e09cbc07082::t_0eb99e3689bd37 36-37
+  s_8e3e09cbc07082::t_cc389831215c48 2,4,7
+genesis/engine/solvers/mpm_material_physics.py
+  s_8e3e09cbc07082::t_ea81a339b03e74 1-3,6-13,15-18,20-22,24-232
+  s_8e3e09cbc07082::t_f8ba59812372cb 4-5,14,19,23
+genesis/engine/materials/MPM/elastic.py
+  s_8e3e09cbc07082::t_cd8e51b2e6e444 1
+genesis/engine/materials/MPM/elasto_plastic.py
+  s_8e3e09cbc07082::t_6b575897dedbee 3
+genesis/engine/materials/MPM/liquid.py
+  s_8e3e09cbc07082::t_0dd1953fecbf38 19-20
+genesis/engine/materials/MPM/muscle.py
+  s_8e3e09cbc07082::t_1d6825af4ec263 2
+genesis/engine/materials/MPM/sand.py
+  s_8e3e09cbc07082::t_8937913b5831d1 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9f3bb6e6c6b4ebc85154f391c6086ee51fc07409",
+  "prompts": {},
+  "sessions": {
+    "s_8e3e09cbc07082": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a8f0475a-f9de-4602-9bce-61f4c50730a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
