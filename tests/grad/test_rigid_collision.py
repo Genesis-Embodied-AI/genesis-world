@@ -474,6 +474,7 @@ def test_contact_pose_grad_matches_fd():
     # the built pose would teleport it into a deep corner penetration, a different contact regime.
     init_sphere = tensor_to_array(sphere_ana.get_pos().detach())
     init_wall = tensor_to_array(walls_ana[0].get_pos().detach())
+    settled_qpos = tensor_to_array(sphere_ana.get_qpos().detach())
     sphere_pos = torch.tensor(init_sphere, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     wall_pos = torch.tensor(init_wall, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     sphere_ana.set_pos(sphere_pos, relative=False)
@@ -487,10 +488,13 @@ def test_contact_pose_grad_matches_fd():
 
     scene_fd, walls_fd, sphere_fd = _build_groove()
 
+    # The finite-difference side reuses the analytical scene's settled state instead of re-settling per
+    # evaluation: writing the settled dofs back places the sphere exactly there, and the setters zero the
+    # velocities like the analytical side's leaf write does, so every window starts from the same state
+    # without the repeated settling work.
     @torch.no_grad()
     def loss_at(pos_sphere, pos_wall):
-        scene_fd.reset()
-        settle(scene_fd, sphere_fd)
+        sphere_fd.set_qpos(settled_qpos)
         sphere_fd.set_pos(tuple(pos_sphere), relative=False)
         walls_fd[0].set_pos(tuple(pos_wall), relative=False)
         for _ in range(n_steps):
