@@ -1647,42 +1647,41 @@ def _tc_polar(A: torch.Tensor, pure_rotation: bool, side: Literal["right", "left
             # Flip signs where det < 0
             flip_mask = det_U < 0
             if flip_mask.any():
-                # Flip both the last column of U_svd and last row of Vt simultaneously
+                # Flipping the last column of U_svd alone turns U into a rotation, and negating the smallest singular
+                # value keeps A = U_svd @ diag(Sigma) @ Vt, so that P takes the reflection
                 U_svd[..., :, -1] = torch.where(flip_mask.unsqueeze(-1), -U_svd[..., :, -1], U_svd[..., :, -1])
-                Vt[..., -1, :] = torch.where(flip_mask.unsqueeze(-1), -Vt[..., -1, :], Vt[..., -1, :])
+                Sigma_last = torch.where(flip_mask, -Sigma[..., -1], Sigma[..., -1])
+                Sigma = torch.cat((Sigma[..., :-1], Sigma_last[..., None]), dim=-1)
         else:
             det_U = torch.linalg.det(U_temp)
             if det_U < 0:
-                # Flip both the last column of U_svd and last row of Vt simultaneously
+                # See the batched case
                 U_svd[:, -1] *= -1
-                Vt[-1, :] *= -1
+                Sigma = torch.cat((Sigma[:-1], -Sigma[-1:]))
 
     # Compute U
     U = U_svd @ Vt
 
-    # Use absolute value to ensure P is positive semi-definite
-    Sigma_abs = torch.abs(Sigma)
-
     if side == "right":
-        # P = Vt.T @ diag(|Sigma|) @ Vt
+        # P = Vt.T @ diag(Sigma) @ Vt
         # For batched: Vt is (*batch, N, M), need (*batch, M, N) -> transpose last two dims
         # Create diagonal matrix using torch.diag_embed for batched support
         if is_batched:
-            Sigma_diag = torch.diag_embed(Sigma_abs)  # Shape: (*batch, N, N)
+            Sigma_diag = torch.diag_embed(Sigma)  # Shape: (*batch, N, N)
             # Vt is (*batch, N, M), need Vt.T which is (*batch, M, N)
             Vt_T = Vt.transpose(-1, -2)  # Shape: (*batch, M, N)
             P = Vt_T @ Sigma_diag @ Vt  # Shape: (*batch, N, N)
         else:
-            Sigma_diag = torch.diag(Sigma_abs)  # Shape: (N, N)
+            Sigma_diag = torch.diag(Sigma)  # Shape: (N, N)
             P = Vt.T @ Sigma_diag @ Vt  # Shape: (N, N)
     else:  # "left"
-        # P = U_svd @ diag(|Sigma|) @ U_svd.T (left polar: A = P @ U)
+        # P = U_svd @ diag(Sigma) @ U_svd.T (left polar: A = P @ U)
         if is_batched:
-            Sigma_diag = torch.diag_embed(Sigma_abs)  # Shape: (*batch, M, M)
+            Sigma_diag = torch.diag_embed(Sigma)  # Shape: (*batch, M, M)
             U_svd_T = U_svd.transpose(-1, -2)  # Shape: (*batch, N, M)
             P = U_svd @ Sigma_diag @ U_svd_T  # Shape: (*batch, M, M)
         else:
-            Sigma_diag = torch.diag(Sigma_abs)  # Shape: (M, M)
+            Sigma_diag = torch.diag(Sigma)  # Shape: (M, M)
             P = U_svd @ Sigma_diag @ U_svd.T  # Shape: (M, M)
 
     return U, P
@@ -1734,31 +1733,27 @@ def _np_polar_core_single(A, pure_rotation: bool, side_int: int):
         U_temp = U_svd @ Vt
         det_U = np.linalg.det(U_temp)
         if det_U < 0:
-            # Flip both the last column of U_svd and last row of Vt simultaneously
-            # This changes det(U) from -1 to 1 but maintains A = U_svd @ diag(Sigma) @ Vt
-            # because the two sign flips cancel out in the product
+            # Flipping the last column of U_svd alone turns U into a rotation, and negating the smallest singular
+            # value keeps A = U_svd @ diag(Sigma) @ Vt, so that P takes the reflection
             U_svd[:, -1] *= -1
-            Vt[-1, :] *= -1
+            Sigma[-1] *= -1
 
     # Compute U
     U = U_svd @ Vt
 
-    # Use absolute value to ensure P is positive semi-definite
-    Sigma_abs = np.abs(Sigma)
-
     if side_int == 0:  # "right"
-        # P = Vt.T @ diag(|Sigma|) @ Vt
+        # P = Vt.T @ diag(Sigma) @ Vt
         # Create diagonal matrix manually for numba compatibility
         Sigma_diag = np.zeros((N, N), dtype=Sigma.dtype)
         for i in range(N):
-            Sigma_diag[i, i] = Sigma_abs[i]
+            Sigma_diag[i, i] = Sigma[i]
         P = Vt.T @ Sigma_diag @ Vt
     else:  # "left"
-        # P = U_svd @ diag(|Sigma|) @ U_svd.T (left polar: A = P @ U)
+        # P = U_svd @ diag(Sigma) @ U_svd.T (left polar: A = P @ U)
         # Create diagonal matrix manually for numba compatibility
         Sigma_diag = np.zeros((M, M), dtype=Sigma.dtype)
         for i in range(M):
-            Sigma_diag[i, i] = Sigma_abs[i]
+            Sigma_diag[i, i] = Sigma[i]
         P = U_svd @ Sigma_diag @ U_svd.T
 
     return U, P
@@ -1848,8 +1843,9 @@ def polar(A, pure_rotation: bool = True, side: Literal["right", "left"] = "right
         - Single matrix: shape (M, N)
         - Batched: shape (*batch, M, N)
     pure_rotation : bool, optional
-        If True, ensure the unitary matrix U has det(U) = 1 (pure rotation).
-        If False, U may have det(U) = -1 (contains reflection). Default is True.
+        If True, ensure the unitary matrix U has det(U) = 1 (pure rotation), the reflection of a matrix with a negative
+        determinant then going into P, which has a negative eigenvalue. If False, U has det(U) = -1 for such a matrix
+        and P is positive semi-definite. Default is True.
     side : Literal['right', 'left'], optional
         The side of the decomposition. Either 'right' or 'left'. Default is 'right'.
 
@@ -1858,7 +1854,8 @@ def polar(A, pure_rotation: bool = True, side: Literal["right", "left"] = "right
     tuple[np.ndarray | torch.Tensor, np.ndarray | torch.Tensor]
         A tuple of (U, P) where:
         - U : The unitary matrix (rotation part), same shape as A (M, N) or (*batch, M, N).
-        - P : The positive semi-definite matrix (scaling part). For 'right' decomposition,
+        - P : The symmetric matrix (scaling part), positive semi-definite unless a reflection was moved into it (see
+          `pure_rotation`). For 'right' decomposition,
           P has shape (N, N) or (*batch, N, N). For 'left' decomposition, P has shape (M, M) or (*batch, M, M).
     """
     if isinstance(A, np.ndarray):
