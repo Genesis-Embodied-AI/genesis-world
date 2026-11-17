@@ -552,33 +552,38 @@ def func_inverse_kinematics(
                         ik_state.err_pose[i_ee * 6 + k, i_b] = err_pos_i[k]
                         ik_state.err_pose[i_ee * 6 + k + 3, i_b] = err_rot_i[k]
 
-                    if i_iter < max_solver_iters:
-                        # Full single-link Jacobian over the entity DOFs, the axes being masked while stacking below
-                        func_jacobian_scratch(
-                            i_b,
-                            i_b,
-                            entity_idx,
-                            joint_offset,
-                            i_l_ee,
-                            ee_pos,
-                            ik_state.jacobian,
-                            fk.joints_xanchor,
-                            fk.joints_xaxis,
-                            dyn_info,
-                            rigid_config,
-                        )
-                        for i_d_ in range(n_dofs):
-                            i_d = targets.dofs_idx[i_d_]
-                            for i_error in qd.static(range(3)):
-                                ik_state.jacobian_stacked[i_ee * 6 + i_error, i_d_, i_b] = (
-                                    ik_state.jacobian[i_error, i_d, i_b] * targets.pos_mask[i_error]
-                                )
-                                ik_state.jacobian_stacked[i_ee * 6 + i_error + 3, i_d_, i_b] = (
-                                    ik_state.jacobian[i_error + 3, i_d, i_b] * targets.rot_mask[i_error]
-                                )
-
                 if is_solved or i_iter == max_solver_iters:
                     break
+
+                for i_ee in range(n_links):
+                    i_l_ee = targets.links_idx[i_ee]
+                    ee_quat = fk.links_quat[i_l_ee - link_offset, i_b]
+                    ee_pos = fk.links_pos[i_l_ee - link_offset, i_b] + gu.qd_transform_by_quat(
+                        targets.local_point[i_ee], ee_quat
+                    )
+                    # Full single-link Jacobian over the entity DOFs, the axes being masked while stacking below
+                    func_jacobian_scratch(
+                        i_b,
+                        i_b,
+                        entity_idx,
+                        joint_offset,
+                        i_l_ee,
+                        ee_pos,
+                        ik_state.jacobian,
+                        fk.joints_xanchor,
+                        fk.joints_xaxis,
+                        dyn_info,
+                        rigid_config,
+                    )
+                    for i_d_ in range(n_dofs):
+                        i_d = targets.dofs_idx[i_d_]
+                        for i_error in qd.static(range(3)):
+                            ik_state.jacobian_stacked[i_ee * 6 + i_error, i_d_, i_b] = (
+                                ik_state.jacobian[i_error, i_d, i_b] * targets.pos_mask[i_error]
+                            )
+                            ik_state.jacobian_stacked[i_ee * 6 + i_error + 3, i_d_, i_b] = (
+                                ik_state.jacobian[i_error + 3, i_d, i_b] * targets.rot_mask[i_error]
+                            )
 
                 # In-place Cholesky factorization of the damped Gram matrix, forming each entry when it reaches it
                 for i_row in range(n_rows):
