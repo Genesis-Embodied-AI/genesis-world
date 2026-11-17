@@ -1,8 +1,8 @@
 """
 The constitutive models of the materials of the material point method (MPM) solver.
 
-A user extends the solver with a subclass of an options class of 'gs.materials.MPM' and a subclass of
-'MPMMaterialPhysics' naming it in `material_cls` (see 'MaterialPhysics').
+A user extends the solver with a subclass of an options class of 'gs.materials.MPM' and a physics for it,
+`class MyPhysics(MPMMaterialPhysics[MyMaterial])` (see 'MaterialPhysics').
 """
 
 import math
@@ -16,7 +16,7 @@ from genesis.engine.materials import MPM
 
 
 @qd.data_oriented
-class MPMMaterialPhysics(MaterialPhysics):
+class MPMMaterialPhysics[MaterialT: MPM.Base](MaterialPhysics[MaterialT]):
     """
     The constitutive model of a material of the material point method (MPM) solver.
 
@@ -59,8 +59,8 @@ class MPMMaterialPhysics(MaterialPhysics):
         return stress
 
 
-class ElasticPhysics(MPMMaterialPhysics):
-    material_cls = MPM.Elastic
+class ElasticPhysicsBase[MaterialT: MPM.Elastic](MPMMaterialPhysics[MaterialT]):
+    """The constitutive model of the elastic materials, shared by the physics of each of them."""
 
     @property
     def needs_svd(self) -> bool:
@@ -86,12 +86,14 @@ class ElasticPhysics(MPMMaterialPhysics):
         return stress
 
 
-class MusclePhysics(ElasticPhysics):
-    material_cls = MPM.Muscle
+class ElasticPhysics(ElasticPhysicsBase[MPM.Elastic]):
+    pass
 
+
+class MusclePhysics(ElasticPhysicsBase[MPM.Muscle]):
     @qd.func
     def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-        stress = ElasticPhysics.update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir)
+        stress = ElasticPhysicsBase.update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir)
 
         AAt = m_dir.outer_product(m_dir)
         stress += self.material.E * actu * F_tmp @ AAt @ F_tmp.transpose()
@@ -99,9 +101,7 @@ class MusclePhysics(ElasticPhysics):
         return stress
 
 
-class ElastoPlasticPhysics(MPMMaterialPhysics):
-    material_cls = MPM.ElastoPlastic
-
+class ElastoPlasticPhysics(MPMMaterialPhysics[MPM.ElastoPlastic]):
     @qd.func
     def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
         F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -132,9 +132,7 @@ class ElastoPlasticPhysics(MPMMaterialPhysics):
         return F_new, S_new, Jp_new
 
 
-class SnowPhysics(ElastoPlasticPhysics):
-    material_cls = MPM.Snow
-
+class SnowPhysics(MPMMaterialPhysics[MPM.Snow]):
     @qd.func
     def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -157,9 +155,7 @@ class SnowPhysics(ElastoPlasticPhysics):
         return stress
 
 
-class LiquidPhysics(MPMMaterialPhysics):
-    material_cls = MPM.Liquid
-
+class LiquidPhysics(MPMMaterialPhysics[MPM.Liquid]):
     @property
     def needs_svd(self) -> bool:
         # The shear term of a viscous liquid alone reads U and V
@@ -180,9 +176,7 @@ class LiquidPhysics(MPMMaterialPhysics):
         return stress
 
 
-class SandPhysics(MPMMaterialPhysics):
-    material_cls = MPM.Sand
-
+class SandPhysics(MPMMaterialPhysics[MPM.Sand]):
     def __init__(self, material: MPM.Sand) -> None:
         super().__init__(material)
         sin_phi = math.sin(math.radians(material.friction_angle))
