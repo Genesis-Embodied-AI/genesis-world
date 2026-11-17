@@ -219,7 +219,7 @@ class MPMConfig(Config):
     """The compile-time configuration of the kernels of the material point method (MPM) solver."""
 
     # Whether the singular value decomposition of the advected deformation gradient is computed, which a material
-    # reading it and the backward pass require. Otherwise J is the determinant of the advected deformation gradient.
+    # reading it requires. Otherwise J is the determinant of the advected deformation gradient.
     is_svd_needed: bool
     # Whether the grid is zeroed whole with its adjoint before every substep, instead of sparsely after it (see MPMGrid)
     requires_grad: bool
@@ -429,10 +429,9 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
             )
 
         # When no material reads U, S, V, the transfer to the grid takes J from the determinant of the advected
-        # deformation gradient, which spares the singular value decomposition. The backward pass reverses it alone.
-        # TODO: validate the J = det(F_tmp) shortcut composes with quadrants autograd before enabling it there.
+        # deformation gradient, which spares the singular value decomposition. Autodiff reverses the determinant.
         self.mpm_config = MPMConfig(
-            is_svd_needed=self._requires_grad or any([physics.needs_svd for physics in self._materials_physics]),
+            is_svd_needed=any([physics.needs_svd for physics in self._materials_physics]),
             requires_grad=self._requires_grad,
             is_cpic=self._enable_CPIC and self._sim.rigid_solver.is_active,
             is_deterministic=requires_deterministic_accumulation(),
@@ -545,7 +544,8 @@ Please decrease the simulation timestep or adjust the material parameters."""
         if self._requires_grad:
             kernel_reset_grid_and_grad(self.mpm_state)
             kernel_compute_F_tmp(self.mpm_state, self.mpm_info, compute_svd=False)
-            kernel_svd(self.mpm_state, self.mpm_info)
+            if self.mpm_config.is_svd_needed:
+                kernel_svd(self.mpm_state, self.mpm_info)
         else:
             # The sparse reset at the end of the previous substep leaves the grid zeroed for this one
             kernel_compute_F_tmp(self.mpm_state, self.mpm_info, self.mpm_config.is_svd_needed)

@@ -248,8 +248,9 @@ def test_deformable_inputs_grad_matches_fd(use_implicit_solver, precision, show_
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("block_material_cls", [gs.materials.MPM.Elastic, gs.materials.MPM.Liquid])
 @pytest.mark.parametrize("use_implicit_solver", [False, True])
-def test_coupling_wrench_grad_matches_fd(use_implicit_solver, precision, show_viewer):
+def test_coupling_wrench_grad_matches_fd(block_material_cls, use_implicit_solver, precision, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=4e-3,
@@ -281,7 +282,7 @@ def test_coupling_wrench_grad_matches_fd(use_implicit_solver, precision, show_vi
             lower=(-0.2, -0.05, -0.05),
             upper=(-0.05, 0.05, 0.05),
         ),
-        material=gs.materials.MPM.Elastic(
+        material=block_material_cls(
             E=5e4,
         ),
     )
@@ -322,9 +323,9 @@ def test_coupling_wrench_grad_matches_fd(use_implicit_solver, precision, show_vi
         return box_loss, (fem_block.get_verts_pos() ** 2).sum()
 
     tol = 2e-10 if precision == "64" else 1e-4
-    # In single precision, the implicit solve rounds the displacement of each substep against the positions, which
-    # makes its finite differences noisy, while its analytic gradient matches double precision.
-    fem_tol = 2e-10 if precision == "64" else (1e-3 if use_implicit_solver else 5e-4)
+    # The FEM loss is non-smooth in the box velocity at the scale of the single-precision step, which biases its finite
+    # differences in double precision too, while the analytic gradient matches double precision.
+    fem_tol = 2e-10 if precision == "64" else 1e-3
     vel = np.tile([0.1, 0.2, -0.1, 0.5, -0.3, 0.4], (2, 1))
     vel_ana = torch.tensor(vel, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     box_loss, _ = rollout(vel_ana)
