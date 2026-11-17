@@ -457,7 +457,7 @@ def test_export_and_load(
             size=(0.1, 0.1, 0.1),
         ),
         material=gs.materials.MPM.Elastic(
-            sampler="random",
+            sampler=gs.sampler.random,
         ),
     )
     sph_liquid = deformable_scene.add_entity(
@@ -467,13 +467,28 @@ def test_export_and_load(
         ),
         material=gs.materials.SPH.Liquid(),
     )
+    # The 'pbs' sampler relaxes the particles in a distance field of the given resolution, which places them apart
     pbd_liquid = deformable_scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.5, -0.5, 0.2),
             size=(0.1, 0.1, 0.1),
         ),
-        material=gs.materials.PBD.Liquid(),
+        material=gs.materials.PBD.Liquid(
+            sampler=gs.sampler.pbs,
+            sdf_resolution=16,
+        ),
     )
+    pbd_liquid_fine = deformable_scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.5, 0.0, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.PBD.Liquid(
+            sampler=gs.sampler.pbs,
+            sdf_resolution=64,
+        ),
+    )
+    assert pbd_liquid.n_particles != pbd_liquid_fine.n_particles
     pbd_cloth = deformable_scene.add_entity(
         morph=gs.morphs.Mesh(
             file="meshes/cloth.obj",
@@ -515,8 +530,9 @@ def test_export_and_load(
     assert [entity.name for entity in restored_deformable.entities] == [
         entity.name for entity in deformable_scene.entities
     ]
-    for entity in (mpm_cube, sph_liquid, pbd_liquid, pbd_cloth, pbd_elastic):
+    for entity in (mpm_cube, sph_liquid, pbd_liquid, pbd_liquid_fine, pbd_cloth, pbd_elastic):
         assert_equal(restored_deformable.get_entity(entity.name).init_particles, entity.init_particles)
+    assert restored_deformable.get_entity(pbd_liquid.name).material.sdf_resolution == 16
     # A cloth and an elastic entity hold the remeshed mesh, the tetrahedralization included, and its edges
     restored_cloth = restored_deformable.get_entity(pbd_cloth.name)
     assert_equal(restored_cloth.edges, pbd_cloth.edges)
