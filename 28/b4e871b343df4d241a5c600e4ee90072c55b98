@@ -1,0 +1,38 @@
+genesis/engine/materials/MPM/muscle.py
+  s_8e3e09cbc07082::t_1c4af77fff8df2 3,21
+  s_8e3e09cbc07082::t_b8b570de73339d 22,28
+genesis/constants.py
+  s_8e3e09cbc07082::t_6b22ae136807ca 171-178
+genesis/engine/materials/MPM/elastic.py
+  s_8e3e09cbc07082::t_b8b570de73339d 1,13,20-23,27,42-43,47,51
+examples/tutorials/advanced_worm.py
+  s_8e3e09cbc07082::t_4be86085230019 51
+tests/particles/test_mpm.py
+  s_8e3e09cbc07082::t_4be86085230019 183,186
+tests/coupling/test_hybrid.py
+  s_8e3e09cbc07082::t_4be86085230019 70
+examples/tutorials/advanced_hybrid_robot.py
+  s_8e3e09cbc07082::t_4be86085230019 62
+tests/rendering/test_dynamic_meshes.py
+  s_8e3e09cbc07082::t_4be86085230019 108
+examples/tutorials/advanced_muscle.py
+  s_8e3e09cbc07082::t_4be86085230019 54
+genesis/__init__.py
+  s_8e3e09cbc07082::t_6b22ae136807ca 508
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "28b4e871b343df4d241a5c600e4ee90072c55b98",
+  "prompts": {},
+  "sessions": {
+    "s_8e3e09cbc07082": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a8f0475a-f9de-4602-9bce-61f4c50730a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
