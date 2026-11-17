@@ -41,6 +41,27 @@ def elastic_stress(
     return stress
 
 
+@qd.func
+def clamp_singular_values(
+    U: qd.types.matrix(3, 3),
+    S: qd.types.matrix(3, 3),
+    V: qd.types.matrix(3, 3),
+    yield_lower: float,
+    yield_higher: float,
+):
+    """
+    Return the deformation gradient and its singular values once clamped to the elastic range of a material.
+
+    `U`, `S`, `V` are the singular value decomposition of the advected deformation gradient. The singular values are
+    clamped to `[1 - yield_lower, 1 + yield_higher]`.
+    """
+    S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
+    for d in qd.static(range(3)):
+        S_new[d, d] = min(max(S[d, d], 1 - yield_lower), 1 + yield_higher)
+    F_new = U @ S_new @ V.transpose()
+    return F_new, S_new
+
+
 @qd.data_oriented
 class MPMMaterialPhysics[MaterialT: MPM.Base](MaterialPhysics[MaterialT]):
     """
@@ -139,10 +160,7 @@ class ElastoPlasticPhysics(MPMMaterialPhysics[MPM.ElastoPlastic]):
                 F_new = F_tmp
 
         else:
-            S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for d in qd.static(range(3)):
-                S_new[d, d] = min(max(S[d, d], 1 - self.material.yield_lower), 1 + self.material.yield_higher)
-            F_new = U @ S_new @ V.transpose()
+            F_new, S_new = clamp_singular_values(U, S, V, self.material.yield_lower, self.material.yield_higher)
 
         Jp_new = Jp
         return F_new, S_new, Jp_new
@@ -151,24 +169,17 @@ class ElastoPlasticPhysics(MPMMaterialPhysics[MPM.ElastoPlastic]):
 class SnowPhysics(MPMMaterialPhysics[MPM.Snow]):
     @qd.func
     def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
-        S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
+        F_new, S_new = clamp_singular_values(U, S, V, self.material.yield_lower, self.material.yield_higher)
         Jp_new = Jp
         for d in qd.static(range(3)):
-            S_new[d, d] = min(max(S[d, d], 1 - self.material.yield_lower), 1 + self.material.yield_higher)
             Jp_new *= S[d, d] / S_new[d, d]
-        F_new = U @ S_new @ V.transpose()
         return F_new, S_new, Jp_new
 
     @qd.func
     def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
         # Hardening coefficient: material harder when compressed
         h = qd.exp(10 * (1.0 - Jp))
-        mu, lam = self.material.mu * h, self.material.lam * h
-
-        r = U @ V.transpose()
-        stress = 2 * mu * (F_new - r) @ F_new.transpose() + qd.Matrix.identity(gs.qd_float, 3) * lam * J * (J - 1)
-
-        return stress
+        return elastic_stress(J, U, V, F_tmp, F_new, mu=self.material.mu * h, lam=self.material.lam * h, corotated=True)
 
 
 class LiquidPhysics(MPMMaterialPhysics[MPM.Liquid]):
@@ -186,9 +197,12 @@ class LiquidPhysics(MPMMaterialPhysics[MPM.Liquid]):
 
     @qd.func
     def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-        stress = qd.Matrix.identity(gs.qd_float, 3) * self.material.lam * J * (J - 1)
+        stress = qd.Matrix.zero(gs.qd_float, 3, 3)
         if qd.static(self.material.viscous):
-            stress = 2 * self.material.mu * (F_tmp - U @ V.transpose()) @ F_tmp.transpose() + stress
+            # The shear term reads the advected deformation gradient, since plasticity leaves the liquid a pure dilation
+            stress = elastic_stress(J, U, V, F_tmp, F_tmp, self.material.mu, self.material.lam, corotated=True)
+        else:
+            stress = qd.Matrix.identity(gs.qd_float, 3) * self.material.lam * J * (J - 1)
         return stress
 
 
