@@ -21,6 +21,9 @@ class ForceField(RBC):
     """
     Base class for all force fields. This class should not be used directly.
 
+    A force field is active once created, and its `deactivate` and `activate` methods switch it off and back on at any
+    time.
+
     Note
     ----
     It's called `ForceField`, but it's actually an acceleration field, as force doesn't have a notion of spatial density.
@@ -28,7 +31,7 @@ class ForceField(RBC):
 
     def __init__(self):
         self._active = qd.field(gs.qd_bool, shape=())
-        self._active[None] = False
+        self._active[None] = True
 
     def activate(self):
         """
@@ -425,8 +428,6 @@ class Custom(ForceField):
     """
     Custom force field with a user-defined force(acceleration) function `f(pos, vel, t, i)`.
 
-    Unlike the other force fields, it is active as soon as it is created.
-
     Parameters:
     -----------
     func: A callable Quadrants func (a python function wrapped by `@qd.func`)
@@ -439,7 +440,6 @@ class Custom(ForceField):
         super().__init__()
 
         self._get_acc = func
-        self.activate()
 
 
 @qd.data_oriented

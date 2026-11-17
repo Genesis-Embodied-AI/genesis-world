@@ -343,16 +343,21 @@ def test_force_field_activation(show_viewer, tol):
     custom = scene.add_force_field(gs.force_fields.Custom(acc_unit_x))
     scene.build(n_envs=2)
 
-    # The particles gain the acceleration times the duration over which the field is active
-    for is_active, n_runs_active in ((True, 1), (False, 1), (True, 2)):
-        if is_active:
-            custom.activate()
-        else:
-            custom.deactivate()
-        assert custom.active == is_active
-        for _ in range(N_STEPS):
-            scene.step()
-        assert_allclose(particles.get_particles_vel()[..., 0], n_runs_active * N_STEPS * DT, tol=tol)
+    # The particles gain the acceleration times the duration over which the field is active, from its creation on
+    assert custom.active
+    for _ in range(N_STEPS):
+        scene.step()
+    assert_allclose(particles.get_particles_vel()[..., 0], N_STEPS * DT, tol=tol)
+    custom.deactivate()
+    assert not custom.active
+    for _ in range(N_STEPS):
+        scene.step()
+    assert_allclose(particles.get_particles_vel()[..., 0], N_STEPS * DT, tol=tol)
+    custom.activate()
+    assert custom.active
+    for _ in range(N_STEPS):
+        scene.step()
+    assert_allclose(particles.get_particles_vel()[..., 0], 2 * N_STEPS * DT, tol=tol)
 
 
 @pytest.mark.required
@@ -384,7 +389,6 @@ def test_force_field_direction(n_envs, tol):
         )
     )
     scene.build(n_envs=n_envs)
-    vortex.activate()
 
     particles_pos_init = particles.get_particles_pos()
     scene.step()
