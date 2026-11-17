@@ -5,10 +5,11 @@ A solver plugs in with a generic subclass of 'MaterialPhysics' declaring its own
 each material with a subclass of it parameterized by the options class (`class MyPhysics(MySolverPhysics[MyMaterial])`).
 """
 
-from typing import ClassVar, TypeVar, get_args, get_origin
+from typing import ClassVar
 
 import genesis as gs
 from genesis.engine.materials.base import Material
+from genesis.utils.misc import get_generic_args
 
 
 class MaterialPhysics[MaterialT: Material]:
@@ -17,48 +18,35 @@ class MaterialPhysics[MaterialT: Material]:
 
     A subclass parameterized by a material class registers itself in the `PHYSICS_TYPES_MAP` of the physics base of its
     solver, and serves the subclasses of that material class that no other physics names. A subclass keeping a type
-    parameter registers nothing, which lets several registered physics share code. Subclassing a registered physics, or
-    binding a material class that another physics already binds, raises a TypeError.
+    parameter registers nothing, which lets several registered physics share code. A registered physics has no
+    subclass, and each material class has at most one physics.
     """
 
     PHYSICS_TYPES_MAP: ClassVar[dict[type[Material], type["MaterialPhysics"]]]
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        for physics_base in cls.__mro__[1:]:
-            physics_types_map = physics_base.__dict__.get("PHYSICS_TYPES_MAP")
-            if physics_types_map is None:
-                continue
-            for physics_cls in cls.__mro__[1:]:
-                if physics_cls in physics_types_map.values():
-                    (generic_base,) = physics_cls.__dict__["__orig_bases__"]
-                    raise TypeError(
-                        f"{cls.__name__} subclasses the registered physics {physics_cls.__name__}. Subclass its "
-                        f"generic base {get_origin(generic_base).__name__} instead."
-                    )
-        for base in cls.__dict__.get("__orig_bases__", ()):
-            origin = get_origin(base)
-            if origin is None or not issubclass(origin, MaterialPhysics):
-                continue
-            (material_cls,) = get_args(base)
-            if isinstance(material_cls, TypeVar):
-                break
-            for physics_base in cls.__mro__:
-                if "PHYSICS_TYPES_MAP" in physics_base.__dict__:
-                    registered_cls = physics_base.PHYSICS_TYPES_MAP.get(material_cls)
-                    if registered_cls is not None:
-                        raise TypeError(
-                            f"{cls.__name__} binds {material_cls.__name__}, which the physics "
-                            f"{registered_cls.__name__} already binds."
-                        )
-                    physics_base.PHYSICS_TYPES_MAP[material_cls] = cls
-                    break
-            else:
-                raise TypeError(
-                    f"{cls.__name__} binds {material_cls.__name__}, but none of its base classes declares the "
-                    "'PHYSICS_TYPES_MAP' of a solver."
-                )
-            break
+        physics_types_map = next(
+            (base.__dict__["PHYSICS_TYPES_MAP"] for base in cls.__mro__ if "PHYSICS_TYPES_MAP" in base.__dict__), None
+        )
+        if physics_types_map is not None:
+            registered_bases = [base for base in cls.__mro__[1:] if base in physics_types_map.values()]
+            assert not registered_bases, (
+                f"{cls.__name__} subclasses the registered physics {registered_bases[0].__name__}."
+            )
+        generic_args = get_generic_args(cls, MaterialPhysics)
+        if not generic_args or generic_args[0] is None:
+            return
+        (material_cls,) = generic_args
+        assert physics_types_map is not None, (
+            f"{cls.__name__} binds {material_cls.__name__}, but none of its base classes declares a "
+            "'PHYSICS_TYPES_MAP'."
+        )
+        assert material_cls not in physics_types_map, (
+            f"{cls.__name__} binds {material_cls.__name__}, which {physics_types_map[material_cls].__name__} "
+            "already binds."
+        )
+        physics_types_map[material_cls] = cls
 
     def __init__(self, material: MaterialT) -> None:
         self.material = material
