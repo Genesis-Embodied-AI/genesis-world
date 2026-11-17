@@ -1,0 +1,48 @@
+genesis/engine/materials/MPM/snow.py
+  s_8e3e09cbc07082::t_483ff6037aad89 5,46-51
+genesis/engine/solvers/mpm_solver.py
+  s_8e3e09cbc07082::t_b69a175b8a3e0f 17
+  s_8e3e09cbc07082::t_6102518e26afee 135-139,142-143,150,254-257,402-405,407,409-411,440-442,444,446,449,452-453,460-461,463,913,917-918,921-922,932-933,937-946,982,986-990,992-1000,1002-1010,1705-1706,1715,1718-1719,1726,1760,1781
+genesis/engine/materials/MPM/base.py
+  s_8e3e09cbc07082::t_483ff6037aad89 31-32,34-60,104-110
+genesis/engine/materials/MPM/elasto_plastic.py
+  s_8e3e09cbc07082::t_483ff6037aad89 8,39-44
+genesis/engine/materials/MPM/elastic.py
+  s_8e3e09cbc07082::t_483ff6037aad89 10,47-48,51-52
+  s_8e3e09cbc07082::t_28d66969cc961b 1,46
+  s_8e3e09cbc07082::t_91498dd3df23f2 2-3,11-24,40,44-45
+genesis/engine/materials/MPM/liquid.py
+  s_8e3e09cbc07082::t_483ff6037aad89 5,32-37
+genesis/engine/materials/MPM/sand.py
+  s_8e3e09cbc07082::t_483ff6037aad89 6,31-36
+examples/tutorials/advanced_hybrid_robot.py
+  s_8e3e09cbc07082::t_3339418e0430a0 62
+examples/tutorials/advanced_muscle.py
+  s_8e3e09cbc07082::t_389ebafd5ed71c 54
+examples/tutorials/advanced_worm.py
+  s_8e3e09cbc07082::t_b66adf8182f5f0 51
+genesis/engine/materials/MPM/muscle.py
+  s_8e3e09cbc07082::t_ee508c347cb450 5,21,27
+tests/coupling/test_hybrid.py
+  s_8e3e09cbc07082::t_d012f441503416 70
+tests/particles/test_mpm.py
+  s_8e3e09cbc07082::t_a12ee0d208423e 186
+tests/rendering/test_dynamic_meshes.py
+  s_8e3e09cbc07082::t_92d429e439e33b 108
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "435c71737fe087b776b4791fcb7646b2fda6ae88",
+  "prompts": {},
+  "sessions": {
+    "s_8e3e09cbc07082": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a8f0475a-f9de-4602-9bce-61f4c50730a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
