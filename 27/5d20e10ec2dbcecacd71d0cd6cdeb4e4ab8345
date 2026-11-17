@@ -1,0 +1,21 @@
+tests/particles/test_mpm.py
+  s_8e3e09cbc07082::t_04b3e9433d1e9e 301,306
+  s_8e3e09cbc07082::t_5e960dcb5b1fcc 229,245-262,270-271,289-290,297-298,302-304
+  s_8e3e09cbc07082::t_50e604374eac9f 307
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "275d20e10ec2dbcecacd71d0cd6cdeb4e4ab8345",
+  "prompts": {},
+  "sessions": {
+    "s_8e3e09cbc07082": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a8f0475a-f9de-4602-9bce-61f4c50730a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
