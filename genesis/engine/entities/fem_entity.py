@@ -136,12 +136,12 @@ class FEMEntityDescription(EntityDescription):
 
     @classmethod
     def resolve(cls, spec: "gs.entities.FEM", surface: Surface) -> Self:
-        """Build the simulation mesh and the visual geoms of an entity spec, whose surface 'surface' is resolved.
+        """Build the simulation mesh and the visual geoms of an entity spec.
 
-        Each morph sub-mesh becomes a visual geom with its own surface and UVs, while the simulation operates on a
-        single welded copy of their vertices, tracked through 'FEMVisGeomDescription.sim_verts_idx': welding and
-        tetrahedralization both keep the input vertices first and in order, so these maps remain valid indices into
-        the simulated vertices.
+        'surface' is the one resolved from the spec. Each morph sub-mesh becomes a visual geom with its own surface and
+        UVs, while the simulation operates on a single welded copy of their vertices, tracked through
+        'FEMVisGeomDescription.sim_verts_idx': welding and tetrahedralization both keep the input vertices first and in
+        order, so these maps remain valid indices into the simulated vertices.
         """
         morph = spec.morphs[0]
         meshes = gs.Mesh.from_morph_surface(morph, surface)

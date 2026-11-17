@@ -44,14 +44,14 @@ class MPMHybridPart(NamedTuple):
 
 
 @dataclass
-class HybridAssociationDescription:
-    """Associate the particles of the soft part of a hybrid entity with the rigid links driving them.
+class HybridMuscleGroupsDescription:
+    """Describe the muscle groups of the soft part of a hybrid entity, each following one rigid link.
 
-    Each muscle group follows one link, standing in it at the given transform from the local frame of the link to the
-    world frame. 'muscle_group' gives the group of every particle, or None when the soft part keeps its own.
+    Each group stands in its link at the given transform from the local frame of the link to the world frame.
+    'particles_group' gives the group of every particle, or None when the soft part keeps its own.
     """
 
-    muscle_group: np.ndarray | None
+    particles_group: np.ndarray | None
     links_idx: np.ndarray
     geoms_idx: np.ndarray
     trans_local_to_global: np.ndarray
@@ -69,14 +69,14 @@ class HybridEntityDescription(EntityDescription):
 
     part_rigid_name: str
     part_soft_name: str
-    association: HybridAssociationDescription | None = None
+    muscle_groups: HybridMuscleGroupsDescription | None = None
 
     @classmethod
     def resolve(cls, scene: "Scene", spec: "gs.entities.Hybrid", surface: Surface) -> Self:
         """Add the rigid and the soft parts of an entity spec to the scene, and associate the soft part with the links.
 
         'surface' is the one resolved from the spec, which the soft part takes. Each part takes a copy of its material
-        from the hybrid material, which the association completes with the number of muscle groups.
+        from the hybrid material, which the muscle groups complete with their number.
         """
         morph = spec.morph
         material = spec.material
@@ -126,7 +126,7 @@ class HybridEntityDescription(EntityDescription):
         else:
             gs.raise_exception("`morph` in hybrid entity should be either URDF or Mesh")
 
-        association = None
+        muscle_groups = None
         if not material.use_default_coupling:
             # get rigid-soft association function
             if material.func_instantiate_rigid_soft_association is not None:
@@ -140,15 +140,15 @@ class HybridEntityDescription(EntityDescription):
             )
             # The soft part holds this material, so it gets one muscle group per link
             material_soft.n_groups = len(links_idx)
-            association = HybridAssociationDescription(
-                muscle_group=None if muscle_group is None else muscle_group.astype(gs.np_int, copy=False),
+            muscle_groups = HybridMuscleGroupsDescription(
+                particles_group=None if muscle_group is None else muscle_group.astype(gs.np_int, copy=False),
                 links_idx=np.asarray(links_idx, dtype=gs.np_int),
                 geoms_idx=np.asarray(geoms_idx, dtype=gs.np_int),
                 trans_local_to_global=np.asarray(trans_local_to_global, dtype=gs.np_float),
                 quat_local_to_global=np.asarray(quat_local_to_global, dtype=gs.np_float),
             )
 
-        return cls(spec, surface, part_rigid.name, part_soft.name, association)
+        return cls(spec, surface, part_rigid.name, part_soft.name, muscle_groups)
 
 
 class HybridEntity(Entity):
@@ -180,14 +180,14 @@ class HybridEntity(Entity):
 
         # The soft part following the rigid links of its muscle groups, held without the default coupling alone
         self._mpm_hybrid_part: MPMHybridPart | None = None
-        association = desc.association
-        if association is not None:
-            n_groups = len(association.links_idx)
+        muscle_groups = desc.muscle_groups
+        if muscle_groups is not None:
+            n_groups = len(muscle_groups.links_idx)
             self._mpm_hybrid_part = MPMHybridPart(
-                groups_link_idx=association.links_idx,
-                groups_geom_idx=association.geoms_idx,
-                groups_trans_local_to_global=association.trans_local_to_global,
-                groups_quat_local_to_global=association.quat_local_to_global,
+                groups_link_idx=muscle_groups.links_idx,
+                groups_geom_idx=muscle_groups.geoms_idx,
+                groups_trans_local_to_global=muscle_groups.trans_local_to_global,
+                groups_quat_local_to_global=muscle_groups.quat_local_to_global,
                 groups_damping=np.full(n_groups, self.material.damping),
                 groups_soft_dv_coef=np.full(n_groups, self.material.soft_dv_coef),
                 particles_idx=np.arange(self._part_soft.particle_start, self._part_soft.particle_end),
@@ -377,10 +377,10 @@ class HybridEntity(Entity):
         Finalize the hybrid entity setup during simulation build.
         """
         # can only be called here (at sim build)
-        association = self._desc.association
-        if association is not None and association.muscle_group is not None:
+        muscle_groups = self._desc.muscle_groups
+        if muscle_groups is not None and muscle_groups.particles_group is not None:
             self._part_soft.set_muscle(
-                muscle_group=torch.tensor(association.muscle_group, dtype=gs.tc_int, device=gs.device)
+                muscle_group=torch.tensor(muscle_groups.particles_group, dtype=gs.tc_int, device=gs.device)
                 # no muscle direction as the soft body is actuated by rigid parts
             )
 

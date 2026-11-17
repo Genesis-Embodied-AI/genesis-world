@@ -201,7 +201,7 @@ def test_mesh_mpm_build(show_viewer):
         ),
         material=material,
     )
-    # Each part takes a copy of its material, which the association completes with one muscle group per link
+    # Each part takes a copy of its material, which gets one muscle group per link
     assert material.material_soft.n_groups == 1
     assert duck.part_soft.material.n_groups == len(duck.part_rigid.links) > 1
 
