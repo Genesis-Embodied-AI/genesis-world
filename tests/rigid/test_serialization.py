@@ -1025,7 +1025,7 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         ),
         show_viewer=show_viewer,
     )
-    deformable_scene.add_entity(
+    plane = deformable_scene.add_entity(
         morph=gs.morphs.Plane(),
     )
     mpm_cube = deformable_scene.add_entity(
@@ -1051,9 +1051,13 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
     )
     deformable_scene.build(n_envs=n_envs)
     deformables_pos = []
-    for _ in range(N_STEPS):
+    for i_step in range(N_STEPS):
+        # Particles attached halfway are recorded with the frames from there on
+        if i_step == N_STEPS // 2:
+            mpm_cube.set_particle_constraints(True, plane.links[0].idx, stiffness=1e5)
         deformables_pos.append((mpm_cube.get_particles_pos(), fem_cube.get_verts_pos()))
         deformable_scene.step()
+    final_mpm_pos = mpm_cube.get_particles_pos()
     deformable_scene.stop_recording()
     deformable_trajectory = gs.Scene.load_trajectory(deformable_path, show_viewer=show_viewer)
     replay_mpm_cube, replay_fem_cube = deformable_trajectory.scene.entities[1:]
@@ -1061,6 +1065,9 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         deformable_trajectory.seek(index)
         assert_equal(replay_mpm_cube.get_particles_pos(), mpm_pos)
         assert_equal(replay_fem_cube.get_verts_pos(), fem_pos)
+    # A step from the last frame holds the particles attached as the recorded run did
+    deformable_trajectory.scene.step()
+    assert_allclose(replay_mpm_cube.get_particles_pos(), final_mpm_pos, tol=tol)
 
 
 @pytest.mark.precision("32")
