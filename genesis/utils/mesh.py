@@ -18,6 +18,7 @@ import trimesh
 from PIL import Image
 
 import genesis as gs
+from genesis.constants import TEXTURE_MAP_TYPE
 
 from . import geom as gu
 from .cache import (
@@ -447,13 +448,63 @@ def compute_sdf_data(mesh, res):
 _TEXTURE_MATERIALS_CACHE = OwnedCache()
 
 
-def _get_seed_image(texture) -> np.ndarray | None:
-    """Return the image a mesh visual is seeded with for a dynamic texture, None for any other texture.
+def texture_to_rgba(
+    texture: "gs.textures.ColorTexture | gs.textures.ImageTexture | gs.textures.AssetTexture | None",
+    resolution: tuple[int, int],
+    texture_map_type: TEXTURE_MAP_TYPE = TEXTURE_MAP_TYPE.DIFFUSE,
+) -> np.ndarray:
+    """Return a texture as an RGBA image, in the format of a dynamic texture in a map.
 
-    The renderers replace it with the images of each environment, so the first one serves for any of them.
+    The diffuse map holds sRGB uint8 values and the emissive map linear float16 values (see
+    ``gs.textures.DynamicTexture``). An image is resized to 'resolution', given as (width, height), and converted from
+    its own encoding. A color is sRGB in the diffuse map and linear in the emissive map, as for a static texture. A gray
+    or gray-alpha color spans the three color channels, as an image of one or two channels does. No texture, an
+    unresolved asset texture included, gives a black and magenta checkerboard of 8 by 8 cells.
+    """
+    width, height = resolution
+    if not isinstance(texture, (gs.textures.ColorTexture, gs.textures.ImageTexture)):
+        is_magenta = ((np.arange(height)[:, None] * 8 // height) + (np.arange(width) * 8 // width)) % 2 == 1
+        rgba = np.where(is_magenta[..., None], (1.0, 0.0, 1.0, 1.0), (0.0, 0.0, 0.0, 1.0))
+    else:
+        if isinstance(texture, gs.textures.ImageTexture):
+            if texture.image_array is None:
+                gs.raise_exception(f"A dynamic texture takes no HDR image, got '{texture.image_path}'.")
+            image = texture.image_array
+            if image.ndim == 3 and image.shape[-1] == 1:
+                image = image[..., 0]
+            rgba = np.asarray(Image.fromarray(image).convert("RGBA").resize(resolution, Image.Resampling.BILINEAR))
+            rgba, color, is_srgb = rgba / 255.0, texture.image_color, texture.encoding == "srgb"
+        else:
+            rgba, color = np.ones((height, width, 4)), texture.color
+            is_srgb = texture_map_type == TEXTURE_MAP_TYPE.DIFFUSE
+        # sRGB transfer function of IEC 61966-2-1, between the encoded values and the linear ones
+        if texture_map_type == TEXTURE_MAP_TYPE.EMISSIVE and is_srgb:
+            rgb = rgba[..., :3]
+            rgba[..., :3] = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+        elif texture_map_type == TEXTURE_MAP_TYPE.DIFFUSE and not is_srgb:
+            rgb = rgba[..., :3]
+            rgba[..., :3] = np.where(rgb <= 0.0031308, rgb * 12.92, 1.055 * rgb ** (1.0 / 2.4) - 0.055)
+        factor = np.ones(4)
+        factor[:3] = color[:3] if len(color) >= 3 else color[:1]
+        if len(color) in (2, 4):
+            factor[3] = color[-1]
+        rgba = rgba * factor
+    if texture_map_type == TEXTURE_MAP_TYPE.EMISSIVE:
+        return rgba.astype(np.float16)
+    return (rgba * 255.0).round().astype(np.uint8)
+
+
+def _get_seed_image(texture: "gs.textures.Texture | None") -> np.ndarray | None:
+    """Return the image a mesh visual is seeded with for a dynamic texture, its first variant, None for any other
+    texture.
+
+    The rasterizer draws the images of the dynamic texture in its place (see 'RasterizerContext._bind_textures').
     """
     if isinstance(texture, gs.textures.DynamicTexture):
-        return gs.textures.texture_to_rgba(texture.variants_texture[0], texture.resolution)[0]
+        variants = texture.variants
+        return texture_to_rgba(
+            next(iter(variants.values())) if isinstance(variants, dict) else variants[0], texture.resolution
+        )
     return None
 
 
@@ -477,7 +528,7 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     emission = surface.emission
     emissive_kwargs = {}
     if emission is not None and base is not None and base is not emission and not base.is_black:
-        # The renderer writes the images of a dynamic texture into the texture this one seeds
+        # The rasterizer binds the images of a dynamic texture in place of the texture this one seeds
         emission_seed = _get_seed_image(emission)
         if emission_seed is not None:
             emissive_kwargs = dict(

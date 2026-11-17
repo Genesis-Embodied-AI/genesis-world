@@ -322,6 +322,13 @@ def test_entity_spec(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_free_
         fem_vertices_spec.select(gs.indices.VGeom.at(0)).set(
             gs.options.VGeom(dynamic_vertices=gs.surfaces.DynamicVertices())
         )
+    # A surface reconstructed from particles holds no texture coordinates, which a tearable entity shows once torn
+    with pytest.raises(gs.GenesisException, match="cannot show a DynamicTexture"):
+        gs.entities.MPM(
+            morph=gs.morphs.Sphere(),
+            material=gs.materials.MPM.Elastic(),
+            surface=gs.surfaces.Emission(emissive_texture=gs.textures.DynamicTexture(resolution=(4, 4))),
+        )
 
     scene.build(n_envs=2)
 

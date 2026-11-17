@@ -17,6 +17,7 @@ from .morphs import Morph
 from .options import Options
 from .patches import Geom, Patch, Vertex, VGeom, _FrozenOptions
 from .surfaces import DynamicVertices, Surface
+from .textures import DynamicTexture
 from .vis import EntityVisOptions
 
 if TYPE_CHECKING:
@@ -175,6 +176,11 @@ class Spec(_FrozenOptions, Generic[EntityT]):
 
     def _check_surface(self, surface: Surface) -> None:
         """Check that the kind of entity draws what a surface of the entity or of its visual geoms asks for."""
+        if self.structure != STRUCTURE.RIGID and any(isinstance(texture, DynamicTexture) for _, texture in surface):
+            gs.raise_exception(
+                f"gs.entities.{type(self).__name__} cannot show a DynamicTexture. Only the entities of a rigid "
+                "structure (gs.entities.Rigid and gs.entities.Kinematic) show one."
+            )
         # The deprecated 'vis_mode' names the representation the material decides, 'visual' for a mesh and 'recon' for a
         # reconstructed surface, or a debug representation of the entity, which then shows it in every view.
         if surface.vis_mode is not None:

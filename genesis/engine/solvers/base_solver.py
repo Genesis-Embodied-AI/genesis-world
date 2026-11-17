@@ -10,6 +10,7 @@ import numba as nb
 import quadrants as qd
 
 import genesis as gs
+from genesis.constants import TEXTURE_MAP_TYPE
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.force_fields import ForceField, ForceFields
 from genesis.engine.state_change import StateChange, Subscriber, mutates
@@ -49,9 +50,10 @@ from genesis.utils.misc import (
 
 
 if TYPE_CHECKING:
-    from genesis.engine.render_context import ScopedRenderContext
+    from genesis.engine.render_context import ScopedRenderContext, TextureValueType
     from genesis.engine.simulator import Simulator
     from genesis.options import Options
+    from genesis.typing import IndexType
 
 
 # The bits of an errno: those of an int32 without its sign bit, the flags being int32 kernel literals
@@ -891,6 +893,18 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
     ) -> None:
         """Write back the state 'get_state' returned, notifying the subscribers (see 'CheckpointMixin.set_state')."""
         super().set_state(state, envs_idx)
+
+    @mutates(StateChange.VISUAL, differentiable=False)
+    def _set_vgeom_texture(
+        self,
+        vgeom: object,
+        texture: "TextureValueType",
+        envs_idx: "IndexType | None" = None,
+        texture_map_type: TEXTURE_MAP_TYPE | None = None,
+    ) -> None:
+        # The render context holds the dynamic textures, while the consumers of a change of appearance subscribe to the
+        # solver, which notifies them here
+        self.render_context.textures.set_texture(vgeom, texture, envs_idx, texture_map_type)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

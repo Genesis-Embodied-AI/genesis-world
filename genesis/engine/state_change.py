@@ -30,7 +30,8 @@ class StateChange(enum.Enum):
     surface (link poses, qpos, vertices). DYNAMICS is the velocity state. MODEL is what every later step reads besides
     the state: the model parameters (mass, inertia, friction, gains, limits, gravity) and the constraints attached to
     the state (particle and vertex constraints). VISUAL is the appearance alone, which the physics never reads, such as
-    the visual vertices of a visual geom: the render context reports it, never a solver.
+    the visual vertices of a visual geom or the variant each environment shows of a dynamic texture: the render context
+    reports it, never a solver.
     """
 
     GEOMETRY = enum.auto()

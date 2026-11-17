@@ -188,8 +188,6 @@ class Surface(Options):
                 gs.raise_exception(
                     f"A dynamic texture fills 'diffuse_texture' or 'emissive_texture' alone, got '{name}'."
                 )
-            if isinstance(value, (ColorTexture, ImageTexture)) and value.is_batched:
-                gs.raise_exception(f"A batched texture is a variant of a dynamic texture alone, got '{name}'.")
         # The image of a dynamic texture holds its own opacity
         if isinstance(fields[self._color_target], DynamicTexture) and fields.get("opacity_texture") is not None:
             gs.raise_exception("A dynamic texture holds its own opacity, so 'opacity_texture' cannot be given with it.")
@@ -221,7 +219,8 @@ class Surface(Options):
         """Return the color and opacity of the surface as one RGBA texture, the one the renderers draw.
 
         A batch texture gives its first entry, or a ``gs.textures.BatchTexture`` of its entries under 'batch', as the
-        batch renderer draws them. A dynamic texture drawn as the color is returned as is.
+        batch renderer draws them. A dynamic texture drawn as the color is returned as is, its images holding their own
+        opacity.
         """
         return _make_rgba(_resolve_albedo(self.texture, self.emission), None, batch)
 

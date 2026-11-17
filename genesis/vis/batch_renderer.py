@@ -8,6 +8,7 @@ from genesis.constants import IMAGE_TYPE
 from genesis.engine.render_context import DynamicMesh
 from genesis.repr_base import RBC
 from genesis.utils.misc import BuildableMixin, tensor_to_array
+from genesis.utils.warnings import warn_once
 
 from .camera import Camera
 from .rasterizer_context import SEGMENTATION_LEVELS, SegmentationColorMap
@@ -135,7 +136,13 @@ class GenesisGeomRetriever(BuildableMixin):
 
         for geometry in self.geometries:
             geom_surface = geometry.surface
-            geom_textures = geom_surface.get_rgba(batch=True).textures
+            geom_rgba = geom_surface.get_rgba(batch=True)
+            if geometry.textures:
+                warn_once(self, "BatchRenderer draws no dynamic texture: the meshes showing one are drawn without it.")
+            # The color of a surface showing a dynamic texture is the texture alone (see 'Surface.get_rgba')
+            if isinstance(geom_rgba, gs.textures.DynamicTexture):
+                geom_rgba = gs.textures.BatchTexture(textures=[gs.textures.ColorTexture(color=(1.0, 1.0, 1.0, 1.0))])
+            geom_textures = geom_rgba.textures
 
             geom_texture_indices = []
             for geom_texture in geom_textures:
@@ -293,8 +300,6 @@ class BatchRenderer(BuildableMixin, RBC):
 
         if gs.backend != gs.cuda:
             gs.raise_exception("BatchRenderer requires CUDA backend.")
-        if self._visualizer.scene.textures:
-            gs.raise_exception("The batch renderer does not draw dynamic textures. Render them with the rasterizer.")
         gpu_id = gs.device.index if gs.device.index is not None else 0
 
         # Extract the complete list of non-debug cameras

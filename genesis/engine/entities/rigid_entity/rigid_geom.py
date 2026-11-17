@@ -13,16 +13,15 @@ import genesis.utils.mesh as mu
 from genesis.constants import TEXTURE_MAP_TYPE
 from genesis.engine.mesh import Mesh
 from genesis.engine.render_context import GeomKey, LinkKey, SegmentationKeys
-from genesis.engine.texture import Texture, TextureValueType
-from genesis.options.surfaces import DynamicVertices
 from genesis.repr_base import RBC
-from genesis.typing import FArrayType, IndexType
+from genesis.typing import FArrayType
 from genesis.utils.misc import BuildableMixin, DeprecationError, qd_to_torch, tensor_to_array
 
 from .description import RigidGeomDescription, RigidVisGeomDescription
 
 if TYPE_CHECKING:
     from genesis.engine.materials.rigid import Rigid as RigidMaterial
+    from genesis.engine.render_context import TextureValueType
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
     from genesis.typing import IndexType
 
@@ -31,21 +30,6 @@ if TYPE_CHECKING:
 
 
 NUM_VERTS_VISUAL_GEOM_AABB = 200
-
-
-def _get_dynamic_texture(textures: list[Texture], texture_map_type: TEXTURE_MAP_TYPE | None) -> Texture:
-    """Return the dynamic texture filling the map of type 'texture_map_type', or the only one of 'textures' if None.
-
-    'textures' are the dynamic textures of one visual geom, one per map at most.
-    """
-    if texture_map_type is not None:
-        textures = [texture for texture in textures if texture.texture_map_type == texture_map_type]
-    if len(textures) == 1:
-        return textures[0]
-    if not textures:
-        target = "" if texture_map_type is None else f" in the {texture_map_type.name.lower()} map"
-        gs.raise_exception(f"This visual geom draws no dynamic texture{target}.")
-    gs.raise_exception("This visual geom draws a dynamic texture in both maps. Pick one by 'texture_map_type'.")
 
 
 class RigidGeom(BuildableMixin, RBC):
@@ -631,9 +615,6 @@ class RigidVisGeom(BuildableMixin, RBC):
         self.active_envs_mask: torch.Tensor | None = None
         self.active_envs_idx: np.ndarray | None = None
 
-        # The dynamic textures this visual geom draws, one per map at most, which the scene lists as it builds
-        self._dynamic_textures: list[Texture] = []
-
     @gs.assert_unbuilt
     def _build(self) -> None:
         self._is_built = True
@@ -760,29 +741,44 @@ class RigidVisGeom(BuildableMixin, RBC):
         return tensor[0] if self._solver.n_envs == 0 else tensor
 
     @gs.assert_built
-    def get_texture(
-        self, envs_idx: IndexType | None = None, *, texture_map_type: TEXTURE_MAP_TYPE | None = None
-    ) -> torch.Tensor:
-        """Return the variant each environment shows on a dynamic texture of this visual geom.
-
-        'texture_map_type' picks the texture filling that type of map, and may be None when the visual geom draws a
-        single one. See ``Texture.get_texture`` for 'envs_idx' and the returned value.
-        """
-        return _get_dynamic_texture(self._dynamic_textures, texture_map_type).get_texture(envs_idx)
-
-    @gs.assert_built
     def set_texture(
         self,
-        texture: TextureValueType,
-        envs_idx: IndexType | None = None,
+        texture: "TextureValueType",
+        envs_idx: "IndexType | None" = None,
         *,
         texture_map_type: TEXTURE_MAP_TYPE | None = None,
     ) -> None:
-        """Show a variant, or draw pixels, on a dynamic texture of this visual geom.
+        """Show a variant of a dynamic texture of this visual geom, or write its batched variant, in some environments.
 
-        See ``get_texture`` for 'texture_map_type', and ``Texture.set_texture`` for 'texture' and 'envs_idx'.
+        Parameters
+        ----------
+        texture : int | str | array_like | gs.textures.ColorTexture | gs.textures.ImageTexture
+            A variant, by position or by name, for every selected environment or one per selected environment, or the
+            pixels of the batched variant there, which it then shows: an RGB or RGBA image of shape (height, width,
+            channels) for every selected environment or (len(envs_idx), height, width, channels) for one each,
+            broadcast to the resolution of the texture, or a color or an image texture resized to it. An integer image
+            holds values up to 255 and a float one values up to 1.0, clamped to [0, 1] in the diffuse map and to
+            nonnegative values in the emissive map, whose emission may exceed 1.
+        envs_idx : None | int | array_like, optional
+            The environments to set. If None, every environment is set. Defaults to None.
+        texture_map_type : gs.TEXTURE_MAP_TYPE | None, optional
+            The map whose dynamic texture to set, which may be None when the surface of the visual geom fills a single
+            map with one. Defaults to None.
         """
-        _get_dynamic_texture(self._dynamic_textures, texture_map_type).set_texture(texture, envs_idx)
+        self._solver._set_vgeom_texture(self, texture, envs_idx, texture_map_type)
+        self._entity._is_texture_written = True
+
+    @gs.assert_built
+    def get_texture(
+        self, envs_idx: "IndexType | None" = None, *, texture_map_type: TEXTURE_MAP_TYPE | None = None
+    ) -> torch.Tensor:
+        """Return a copy of the image a dynamic texture of this visual geom shows in each environment, as drawn.
+
+        The images are RGBA, in the format of the map (see ``gs.textures.DynamicTexture``). See ``set_texture`` for
+        'texture_map_type'.
+        """
+        textures = self._solver.render_context.textures
+        return textures.get_texture(self, envs_idx, texture_map_type)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -825,11 +821,6 @@ class RigidVisGeom(BuildableMixin, RBC):
     @property
     def vmesh(self):
         return self.desc.vmesh
-
-    @property
-    def name(self) -> str:
-        """The name the asset gives the vgeom, empty when it gives none, which ``gs.indices.VGeom.named`` selects on."""
-        return self.desc.vmesh.metadata.get("name", "")
 
     @property
     def solver(self):

@@ -21,9 +21,6 @@ DYNAMIC_VVERTS = Size("dynamic_vverts")
 BATCHED_VVERTS = Size("batched_vverts")
 VGEOMS_VARIANTS = Size("vgeoms_variants")
 VARIANTS_VVERTS = Size("variants_vverts")
-# The variant an environment shows for the mesh of the asset, whatever the variants a visual geom declares, the batched
-# variant being -1.
-ASSET_VARIANT_IDX = -2
 
 # Whether each environment holds each geom or visual geom, which the heterogeneous variants alone require
 VARIANTS = "variants"

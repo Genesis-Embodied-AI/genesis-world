@@ -11,6 +11,7 @@ import genesis.utils.misc as miscu
 import genesis.utils.particle as pu
 from genesis.engine.render_context import ParticlesPhysics, StaticMeshBatch
 from genesis.utils.misc import BuildableMixin
+from genesis.utils.warnings import warn_once
 
 try:
     sys.path.append(os.path.join(miscu.get_src_dir(), "ext/LuisaRender/build/bin"))
@@ -213,8 +214,6 @@ class Raytracer(BuildableMixin):
     @gs.assert_unbuilt
     def build(self, scene):
         # Note that surfaces and entities added after building may not be included in LuisaRender
-        if scene.textures:
-            gs.raise_exception("The raytracer does not draw dynamic textures. Render them with the rasterizer.")
         self.scene = scene
         self.sim = scene.sim
         self.visualizer = scene.visualizer
@@ -277,6 +276,10 @@ class Raytracer(BuildableMixin):
     def get_texture(self, texture):
         if texture is None:
             return None
+        if isinstance(texture, gs.textures.DynamicTexture):
+            warn_once(self, "Raytracer draws no dynamic texture: the meshes showing one are drawn without it.")
+            return None
+
         if isinstance(texture, gs.textures.ColorTexture):
             return LuisaRenderPy.ColorTexture(color=texture.color)
         elif isinstance(texture, gs.textures.ImageTexture):
@@ -303,10 +306,11 @@ class Raytracer(BuildableMixin):
     def add_surface(self, shape_name, surface):
         """Add the surface of a shape."""
         # add emission
-        if surface.emission is not None:
+        emission = self.get_texture(surface.emission)
+        if emission is not None:
             emission_luisa = LuisaRenderPy.Light(
                 name=f"emis_{shape_name}",
-                emission=self.get_texture(surface.emission),
+                emission=emission,
                 two_sided=False if surface.double_sided is None else surface.double_sided,
                 beam_angle=surface.cutoff,
             )

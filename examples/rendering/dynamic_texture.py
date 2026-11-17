@@ -17,59 +17,46 @@ import os
 from typing import TYPE_CHECKING, NamedTuple, override
 
 import numpy as np
-import torch
 
 import trimesh
 from huggingface_hub import snapshot_download
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.state_change import Subscriber
 from genesis.utils.misc import tensor_to_array, with_lock
 from genesis.vis.keybindings import Key, KeyAction, Keybind, MouseButton
 from genesis.vis.viewer_plugins import EVENT_HANDLE_STATE, EVENT_HANDLED, RaycasterViewerPlugin
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.rigid_entity import RigidVisGeom
     from genesis.engine.scene import Scene
-    from genesis.engine.texture import Texture
     from genesis.ext.pyrender.node import Node
 
 TEXTURE_RESOLUTION = (256, 256)
 
 
 class Canvas(NamedTuple):
-    """A dynamic texture taking paint, with the image of its batched variant in each environment as last seen.
+    """A visual geom whose dynamic texture takes paint in its batched variant.
 
     Attributes
     ----------
-    texture : Texture
-        The dynamic texture taking the paint.
+    vgeom : RigidVisGeom
+        The visual geom drawing the texture in its diffuse map.
     mesh : trimesh.Trimesh
-        The visual mesh of the geom drawing the texture, in the frame of the geom.
-    variants : tuple[np.ndarray, ...]
-        The entries of each variant, as RGBA uint8 arrays of shape (n_entries, height, width, 4).
-    i_paint_variant : int
-        The position of the batched variant taking the paint.
-    images : np.ndarray
-        The image of the batched variant in each environment.
+        The visual mesh of the geom, in the frame of the geom.
     pixels_pos : np.ndarray
         The center of each pixel, as (column, row) of shape (height, width, 2).
-    subscriber : Subscriber
-        The subscriber passing the painter the pixels drawn by others, watching no change of state.
     """
 
-    texture: "Texture"
+    vgeom: "RigidVisGeom"
     mesh: trimesh.Trimesh
-    variants: tuple[np.ndarray, ...]
-    i_paint_variant: int
-    images: np.ndarray
     pixels_pos: np.ndarray
-    subscriber: Subscriber
 
 
 class TexturePainterPlugin(RaycasterViewerPlugin):
     """
-    Paint with the left mouse button on the visual geoms drawing a dynamic texture in their diffuse map.
+    Paint with the left mouse button on the visual geoms drawing a dynamic texture with a batched variant in their
+    diffuse map.
 
     Parameters
     ----------
@@ -91,35 +78,19 @@ class TexturePainterPlugin(RaycasterViewerPlugin):
 
     @property
     def _lock(self):
-        # Painting uploads pixels under the render lock, so the plugin shares that lock rather than holding its own
+        # Painting writes pixels the renderers read, so the plugin shares the render lock rather than holding its own
         return self.viewer.render_lock
 
     def build(self, viewer, camera: "Node", scene: "Scene"):
         super().build(viewer, camera, scene)
 
-        for texture in scene.textures:
-            variants_is_batched = texture.options.variants_is_batched
-            if variants_is_batched.count(True) != 1 or texture.texture_map_type != gs.TEXTURE_MAP_TYPE.DIFFUSE:
-                continue
-            vgeom = texture.vgeom
-            variants = texture.options.get_variants_image(texture.texture_map_type)
-            i_paint_variant = variants_is_batched.index(True)
-            paint_entries = variants[i_paint_variant]
-            images = paint_entries[np.arange(max(scene.n_envs, 1)) % len(paint_entries)]
-            width, height = texture.options.resolution
-            pixels_pos = np.stack(np.meshgrid(np.arange(width) + 0.5, np.arange(height) + 0.5), axis=-1)
-
-            # Genesis stores no pixels, so the painter keeps a copy of every drawing to paint on top of it
-            def copy_drawing(
-                i_variant: int, envs_idx: np.ndarray, image: torch.Tensor, images: np.ndarray = images
-            ) -> None:
-                with self._lock:
-                    images[envs_idx] = tensor_to_array(image)
-
-            subscriber = Subscriber(to=frozenset())
-            texture.subscribe(subscriber, copy_drawing)
-            mesh = trimesh.Trimesh(vgeom.init_vverts, vgeom.init_vfaces, process=False)
-            self._canvases[vgeom.uid] = Canvas(texture, mesh, variants, i_paint_variant, images, pixels_pos, subscriber)
+        for vgeom in scene.rigid_solver.vgeoms:
+            texture = vgeom.surface.texture
+            if isinstance(texture, gs.textures.DynamicTexture) and texture.is_batched:
+                width, height = texture.resolution
+                pixels_pos = np.stack(np.meshgrid(np.arange(width) + 0.5, np.arange(height) + 0.5), axis=-1)
+                mesh = trimesh.Trimesh(vgeom.init_vverts, vgeom.init_vfaces, process=False)
+                self._canvases[vgeom.uid] = Canvas(vgeom, mesh, pixels_pos)
 
     @with_lock
     @override
@@ -154,7 +125,8 @@ class TexturePainterPlugin(RaycasterViewerPlugin):
         super().update_on_sim_step()
 
         strokes_pos, self._strokes_pos = self._strokes_pos, []
-        canvases_envs_idx: dict[int, set[int]] = {}
+        # The image painted on in each environment of each canvas
+        canvases_images: dict[int, dict[int, np.ndarray]] = {}
         for stroke_pos in strokes_pos:
             ray_hit = None
             if stroke_pos is not None:
@@ -167,7 +139,7 @@ class TexturePainterPlugin(RaycasterViewerPlugin):
                 continue
 
             # The texture coordinates of the point hit, interpolated over the face of the visual mesh holding it
-            vgeom = canvas.texture.vgeom
+            vgeom = canvas.vgeom
             env_idx = ray_hit.env_idx
             vgeom_pos = tensor_to_array(vgeom.get_pos(env_idx, relative=False).squeeze(0))
             vgeom_quat = tensor_to_array(vgeom.get_quat(env_idx, relative=False).squeeze(0))
@@ -176,18 +148,15 @@ class TexturePainterPlugin(RaycasterViewerPlugin):
             hit_pos_mesh, _, faces_idx = canvas.mesh.nearest.on_surface(hit_pos_local[None])
             barycentric = trimesh.triangles.points_to_barycentric(canvas.mesh.triangles[faces_idx], hit_pos_mesh)
             uv = barycentric[0] @ vgeom.uvs[canvas.mesh.faces[faces_idx[0]]]
-            height, width = canvas.images.shape[1:3]
+            height, width = canvas.pixels_pos.shape[:2]
             pixel_pos = uv * (width, height)
 
-            # The first paint of a step over another variant starts from that variant, which the paint then covers
+            # The first paint of a step in an environment starts from the image it shows, which the paint then covers
             i_env = 0 if env_idx is None else env_idx
-            envs_idx = canvases_envs_idx.setdefault(vgeom.uid, set())
-            if i_env not in envs_idx:
-                envs_idx.add(i_env)
-                i_variant = canvas.texture.active_variants_idx[i_env]
-                if i_variant != canvas.i_paint_variant:
-                    variant_entries = canvas.variants[i_variant]
-                    canvas.images[i_env] = variant_entries[i_env % len(variant_entries)]
+            images = canvases_images.setdefault(vgeom.uid, {})
+            if i_env not in images:
+                image = vgeom.get_texture(None if env_idx is None else [env_idx])
+                images[i_env] = tensor_to_array(image if env_idx is None else image[0])
 
             # A stroke joins its successive points, unless it crosses to another canvas or environment, or across a
             # seam of the texture coordinates, which moves it to a distant part of the image
@@ -200,20 +169,18 @@ class TexturePainterPlugin(RaycasterViewerPlugin):
             segment = pixel_pos - stroke_start
             ratio = np.clip((canvas.pixels_pos - stroke_start) @ segment / max(segment @ segment, gs.EPS), 0.0, 1.0)
             pixels_dist = np.linalg.norm(canvas.pixels_pos - stroke_start - ratio[..., None] * segment, axis=-1)
-            canvas.images[i_env][pixels_dist <= self.brush_radius] = self.color
+            images[i_env][pixels_dist <= self.brush_radius] = self.color
             self._stroke_end = (canvas, i_env, pixel_pos)
 
-        for vgeom_uid, envs_idx in canvases_envs_idx.items():
-            canvas = self._canvases[vgeom_uid]
-            envs_idx = sorted(envs_idx)
-            canvas.texture.set_texture(canvas.images[envs_idx], envs_idx if self.scene.n_envs > 0 else None)
+        for vgeom_uid, images in canvases_images.items():
+            envs_idx = list(images)
+            self._canvases[vgeom_uid].vgeom.set_texture(
+                np.stack(list(images.values())), envs_idx if self.scene.n_envs > 0 else None
+            )
 
     @override
     def on_close(self) -> None:
         super().on_close()
-
-        for canvas in self._canvases.values():
-            canvas.texture.unsubscribe(canvas.subscriber)
         self._canvases.clear()
 
 
@@ -256,9 +223,6 @@ def main():
         "duckurcqa": gs.textures.ImageTexture(
             image_path=f"{asset_path}/textures/duckurcqa.png",
         ),
-        "paint": gs.textures.AssetTexture(
-            is_batched=True,
-        ),
     }
     duck = scene.add_entity(
         spec=gs.entities.Rigid(
@@ -273,6 +237,7 @@ def main():
                 diffuse_texture=gs.textures.DynamicTexture(
                     resolution=TEXTURE_RESOLUTION,
                     variants=variants,
+                    is_batched=True,
                 ),
             ),
             material=gs.materials.Rigid(
@@ -293,9 +258,11 @@ def main():
                 diffuse_texture=gs.textures.DynamicTexture(
                     resolution=(300, 200),
                     variants={
-                        "white": gs.textures.ColorTexture(color=(1.0, 1.0, 1.0)),
-                        "paint": gs.textures.ColorTexture(color=(1.0, 1.0, 1.0), is_batched=True),
+                        "white": gs.textures.ColorTexture(
+                            color=(1.0, 1.0, 1.0),
+                        ),
                     },
+                    is_batched=True,
                 ),
                 double_sided=True,
             ),
@@ -308,9 +275,6 @@ def main():
         scene.viewer.add_plugin(TexturePainterPlugin())
     scene.build(n_envs=args.num_envs, env_spacing=(0.5, 0.5))
 
-    # The variants cycled through, the paint being shown by painting alone
-    variants_name = tuple(name for name, texture in variants.items() if not texture.is_batched)
-
     # The variant each environment shows is offset by the index of the environment
     envs_idx = np.arange(max(args.num_envs, 1))
     i_variant = 0
@@ -318,8 +282,8 @@ def main():
 
     def show_variant(offset=0):
         nonlocal i_variant
-        i_variant = (i_variant + offset) % len(variants_name)
-        duck.set_texture((i_variant + envs_idx) % len(variants_name))
+        i_variant = (i_variant + offset) % len(variants)
+        duck.set_texture((i_variant + envs_idx) % len(variants))
 
     def draw():
         duck.set_texture(np.random.rand(len(envs_idx), 1, 1, 3))

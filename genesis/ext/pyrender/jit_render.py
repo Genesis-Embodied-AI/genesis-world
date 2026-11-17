@@ -15,7 +15,7 @@ from .numba_gl_wrapper import GLWrapper
 from .scene import CORNER_INDICES
 
 if TYPE_CHECKING:
-    from .node import Node
+    from .primitive import Primitive
 
 
 _DISABLE_OFFSCREEN_MARKERS = "GS_DISABLE_OFFSCREEN_MARKERS" in os.environ
@@ -1512,13 +1512,12 @@ class JITRenderer:
                 self.gen_func_ptr()
             return self._update_normal_flat(vertices.reshape((-1, 3, 3)))
 
-    def update_texture_layers(self, node: "Node", layers: np.ndarray) -> None:
-        """Set the texture array layers each rendered environment of a node samples (see 'Primitive.texture_layers')."""
-        primitive = node.mesh.primitives[0]
-        primitive.texture_layers[:] = layers
+    def update_texture_layers(self, primitive: "Primitive") -> None:
+        """Copy the texture array layers each rendered environment of a primitive samples, which its
+        'texture_layers' hold, for the next render pass."""
         i = self._primitive_index.get(primitive)
         if i is not None and self.texture_layers_idx[i] >= 0:
-            self.texture_layers[self.texture_layers_idx[i], : len(layers)] = layers
+            self.texture_layers[self.texture_layers_idx[i], : len(primitive.texture_layers)] = primitive.texture_layers
 
     def update_buffer(self, primitives, buffer_name, data):
         """Queue the update of one buffer of several primitives, flushed during the next render pass.

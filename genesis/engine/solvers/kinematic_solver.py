@@ -15,6 +15,7 @@ from genesis.engine.entities.rigid_entity.rigid_link import KinematicLink
 from genesis.engine.render_context import (
     ArrayRef,
     DynamicMesh,
+    DynamicTextures,
     EntityAsset,
     Floor,
     Frames,
@@ -27,6 +28,7 @@ from genesis.engine.render_context import (
     ShapeRoles,
     StaticMeshBatch,
     TexturePaths,
+    get_variants_idx,
     select_view_shapes,
 )
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
@@ -77,7 +79,6 @@ from .rigid.abd.misc import (
     kernel_init_link_fields,
 )
 from .rigid.render import (
-    ASSET_VARIANT_IDX,
     VARIANTS,
     RigidRenderData,
     kernel_add_propellers_revs,
@@ -1443,12 +1444,15 @@ class KinematicSolver(Solver):
 class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
     """The visual meshes of the visual geoms of a kinematic or rigid solver, posed by their link, and its link frames.
 
+    The meshes of the visual geoms whose surface shows a dynamic texture carry it (see DynamicTextures).
+
     'set_vverts', 'get_vverts', 'get_vgeoms_pose' and 'add_propellers_rpm' are the interface of the visual geoms and the
     drones of the solver to the appearance the scoped context holds.
     """
 
     def build(self) -> None:
         solver = self.owner
+        self.textures = DynamicTextures([(vgeom, vgeom.surface) for vgeom in solver.vgeoms], solver.n_envs)
         # The visual geoms take a slot each, those posed by their link first, so that their poses form one contiguous
         # block, the visual geoms of the entities a deprecated 'vis_mode' shows in their debug representation after the
         # others, so that the block of the scene as it looks leaves them out, then those showing DynamicVertices, which
@@ -1681,6 +1685,7 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
                             data.vfaces_info.vverts_idx, slice(vface_start, vface_start + vgeom.n_vfaces)
                         ),
                         is_ray_target=is_ray_target,
+                        textures=self.textures.get(vgeom),
                     )
                 )
             elif i_s >= self._n_posed_vgeoms and entity.surface.vis_mode is None:
@@ -1696,6 +1701,7 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
                         seg_keys,
                         is_active=None if vgeom.active_envs_mask is None else ArrayRef(data.vgeoms.is_active, i_s),
                         is_ray_target=is_ray_target,
+                        textures=self.textures.get(vgeom),
                         roles=ShapeRoles.of(entity.idx, is_looks=True, is_debug=False),
                     )
                 )
@@ -1811,29 +1817,7 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
         i_dg = int(self._vgeoms_slot[vgeom.idx]) - self._n_posed_vgeoms
         variants = vgeom.desc.dynamic_vertices.variants
         if vverts is None:
-            variants_name = tuple(variants) if isinstance(variants, dict) else ()
-            variants_idx = []
-            for variant_given in np.atleast_1d(np.array(variant, dtype=object)).tolist():
-                if variant_given is None:
-                    variant_idx = ASSET_VARIANT_IDX
-                elif isinstance(variant_given, str):
-                    if variant_given not in variants_name:
-                        gs.raise_exception(
-                            f"No variant is named '{variant_given}'. Existing names: {list(variants_name)}."
-                        )
-                    variant_idx = variants_name.index(variant_given)
-                elif not isinstance(variant_given, (int, np.integer)) or isinstance(variant_given, bool):
-                    gs.raise_exception(
-                        "A variant of DynamicVertices is given by an integer position or a name, got "
-                        f"{variant_given!r}."
-                    )
-                elif not 0 <= variant_given < len(variants):
-                    gs.raise_exception(f"Variant {variant_given} is out of range for {len(variants)} variants.")
-                else:
-                    variant_idx = variant_given
-                variants_idx.append(variant_idx)
-            # A single variant is shown in every selected environment
-            variants_idx = variants_idx if len(variants_idx) > 1 else variants_idx[0]
+            variants_idx = get_variants_idx(variants, variant)
             if gs.use_zerocopy:
                 variant_view = qd_to_torch(dynamic_vverts.vgeoms_variant_idx, transpose=True, copy=False)
                 mask = (0, i_dg) if solver.n_envs == 0 else indices_to_mask(envs_idx, i_dg)

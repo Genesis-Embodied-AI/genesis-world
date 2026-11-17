@@ -239,12 +239,13 @@ class Texture(object):
 
         # Bind texture and generate mipmaps
         if is_array:
-            # A dynamic texture takes a layer per variant entry, and per rendered environment for a batched variant
+            # A dynamic texture takes a layer per variant, and one per rendered environment for its batched variant
             max_layers = glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS)
             if len(self.source) > max_layers:
                 gs.raise_exception(
                     f"A dynamic texture takes {len(self.source)} layers, more than the {max_layers} this GPU holds. "
-                    "Render fewer environments with 'rendered_envs_idx' of the visualization options."
+                    "Use fewer variants, or for a texture with a batched variant, render fewer environments with "
+                    "'rendered_envs_idx' of the visualization options."
                 )
             glTexImage3D(
                 self.tex_type, 0, internal_fmt, width, height, len(self.source), 0, fmt, self.data_format, data

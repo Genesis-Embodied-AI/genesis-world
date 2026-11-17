@@ -219,21 +219,15 @@ def _classes_by_name(expect) -> dict[str, type]:
 def _deduce_union(expect, value):
     """Returns the argument of a union declaration that holds this value, or the declaration itself.
 
-    A scale states one factor or one per axis, so only the argument the value stands in states what its items are. A
-    color states one color or one per entry, so a sequence also matches on whether its first item is one.
+    A scale states one factor or one per axis, so only the argument the value stands in states what its items are.
     """
     if typing.get_origin(expect) not in (types.UnionType, typing.Union):
         return expect
     args = [_unwrap_annotation(arg) for arg in _accepted_classes(expect)]
-    is_value_sequence = _is_sequence(type(value))
-    is_item_sequence = is_value_sequence and len(value) > 0 and _is_sequence(type(value[0]))
-    candidates = [arg for arg in args if _is_sequence(typing.get_origin(arg) or arg) == is_value_sequence]
-    for arg in candidates:
-        item_args = typing.get_args(arg) if is_value_sequence else ()
-        item_type = _unwrap_annotation(item_args[0]) if item_args else None
-        if item_type is None or _is_sequence(typing.get_origin(item_type) or item_type) == is_item_sequence:
+    for arg in args:
+        if _is_sequence(typing.get_origin(arg) or arg) == _is_sequence(type(value)):
             return arg
-    return candidates[0] if candidates else args[0]
+    return args[0]
 
 
 def _is_sequence(cls) -> bool:
@@ -314,7 +308,8 @@ def _surface_textures(surface: Options) -> Iterable[tuple[str, "gs.textures.Imag
         elif isinstance(texture, gs.textures.BatchTexture):
             textures.extend((name, held) for held in texture.textures if held is not None)
         elif isinstance(texture, gs.textures.DynamicTexture):
-            textures.extend((name, variant) for variant in texture.variants_texture if variant is not None)
+            variants = texture.variants.values() if isinstance(texture.variants, dict) else texture.variants
+            textures.extend((name, variant) for variant in variants if variant is not None)
 
 
 def pixel_less_textures(surface: Options) -> tuple[str, ...]:
@@ -560,9 +555,9 @@ def _redact_paths(value, key=None):
     """Return the value with every path it holds reduced to the name of what the path points at.
 
     A directory belongs to the author's filesystem, so a file keeps the name alone. A path stands where a field or a
-    key names one, 'file' or a name ending in '_path' (a morph's file, a mesh's or a texture's path), alone or in a
-    list, and inside an inline document as the value of an attribute. Every other string, a prim path or a joint name
-    written with slashes among them, is left as it is.
+    key names one, 'file' or a name ending in '_path' (a morph's file, a mesh's or a texture's path), and inside an
+    inline document as the value of an attribute. Every other string, a prim path or a joint name written with slashes
+    among them, is left as it is.
     """
     if isinstance(value, str):
         try:
@@ -575,8 +570,8 @@ def _redact_paths(value, key=None):
                 if os.path.isabs(stated):
                     value = value.replace(stated, os.path.basename(stated))
         return value
-    if isinstance(value, (list, tuple)):
-        return [_redact_paths(item, key) for item in value]
+    if isinstance(value, list):
+        return [_redact_paths(item) for item in value]
     if isinstance(value, dict):
         if "@dict" in value:
             return {"@dict": [[k, _redact_paths(v, k if isinstance(k, str) else None)] for k, v in value["@dict"]]}
