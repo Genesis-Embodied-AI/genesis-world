@@ -1,0 +1,32 @@
+genesis/engine/materials/MPM/liquid.py
+  s_8e3e09cbc07082::t_483ff6037aad89 5,32-37
+genesis/engine/materials/MPM/elasto_plastic.py
+  s_8e3e09cbc07082::t_483ff6037aad89 8,39-44
+genesis/engine/materials/MPM/sand.py
+  s_8e3e09cbc07082::t_483ff6037aad89 6,31-36
+genesis/engine/materials/MPM/elastic.py
+  s_8e3e09cbc07082::t_483ff6037aad89 8,31-36
+genesis/engine/solvers/mpm_solver.py
+  s_8e3e09cbc07082::t_6102518e26afee 135-139,142-143,150,254-257,402-405,407,409-411,440-442,444,446,449,452-453,460-461,463,913,917-918,921-922,932-933,937-946,982,986-990,992-1000,1002-1010,1705-1706,1715,1718-1719,1726,1760,1781
+  s_8e3e09cbc07082::t_b69a175b8a3e0f 17
+genesis/engine/materials/MPM/base.py
+  s_8e3e09cbc07082::t_483ff6037aad89 31-32,34-60,104-110
+genesis/engine/materials/MPM/snow.py
+  s_8e3e09cbc07082::t_483ff6037aad89 5,46-51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7ecbd8b32a5b2ec131d90ebeb7fff88dfd3d1643",
+  "prompts": {},
+  "sessions": {
+    "s_8e3e09cbc07082": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a8f0475a-f9de-4602-9bce-61f4c50730a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
