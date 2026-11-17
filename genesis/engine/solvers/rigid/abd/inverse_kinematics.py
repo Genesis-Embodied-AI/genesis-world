@@ -120,10 +120,9 @@ def func_forward_kinematics_scratch(
 ):
     """Forward kinematics of one entity on caller-owned scratch buffers.
 
-    Reads the configuration from qpos[:, i_col_q] (entity-local q coordinates keyed by q_offset) and writes link
-    poses and joint frames at column i_col_out of the given tensors. The live solver state is only read (model
-    info and the fixed root pose). Handles every joint type, so callers get correct kinematics without mutating
-    solver state.
+    Reads the configuration from qpos[:, i_col_q] (entity-local q coordinates keyed by q_offset) and writes link poses
+    and joint frames at column i_col_out of the given tensors. The live solver state is only read (model info and the
+    fixed root pose). Handles every joint type, so callers get kinematics without mutating solver state.
     """
     for i_l_ in range(dyn_info.entities.link_start[entity_idx], dyn_info.entities.link_end[entity_idx]):
         i_l = gs.qd_int(i_l_)
@@ -604,8 +603,7 @@ def func_inverse_kinematics(
                         else:
                             ik_state.chol[i_row, j_row, i_b] = val / ik_state.chol[j_row, j_row, i_b]
 
-                # Forward then backward substitution, the right-hand side being err in the error space and J^T err in
-                # the dof space
+                # Forward then backward substitution, of err in the error space and of J^T err in the dof space
                 for i_row in range(n_rows):
                     val = gs.qd_float(0.0)
                     if is_dof_space:
