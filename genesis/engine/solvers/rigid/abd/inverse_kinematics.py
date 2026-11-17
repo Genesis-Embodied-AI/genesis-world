@@ -241,44 +241,38 @@ def func_jacobian_scratch(
     for i_row, i_d in qd.ndrange(6, jacobian.shape[1]):
         jacobian[i_row, i_d, i_col] = 0.0
 
-    # Every parent comes before its children in the links of an entity, which bounds the ancestors of the target link
-    # by the links preceding it.
-    link_start = dyn_info.entities.link_start[entity_idx]
     i_l = ee_link
-    is_on_path = True
-    for _ in range(ee_link - link_start + 1):
-        if is_on_path:
-            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-            for i_j_ in range(dyn_info.links.joint_start[I_l], dyn_info.links.joint_end[I_l]):
-                i_j = gs.qd_int(i_j_)
-                I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
-                i_d_jac = dyn_info.joints.dof_start[I_j] - dof_offset
-                if dyn_info.joints.type[I_j] == gs.JOINT_TYPE.REVOLUTE:
-                    rotation = joints_xaxis[i_j - joint_offset, i_col]
-                    translation = rotation.cross(ee_pos - joints_xanchor[i_j - joint_offset, i_col])
+    while i_l != -1:
+        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+        for i_j_ in range(dyn_info.links.joint_start[I_l], dyn_info.links.joint_end[I_l]):
+            i_j = gs.qd_int(i_j_)
+            I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+            i_d_jac = dyn_info.joints.dof_start[I_j] - dof_offset
+            if dyn_info.joints.type[I_j] == gs.JOINT_TYPE.REVOLUTE:
+                rotation = joints_xaxis[i_j - joint_offset, i_col]
+                translation = rotation.cross(ee_pos - joints_xanchor[i_j - joint_offset, i_col])
+                for i in qd.static(range(3)):
+                    jacobian[i, i_d_jac, i_col] = translation[i]
+                    jacobian[i + 3, i_d_jac, i_col] = rotation[i]
+            elif dyn_info.joints.type[I_j] == gs.JOINT_TYPE.PRISMATIC:
+                translation = joints_xaxis[i_j - joint_offset, i_col]
+                for i in qd.static(range(3)):
+                    jacobian[i, i_d_jac, i_col] = translation[i]
+            elif dyn_info.joints.type[I_j] == gs.JOINT_TYPE.FREE:
+                # Base translation moves the goal point directly; base rotation contributes a lever-arm term about
+                # the root position (the FREE joint's scratch anchor, placed by func_forward_kinematics_scratch).
+                base_pos = joints_xanchor[i_j - joint_offset, i_col]
+                for i_d_ in qd.static(range(3)):
+                    jacobian[i_d_, dyn_info.joints.dof_start[I_j] + i_d_ - dof_offset, i_col] = 1.0
+                for i_d_ in qd.static(range(3)):
+                    i_d = dyn_info.joints.dof_start[I_j] + i_d_ + 3
+                    I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+                    rotation = dyn_info.dofs.motion_ang[I_d]
+                    translation = rotation.cross(ee_pos - base_pos)
                     for i in qd.static(range(3)):
-                        jacobian[i, i_d_jac, i_col] = translation[i]
-                        jacobian[i + 3, i_d_jac, i_col] = rotation[i]
-                elif dyn_info.joints.type[I_j] == gs.JOINT_TYPE.PRISMATIC:
-                    translation = joints_xaxis[i_j - joint_offset, i_col]
-                    for i in qd.static(range(3)):
-                        jacobian[i, i_d_jac, i_col] = translation[i]
-                elif dyn_info.joints.type[I_j] == gs.JOINT_TYPE.FREE:
-                    # Base translation moves the goal point directly, and base rotation contributes a lever-arm term
-                    # about the root position, the scratch anchor of the FREE joint.
-                    base_pos = joints_xanchor[i_j - joint_offset, i_col]
-                    for i_d_ in qd.static(range(3)):
-                        jacobian[i_d_, dyn_info.joints.dof_start[I_j] + i_d_ - dof_offset, i_col] = 1.0
-                    for i_d_ in qd.static(range(3)):
-                        i_d = dyn_info.joints.dof_start[I_j] + i_d_ + 3
-                        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-                        rotation = dyn_info.dofs.motion_ang[I_d]
-                        translation = rotation.cross(ee_pos - base_pos)
-                        for i in qd.static(range(3)):
-                            jacobian[i, i_d - dof_offset, i_col] = translation[i]
-                            jacobian[i + 3, i_d - dof_offset, i_col] = rotation[i]
-            i_l = dyn_info.links.parent_idx[I_l]
-            is_on_path = i_l >= link_start
+                        jacobian[i, i_d - dof_offset, i_col] = translation[i]
+                        jacobian[i + 3, i_d - dof_offset, i_col] = rotation[i]
+        i_l = dyn_info.links.parent_idx[I_l]
 
 
 @qd.func
@@ -408,41 +402,44 @@ def func_integrate_dq_scratch(
 
     for i_l in range(dyn_info.entities.link_start[entity_idx], dyn_info.entities.link_end[entity_idx]):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-        if dyn_info.links.n_dofs[I_l] > 0:
-            i_j = dyn_info.links.joint_start[I_l]
-            I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
-            joint_type = dyn_info.joints.type[I_j]
+        if dyn_info.links.n_dofs[I_l] == 0:
+            continue
 
-            q_loc = dyn_info.links.q_start[I_l] - q_offset
-            dof_start = dyn_info.links.dof_start[I_l]
-            dq_start = dof_start - dyn_info.entities.dof_start[entity_idx]
+        i_j = dyn_info.links.joint_start[I_l]
+        I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+        joint_type = dyn_info.joints.type[I_j]
 
-            if joint_type == gs.JOINT_TYPE.FREE:
-                pos = qd.Vector([qpos[q_loc, i_col], qpos[q_loc + 1, i_col], qpos[q_loc + 2, i_col]])
-                pos = pos + qd.Vector([dq[dq_start, i_col], dq[dq_start + 1, i_col], dq[dq_start + 2, i_col]])
-                quat = qd.Vector(
-                    [qpos[q_loc + 3, i_col], qpos[q_loc + 4, i_col], qpos[q_loc + 5, i_col], qpos[q_loc + 6, i_col]]
-                )
-                dquat = gu.qd_rotvec_to_quat(
-                    qd.Vector(
-                        [dq[dq_start + 3, i_col], dq[dq_start + 4, i_col], dq[dq_start + 5, i_col]], dt=gs.qd_float
+        q_loc = dyn_info.links.q_start[I_l] - q_offset
+        dof_start = dyn_info.links.dof_start[I_l]
+        dq_start = dof_start - dyn_info.entities.dof_start[entity_idx]
+
+        if joint_type == gs.JOINT_TYPE.FREE:
+            pos = qd.Vector([qpos[q_loc, i_col], qpos[q_loc + 1, i_col], qpos[q_loc + 2, i_col]])
+            pos = pos + qd.Vector([dq[dq_start, i_col], dq[dq_start + 1, i_col], dq[dq_start + 2, i_col]])
+            quat = qd.Vector(
+                [qpos[q_loc + 3, i_col], qpos[q_loc + 4, i_col], qpos[q_loc + 5, i_col], qpos[q_loc + 6, i_col]]
+            )
+            dquat = gu.qd_rotvec_to_quat(
+                qd.Vector([dq[dq_start + 3, i_col], dq[dq_start + 4, i_col], dq[dq_start + 5, i_col]], dt=gs.qd_float)
+            )
+            # The delta rotation is expressed in the world frame, so it composes on the left of the orientation.
+            quat = gu.qd_transform_quat_by_quat(quat, dquat)
+            for j in qd.static(range(3)):
+                qpos[q_loc + j, i_col] = pos[j]
+            for j in qd.static(range(4)):
+                qpos[q_loc + j + 3, i_col] = quat[j]
+
+        elif joint_type == gs.JOINT_TYPE.FIXED:
+            pass
+
+        else:
+            for i_d_ in range(dyn_info.links.n_dofs[I_l]):
+                qpos[q_loc + i_d_, i_col] = qpos[q_loc + i_d_, i_col] + dq[dq_start + i_d_, i_col]
+                if respect_joint_limit:
+                    I_d = [dof_start + i_d_, i_b] if qd.static(rigid_config.batch_dofs_info) else dof_start + i_d_
+                    qpos[q_loc + i_d_, i_col] = qd.math.clamp(
+                        qpos[q_loc + i_d_, i_col], dyn_info.dofs.limit[I_d][0], dyn_info.dofs.limit[I_d][1]
                     )
-                )
-                # The delta rotation is expressed in the world frame, so it composes on the left of the orientation.
-                quat = gu.qd_transform_quat_by_quat(quat, dquat)
-                for j in qd.static(range(3)):
-                    qpos[q_loc + j, i_col] = pos[j]
-                for j in qd.static(range(4)):
-                    qpos[q_loc + j + 3, i_col] = quat[j]
-
-            elif joint_type != gs.JOINT_TYPE.FIXED:
-                for i_d_ in range(dyn_info.links.n_dofs[I_l]):
-                    qpos[q_loc + i_d_, i_col] = qpos[q_loc + i_d_, i_col] + dq[dq_start + i_d_, i_col]
-                    if respect_joint_limit:
-                        I_d = [dof_start + i_d_, i_b] if qd.static(rigid_config.batch_dofs_info) else dof_start + i_d_
-                        qpos[q_loc + i_d_, i_col] = qd.math.clamp(
-                            qpos[q_loc + i_d_, i_col], dyn_info.dofs.limit[I_d][0], dyn_info.dofs.limit[I_d][1]
-                        )
 
 
 @qd.func
@@ -672,33 +669,35 @@ def func_inverse_kinematics(
                 entity_dof_start = dyn_info.entities.dof_start[entity_idx]
                 for i_l in range(dyn_info.entities.link_start[entity_idx], dyn_info.entities.link_end[entity_idx]):
                     I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-                    link_dof_start_local = dyn_info.links.dof_start[I_l] - entity_dof_start
-                    link_dof_end_local = dyn_info.links.dof_end[I_l] - entity_dof_start
 
-                    is_resampled = False
+                    must_resample = False
                     for i_d_ in range(n_dofs):
                         i_d = targets.dofs_idx[i_d_]
+                        link_dof_start_local = dyn_info.links.dof_start[I_l] - entity_dof_start
+                        link_dof_end_local = dyn_info.links.dof_end[I_l] - entity_dof_start
                         if link_dof_start_local <= i_d and i_d < link_dof_end_local:
-                            is_resampled = True
+                            must_resample = True
+                            break
+                    if not must_resample:
+                        continue
 
-                    if is_resampled:
-                        for i_j in range(dyn_info.links.joint_start[I_l], dyn_info.links.joint_end[I_l]):
-                            I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
-                            i_d = dyn_info.joints.dof_start[I_j]
-                            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+                    for i_j in range(dyn_info.links.joint_start[I_l], dyn_info.links.joint_end[I_l]):
+                        I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+                        i_d = dyn_info.joints.dof_start[I_j]
+                        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
 
-                            dof_limit = dyn_info.dofs.limit[I_d]
-                            if (
-                                dyn_info.joints.type[I_j] == gs.JOINT_TYPE.REVOLUTE
-                                or dyn_info.joints.type[I_j] == gs.JOINT_TYPE.PRISMATIC
-                            ) and qd_isfinite(dof_limit):
-                                q_start = dyn_info.joints.q_start[I_j]
-                                # Counter-based draw keyed on (env, restart, DOF). A qd.random() per-thread stream
-                                # would order by the parallel schedule, which makes the resampled configuration, and
-                                # thus the returned one, nondeterministic across runs.
-                                fk.qpos[q_start - q_offset, i_b] = dof_limit[0] + gu.qd_hash01(
-                                    seed, i_b, i_sample, q_start
-                                ) * (dof_limit[1] - dof_limit[0])
+                        dof_limit = dyn_info.dofs.limit[I_d]
+                        if (
+                            dyn_info.joints.type[I_j] == gs.JOINT_TYPE.REVOLUTE
+                            or dyn_info.joints.type[I_j] == gs.JOINT_TYPE.PRISMATIC
+                        ) and qd_isfinite(dof_limit):
+                            q_start = dyn_info.joints.q_start[I_j]
+                            # Counter-based draw keyed on (env, restart, DOF). A qd.random() per-thread stream
+                            # would order by the parallel schedule, which makes the resampled configuration, and
+                            # thus the returned one, nondeterministic across runs.
+                            fk.qpos[q_start - q_offset, i_b] = dof_limit[0] + gu.qd_hash01(
+                                seed, i_b, i_sample, q_start
+                            ) * (dof_limit[1] - dof_limit[0])
 
 
 @qd.kernel(fastcache=True)
