@@ -313,30 +313,10 @@ class Mesh(RBC, serialization.SerializationMixin):
 
     def clear_visuals(self):
         """
-        Clear the mesh's visual attributes by resetting the surface to gs.surfaces.Default() and dropping its uvs.
+        Clear the mesh's visual attributes by resetting the surface to gs.surfaces.Default().
         """
         self._surface = gs.surfaces.Default()
         self._surface.update_texture()
-        self._uvs = None
-
-    def _drop_unsampled_uvs(self) -> None:
-        """Drop the uvs of the mesh when its surface samples no texture, once no patch can replace that surface."""
-        if not self._surface.requires_uv:
-            self._uvs = None
-
-    def _check_uvs(self) -> None:
-        if self._uvs is None and any(
-            isinstance(texture, gs.textures.DynamicTexture)
-            for texture in (self._surface.texture, self._surface.emission)
-        ):
-            gs.raise_exception("A dynamic texture requires a mesh with texture coordinates, which this mesh lacks.")
-        if self._surface.requires_uv and self._uvs is None:
-            if "mesh_path" in self._metadata:
-                gs.logger.warning(
-                    f"Texture given but asset missing uv info (or failed to load): {self._metadata['mesh_path']}"
-                )
-            else:
-                gs.logger.warning("Texture given but asset missing uv info (or failed to load).")
 
     @property
     def tmesh_hash(self) -> str:
@@ -708,6 +688,11 @@ class Mesh(RBC, serialization.SerializationMixin):
                     fields[name] = texture._resolve_asset_texture(slots_texture.get(name))
             self._surface = type(surface)(**fields).model_copy(update=shortcuts)
             self.update_trimesh_visual()
+        if self._uvs is None and any(
+            isinstance(texture, gs.textures.DynamicTexture)
+            for texture in (self._surface.texture, self._surface.emission)
+        ):
+            gs.raise_exception("A dynamic texture requires a mesh with texture coordinates, which this mesh lacks.")
         if self._surface.requires_uv and self._uvs is None:
             if "mesh_path" in self._metadata:
                 gs.logger.warning(
