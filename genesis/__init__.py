@@ -59,13 +59,13 @@ SEED: int | None = None
 # FIXME: The quadrants stub types the call of a scalar dtype as returning None, so the scalar dtypes are Any until the
 # stub is fixed. This leaves every use of 'qd_float', 'qd_int' and 'qd_bool' unchecked.
 qd_float: Any
-np_float: type[np.floating]
-tc_float: torch.dtype
 qd_int: Any
-np_int: type[np.integer]
-tc_int: torch.dtype
 qd_bool: Any
+np_float: type[np.floating]
+np_int: type[np.integer]
 np_bool: type[np.generic]
+tc_float: torch.dtype
+tc_int: torch.dtype
 tc_bool: torch.dtype
 qd_vec2: qd.lang.matrix.VectorType
 qd_vec4: qd.lang.matrix.VectorType
