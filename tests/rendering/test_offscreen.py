@@ -102,6 +102,12 @@ def test_render_api(show_viewer, renderer_type, renderer):
             pytest.xfail("Flaky on MacOS with Apple Software Renderer.")
         raise
 
+    if IS_BATCHRENDER:
+        # An output already rendered in the step comes back along with one rendered for the first time
+        rgb_arr, *_ = camera.render(rgb=True, force_render=True)
+        rgb_arr_cached, *_ = camera.render(rgb=True, depth=True)
+        assert_equal(rgb_arr_cached, rgb_arr)
+
     if renderer_type == RENDERER_TYPE.RASTERIZER:
         # An entity whose pose blew up stays drawn where it last was, and follows its pose again once it is valid
         box.set_pos((float("nan"), 0.0, 0.0))
