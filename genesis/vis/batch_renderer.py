@@ -449,7 +449,7 @@ class BatchRenderer(BuildableMixin, RBC):
                 self._data_cache[(img_type, cache_key)] = rendered[img_type]
 
         # Return in the required order, or None if not requested
-        return tuple(self._data_cache[(img_type, cache_key)] if needed[img_type] else None for img_type in IMAGE_TYPE)
+        return tuple(self._data_cache[(img_type, cache_key)] if request[img_type] else None for img_type in IMAGE_TYPE)
 
     def colorize_seg_idxc_arr(self, seg_idxc_arr):
         return self._geom_retriever.seg_color_map.colorize_seg_idxc_arr(seg_idxc_arr)
