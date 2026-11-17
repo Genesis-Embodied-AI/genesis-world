@@ -177,6 +177,13 @@ def test_particle_constraints(show_viewer, tol):
 
 
 @pytest.mark.required
+def test_reject_empty_mesh_set():
+    scene = gs.Scene()
+    with pytest.raises(gs.GenesisException, match="at least one mesh file"):
+        scene.add_entity(morph=gs.morphs.MeshSet(files=()), material=gs.materials.MPM.Elastic())
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("variant", ["svd", "no_svd"])
 def test_perf_dispatch(variant, show_viewer):
     if variant == "svd":

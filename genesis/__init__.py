@@ -500,6 +500,7 @@ from .constants import (
     ACTIVE,
     INACTIVE,
     integrator,
+    sampler,
     constraint_solver,
     friction_cone,
     contact_resolution,

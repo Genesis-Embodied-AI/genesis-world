@@ -1606,14 +1606,13 @@ class Scene(BuildableMixin, RBC):
     # ------------------------------------------------------------------------------------
 
     def _reject_unexportable(self) -> None:
-        """Raise when the scene holds an entity, an emitter or a force field no description covers, and warn about what
+        """Raise when the scene holds an emitter or a force field, which no description covers, and warn about what
         'export' leaves out.
         """
         # A scene holding what alters the simulation is rejected, since a file leaving it out would restore other
         # physics. Everything else is left out with a warning: what observes or draws the simulation, and every
         # callback. Every solver holds the same force fields, so one solver names them all.
-        rejected_kinds = Counter(type(entity).__name__ for entity in self.entities if entity.desc is None)
-        rejected_kinds.update(type(emitter).__name__ for emitter in self._emitters)
+        rejected_kinds = Counter(type(emitter).__name__ for emitter in self._emitters)
         rejected_kinds.update(type(force_field).__name__ for force_field in self._sim.solvers[0].force_fields.fields)
         omitted_kinds = Counter(type(sensor).__name__ for sensor in self.sensors)
         if self._visualizer is not None:
@@ -1653,11 +1652,11 @@ class Scene(BuildableMixin, RBC):
         simulation had run to, so the simulated state has to be reproduced by stepping it again. Adding an entity
         resolves its description, so a scene is exported before it is built as readily as after.
 
-        Only a rigid or a kinematic entity carries a description. A scene
-        holding anything that alters the simulation raises, naming it: an emitter and a force field. Everything else
-        a description leaves out is written without, with a warning naming it: a camera, a sensor, a callback Genesis
-        calls at every step, a texture read from an HDR or EXR file, and the visual vertices an entity was given at
-        runtime. A recorder neither simulates nor draws, so it is left out without a word.
+        Every entity carries a description, its particles sampled and its meshes tetrahedralized as its build resolved
+        them. A scene holding anything else that alters the simulation raises, naming it: an emitter and a force field.
+        Everything else a description leaves out is written without, with a warning naming it: a camera, a sensor, a
+        callback Genesis calls at every step, a texture read from an HDR or EXR file, and the visual vertices an entity
+        was given at runtime. A recorder neither simulates nor draws, so it is left out without a word.
 
         Parameters
         ----------

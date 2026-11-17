@@ -112,25 +112,29 @@ class Emitter(RBC):
                     p_size=p_size,
                     radius=droplet_size / 2,
                     height=droplet_length,
-                    sampler=self._entity.sampler,
+                    sampler=self._entity.material.sampler,
+                    sdf_resolution=self._entity.material.sdf_resolution,
                 )
             elif droplet_shape == "sphere":  # sphere droplet ignores droplet_length
                 positions = pu.sphere_to_particles(
                     p_size=p_size,
                     radius=droplet_size / 2,
-                    sampler=self._entity.sampler,
+                    sampler=self._entity.material.sampler,
+                    sdf_resolution=self._entity.material.sdf_resolution,
                 )
             elif droplet_shape == "square":
                 positions = pu.box_to_particles(
                     p_size=p_size,
                     size=np.array([droplet_size, droplet_size, droplet_length]),
-                    sampler=self._entity.sampler,
+                    sampler=self._entity.material.sampler,
+                    sdf_resolution=self._entity.material.sdf_resolution,
                 )
             elif droplet_shape == "rectangle":
                 positions = pu.box_to_particles(
                     p_size=p_size,
                     size=np.array([droplet_size[0], droplet_size[1], droplet_length]),
-                    sampler=self._entity.sampler,
+                    sampler=self._entity.material.sampler,
+                    sdf_resolution=self._entity.material.sdf_resolution,
                 )
             else:
                 gs.raise_exception(f"Unsupported droplet shape '{droplet_shape}'")
@@ -203,7 +207,8 @@ class Emitter(RBC):
             p_size=particle_size,
             outer_radius=source_radius,
             inner_radius=source_radius * 0.4,
-            sampler=self._entity.sampler,
+            sampler=self._entity.material.sampler,
+            sdf_resolution=self._entity.material.sdf_resolution,
         )
         positions = pos + positions_
 

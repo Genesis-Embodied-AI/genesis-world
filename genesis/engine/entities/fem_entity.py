@@ -1,6 +1,7 @@
 from functools import wraps
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 import numpy as np
 import torch
@@ -14,9 +15,9 @@ import genesis.utils.mesh as mu
 from genesis.engine.entities.rigid_entity import RigidLink
 from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
-from genesis.utils.misc import broadcast_tensor, tensor_to_array, unique_rows
+from genesis.utils.misc import broadcast_tensor, unique_rows
 
-from .base_entity import Entity
+from .base_entity import Entity, EntityDescription
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
@@ -26,18 +27,18 @@ if TYPE_CHECKING:
 class FEMVisGeom(RBC):
     """A visual geom of a FEM entity, the deformable counterpart of `RigidVisGeom`.
 
-    It carries the render mesh drawn by the visualizer, decoupled from the simulation mesh, and 'sim_verts_idx',
+    It carries the render mesh drawn by the visualizer, decoupled from the simulation mesh, and 'verts_idx',
     the map from each render-mesh vertex to the simulated vertex standing for it (vertices co-located across visual
     geoms or duplicated by texture seams share a single simulated vertex).
     """
 
-    def __init__(self, entity, vvert_start, vface_start, vmesh, sim_verts_idx):
+    def __init__(self, entity, vvert_start, vface_start, vmesh, verts_idx):
         self._uid = gs.UID()
         self._entity = entity
         self._vvert_start = vvert_start
         self._vface_start = vface_start
         self._vmesh = vmesh
-        self._sim_verts_idx = sim_verts_idx
+        self._verts_idx = verts_idx
 
     def get_trimesh(self):
         """The underlying `trimesh.Trimesh` of the render mesh."""
@@ -59,9 +60,17 @@ class FEMVisGeom(RBC):
         return self._vmesh
 
     @property
-    def sim_verts_idx(self):
+    def verts_idx(self):
         """Map from render-mesh vertex index to the entity's simulated vertex index."""
-        return self._sim_verts_idx
+        return self._verts_idx
+
+    @property
+    def sim_verts_idx(self):
+        """Map from render-mesh vertex index to the entity's simulated vertex index. Deprecated: use 'verts_idx'."""
+        gs.logger.warning(
+            "'sim_verts_idx' is deprecated and will be removed in a future release. Use 'verts_idx' instead."
+        )
+        return self._verts_idx
 
     @property
     def surface(self):
@@ -109,6 +118,105 @@ class FEMVisGeom(RBC):
         return self._vface_start + self.n_vfaces
 
 
+@dataclass
+class FEMVisGeomDescription:
+    """Describe one visual geom of a FEM entity: its render mesh, and the simulated vertex of each render vertex."""
+
+    vmesh: "gs.Mesh"
+    verts_idx: np.ndarray
+
+
+@dataclass
+class FEMEntityDescription(EntityDescription):
+    """Describe one FEM entity as its resolution left it: its simulation mesh and the visual geoms drawn over it.
+
+    The simulation mesh is the tetrahedralization of the welded morph sub-meshes, or those welded triangles for a
+    cloth, posed by the morph. An entity created from this reads no asset and tetrahedralizes nothing, so it simulates
+    the exact mesh it was exported with. 'init_positions_COM' is the point that the initial offset of each vertex is
+    taken from (see 'FEMEntity.set_position'), and 'fixed_verts_idx' lists the vertices the patches of the spec fix.
+    """
+
+    vgeoms: list[FEMVisGeomDescription]
+    init_positions: np.ndarray
+    init_positions_COM: np.ndarray
+    elems: np.ndarray
+    fixed_verts_idx: np.ndarray
+
+    @classmethod
+    def resolve(cls, spec: "gs.entities.FEM", surface: Surface) -> Self:
+        """Build the simulation mesh and the visual geoms of an entity spec.
+
+        'surface' is the one resolved from the spec. Each morph sub-mesh becomes a visual geom with its own surface and
+        UVs, while the simulation operates on a single welded copy of their vertices, tracked through
+        'FEMVisGeomDescription.verts_idx': welding and tetrahedralization both keep the input vertices first and in
+        order, so these maps remain valid indices into the simulated vertices.
+        """
+        morph = spec.morphs[0]
+        meshes = gs.Mesh.from_morph_surface(morph, surface)
+        surface_verts, surface_faces, verts_maps = mu.merge_submeshes(
+            [mesh.verts for mesh in meshes], [mesh.faces for mesh in meshes]
+        )
+        vgeoms = [FEMVisGeomDescription(vmesh=mesh, verts_idx=verts_idx) for mesh, verts_idx in zip(meshes, verts_maps)]
+
+        if isinstance(spec.material, gs.materials.FEM.Cloth):
+            # Cloth needs no tetrahedralization: the welded surface triangles are the simulation elements.
+            verts = surface_verts + morph.pos
+            elems = surface_faces
+        else:
+            # Tetgen refinement depends on the absolute coordinates of its input. File meshes are tetrahedralized
+            # untranslated so the result, and its on-disk cache, are shared across all placements of the same asset;
+            # primitives keep the position baked in, as the simulated rest state is sensitive to the exact refinement.
+            is_mesh_morph = isinstance(morph, gs.options.morphs.Mesh)
+            if not is_mesh_morph:
+                surface_verts = surface_verts + morph.pos
+            surface_trimesh = trimesh.Trimesh(vertices=surface_verts, faces=surface_faces, process=False)
+            verts, elems = eu.mesh_to_elements(surface_trimesh, tet_cfg=mu.generate_tetgen_config_from_morph(morph))
+            if is_mesh_morph:
+                verts = verts + morph.pos
+            verts, elems = eu.split_all_surface_tets(verts, elems)
+        verts = verts.astype(gs.np_float, copy=False)
+        elems = elems.astype(gs.np_int, copy=False)
+        if not len(verts) > 0:
+            gs.raise_exception("Entity has zero vertices.")
+
+        # Compose the morph pose offset (e.g. an up-axis conversion) onto the morph orientation, rotating the verts
+        # about their COM (the pre-existing morph.quat convention), then translate by the body-frame offset position
+        # R(morph.quat) @ offset_pos. NB: pivoting the orientation about the vertex COM differs from the rigid
+        # parent-child composition when the mesh COM is not at the morph origin.
+        morph_quat = np.array(morph.quat, dtype=gs.np_float)
+        init_quat = gu.transform_quat_by_quat(np.array(morph.offset_quat, dtype=gs.np_float), morph_quat)
+        R = gu.quat_to_R(init_quat)
+        verts_COM = verts.mean(axis=0)
+        offset_shift = gu.transform_by_quat(np.array(morph.offset_pos, dtype=gs.np_float), morph_quat)
+        init_positions = (verts - verts_COM) @ R.T + verts_COM + offset_shift
+
+        # The patches select vertices as the morph states them, relative to its position before its rotation. The later
+        # of two patches setting one vertex applies.
+        verts_pos_morph = verts - morph.pos
+        verts_is_fixed = np.zeros(len(verts), dtype=np.bool_)
+        for patch in spec.patches:
+            # Each selector resolves among the vertices the selectors before it hold, an ordinal counting those alone
+            verts_idx = np.arange(len(verts))
+            for vertex_index in patch.selectors:
+                if verts_idx.size == 0:
+                    break
+                verts_idx = verts_idx[vertex_index._resolve(verts_pos_morph[verts_idx])]
+            if verts_idx.size == 0:
+                gs.raise_exception(f"The selection {patch.selection_repr} holds no vertex of the FEM entity {morph}.")
+            if "is_fixed" in patch.options.model_fields_set:
+                verts_is_fixed[verts_idx] = patch.options.is_fixed
+
+        return cls(
+            spec,
+            surface,
+            vgeoms,
+            init_positions,
+            verts_COM + offset_shift,
+            elems,
+            np.flatnonzero(verts_is_fixed).astype(gs.np_int, copy=False),
+        )
+
+
 def assert_muscle(method):
     @wraps(method)
     def wrapper(self, *args, **kwargs):
@@ -133,10 +241,8 @@ class FEMEntity(Entity):
         The simulation scene that this entity belongs to.
     solver : Solver
         The physics solver instance used for simulation.
-    spec : gs.entities.FEM
-        The entity spec the entity is constructed from, whose morph gives its geometry.
-    surface : Surface
-        The surface mesh associated with the entity (for rendering or collision).
+    desc : FEMEntityDescription
+        The description the entity is created from, holding its spec, its surface and its simulation mesh.
     idx : int
         Unique identifier of the entity within the scene.
     v_start : int, optional
@@ -155,16 +261,15 @@ class FEMEntity(Entity):
         self,
         scene: "Scene",
         solver: "FEMSolver",
-        surface: Surface,
+        desc: FEMEntityDescription,
         idx: int,
-        spec: "gs.entities.FEM",
         v_start: int = 0,
         el_start: int = 0,
         s_start: int = 0,
         vvert_start: int = 0,
         vface_start: int = 0,
     ) -> None:
-        super().__init__(idx, scene, solver, surface, spec)
+        super().__init__(idx, scene, solver, desc)
 
         self._v_start = v_start  # offset for vertex index of elements
         self._el_start = el_start  # offset for element index
@@ -172,7 +277,26 @@ class FEMEntity(Entity):
         self._vvert_start = vvert_start  # offset for render vertices
         self._vface_start = vface_start  # offset for render faces
         self._step_global_added = None
-        self.sample()
+
+        self._vgeoms = gs.List()
+        for vgeom_desc in desc.vgeoms:
+            self._vgeoms.append(
+                FEMVisGeom(
+                    entity=self,
+                    vvert_start=vvert_start,
+                    vface_start=vface_start,
+                    vmesh=vgeom_desc.vmesh,
+                    verts_idx=vgeom_desc.verts_idx,
+                )
+            )
+            vvert_start += len(vgeom_desc.vmesh.verts)
+            vface_start += len(vgeom_desc.vmesh.faces)
+        self._fixed_verts_idx_local = desc.fixed_verts_idx
+        self.init_positions = torch.tensor(desc.init_positions, dtype=gs.tc_float, device=gs.device)
+        self.init_positions_COM_offset = torch.tensor(
+            desc.init_positions - desc.init_positions_COM, dtype=gs.tc_float, device=gs.device
+        )
+        self.elems = desc.elems
 
         if isinstance(self.material, gs.materials.FEM.Cloth):
             # For cloth, elements are already surface triangles
@@ -317,117 +441,6 @@ class FEMEntity(Entity):
 
             self.set_muscle_direction(muscle_direction)
 
-    # ------------------------------------------------------------------------------------
-    # ----------------------------------- instantiation ----------------------------------
-    # ------------------------------------------------------------------------------------
-
-    def instantiate(self, verts, elems):
-        """
-        Initialize FEM entity with given vertices and elements.
-
-        Parameters
-        ----------
-        verts : np.ndarray
-            Array of vertex positions with shape (n_vertices, 3).
-
-        elems : np.ndarray
-            Array of elements indexing into verts: tetrahedra with shape (n_elements, 4), or surface triangles with
-            shape (n_elements, 3) for Cloth material.
-
-        Raises
-        ------
-        Exception
-            If no vertices are provided.
-        """
-        verts = verts.astype(gs.np_float, copy=False)
-        elems = elems.astype(gs.np_int, copy=False)
-
-        # Compose the morph pose offset (e.g. an up-axis conversion) onto the morph orientation, rotating the verts
-        # about their COM (the pre-existing morph.quat convention), then translate by the body-frame offset position
-        # R(morph.quat) @ offset_pos. NB: pivoting the orientation about the vertex COM differs from the rigid
-        # parent-child composition when the mesh COM is not at the morph origin.
-        morph_quat = np.array(self._morph.quat, dtype=gs.np_float)
-        init_quat = gu.transform_quat_by_quat(np.array(self._morph.offset_quat, dtype=gs.np_float), morph_quat)
-        R = gu.quat_to_R(init_quat)
-        verts_COM = verts.mean(axis=0)
-        init_positions = (verts - verts_COM) @ R.T + verts_COM
-        offset_shift = gu.transform_by_quat(np.array(self._morph.offset_pos, dtype=gs.np_float), morph_quat)
-        init_positions = init_positions + offset_shift
-
-        if not init_positions.shape[0] > 0:
-            gs.raise_exception("Entity has zero vertices.")
-
-        # The patches select vertices as the morph states them, relative to its position before its rotation. The later
-        # of two patches setting one vertex applies.
-        verts_pos_morph = verts - self._morph.pos
-        verts_is_fixed = np.zeros(len(verts), dtype=np.bool_)
-        for patch in self._spec.patches:
-            # Each selector resolves among the vertices the selectors before it hold, an ordinal counting those alone
-            verts_idx = np.arange(len(verts))
-            for vertex_index in patch.selectors:
-                if verts_idx.size == 0:
-                    break
-                verts_idx = verts_idx[vertex_index._resolve(verts_pos_morph[verts_idx])]
-            if verts_idx.size == 0:
-                gs.raise_exception(f"The selection {patch.selection_repr} holds no vertex of entity '{self.name}'.")
-            if "is_fixed" in patch.options.model_fields_set:
-                verts_is_fixed[verts_idx] = patch.options.is_fixed
-        self._fixed_verts_idx_local = np.flatnonzero(verts_is_fixed).astype(gs.np_int, copy=False)
-
-        self.init_positions = torch.tensor(init_positions, dtype=gs.tc_float, device=gs.device)
-        self.init_positions_COM_offset = torch.tensor(
-            init_positions - (verts_COM + offset_shift), dtype=gs.tc_float, device=gs.device
-        )
-
-        self.elems = elems
-
-    def sample(self):
-        """
-        Build the entity's visual geoms and simulation mesh from its morph.
-
-        Each morph sub-mesh becomes a visual geom with its own surface and UVs, while the simulation operates on a
-        single welded copy of their vertices, tracked through 'FEMVisGeom.sim_verts_idx': welding and
-        tetrahedralization both keep the input vertices first and in order, so these maps remain valid indices into
-        the simulated vertices.
-        """
-        meshes = gs.Mesh.from_morph_surface(self._morph, self._surface)
-        surface_verts, surface_faces, verts_maps = mu.merge_submeshes(
-            [mesh.verts for mesh in meshes], [mesh.faces for mesh in meshes]
-        )
-        self._vgeoms = gs.List()
-        vvert_start, vface_start = self._vvert_start, self._vface_start
-        for mesh, verts_idx in zip(meshes, verts_maps):
-            self._vgeoms.append(
-                FEMVisGeom(
-                    entity=self,
-                    vvert_start=vvert_start,
-                    vface_start=vface_start,
-                    vmesh=mesh,
-                    sim_verts_idx=verts_idx,
-                )
-            )
-            vvert_start += len(mesh.verts)
-            vface_start += len(mesh.faces)
-
-        if isinstance(self.material, gs.materials.FEM.Cloth):
-            # Cloth needs no tetrahedralization: the welded surface triangles are the simulation elements.
-            verts = surface_verts + self._morph.pos
-            elems = surface_faces
-        else:
-            # Tetgen refinement depends on the absolute coordinates of its input. File meshes are tetrahedralized
-            # untranslated so the result, and its on-disk cache, are shared across all placements of the same asset;
-            # primitives keep the position baked in, as the simulated rest state is sensitive to the exact refinement.
-            is_mesh_morph = isinstance(self._morph, gs.options.morphs.Mesh)
-            if not is_mesh_morph:
-                surface_verts = surface_verts + self._morph.pos
-            surface_trimesh = trimesh.Trimesh(vertices=surface_verts, faces=surface_faces, process=False)
-            verts, elems = eu.mesh_to_elements(surface_trimesh, tet_cfg=self.tet_cfg)
-            if is_mesh_morph:
-                verts = verts + self._morph.pos
-            verts, elems = eu.split_all_surface_tets(verts, elems)
-
-        self.instantiate(verts, elems)
-
     def _add_to_solver(self):
         self._step_global_added = self._solver.sim.cur_step_global
         gs.logger.info(
@@ -435,26 +448,22 @@ class FEMEntity(Entity):
             f"size: ({self.n_elements}, {self.n_vertices}), material: {self.material}."
         )
 
-        # Convert to appropriate numpy array types
-        verts_numpy = tensor_to_array(self.init_positions, dtype=gs.np_float)
-
         if isinstance(self.material, gs.materials.FEM.Cloth):
             self._solver.add_cloth(
                 v_start=self._v_start,
                 s_start=self._s_start,
-                verts=verts_numpy,
+                verts=self._desc.init_positions,
                 tri2v=self._surface_tri_np,
                 tri2el=self._surface_el_np,
             )
         else:
-            elems_np = self.elems.astype(gs.np_int, copy=False)
             self._solver.add_elements(
                 material=self.material,
                 v_start=self._v_start,
                 el_start=self._el_start,
                 s_start=self._s_start,
-                verts=verts_numpy,
-                elems=elems_np,
+                verts=self._desc.init_positions,
+                elems=self.elems,
                 tri2v=self._surface_tri_np,
                 tri2el=self._surface_el_np,
             )
@@ -468,7 +477,7 @@ class FEMEntity(Entity):
                 vvert_start=vgeom.vvert_start,
                 vface_start=vgeom.vface_start,
                 v_start=self._v_start,
-                verts_idx=vgeom.sim_verts_idx,
+                verts_idx=vgeom.verts_idx,
                 uvs=uvs,
                 vfaces=vgeom.vmesh.faces.astype(gs.np_int, copy=False),
             )
@@ -722,9 +731,3 @@ class FEMEntity(Entity):
     def surface_triangles(self):
         """Surface triangles of the FEM mesh."""
         return self._surface_tri_np
-
-    @property
-    def tet_cfg(self):
-        """Configuration of tetrahedralization."""
-        tet_cfg = mu.generate_tetgen_config_from_morph(self.morph)
-        return tet_cfg

@@ -190,16 +190,21 @@ def test_mesh_mpm_build(show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    scene.add_entity(
+    material = gs.materials.Hybrid(
+        material_rigid=gs.materials.Rigid(),
+        material_soft=gs.materials.MPM.Muscle(),
+    )
+    duck = scene.add_entity(
         morph=gs.morphs.Mesh(
             file="meshes/duck.obj",
             scale=0.15,
         ),
-        material=gs.materials.Hybrid(
-            material_rigid=gs.materials.Rigid(),
-            material_soft=gs.materials.MPM.Muscle(),
-        ),
+        material=material,
     )
+    # Each part takes a copy of its material, which gets one muscle group per link
+    assert material.material_soft.n_groups == 1
+    assert duck.part_soft.material.n_groups == len(duck.part_rigid.links) > 1
+
     scene.build()
 
 

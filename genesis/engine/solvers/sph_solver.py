@@ -10,6 +10,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import SPHEntity
+from genesis.engine.entities.particle_entity import ParticleEntityDescription
 from genesis.engine.materials import SPH
 from genesis.options.solvers import SPHOptions
 from genesis.options.surfaces import Surface
@@ -38,7 +39,6 @@ from .base_solver import SimulatorState
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -360,18 +360,22 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
     def add_entity(
         self,
         idx: int,
-        surface: Surface,
-        spec: "gs.entities.SPH",
-        desc: "EntityDescription | None" = None,
-    ) -> "SPHEntity":
+        surface: Surface | None,
+        spec: "gs.entities.SPH | None",
+        desc: ParticleEntityDescription | None = None,
+    ) -> SPHEntity:
+        """Create an entity from its description, resolving one from the entity spec and its surface if none is given."""
+        if desc is None:
+            desc = ParticleEntityDescription.resolve(
+                spec, surface, self._particle_size, self.boundary_lower, self.boundary_upper
+            )
         entity = SPHEntity(
             scene=self._sim.scene,
             solver=self,
-            surface=surface,
+            desc=desc,
             particle_size=self._particle_size,
             idx=idx,
             particle_start=self.n_particles,
-            spec=spec,
         )
         self._entities.append(entity)
         self._n_particles += entity.n_particles

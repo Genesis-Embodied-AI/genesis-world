@@ -72,14 +72,15 @@ def trimesh_to_particles_simple(mesh, p_size, sampler):
     return positions
 
 
-def trimesh_to_particles_pbs(mesh, p_size, sampler, pos=(0, 0, 0)):
+def trimesh_to_particles_pbs(mesh, p_size, sdf_resolution, pos=(0, 0, 0)):
     """Sample particles uniformly in the volume of a mesh, following Kugelstadt et al. 2021.
 
     Particles are seeded on a lattice inside the mesh, then relaxed by a few smoothed-particle hydrodynamics (SPH) steps
-    that even out their density while keeping them inside. The sampler is named 'pbs-<res>', 'res' being the number of
-    cells per axis of the signed distance field of the mesh that holds the particles inside.
+    that even out their density while keeping them inside. 'sdf_resolution' is the number of cells per axis of the
+    signed distance field of the mesh that holds the particles inside.
     """
-    assert "pbs" in sampler
+    # The key names the sampler as the '.ptc' files of earlier releases do, so that they stay valid
+    sampler = f"pbs-{sdf_resolution}"
 
     # The physics-based sampler draws nothing from the global generator, which its entries leave out of their key
     cache = get_ptc_cache(mesh.vertices, mesh.faces, p_size, sampler, None)
@@ -88,16 +89,17 @@ def trimesh_to_particles_pbs(mesh, p_size, sampler, pos=(0, 0, 0)):
         gs.logger.debug("Sampled particles file (`.ptc`) found in cache.")
     else:
         with gs.logger.timer(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file:"):
-            sdf_res = int(sampler.split("-")[-1])
             # This method samples denser particles than the 'random' and 'regular' samplers at the same radius
             radius = 1.104 * p_size / 2
 
             # Signed distance field, positive inside, over the bounding box of the mesh padded by the support radius
             origin = mesh.bounds[0] - 4.0 * radius
-            cell_size = (mesh.bounds[1] + 4.0 * radius - origin) / sdf_res
-            nodes = origin + cell_size * np.stack(np.meshgrid(*[np.arange(sdf_res + 1)] * 3, indexing="ij"), axis=-1)
+            cell_size = (mesh.bounds[1] + 4.0 * radius - origin) / sdf_resolution
+            nodes = origin + cell_size * np.stack(
+                np.meshgrid(*[np.arange(sdf_resolution + 1)] * 3, indexing="ij"), axis=-1
+            )
             sdf, *_ = igl.signed_distance(nodes.reshape((-1, 3)), mesh.vertices, mesh.faces)
-            sdf = -sdf.reshape((sdf_res + 1,) * 3)
+            sdf = -sdf.reshape((sdf_resolution + 1,) * 3)
 
             # The particles are seeded slightly closer than their final spacing, on layers of rows offset by a radius
             # every other row, then relaxed towards a uniform density
@@ -303,14 +305,14 @@ def _box_to_particles(p_size, pos, size, sampler):
     return positions
 
 
-def box_to_particles(p_size=0.01, pos=(0, 0, 0), size=(1, 1, 1), sampler="random"):
-    if "pbs" in sampler:
+def box_to_particles(p_size=0.01, pos=(0, 0, 0), size=(1, 1, 1), sampler=gs.sampler.random, sdf_resolution=32):
+    if sampler == gs.sampler.pbs:
         mesh = trimesh.creation.box(extents=size)
 
         try:
-            positions = trimesh_to_particles_pbs(mesh, p_size, sampler, pos=pos)
+            positions = trimesh_to_particles_pbs(mesh, p_size, sdf_resolution, pos=pos)
         except gs.GenesisException:
-            sampler = "random"
+            sampler = gs.sampler.random
 
     if sampler in ("random", "regular"):
         positions = _box_to_particles(
@@ -323,13 +325,15 @@ def box_to_particles(p_size=0.01, pos=(0, 0, 0), size=(1, 1, 1), sampler="random
     return positions
 
 
-def cylinder_to_particles(p_size=0.01, pos=(0, 0, 0), radius=0.5, height=1.0, sampler="random"):
-    if "pbs" in sampler:
+def cylinder_to_particles(
+    p_size=0.01, pos=(0, 0, 0), radius=0.5, height=1.0, sampler=gs.sampler.random, sdf_resolution=32
+):
+    if sampler == gs.sampler.pbs:
         mesh = trimesh.creation.cylinder(radius=radius, height=height)
         try:
-            positions = trimesh_to_particles_pbs(mesh, p_size, sampler, pos=pos)
+            positions = trimesh_to_particles_pbs(mesh, p_size, sdf_resolution, pos=pos)
         except gs.GenesisException:
-            sampler = "random"
+            sampler = gs.sampler.random
 
     if sampler in ("random", "regular"):
         # sample a cube first
@@ -347,13 +351,13 @@ def cylinder_to_particles(p_size=0.01, pos=(0, 0, 0), radius=0.5, height=1.0, sa
     return positions
 
 
-def sphere_to_particles(p_size=0.01, pos=(0, 0, 0), radius=0.5, sampler="random"):
-    if "pbs" in sampler:
+def sphere_to_particles(p_size=0.01, pos=(0, 0, 0), radius=0.5, sampler=gs.sampler.random, sdf_resolution=32):
+    if sampler == gs.sampler.pbs:
         mesh = trimesh.creation.icosphere(radius=radius)
         try:
-            positions = trimesh_to_particles_pbs(mesh, p_size, sampler, pos=pos)
+            positions = trimesh_to_particles_pbs(mesh, p_size, sdf_resolution, pos=pos)
         except gs.GenesisException:
-            sampler = "random"
+            sampler = gs.sampler.random
 
     if sampler in ("random", "regular"):
         # sample a cube first
@@ -371,13 +375,15 @@ def sphere_to_particles(p_size=0.01, pos=(0, 0, 0), radius=0.5, sampler="random"
     return positions
 
 
-def shell_to_particles(p_size=0.01, pos=(0, 0, 0), inner_radius=0.5, outer_radius=0.7, sampler="random"):
-    if "pbs" in sampler:
+def shell_to_particles(
+    p_size=0.01, pos=(0, 0, 0), inner_radius=0.5, outer_radius=0.7, sampler=gs.sampler.random, sdf_resolution=32
+):
+    if sampler == gs.sampler.pbs:
         mesh = trimesh.creation.icosphere(radius=outer_radius)
         try:
-            positions = trimesh_to_particles_pbs(mesh, p_size, sampler, pos=pos)
+            positions = trimesh_to_particles_pbs(mesh, p_size, sdf_resolution, pos=pos)
         except gs.GenesisException:
-            sampler = "random"
+            sampler = gs.sampler.random
 
     if sampler in ("random", "regular"):
         # sample a cube first

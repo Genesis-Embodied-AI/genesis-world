@@ -12,6 +12,7 @@ import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import MPMEntity
+from genesis.engine.entities.particle_entity import ParticleEntityDescription
 from genesis.engine.materials import MPM
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.abd.misc import func_add_external_wrench
@@ -43,7 +44,6 @@ from .base_solver import ErrorCode, kernel_set_actu
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -415,6 +415,7 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         self.particle_constraints: MPMParticleConstraints | None = None
         self.data_manager: MPMData | None = None
         self._mpm_materials: MPMMaterials | None = None
+        # The constraint kernel runs once a particle was constrained, by a setter or a restored record
         self._is_constrained = False
 
     @gs.assert_unbuilt
@@ -440,7 +441,12 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         self.data_manager = MPMData(self)
         self.mpm_state = self.data_manager.mpm_state
         self.mpm_info = self.data_manager.mpm_info
-        self.particle_constraints = MPMParticleConstraints(unused=True)
+        # Allocated whole with the solver, so that every record of the scene holds them however they are set later
+        self.particle_constraints = MPMParticleConstraints(
+            sizes=dict(particles=self._n_particles, envs=self.n_envs_), env_first=False, unused=not self.is_active
+        )
+        if self.is_active:
+            kernel_clear_particle_constraints(self.particle_constraints)
         # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
         self.register_errors(
             self.data_manager.errno,
@@ -486,22 +492,26 @@ Please decrease the simulation timestep or adjust the material parameters."""
     def add_entity(
         self,
         idx: int,
-        surface: Surface,
-        spec: "gs.entities.MPM",
-        desc: "EntityDescription | None" = None,
-    ) -> "MPMEntity":
-        self.add_material(spec.material)
+        surface: Surface | None,
+        spec: "gs.entities.MPM | None",
+        desc: ParticleEntityDescription | None = None,
+    ) -> MPMEntity:
+        """Create an entity from its description, resolving one from the entity spec and its surface if none is given."""
+        if desc is None:
+            desc = ParticleEntityDescription.resolve(
+                spec, surface, self._particle_size, self.boundary_lower, self.boundary_upper
+            )
+        self.add_material(desc.spec.material)
 
         entity = MPMEntity(
             scene=self._sim.scene,
             solver=self,
-            surface=surface,
+            desc=desc,
             particle_size=self._particle_size,
             idx=idx,
             particle_start=self.n_particles,
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
-            spec=spec,
         )
         self._entities.append(entity)
         self._n_particles += entity.n_particles
@@ -741,8 +751,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
         """
         if not isinstance(link_idx, int):
             gs.raise_exception("link_idx must be an integer.")
-        if not self._is_constrained:
-            self._init_particle_constraints()
+        self._is_constrained = True
         particles_mask = self._broadcast_particles_mask(particles_mask, particles_start)
         rigid_solver = self._sim.rigid_solver
         # The attachment is a configuration of the constraint, which carries no gradient
@@ -775,14 +784,6 @@ Please decrease the simulation timestep or adjust the material parameters."""
             gs.raise_exception("The particle mask overruns the particles of the solver.")
         return particles_mask
 
-    def _init_particle_constraints(self) -> None:
-        # Allocated once some particles are constrained, which most scenes never do
-        self.particle_constraints = MPMParticleConstraints(
-            sizes=dict(particles=self._n_particles, envs=self.n_envs_), env_first=False
-        )
-        kernel_clear_particle_constraints(self.particle_constraints)
-        self._is_constrained = True
-
     def load_checkpoint(
         self,
         checkpoint: SolverCheckpoint,
@@ -790,14 +791,11 @@ Please decrease the simulation timestep or adjust the material parameters."""
         boundary_only: bool = False,
         envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
     ) -> None:
-        # The constraints are allocated on first use, so a record holds them only if they existed when it was made: a
-        # record holding them allocates them before they are written back, and one without them leaves none.
-        is_constrained_record = checkpoint.arrays.get("particle_constraints.is_constrained")
-        if is_constrained_record is not None and is_constrained_record.ndim > 0 and not self._is_constrained:
-            self._init_particle_constraints()
         super().load_checkpoint(checkpoint, boundary_only=boundary_only, envs_idx=envs_idx)
-        if is_constrained_record is not None and is_constrained_record.ndim == 0 and self._is_constrained:
-            kernel_clear_particle_constraints(self.particle_constraints)
+        # The constraints apply from the first substep a restored record holds one on
+        is_constrained_record = checkpoint.arrays.get("particle_constraints.is_constrained")
+        if is_constrained_record is not None:
+            self._is_constrained |= bool(is_constrained_record.any())
 
     @gs.assert_built
     @mutates(StateChange.MODEL)

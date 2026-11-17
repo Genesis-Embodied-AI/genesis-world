@@ -58,7 +58,8 @@ def main():
             pos=(0.3, -0.0, 1.3),
         ),
         material=gs.materials.MPM.Elastic(
-            sampler="pbs-64",
+            sampler=gs.sampler.pbs,
+            sdf_resolution=64,
         ),
         surface=gs.surfaces.Rough(
             color=(0.6, 1.0, 0.8, 1.0),

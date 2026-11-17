@@ -6,7 +6,7 @@ from pydantic import StrictBool, model_validator
 import genesis as gs
 from genesis.typing import PositiveFloat
 
-from .base import SamplerType
+from ..base import SamplerType
 from .elasto_plastic import ElastoPlastic
 
 
@@ -28,7 +28,7 @@ class Snow(ElastoPlastic):
         Poisson ratio. Default is 0.2.
     rho : float, optional
         Density (kg/m³). Default is 1000.
-    sampler : str, optional
+    sampler : gs.sampler, optional
         Particle sampler. Default is 'random'.
     yield_lower : float, optional
         Lower bound of yield condition. Default is 2.5e-2.
@@ -36,7 +36,7 @@ class Snow(ElastoPlastic):
         Upper bound of yield condition. Default is 4.5e-3.
     """
 
-    sampler: SamplerType = "random"
+    sampler: SamplerType = gs.sampler.random
     use_von_mises: StrictBool = False
 
     @model_validator(mode="before")
