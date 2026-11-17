@@ -1,5 +1,80 @@
 # Genesis Release Note
 
+## 1.4.7
+
+This release keeps polishing our non-rigid solvers and couplers. Multi-physics simulation should be faster and more reliable with a much reduced memory footprint. All solvers are now fully deterministic in `gs.init(use_deterministic_algorithms=True)` mode, at the cost of about a 15% speed drop.
+
+### New Features
+
+* Support joint equalities without second joint in SAPCoupler. (@jeetrex17) (#3333)
+* Support kinematic chains of any length in SAPCoupler. (@duburcqa) (#3804)
+* Add entity spec with options per link, geom and vertex. (@Milotrince) (#3628)
+
+### Bug fixes
+
+* Fix FEM damping dragging bodies moved by pinned vertices. (@duburcqa) (#3807)
+* Fix FEM implicit solves stopping early on stiff or heavy scenes. (@duburcqa) (#3805)
+* Fix FEM entities sinking through the floor when using vertex floor contact with SAP coupler. (@duburcqa) (#3750)
+* Fix FEM soft vertex constraints with the explicit solver. (@duburcqa) (#3751)
+* Fix FEM Newton iterations ignoring their convergence threshold. (@duburcqa) (#3801)
+* Fix FEM crash when rendering with split environments. (@duburcqa) (#3833)
+* Fix FEM explicit stable Neo-Hookean being too soft. (@duburcqa) (#3791)
+* Fix bodies sinking into pinned FEM vertices with SAP coupler. (@duburcqa) (#3799)
+* Fix MPM particles attached to a moving link lagging behind it. (@duburcqa) (#3752)
+* Fix MPM held particles depending on particle order. (@duburcqa) (#3775)
+* Fix SPH liquids compressing far below their rest volume. (@duburcqa) (#3755)
+* Fix SPH liquids seeping into rigid bodies and pushing on them with the wrong force. (@duburcqa) (#3778)
+* Fix SPH liquids flowing through FEM entities. (@duburcqa) (#3763)
+* Fix SPH particles squeezed through rigid surfaces under resting bodies. (@duburcqa) (#3783)
+* Fix SPH liquids flowing through fixed bodies moved after the build. (@duburcqa) (#3795)
+* Fix SPH viscosity losing momentum and inviscid liquids failing to build. (@duburcqa) (#3806)
+* Fix SAP coupler crashing or silently ignoring weld and connect equalities. (@duburcqa) (#3774)
+* Fix SAP coupler on heterogeneous entities and scenes without rigid dofs. (@duburcqa) (#3781)
+* Fix SAP coupler ignoring the contact torques of free bodies. (@duburcqa) (#3782)
+* Fix SAP overflow errors on piles of soft bodies. (@duburcqa) (#3800)
+* Fix SAP coupler overflowing on dense FEM meshes. (@duburcqa) (#3794)
+* Fix SAP leaving light bodies unsolved next to large corrections. (@duburcqa) (#3820)
+* Make SAP contact stiffness independent of the mesh resolution. (@duburcqa) (#3785)
+* Fix masked resetting of SAP on CPU. (@duburcqa) (#3825)
+* Fix welds and screws added after the build being ignored by SAP coupler. (@duburcqa) (#3810)
+* Fix the stiffness of FEM-FEM contacts with the SAP coupler. (@duburcqa) (#3757)
+* Fix partial reset and hybrid entities with rigid-MPM coupling. (@duburcqa) (#3758)
+* Fix IPC coupling force on rigid links summed over substeps. (@duburcqa) (#3789)
+* Fix SDF grid of thin-walled non-convex meshes being sized from a biased wall thickness. (@duburcqa) (#3815)
+* Fix 'get_AABB' returning lagging or even empty boxes. (@duburcqa) (#3773)
+* Fix kernel caching of the legacy coupler, MPM, sensors and rigid queries. (@duburcqa) (#3818)
+* Fix MJCF welds, connects and screw constraints misplacing off-center free bodies. (@duburcqa) (#3812)
+* Fix regression causing GPU sync in case of masked resets. (@duburcqa) (#3817)
+* Fix crash when adding an entity with tiny or degenerate convex geoms. (@duburcqa) (#3824)
+* Fix watertighten wrap resolution of meshes smaller than 10 cm. (@duburcqa) (#3826)
+* Fix crash when building a camera bound to one env with split_envs. (@Hadrien-Cornier) (#3540)
+* Fix batch renderer returning None for an output rendered twice. (@duburcqa) (#3852)
+* Fix crashes using scene objects before build or after destroy. (@duburcqa) (#3831)
+
+### Miscellaneous
+
+* Speed up the implicit FEM solver. (@duburcqa) (#3759)
+* Speed up SPH liquids by up to 25% with batched scenes. (@duburcqa) (#3798)
+* Speed up the SAP coupler at small batch sizes. (@duburcqa) (#3793)
+* Speed up the SAP solve with a contact-aware rigid preconditioner. (@duburcqa) (#3796)
+* Speed up FEM self-contact detection of SAPCoupler. (@duburcqa) (#3803)
+* Speed up hydroelastic contacts and ray casts. (@duburcqa) (#3771)
+* Speed up scenes with several hybrid entities. (@duburcqa) (#3772)
+* Speed up loading URDF assets whose meshes share textures. (@Milotrince) (#3823)
+* Speed up loading URDF assets by loading mesh files once. (@b84330808) (#3839)
+* Reduce memory footprint and build time of SPH liquids bounded by large fixed bodies. (@duburcqa) (#3809)
+* Reduce the memory footprint of differentiable MPM and FEM scenes. (@duburcqa) (#3760)
+* Make SAP coupler faster, deterministic and fp32 compatible. (@duburcqa) (#3762)
+* Add support for deterministic mode to MPM solver. (@duburcqa) (#3767)
+* Add support for deterministic mode to coupling rigid vs SPH or MPM. (@duburcqa) (#3776)
+* Fix SAP solves running to the iteration cap when FEM and rigid bodies are not in contact. (@duburcqa) (#3811)
+* Fix Genesis failing to import when matplotlib is not installed. (@duburcqa) (#3832)
+* Avoid GPU sync when setting indexed entries of masked environments. (@duburcqa) (#3837)
+* Declare the error and checkpoint support of every solver and coupler. (@duburcqa) (#3766)
+* Cache the compiled SAP coupler kernels across runs. (@duburcqa) (#3813)
+* List the failing environments in solver error messages. (@duburcqa) (#3840)
+* Refine SDF grid of thin convex geoms. (@duburcqa) (#3822)
+
 ## 1.4.6
 
 This release polishes our non-rigid solvers (mainly FEM, but also MPM, and PBD) and couplers. Differentiable simulation has also been greatly improved. It is now natively compatible with torch, while running about x3 faster and extended to support more setters and physics. Beyond that, the simulation is running faster than ever across all solvers, batch sizes and backends. Notably, the rigid solver and implicit FEM solver are now running multiple times faster for small batch sizes on GPU.
