@@ -1,0 +1,30 @@
+genesis/options/recorders.py
+  s_1eb4103db5e662::t_b6e94811e5cf6c 14,75-76,78-80,89-90,96-97
+  s_1eb4103db5e662::t_780b0e7612fa92 77
+genesis/recorders/file_writers.py
+  s_1eb4103db5e662::t_b6e94811e5cf6c 65
+tests/core/test_recorders.py
+  s_1eb4103db5e662::t_2de8adadc33ba8 467
+  s_1eb4103db5e662::t_5cb7f740a05971 466
+  s_1eb4103db5e662::t_322087ad05578f 317-318,436-443,461
+  s_1eb4103db5e662::t_7511b2262e13d4 468
+genesis/utils/video_encoder.py
+  s_1eb4103db5e662::t_b6e94811e5cf6c 102-104,107-108,122-123,131-134,191-201,216-217
+  s_1eb4103db5e662::t_780b0e7612fa92 105,135
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3d3e7c57a63465879ac77345e7f866a30adb3e8c",
+  "prompts": {},
+  "sessions": {
+    "s_1eb4103db5e662": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0ee06b63-8e4a-490c-8c7d-a643fdc86b80",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
