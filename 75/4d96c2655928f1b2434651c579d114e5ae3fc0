@@ -1,0 +1,22 @@
+genesis/engine/mesh.py
+  s_80102244beff09::t_4eac336165a29e 234-244
+tests/parsers/test_mesh.py
+  s_80102244beff09::t_9c524d23870690 1052
+  s_80102244beff09::t_758c6a8a09d710 1047,1053-1054
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "754d96c2655928f1b2434651c579d114e5ae3fc0",
+  "prompts": {},
+  "sessions": {
+    "s_80102244beff09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b945f235-1203-4aeb-a708-05f7e851c6ef",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
