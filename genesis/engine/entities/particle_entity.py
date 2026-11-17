@@ -52,20 +52,6 @@ def check_particles_inside_boundary(
         )
 
 
-def resolve_sampler(sampler: str) -> str:
-    """Check the name of a particle sampler, completing 'pbs' with the default resolution of its distance field."""
-    match sampler.split("-"):
-        case ["regular"] | ["random"]:
-            return sampler
-        case ["pbs"]:
-            return "pbs-32"
-        case ["pbs", num] if num.isnumeric():
-            return sampler
-    gs.raise_exception(
-        f"Only one of the following samplers is supported: [`regular`, `random`, `pbs`, `pbs-sdf_res`]. Got: {sampler}."
-    )
-
-
 def load_morph_vmesh(
     morph: "gs.morphs.Primitive | gs.morphs.Mesh", surface: Surface
 ) -> tuple["gs.Mesh", np.ndarray, np.ndarray]:
@@ -125,7 +111,7 @@ class ParticleEntityDescription(EntityDescription):
         outside the box from 'boundary_lower' to 'boundary_upper', the domain of the solver, raises.
         """
         morph = spec.morphs[0]
-        sampler = resolve_sampler(spec.material.sampler)
+        material = spec.material
         mesh_set_group_ids = None
         if isinstance(morph, gs.options.morphs.MeshSet):
             if not morph.files:
@@ -136,7 +122,7 @@ class ParticleEntityDescription(EntityDescription):
                 trans_i = np.array(pos_i, dtype=gs.np_float)
                 quat_i = gu.xyz_to_quat(np.array(euler_i, dtype=gs.np_float), rpy=True, degrees=True)
                 # Sample before posing the mesh, so the lattice and the sampling cache depend on the member shape alone
-                particles_i = vmesh_i.particlize(particle_size, sampler)
+                particles_i = vmesh_i.particlize(particle_size, material.sampler, material.sdf_resolution)
                 particles_per_mesh.append(gu.transform_by_trans_quat(particles_i, trans_i, quat_i))
                 vmesh_i.apply_transform(gu.trans_quat_to_T(trans_i, quat_i))
             mesh_set_group_ids = np.concatenate(
@@ -157,7 +143,7 @@ class ParticleEntityDescription(EntityDescription):
             vmesh, pos, quat = load_morph_vmesh(morph, surface)
             surface = vmesh.surface
             # Sample before posing the mesh, so the lattice and the sampling cache depend on the shape alone
-            particles = vmesh.particlize(particle_size, sampler)
+            particles = vmesh.particlize(particle_size, material.sampler, material.sdf_resolution)
             vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
             particles = gu.transform_by_trans_quat(particles, pos, quat)
             origin = pos
@@ -252,11 +238,6 @@ class ParticleEntity(Entity):
 
         # Note that this attribute must only be used in forward pass
         self.active = False
-
-    @property
-    def sampler(self) -> str:
-        """The particle sampler of the material, which samples the particles that an emitter adds."""
-        return resolve_sampler(self.material.sampler)
 
     def _add_to_solver(self):
         # For nowhere entity, it will be activated when particles are later added.

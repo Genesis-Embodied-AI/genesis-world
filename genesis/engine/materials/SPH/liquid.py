@@ -1,6 +1,8 @@
+import genesis as gs
 from genesis.typing import NonNegativeFloat, PositiveFloat
 
-from .base import Base, SamplerType
+from ..base import SamplerType
+from .base import Base
 
 
 class Liquid(Base):
@@ -18,11 +20,11 @@ class Liquid(Base):
         that droplets round up and jets break into drops. A higher value holds the liquid together more firmly, at the
         cost of a smaller stable time step for small droplets. 0 leaves the free surface unconstrained. Default is
         0.0728, the surface tension of water at 20 degrees Celsius.
-    sampler : str, optional
+    sampler : gs.sampler, optional
         Particle sampler. Defaults to 'regular' for numerical stability with SPH.
     """
 
     rho: PositiveFloat = 1000.0
     mu: NonNegativeFloat = 0.005
     surface_tension: NonNegativeFloat = 0.0728
-    sampler: SamplerType = "regular"
+    sampler: SamplerType = gs.sampler.regular

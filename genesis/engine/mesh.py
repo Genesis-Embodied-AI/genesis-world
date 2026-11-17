@@ -283,16 +283,15 @@ class Mesh(RBC, serialization.SerializationMixin):
         """
         return mu.tetrahedralize_mesh(self._mesh, tet_cfg)
 
-    def particlize(
-        self,
-        p_size=0.01,
-        sampler="random",
-    ):
+    def particlize(self, p_size=0.01, sampler=gs.sampler.random, sdf_resolution=32):
         """
         Sample particles using the mesh volume.
+
+        'sdf_resolution' is the resolution of the signed distance field that the 'pbs' sampler relaxes the particles
+        in, which the other samplers ignore.
         """
-        if "pbs" in sampler:
-            return pu.trimesh_to_particles_pbs(self._mesh, p_size, sampler)
+        if sampler == gs.sampler.pbs:
+            return pu.trimesh_to_particles_pbs(self._mesh, p_size, sdf_resolution)
         return pu.trimesh_to_particles_simple(self._mesh, p_size, sampler)
 
     def sample_point_cloud(

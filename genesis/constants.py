@@ -76,6 +76,15 @@ class integrator(StrEnum):
     approximate_implicitfast = enum.auto()
 
 
+# particle sampler of the particle-based materials
+class sampler(StrEnum):
+    """How the particles of an entity are placed inside its shape."""
+
+    regular = enum.auto()
+    random = enum.auto()
+    pbs = enum.auto()
+
+
 # rigid solver constraint solver
 class constraint_solver(StrEnum):
     CG = enum.auto()

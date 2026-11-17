@@ -7,7 +7,8 @@ from pydantic import Field
 import genesis as gs
 from genesis.typing import PositiveFloat, ValidFloat
 
-from .base import Base, SamplerType
+from ..base import SamplerType
+from .base import Base
 
 
 @qd.data_oriented
@@ -23,13 +24,13 @@ class Sand(Base):
         Poisson ratio. Default is 0.2.
     rho : float, optional
         Density (kg/m³). Default is 1000.
-    sampler : str, optional
+    sampler : gs.sampler, optional
         Particle sampler. Default is 'random'.
     friction_angle : float, optional
         Friction angle in degrees, used to compute internal pressure-dependent plasticity. Default is 45.
     """
 
-    sampler: SamplerType = "random"
+    sampler: SamplerType = gs.sampler.random
     friction_angle: PositiveFloat = 45.0
 
     # Derived from friction_angle, set in model_post_init.
