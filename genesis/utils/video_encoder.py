@@ -131,8 +131,7 @@ class VideoEncoder:
         self._stream = None
         self._frame = None
         self._buffer = None
-        self._row_bytes = 0
-        # Shape of the first frame, the size of the video, set by the calling thread
+        # Shape of the first frame of the video, the size of the video, set by the calling thread
         self._frame_shape = None
 
         self._queue = queue.Queue(maxsize=ENCODER_QUEUE_SIZE) if is_threaded else None
@@ -202,7 +201,6 @@ class VideoEncoder:
         self._frame = av.VideoFrame(width_even, height_even, "rgb24" if is_color else "gray8")
         frame_plane = self._frame.planes[0]
         self._buffer = np.asarray(memoryview(frame_plane)).reshape((height_even, frame_plane.line_size))
-        self._row_bytes = width * (3 if is_color else 1)
         # The padding is written once, since every frame only ever fills the leading rows and columns
         self._buffer[...] = 0
 
@@ -232,7 +230,8 @@ class VideoEncoder:
         is_color = frame.ndim == 3 and frame.shape[-1] == 3
         if frame.ndim != 2 + is_color or not np.issubdtype(frame.dtype, np.integer):
             gs.raise_exception("Frames must be either grayscale [H, W] or color [H, W, RGB] of integer type.")
-        if self._frame_shape is None:
+        # No encoding thread and no frame storage means a new video, the encoder being reusable once closed
+        if self._thread is None and self._buffer is None:
             self._frame_shape = frame.shape
         elif frame.ndim != len(self._frame_shape):
             gs.raise_exception("Frames must be all grayscale or all color.")

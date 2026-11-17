@@ -1,4 +1,3 @@
-import functools
 import re
 import sys
 import threading

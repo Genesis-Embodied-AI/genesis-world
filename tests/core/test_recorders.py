@@ -8,6 +8,7 @@ import av
 
 import genesis as gs
 from genesis.utils.image_exporter import as_grayscale_image
+from genesis.utils.video_encoder import VideoEncoder
 
 from ..utils.assertions import assert_allclose, assert_equal, rgb_array_to_png_bytes
 
@@ -439,9 +440,10 @@ def test_video_writer(tmp_path):
     )
     # White frames whose size changes along the recording, cropped or padded with black to the size of the first one
     video_resized_path = tmp_path / "test_resized.mp4"
-    frames_resized_size = [64, 32, 96] * 4
+    frames_resized_size = [(64, 32, 96)[i % 3] for i in range(STEPS + 1)]
+    frames_resized_size_iter = iter(frames_resized_size)
     scene.add_recorder(
-        data_func=lambda: np.full((frames_resized_size.pop(0),) * 2 + (3,), 255, dtype=np.uint8),
+        data_func=lambda: np.full((next(frames_resized_size_iter),) * 2 + (3,), 255, dtype=np.uint8),
         rec_options=gs.recorders.VideoFile(
             filename=video_resized_path,
         ),
@@ -464,8 +466,15 @@ def test_video_writer(tmp_path):
     # The encoding is lossy, so the colors are compared away from the edges of the white area
     with av.open(video_resized_path) as container:
         frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)]
-    for frame, size in zip(frames, [64, 32, 96] * 4):
+    for frame, size in zip(frames, frames_resized_size):
         assert frame.shape == (64, 64, 3)
         assert_allclose(frame[: min(size, 64) - 8, : min(size, 64) - 8], 255, atol=10)
         if size < 64:
             assert_allclose(frame[size + 8 :, size + 8 :], 0, atol=10)
+
+    # A video holds color frames or grayscale ones, never both
+    encoder = VideoEncoder(tmp_path / "test_mixed.mp4", fps=30)
+    encoder.write(np.zeros((64, 64, 3), dtype=np.uint8))
+    with pytest.raises(gs.GenesisException, match="all grayscale or all color"):
+        encoder.write(np.zeros((64, 64), dtype=np.uint8))
+    encoder.close()

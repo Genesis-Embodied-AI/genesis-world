@@ -29,7 +29,6 @@ def animate(imgs, filename=None, fps=60):
 
     if filename is None:
         filename = f"{get_entry_point_name()}_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
-    os.makedirs(os.path.abspath(os.path.dirname(filename)), exist_ok=True)
 
     gs.logger.info(f'Saving video to ~<"{filename}">~...')
     encoder = VideoEncoder(filename, fps)
