@@ -1,0 +1,28 @@
+genesis/engine/materials/MPM/base.py
+  s_8e3e09cbc07082::t_0171e443a59de7 2-3,31-36,38-43,51-56,61-63
+  s_8e3e09cbc07082::t_d80ae9c1e3e955 104-106
+genesis/engine/solvers/mpm_solver.py
+  s_8e3e09cbc07082::t_86806132a58b7a 254-256,401-404,409-410,459,461,916,920,931,936,944,985,988,991,995,998,1001
+genesis/utils/data.py
+  s_8e3e09cbc07082::t_a5810615ec5584 85
+  s_8e3e09cbc07082::t_d80ae9c1e3e955 13,58-59,79
+genesis/engine/materials/MPM/muscle.py
+  s_8e3e09cbc07082::t_d80ae9c1e3e955 1-2,32
+  s_8e3e09cbc07082::t_22a0518d8b76eb 33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e0fbbdc277044dedc06bcb633c830c4e9766b97a",
+  "prompts": {},
+  "sessions": {
+    "s_8e3e09cbc07082": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a8f0475a-f9de-4602-9bce-61f4c50730a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
