@@ -1,8 +1,6 @@
 """
-The constitutive models of the materials of the material point method (MPM) solver.
-
-A user extends the solver with a subclass of an options class of 'gs.materials.MPM' and a physics for it,
-`class MyPhysics(MPMMaterialPhysics[MyMaterial])` (see 'MaterialPhysics').
+The constitutive models of the materials of the material point method (MPM) solver, bound to their options classes
+through 'MaterialPhysics'.
 """
 
 import math

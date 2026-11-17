@@ -33,8 +33,7 @@ class Base(Material["MPMEntity"]):
 
     Note
     ----
-    This class should *not* be instantiated directly. A subclass simulates with the physics registered for it, or for
-    its closest base class (see 'MPMMaterialPhysics' in genesis/engine/solvers/mpm_material_physics.py).
+    This class should *not* be instantiated directly.
 
     Parameters
     ----------

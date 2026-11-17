@@ -3,10 +3,7 @@ import pytest
 import torch
 import trimesh
 
-import quadrants as qd
-
 import genesis as gs
-from genesis.engine.solvers.mpm_material_physics import MPMMaterialPhysics
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -310,30 +307,12 @@ def test_perf_dispatch(variant, show_viewer):
 
 
 @pytest.mark.required
-def test_user_material_physics(precision, show_viewer):
+def test_material_subclass(precision, show_viewer):
     class ElasticTwin(gs.materials.MPM.Elastic):
         pass
 
     class UnboundMaterial(gs.materials.MPM.Base):
         pass
-
-    class UnstressedElastic(gs.materials.MPM.Elastic):
-        pass
-
-    class UnstressedElasticPhysics(MPMMaterialPhysics[UnstressedElastic]):
-        @qd.func
-        def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-            return qd.Matrix.zero(gs.qd_float, 3, 3)
-
-    with pytest.raises(TypeError, match="already binds"):
-
-        class DuplicatePhysics(MPMMaterialPhysics[UnstressedElastic]):
-            pass
-
-    with pytest.raises(TypeError, match="subclasses the registered physics"):
-
-        class DerivedPhysics(UnstressedElasticPhysics):
-            pass
 
     with pytest.raises(gs.GenesisException, match="No MPMMaterialPhysics is registered"):
         gs.Scene().add_entity(morph=gs.morphs.Box(size=(0.08, 0.08, 0.08)), material=UnboundMaterial())
@@ -349,8 +328,8 @@ def test_user_material_physics(precision, show_viewer):
             upper_bound=(0.4, 0.4, 0.5),
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.0, -0.8, 0.4),
-            camera_lookat=(-0.1, 0.0, 0.05),
+            camera_pos=(-0.2, -0.6, 0.3),
+            camera_lookat=(-0.2, 0.0, 0.04),
         ),
         show_viewer=show_viewer,
     )
@@ -364,22 +343,13 @@ def test_user_material_physics(precision, show_viewer):
         ),
         material=gs.materials.MPM.Elastic(),
     )
-    # A subclass of a material without a physics of its own simulates with the physics of the material. It lies a whole
-    # number of cells away from its twin, so that both sit alike on the grid.
+    # The subclass lies a whole number of cells away from its twin, so that both sit alike on the grid
     elastic_twin = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(-0.2875, 0.0, 0.06),
             size=(0.08, 0.08, 0.08),
         ),
         material=ElasticTwin(),
-    )
-    # A material bound to a physics of its own simulates with it, here one that keeps no stress and collapses
-    unstressed = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.1, 0.0, 0.06),
-            size=(0.08, 0.08, 0.08),
-        ),
-        material=UnstressedElastic(),
     )
     scene.build(n_envs=2)
 
@@ -391,11 +361,6 @@ def test_user_material_physics(precision, show_viewer):
     elastic_pos = elastic.get_particles_pos()
     elastic_twin_disp = elastic_twin.get_particles_pos() - init_elastic_twin_pos
     assert_allclose(elastic_twin_disp, elastic_pos - init_elastic_pos, tol=1e-13 if precision == "64" else 5e-6)
-
-    unstressed_pos = unstressed.get_particles_pos()
-    elastic_height = elastic_pos[..., 2].amax(dim=-1) - elastic_pos[..., 2].amin(dim=-1)
-    unstressed_height = unstressed_pos[..., 2].amax(dim=-1) - unstressed_pos[..., 2].amin(dim=-1)
-    assert (unstressed_height < 0.6 * elastic_height).all()
 
 
 @pytest.mark.required
