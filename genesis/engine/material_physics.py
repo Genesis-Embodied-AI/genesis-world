@@ -70,7 +70,4 @@ class MaterialPhysics[MaterialT: Material]:
             physics_cls = cls.PHYSICS_TYPES_MAP.get(options_cls)
             if physics_cls is not None:
                 return physics_cls(material)
-        gs.raise_exception(
-            f"No {cls.__name__} is registered for the material {type(material).__name__}. Define a subclass "
-            f"'{cls.__name__}[{type(material).__name__}]'."
-        )
+        gs.raise_exception(f"No {cls.__name__} is registered for the material {type(material).__name__}.")
