@@ -31,6 +31,7 @@ from genesis.options import (
     FEMOptions,
     KinematicOptions,
     MPMOptions,
+    NewtonOptions,
     PBDOptions,
     ProfilingOptions,
     RigidOptions,
@@ -159,6 +160,9 @@ class Scene(BuildableMixin, RBC):
         The options configuring the fem_solver (``scene.fem_solver``).
     pbd_options : gs.options.PBDOptions
         The options configuring the pbd_solver (``scene.pbd_solver``).
+    newton_options : gs.options.NewtonOptions
+        The options configuring the newton_solver (``scene.sim.newton_solver``), which solves every substep of the
+        implicit MPM solver together with the rigid entities in contact with its particles.
     coupler_options : gs.options.CouplerOptions
         The options configuring the `coupler` between different solvers.
     vis_options : gs.options.VisOptions
@@ -185,6 +189,7 @@ class Scene(BuildableMixin, RBC):
         sph_options: SPHOptions | None = None,
         fem_options: FEMOptions | None = None,
         pbd_options: PBDOptions | None = None,
+        newton_options: NewtonOptions | None = None,
         coupler_options: BaseCouplerOptions | None = None,
         vis_options: VisOptions | None = None,
         viewer_options: ViewerOptions | None = None,
@@ -205,6 +210,7 @@ class Scene(BuildableMixin, RBC):
             sph_options,
             fem_options,
             pbd_options,
+            newton_options,
             coupler_options,
             vis_options,
             viewer_options,
@@ -224,6 +230,7 @@ class Scene(BuildableMixin, RBC):
                 sph=sph_options,
                 fem=fem_options,
                 pbd=pbd_options,
+                newton=newton_options,
                 coupler=coupler_options,
                 vis=vis_options,
                 viewer=viewer_options,

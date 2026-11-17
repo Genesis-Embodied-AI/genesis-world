@@ -225,6 +225,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._box_box_detection = options.box_box_detection
         self._requires_grad = self._sim.options.requires_grad
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
+        self._is_solved_in_global_newton = False
 
         # The differentiable solve keeps every body in its iteration trace, so hibernation stays off there (see the
         # use_hibernation option).
@@ -337,6 +338,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._sol_default_timeconst = None
         if self._options.constraint_timeconst is not None:
             self._sol_default_timeconst = max(self._options.constraint_timeconst, self._sol_min_timeconst)
+
+        self._is_solved_in_global_newton = self.is_solved_in_global_newton
 
         self.n_geoms_ = max(1, self.n_geoms)
         self.n_verts_ = max(1, self.n_verts)
@@ -1388,7 +1391,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # The work before the constraint solve is captured as three graphs, since the compile time of a kernel grows
             # faster than its size while one more graph replay costs next to nothing. The collision detection takes a
             # graph of its own, the one Collider.detection launches, so that a scene compiles it once whether it steps
-            # or detects collisions alone. The work after the solve is captured as one graph.
+            # or detects collisions alone. The work after the solve is captured as one graph. A substep solved within
+            # the Newton solve of the implicit MPM solver stops once its constraint rows are assembled, the Newton solve
+            # writing the constraint solution that the work after the solve reads (see 'substep_post_coupling').
+            is_solved_in_global_newton = self.is_solved_in_global_newton
             collider = self.collider
             constraint_solver = self.constraint_solver
             collider._contact_data_cache.clear()
@@ -1416,25 +1422,27 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     self.rigid_config,
                     collider.collider_config,
                 )
-                func_solve_body(
+                if not is_solved_in_global_newton:
+                    func_solve_body(
+                        self.dyn_state,
+                        constraint_solver.constraint_state,
+                        self.dyn_info,
+                        self.rigid_info,
+                        self.rigid_config,
+                        constraint_solver._n_iterations,
+                    )
+            if not is_solved_in_global_newton:
+                kernel_substep_post(
                     self.dyn_state,
+                    collider.collider_state,
                     constraint_solver.constraint_state,
                     self.dyn_info,
                     self.rigid_info,
                     self.rigid_config,
-                    constraint_solver._n_iterations,
+                    not self._disable_constraint,
+                    self._options.noslip_iterations > 0,
+                    self._errno,
                 )
-            kernel_substep_post(
-                self.dyn_state,
-                collider.collider_state,
-                constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                not self._disable_constraint,
-                self._options.noslip_iterations > 0,
-                self._errno,
-            )
 
         if not isinstance(self.sim.coupler, SAPCoupler):
             self._is_forward_pos_updated = not self._enable_mujoco_compatibility
@@ -1661,6 +1669,18 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if isinstance(self.sim.coupler, SAPCoupler):
             update_qacc_from_qvel_delta(self.dyn_state, self.rigid_info, self.rigid_config)
             kernel_step_2(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno)
+        elif self.is_solved_in_global_newton:
+            kernel_substep_post(
+                self.dyn_state,
+                self.collider.collider_state,
+                self.constraint_solver.constraint_state,
+                self.dyn_info,
+                self.rigid_info,
+                self.rigid_config,
+                not self._disable_constraint,
+                self._options.noslip_iterations > 0,
+                self._errno,
+            )
         elif isinstance(self.sim.coupler, IPCCoupler):
             # If any rigid entity is coupled to IPC, perform rigid simulation in post-coupling phase.
             # Collision exclusion for IPC-coupled links is handled in the collider at build time.
@@ -3261,6 +3281,25 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
+
+    @property
+    def is_solved_in_global_newton(self) -> bool:
+        """
+        Whether the substeps of the rigid solver are solved within the global Newton solve of the implicit MPM solver,
+        the accelerations of its dofs joining the unknowns of the particles (see NewtonSolver).
+
+        They are once a rigid geom that couples with the particles moves (see 'LegacyCouplerOptions.rigid_mpm' and
+        'needs_coup' of gs.materials.Rigid), the geoms fixed in the world acting on the particles alone. A substep then
+        stops once its constraint rows are assembled, and finishes from the accelerations that the Newton solve hands it
+        (see 'substep_post_coupling').
+        """
+        if self._is_built:
+            return self._is_solved_in_global_newton
+        return (
+            self.sim.newton_solver.is_active
+            and self.sim.coupler.rigid_couplings[0]
+            and any(geom.needs_coup and not geom.is_fixed for geom in self.geoms)
+        )
 
     @property
     def n_geoms(self) -> int:

@@ -40,6 +40,7 @@ from .solvers.base_solver import (
     kernel_set_time,
     merge_errno,
 )
+from .solvers.newton_solver import NewtonSolver
 from .state_change import StateChange, Subscriber
 from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 
@@ -122,9 +123,13 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         self.sph_solver = SPHSolver(self, options.sph)
         self.pbd_solver = PBDSolver(self, options.pbd)
         self.fem_solver = FEMSolver(self, options.fem)
+        self.newton_solver = NewtonSolver(self, options.newton)
 
+        # The Newton solver goes first, so that it solves a substep once every other solver prepared it and the coupler
+        # ran, and before the others finish it (see 'NewtonSolver.substep_post_coupling')
         self._solvers: list["Solver"] = gs.List(
             [
+                self.newton_solver,
                 self.rigid_solver,
                 self.kinematic_solver,
                 self.mpm_solver,
@@ -133,11 +138,13 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
                 self.fem_solver,
             ]
         )
-        # The solver simulating the entities of each entity spec class, a subclass going where its base goes
+        # The solver simulating the entities of each entity spec class, a subclass going where its base goes. The Newton
+        # solver simulates no entity of its own.
+        solvers_with_entities = [solver for solver in self._solvers if solver is not self.newton_solver]
         self._solvers_by_spec_cls: dict[type[gs.entities.Spec], "Solver"] = {
-            solver.entity_spec_cls: solver for solver in self._solvers
+            solver.entity_spec_cls: solver for solver in solvers_with_entities
         }
-        assert len(self._solvers_by_spec_cls) == len(self._solvers)
+        assert len(self._solvers_by_spec_cls) == len(solvers_with_entities)
 
         self._active_solvers: list["Solver"] = gs.List()
         # What runs in the scene in its own right: the active solvers, then the coupler when one is active

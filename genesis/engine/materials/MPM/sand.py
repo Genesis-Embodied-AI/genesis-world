@@ -8,6 +8,7 @@ import genesis as gs
 from genesis.typing import PositiveFloat, ValidFloat
 
 from .base import Base, SamplerType
+from .elastic import func_diagonal, func_diagonal_matrix
 
 
 @qd.data_oriented
@@ -44,30 +45,9 @@ class Sand(Base):
         self.update_stress = self._update_stress_sand
 
     @qd.func
-    def _sand_projection(self, S, Jp, eps):
-        S_out = qd.Matrix.zero(gs.qd_float, 3, 3)
-        epsilon = qd.Vector.zero(gs.qd_float, 3)
-        for i in qd.static(range(3)):
-            epsilon[i] = qd.log(max(abs(S[i, i]), 1e-4))
-            S_out[i, i] = 1
-        tr = epsilon.sum() + Jp
-        epsilon_hat = epsilon - tr / 3
-        epsilon_hat_norm = epsilon_hat.norm(eps)
-
-        Jp_new = gs.qd_float(0.0)
-        if tr >= 0.0:
-            Jp_new = tr
-        else:
-            Jp_new = 0.0
-            delta_gamma = epsilon_hat_norm + (3 * self.lam + 2 * self.mu) / (2 * self.mu) * tr * self.alpha
-            for i in qd.static(range(3)):
-                S_out[i, i] = qd.exp(epsilon[i] - max(0, delta_gamma) / epsilon_hat_norm * epsilon_hat[i])
-
-        return S_out, Jp_new
-
-    @qd.func
     def _update_F_S_Jp_sand(self, J, F_tmp, U, S, V, Jp, eps):
-        S_new, Jp_new = self._sand_projection(S, Jp, eps)
+        sigma_new, Jp_new = func_sand_return_map(func_diagonal(S), Jp, self.mu, self.lam, self.alpha, eps)
+        S_new = func_diagonal_matrix(sigma_new)
         F_new = U @ S_new @ V.transpose()
         return F_new, S_new, Jp_new
 
@@ -82,3 +62,46 @@ class Sand(Base):
             center[i, i] += self.lam * log_S_sum * (1 / S[i, i])
         stress = U @ center @ V.transpose() @ F_new.transpose()
         return stress
+
+
+@qd.func
+def func_sand_return_map(sigma: qd.types.vector(3), Jp: float, mu: float, lam: float, alpha: float, eps: float):
+    """
+    Return the singular values of the deformation gradient of sand after its Drucker-Prager return map, and its volume
+    correction.
+
+    `Jp` is the log volume the particle gained by dilating, which a compressed particle gives back first. Under tension,
+    sand loses its strain and keeps the dilation as volume correction. Under compression beyond the friction cone of
+    coefficient `alpha`, its deviatoric strain is projected back onto the cone.
+    """
+    epsilon = qd.log(qd.max(qd.abs(sigma), 1e-4))
+    trace = epsilon.sum() + Jp
+    epsilon_hat = epsilon - trace / 3.0
+    epsilon_hat_norm = epsilon_hat.norm(eps)
+    sigma_new = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+    Jp_new = trace
+    if trace < 0.0:
+        Jp_new = 0.0
+        delta_gamma = epsilon_hat_norm + (3.0 * lam + 2.0 * mu) / (2.0 * mu) * trace * alpha
+        sigma_new = qd.exp(epsilon - qd.max(delta_gamma, 0.0) / epsilon_hat_norm * epsilon_hat)
+    return sigma_new, Jp_new
+
+
+@qd.func
+def func_extended_hencky_principal(sigma: qd.types.vector(3), mu: float, lam: float, sigma_min: float):
+    """
+    Return the extended Hencky energy density of sand, its gradient and its Hessian in the signed singular values.
+
+    The log of a singular value below `sigma_min` continues by its tangent line, which keeps the energy finite as a
+    singular value goes to zero or below.
+    """
+    sigma_log = qd.max(sigma, sigma_min)
+    log_stretch = qd.log(sigma_log) + qd.min(sigma - sigma_min, 0.0) / sigma_min
+    dlog_stretch = 1.0 / sigma_log
+    d2log_stretch = -(sigma >= sigma_min).cast(gs.qd_float) * dlog_stretch * dlog_stretch
+    trace = log_stretch.sum()
+    tau = 2.0 * mu * log_stretch + lam * trace
+    psi = mu * log_stretch.dot(log_stretch) + 0.5 * lam * trace * trace
+    A = lam * dlog_stretch.outer_product(dlog_stretch)
+    A += func_diagonal_matrix(2.0 * mu * dlog_stretch * dlog_stretch + tau * d2log_stretch)
+    return psi, tau * dlog_stretch, A
