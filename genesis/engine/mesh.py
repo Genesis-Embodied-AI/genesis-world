@@ -135,7 +135,7 @@ class Mesh(RBC, serialization.SerializationMixin):
     metadata : dict
         The metadata of the mesh.
     asset_textures : AssetTextures | None
-        The textures the asset gives the maps of the mesh, which the asset texture variants of the dynamic textures of
+        The textures the asset gives the maps of the mesh, which the variants left to None of the dynamic textures of
         its surface show, at construction and whenever a surface is set. None for a mesh made without an asset.
     """
 
@@ -685,7 +685,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         """Replace the surface of the mesh, the textures the given surface leaves unset keeping their current images.
 
         Every other field takes the value of the given surface, its defaults included, so a surface of another type
-        renders as that type does. The asset texture variants of a dynamic texture of the given surface show the
+        renders as that type does. The variants of a dynamic texture of the given surface left to None show the
         textures the asset gives the mesh. A mesh being made takes the surface as given, and keeps the visual of its
         asset.
         """
@@ -711,7 +711,7 @@ class Mesh(RBC, serialization.SerializationMixin):
                     fields[name] = value
             self._surface = type(surface)(**fields).model_copy(update=shortcuts)
         # The color map is resolved first, so that a surface drawing its color in the emissive map shows the color the
-        # asset gives, and the emission only where the asset gives no color
+        # asset gives, and the emission only where the asset gives no color.
         for is_emission, asset_texture in (
             ((False, self._asset_textures.color), (True, self._asset_textures.emission))
             if self._asset_textures is not None
@@ -724,14 +724,12 @@ class Mesh(RBC, serialization.SerializationMixin):
                 continue
             is_named = isinstance(texture.variants, dict)
             variants = tuple(texture.variants.values()) if is_named else texture.variants
-            if not any(isinstance(variant, gs.textures.AssetTexture) for variant in variants):
-                continue
-            variants = tuple(
-                asset_texture if isinstance(variant, gs.textures.AssetTexture) else variant for variant in variants
-            )
+            variants = tuple(asset_texture if variant is None else variant for variant in variants)
             texture = texture.model_copy(
                 update={"variants": dict(zip(texture.variants, variants)) if is_named else variants}
             )
+            # The texture of the asset is shown whatever the variants (see 'DynamicTextures.set_texture')
+            texture._asset_texture = asset_texture
             # The surface may be shared with the caller, or between the meshes of one material
             self._surface = self._surface.model_copy()
             if is_emission:

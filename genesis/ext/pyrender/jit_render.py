@@ -939,7 +939,7 @@ class JITRenderer:
                     set_uniform_3fv(pid, "color", color_list[id], gl)
 
                 # A texture array is sampled at the layer of the environment drawn, which a pass drawing every
-                # environment sets per instance below
+                # environment sets per instance below.
                 i_layers = texture_layers_idx[id]
                 is_layer_set = i_layers >= 0 and is_rgba and not flags & RenderFlags_FLAT
                 if is_layer_set and env_idx >= 0:

@@ -6,7 +6,7 @@ from typing import Annotated, Literal, Self, cast
 import numpy as np
 
 from PIL import Image
-from pydantic import BeforeValidator, Field, StrictBool, computed_field, model_validator
+from pydantic import BeforeValidator, Field, PrivateAttr, StrictBool, computed_field, model_validator
 
 import genesis as gs
 import genesis.utils.mesh as mu
@@ -447,27 +447,19 @@ class _ImagelessTexture(Texture):
         return True
 
 
-class AssetTexture(_ImagelessTexture):
-    """
-    The texture the asset gives the map of a surface holding a dynamic texture, as a variant of that dynamic texture.
-
-    It is valid only in the 'variants' of a ``DynamicTexture``, and resolves when the entity is added: to the image or
-    the color the asset gives the map, or to no texture where it gives none. Each visual geom drawing the dynamic
-    texture resolves it to the texture its own asset material gives, so one declaration serves several materials.
-    """
-
-
 class DynamicTexture(_ImagelessTexture):
     """
     A texture whose image changes while the simulation runs, such as a screen or an indicator light.
 
     It fills the diffuse or the emissive map of a surface, and requires a mesh with texture coordinates. Each parallel
-    environment shows one of a fixed set of variants declared here, or the batched variant if any, which holds one
-    image per environment written at runtime. Once the scene is built, ``vgeom.set_texture`` shows a variant by
-    position or by name in the selected environments, or writes the batched variant there and shows it, and
-    ``vgeom.get_texture`` returns the images as drawn. The render context holds the variant each environment shows and the batched variant:
-    they are appearance and take no part in checkpoints, and a reset shows the first variant again. The rasterizer draws
-    them, while the other renderers warn once and draw the meshes without them. Only the entities of a rigid or
+    environment shows one of a fixed set of variants declared here, the texture the asset gives the map, or the batched
+    variant if any, which holds one image per environment written at runtime. Once the scene is built,
+    ``vgeom.set_texture(texture)`` writes the batched variant in the selected environments and shows it, and
+    ``vgeom.set_texture(variant=...)`` shows a variant there by position or by name, the texture the asset gives the
+    map whatever the variants for None, the default. Giving both raises. ``vgeom.get_texture`` returns the images as
+    drawn. The render context holds the image each environment shows and the batched variant: they are appearance and
+    take no part in checkpoints, and a reset shows the first variant again. The rasterizer draws them, while the other
+    renderers warn once and draw the meshes without them. Only the entities of a rigid or
     deformable structure (rigid, kinematic, FEM, PBD cloth and elastic) show them, the others refusing them.
 
     The images are RGBA, in the format the map sets. The diffuse map holds 8-bit sRGB values, the alpha channel standing
@@ -477,14 +469,16 @@ class DynamicTexture(_ImagelessTexture):
     Parameters
     ----------
     resolution : tuple[int, int]
-        The resolution of every image, as (width, height) in pixels. A renderer uploads the pixels of the batched variant
-        each time they are written, so a larger image costs more per write, while showing a variant costs nothing.
-    variants : tuple[ColorTexture | ImageTexture | AssetTexture | None, ...] | dict[str, ...], optional
-        The images an environment switches between, each a color or an image resized to 'resolution', an
-        ``AssetTexture`` for the texture the asset gives the map, or None for no texture, which shows a black and
-        magenta checkerboard. A mapping names them, so that they are shown by name as well as by position. Each variant
-        costs the memory of one image per visual geom showing the texture. Every environment shows the first variant at
-        build and after a reset. Default is one variant with no texture.
+        The resolution of every image, as (width, height) in pixels. A renderer uploads the pixels of the batched
+        variant at each write, so a larger image costs more per write, while showing a variant is free.
+    variants : tuple[ColorTexture | ImageTexture | None, ...] | dict[str, ...], optional
+        The images an environment switches between, each a color or an image resized to 'resolution', or None for the
+        texture the asset gives the map, which each visual geom resolves to the texture of its own asset material when
+        the entity is added, a black and magenta checkerboard showing where the asset gives none. A mapping names them,
+        so that they are shown by name as well as by position. Each variant costs the memory of one image per visual
+        geom showing the texture, as does the texture the asset gives the map, held whatever the variants. Every
+        environment shows the first variant at build and after a reset. Default is one variant, the texture the asset
+        gives the map.
     is_batched : bool, optional
         Whether the texture holds a batched variant, one image per environment that ``set_texture`` writes pixels into.
         It costs the memory of one image per environment and per visual geom showing the texture, which a texture
@@ -493,7 +487,9 @@ class DynamicTexture(_ImagelessTexture):
 
     resolution: PositiveVec2IType
     variants: (
-        Annotated[tuple[ColorTexture | ImageTexture | AssetTexture | None, ...], Field(min_length=1, strict=False)]
-        | Annotated[dict[str, ColorTexture | ImageTexture | AssetTexture | None], Field(min_length=1)]
+        Annotated[tuple[ColorTexture | ImageTexture | None, ...], Field(min_length=1, strict=False)]
+        | Annotated[dict[str, ColorTexture | ImageTexture | None], Field(min_length=1)]
     ) = (None,)
     is_batched: StrictBool = False
+    # The texture the asset gives the map, which the entity resolves as it is added, None where it gives none
+    _asset_texture: "ColorTexture | ImageTexture | None" = PrivateAttr(default=None)

@@ -327,7 +327,7 @@ def test_export_and_load_rigid(
     anchored_pos = anchored.get_pos()
     anchored_quat = anchored.get_quat()
     stretched.set_vverts(stretched.vgeoms[0].init_vverts + 0.01)
-    anchored.set_texture(1)
+    anchored.set_texture(variant=1)
     for _ in range(20):
         scene.step()
 

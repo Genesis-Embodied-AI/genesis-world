@@ -894,18 +894,6 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
         """Write back the state 'get_state' returned, notifying the subscribers (see 'CheckpointMixin.set_state')."""
         super().set_state(state, envs_idx)
 
-    @mutates(StateChange.VISUAL, differentiable=False)
-    def _set_vgeom_texture(
-        self,
-        vgeom: object,
-        texture: "TextureValueType",
-        envs_idx: "IndexType | None" = None,
-        texture_map_type: TEXTURE_MAP_TYPE | None = None,
-    ) -> None:
-        # The render context holds the dynamic textures, while the consumers of a change of appearance subscribe to the
-        # solver, which notifies them here
-        self.render_context.textures.set_texture(vgeom, texture, envs_idx, texture_map_type)
-
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------

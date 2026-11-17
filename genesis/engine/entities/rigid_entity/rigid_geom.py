@@ -740,32 +740,58 @@ class RigidVisGeom(BuildableMixin, RBC):
         tensor = self._solver.render_context.get_vverts((self,), envs_idx)
         return tensor[0] if self._solver.n_envs == 0 else tensor
 
-    @gs.assert_built
+    @overload
     def set_texture(
         self,
         texture: "TextureValueType",
         envs_idx: "IndexType | None" = None,
         *,
         texture_map_type: TEXTURE_MAP_TYPE | None = None,
+    ) -> None: ...
+
+    @overload
+    def set_texture(
+        self,
+        texture: None = None,
+        envs_idx: "IndexType | None" = None,
+        *,
+        variant: "int | str | Sequence[int | str] | None" = None,
+        texture_map_type: TEXTURE_MAP_TYPE | None = None,
+    ) -> None: ...
+
+    @gs.assert_built
+    def set_texture(
+        self,
+        texture: "TextureValueType | None" = None,
+        envs_idx: "IndexType | None" = None,
+        *,
+        variant: "int | str | Sequence[int | str] | None" = None,
+        texture_map_type: TEXTURE_MAP_TYPE | None = None,
     ) -> None:
-        """Show a variant of a dynamic texture of this visual geom, or write its batched variant, in some environments.
+        """Write the batched variant of a dynamic texture of this visual geom and show it, or show one of its variants,
+        in some environments.
+
+        The pixels `texture` given, the batched variant takes them and shows them. Otherwise the variant `variant` is
+        shown, the texture the asset gives the map if None, whatever the variants. Giving both raises.
 
         Parameters
         ----------
-        texture : int | str | array_like | gs.textures.ColorTexture | gs.textures.ImageTexture
-            A variant, by position or by name, for every selected environment or one per selected environment, or the
-            pixels of the batched variant there, which it then shows: an RGB or RGBA image of shape (height, width,
-            channels) for every selected environment or (len(envs_idx), height, width, channels) for one each,
-            broadcast to the resolution of the texture, or a color or an image texture resized to it. An integer image
-            holds values up to 255 and a float one values up to 1.0, clamped to [0, 1] in the diffuse map and to
-            nonnegative values in the emissive map, whose emission may exceed 1.
+        texture : None | array_like | gs.textures.ColorTexture | gs.textures.ImageTexture
+            The pixels of the batched variant: an RGB or RGBA image of shape (height, width, channels) for every
+            selected environment or (len(envs_idx), height, width, channels) for one each, broadcast to the resolution
+            of the texture, or a color or an image texture resized to it. An integer image holds values up to 255 and a
+            float one values up to 1.0, clamped to [0, 1] in the diffuse map and to nonnegative values in the emissive
+            map, whose emission may exceed 1. Defaults to None.
         envs_idx : None | int | array_like, optional
             The environments to set. If None, every environment is set. Defaults to None.
+        variant : None | int | str | sequence of int or str, optional
+            A variant, by position or by name, for every selected environment or one per selected environment, None for
+            the texture the asset gives the map. Defaults to None.
         texture_map_type : gs.TEXTURE_MAP_TYPE | None, optional
             The map whose dynamic texture to set, which may be None when the surface of the visual geom fills a single
             map with one. Defaults to None.
         """
-        self._solver._set_vgeom_texture(self, texture, envs_idx, texture_map_type)
+        self._solver.render_context.set_texture(self, texture, envs_idx, variant, texture_map_type)
         self._entity._is_texture_written = True
 
     @gs.assert_built

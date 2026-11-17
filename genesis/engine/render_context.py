@@ -4,7 +4,6 @@ import dataclasses
 import functools
 import itertools
 import types
-import weakref
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Generic, NamedTuple, TypeVar, get_args, get_origin
@@ -262,16 +261,15 @@ class TextureVariants:
     """The map of the surface of the mesh the texture fills, which sets the format of the images: 8-bit sRGB values in
     the diffuse map, 16-bit linear values in the emissive map."""
     variants: torch.Tensor
-    """The RGBA image of each variant."""
+    """The RGBA image of each variant declared, then of the texture the asset gives the map."""
     batched: torch.Tensor | None
     """The image of the batched variant in each environment of the scene, None for a texture without."""
     variants_idx: torch.Tensor
-    """The variant each environment of the scene shows, -1 for the batched one."""
-    subscribers: weakref.WeakSet[Subscriber] = dataclasses.field(
-        default_factory=weakref.WeakSet, kw_only=True, repr=False
-    )
+    """The image each environment of the scene shows, -1 for the batched one."""
+    subscribers: set[Subscriber] = dataclasses.field(default_factory=set, kw_only=True, repr=False)
     """The subscribers notified of each write of the batched variant as a change of VISUAL in the environments written,
-    so that a consumer keeping its own copy of the images copies those alone."""
+    so that a consumer keeping its own copy of the images copies those alone. A consumer adds its subscriber there, and
+    removes it once it releases its copy."""
 
 
 @dataclass(frozen=True, eq=False)
@@ -707,6 +705,22 @@ class ScopedRenderContext(Generic[OwnerT]):
         """Whether the user hides a marker of the scoped context (see 'set_hidden')."""
         return marker in self._hidden_markers
 
+    def set_texture(
+        self,
+        mesh: object,
+        texture: "TextureValueType | None",
+        envs_idx: "IndexType | None",
+        variant: "int | str | Sequence[int | str] | None",
+        map_type: TEXTURE_MAP_TYPE | None,
+    ) -> None:
+        """Write the batched variant of a dynamic texture of a mesh and show it, or show one of its variants.
+
+        The subscribers of the render context are notified of the change of appearance (see
+        'DynamicTextures.set_texture' for the parameters).
+        """
+        self.textures.set_texture(mesh, texture, envs_idx, variant, map_type)
+        self._context.invalidate((self,), change=StateChange.VISUAL)
+
     def set_hidden(self, marker: Shape, hidden: bool) -> None:
         """Hide a marker the scoped context shows, or show it again, whatever its staleness.
 
@@ -750,13 +764,12 @@ class ScopedRenderContext(Generic[OwnerT]):
 # -------------------------------- dynamic appearance --------------------------------
 # ------------------------------------------------------------------------------------
 
-# The variants to show, by position or by name, or the pixels to write into the batched variant of a dynamic texture
-# (see 'DynamicTextures.set_texture')
-TextureValueType = int | str | Sequence[int | str] | np.ndarray | torch.Tensor | ColorTexture | ImageTexture
+# The pixels to write into the batched variant of a dynamic texture (see 'DynamicTextures.set_texture')
+TextureValueType = np.ndarray | torch.Tensor | ColorTexture | ImageTexture
 
 
 # The variant an environment shows for the asset, its mesh or its texture, whatever the variants declared, the batched
-# variant being -1
+# variant being -1.
 ASSET_VARIANT_IDX = -2
 
 
@@ -799,9 +812,10 @@ class DynamicTextures:
     ``gs.textures.DynamicTexture``).
 
     Each mesh whose surface fills its diffuse or its emissive map with a dynamic texture holds one TextureVariants per
-    such map. `meshes_surface` holds each mesh, the object it stands for (a visual geom, or an entity drawn as a single
-    mesh), with its surface, and `n_envs` is the number of parallel environments of the scene. Every environment shows
-    the first variant at build and after a reset.
+    such map, whose images are the variants declared then the texture the asset gives the map (see 'set_texture').
+    `meshes_surface` holds each mesh, the object it stands for (a visual geom, or an entity drawn as a single mesh),
+    with its surface, and `n_envs` is the number of parallel environments of the scene. Every environment shows the
+    first variant at build and after a reset.
     """
 
     def __init__(self, meshes_surface: "Iterable[tuple[object, Surface]]", n_envs: int) -> None:
@@ -831,6 +845,7 @@ class DynamicTextures:
             textures = []
             for map_type, options in mesh_options:
                 variants = options.variants.values() if isinstance(options.variants, dict) else options.variants
+                variants = (*variants, options._asset_texture)
                 images = torch.as_tensor(
                     np.stack([mu.texture_to_rgba(variant, options.resolution, map_type) for variant in variants]),
                     device=gs.device,
@@ -872,36 +887,50 @@ class DynamicTextures:
     def set_texture(
         self,
         mesh: object,
-        texture: TextureValueType,
-        envs_idx: "IndexType | None" = None,
-        map_type: TEXTURE_MAP_TYPE | None = None,
+        texture: TextureValueType | None,
+        envs_idx: "IndexType | None",
+        variant: "int | str | Sequence[int | str] | None",
+        map_type: TEXTURE_MAP_TYPE | None,
     ) -> None:
-        """Show a variant of a dynamic texture of a mesh, or write its batched variant, in some environments.
+        """Write the batched variant of a dynamic texture of a mesh and show it, or show one of its variants, in some
+        environments.
 
-        See ``RigidVisGeom.set_texture`` for `texture` and `envs_idx`, and for `map_type`, its `texture_map_type`.
+        Parameters
+        ----------
+        mesh : object
+            The visual geom whose mesh shows the texture.
+        texture : TextureValueType | None
+            See ``RigidVisGeom.set_texture``.
+        envs_idx : None | int | array_like
+            See ``RigidVisGeom.set_texture``.
+        variant : int | str | Sequence[int | str] | None
+            See ``RigidVisGeom.set_texture``.
+        map_type : TEXTURE_MAP_TYPE | None
+            The ``texture_map_type`` of ``RigidVisGeom.set_texture``.
         """
+        if texture is not None and variant is not None:
+            gs.raise_exception("'set_texture' takes either the pixels of the batched variant or a variant, not both.")
         texture_variants = self._get_texture(mesh, map_type)
         options = self._textures_options[texture_variants]
         mask = self._get_envs_mask(envs_idx)
+        if texture is None:
+            # The texture of the asset is the image following the variants declared (see '__init__')
+            variants_idx = np.array(get_variants_idx(options.variants, variant))
+            variants_idx[variants_idx == ASSET_VARIANT_IDX] = len(options.variants)
+            assign_indexed_tensor(texture_variants.variants_idx, mask, variants_idx.tolist())
+            return
         if isinstance(texture, (ColorTexture, ImageTexture)):
             texture = mu.texture_to_rgba(texture, options.resolution, texture_variants.map_type)
         texture_ndim = texture.ndim if isinstance(texture, (torch.Tensor, np.ndarray)) else np.ndim(texture)
-        if texture_ndim <= 1:
-            variants_idx = get_variants_idx(
-                options.variants, tensor_to_array(texture) if isinstance(texture, torch.Tensor) else texture
-            )
-            assign_indexed_tensor(texture_variants.variants_idx, mask, variants_idx)
-            return
         if texture_ndim not in (3, 4):
             gs.raise_exception(
-                "A dynamic texture shows variants, or takes pixels of shape (height, width, channels) for every selected "
-                f"environment or (len(envs_idx), height, width, channels) for one each, got an array of {texture_ndim} "
-                "dims."
+                "A dynamic texture takes pixels of shape (height, width, channels) for every selected environment or "
+                f"(len(envs_idx), height, width, channels) for one each, got an array of {texture_ndim} dims."
             )
         if texture_variants.batched is None:
             gs.raise_exception(
-                "Pixels are written into the batched variant of a dynamic texture, which this one lacks. Declare it with "
-                "'is_batched=True'."
+                "Pixels are written into the batched variant of a dynamic texture, which this one lacks. Declare it "
+                "with 'is_batched=True'."
             )
         # torch.as_tensor warns on a read-only array, such as an image read from a file
         if isinstance(texture, np.ndarray) and not texture.flags.writeable:
@@ -911,7 +940,7 @@ class DynamicTextures:
         if n_channels not in (3, 4):
             gs.raise_exception(f"Pixels are written as RGB or RGBA, got {n_channels} channels.")
         # The images hold uint8 sRGB values in the diffuse map, and float16 linear values in the emissive map, which may
-        # exceed 1, a float array standing for 1.0 where an integer one stands for 255
+        # exceed 1, a float array standing for 1.0 where an integer one stands for 255.
         if texture_variants.map_type == TEXTURE_MAP_TYPE.EMISSIVE:
             alpha = 1.0
             if image.is_floating_point():
@@ -969,7 +998,7 @@ class _ScopedRecord:
     # The number of times the scoped context was made stale, and the latest refresh of its shapes and of its markers
     epoch: int = 0
     # Whether a change of appearance made the scoped context stale since its latest refresh (see
-    # 'RenderContext.subscribe')
+    # 'RenderContext.subscribe').
     has_visual_change: bool = False
     shapes_refresh: _Refresh | None = None
     markers_refresh: _Refresh | None = None
@@ -1127,7 +1156,6 @@ class RenderContext:
         def on_change(solver: "Solver", change: StateChange, envs_idx: "IndexType | None") -> None:
             for record in self._sources_records.get(solver, ()):
                 if change in record.scoped_context.stale_on:
-                    record.has_visual_change |= change is StateChange.VISUAL
                     record.epoch += 1
                 # The environments resolve at the next read of the markers, so that a setter pays no read of the device
                 record.changes.append((change, envs_idx))
@@ -1187,6 +1215,7 @@ class RenderContext:
         for record in self._records:
             if scoped_contexts is None or record.scoped_context in scoped_contexts:
                 record.epoch += 1
+                record.has_visual_change |= change is StateChange.VISUAL
         for subscriber in self._subscribers:
             subscriber.notify(change)
 

@@ -252,7 +252,7 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
             diffuse_texture=gs.textures.DynamicTexture(
                 resolution=(8, 8),
                 variants=(
-                    gs.textures.AssetTexture(),
+                    None,
                     gs.textures.ColorTexture(
                         color=(1.0, 1.0, 1.0),
                     ),
@@ -319,7 +319,7 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
     masks_weight = masks / masks_npixel
 
     # The variants at build: the first color of the screen, the asset texture of the plane, and no texture, whose black
-    # and magenta checkerboard adds red and blue on top of the dark red base
+    # and magenta checkerboard adds red and blue on top of the dark red base.
     colors = np.einsum("bhwc,behw->bec", rgb, masks_weight)
     assert (colors[:, 0, 2] > 150.0).all() and (colors[:, 0, :2] < 30.0).all()
     assert_allclose(colors[:, 1], colors[:, 3], atol=5.0)
@@ -328,7 +328,7 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
 
     # A variant shown by name in one environment, one image per environment written into the batched variant, and a
     # color shared by every one. The images as drawn are those of the shown variant, in the format of the map.
-    screen.set_texture("red", envs_idx=[1])
+    screen.set_texture(envs_idx=[1], variant="red")
     label.set_texture(np.array([[0.0, 1.0, 0.0], [1.0, 1.0, 0.0]])[:, None, None])
     lamp.set_texture(gs.textures.ColorTexture(color=(0.0, 1.0, 0.0)))
     assert_equal(screen_vgeom.get_texture()[:, 4, 4], [[0.0, 0.0, 1.0, 1.0], [1.0, 0.0, 0.0, 1.0]])
@@ -353,15 +353,15 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
     colors = np.einsum("bhwc,behw->bec", camera.render(rgb=True)[0], masks_weight)
     assert (colors[:, 2, 1] > 100.0).all() and (colors[:, 2, 2] < 30.0).all()
     # The emissive map holds linear values: an sRGB image variant shows as its decoded value written as pixels
-    lamp_vgeom.set_texture(1, texture_map_type=gs.TEXTURE_MAP_TYPE.EMISSIVE)
+    lamp_vgeom.set_texture(variant=1, texture_map_type=gs.TEXTURE_MAP_TYPE.EMISSIVE)
     colors_variant = np.einsum("bhwc,behw->bec", camera.render(rgb=True)[0], masks_weight)
     lamp_vgeom.set_texture(np.array([[[0.0, ((128 / 255 + 0.055) / 1.055) ** 2.4, 0.0]]]))
     colors_drawn = np.einsum("bhwc,behw->bec", camera.render(rgb=True)[0], masks_weight)
     assert_allclose(colors_variant[:, 2], colors_drawn[:, 2], atol=2.0)
     with pytest.raises(gs.GenesisException, match="No variant is named"):
-        screen_vgeom.set_texture("green")
+        screen_vgeom.set_texture(variant="green")
     with pytest.raises(gs.GenesisException, match="integer position"):
-        screen_vgeom.set_texture(0.5)
+        screen_vgeom.set_texture(variant=0.5)
     with pytest.raises(gs.GenesisException, match="2 dims"):
         screen_vgeom.set_texture(np.zeros((16, 16)))
     with pytest.raises(gs.GenesisException, match="batched variant"):
@@ -387,7 +387,7 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
     )
     assert surface.opacity_texture is None
     with pytest.raises(gs.GenesisException, match="diffuse map"):
-        lamp_vgeom.set_texture(0, texture_map_type=gs.TEXTURE_MAP_TYPE.DIFFUSE)
+        lamp_vgeom.set_texture(variant=0, texture_map_type=gs.TEXTURE_MAP_TYPE.DIFFUSE)
     with pytest.raises(gs.GenesisException, match="no dynamic texture"):
         reference.vgeoms[0].get_texture()
     with pytest.raises(gs.GenesisException, match="diffuse_texture"):
@@ -399,7 +399,7 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
         )
 
     # A reset of one environment shows the first variants there again, the asset texture of the plane, and a reset of
-    # the scene does so in every environment
+    # the scene does so in every environment.
     scene.reset(envs_idx=[1])
     colors = np.einsum("bhwc,behw->bec", camera.render(rgb=True)[0], masks_weight)
     assert colors[0, 1, 1] > 100.0 and colors[0, 1, 0] < 30.0
@@ -415,7 +415,7 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer):
     # Drawing every environment in one pass needs 'split_envs' off, which 'test_dynamic_texture' needs on for the
-    # images of each environment, and the option holds for a whole scene
+    # images of each environment, and the option holds for a whole scene.
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, 0.75, 4.0),
@@ -544,7 +544,7 @@ def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer
 
     # A variant per environment, then an image per environment, then a variant beside an image. A scene without
     # parallel environments returns the image of its only environment alone.
-    vgeom.set_texture([0, 1][:n_envs_])
+    vgeom.set_texture(variant=[0, 1][:n_envs_])
     variants_color = np.array([[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]])
     assert_equal(vgeom.get_texture()[..., 0, 0, :], variants_color if n_envs > 0 else variants_color[0])
     colors = np.einsum("hwc,ebhw->ebc", camera.render(rgb=True)[0], masks_weight)
@@ -554,7 +554,7 @@ def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer
     colors = np.einsum("hwc,ebhw->ebc", camera.render(rgb=True)[0], masks_weight)
     is_high = np.array([[False, True, False], [True, True, False]])[:n_envs_]
     assert (colors[0][is_high] > 150.0).all() and (colors[0][~is_high] < 30.0).all()
-    vgeom.set_texture(0, envs_idx=[n_envs_ - 1] if n_envs > 0 else None)
+    vgeom.set_texture(envs_idx=[n_envs_ - 1] if n_envs > 0 else None, variant=0)
     colors = np.einsum("hwc,ebhw->ebc", camera.render(rgb=True)[0], masks_weight)
     is_high = np.array([[False, True, False], [True, False, False]] if n_envs > 0 else [[True, False, False]])
     assert (colors[0][is_high] > 150.0).all() and (colors[0][~is_high] < 30.0).all()
@@ -565,8 +565,8 @@ def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer
     assert (colors[0][is_high] > 150.0).all() and (colors[0][~is_high] < 30.0).all()
 
     # The deformable entities switch their variant per environment as a rigid one does
-    block.set_texture([1, 0][:n_envs_])
-    cube.set_texture([1, 0][:n_envs_])
+    block.set_texture(variant=[1, 0][:n_envs_])
+    cube.set_texture(variant=[1, 0][:n_envs_])
     _, _, segmentation, _ = deformable_camera.render(rgb=False, segmentation=True)
     deformable_masks = (segmentation == np.array([block.idx + 1, cube.idx + 1])[:, None, None, None]) & (
         envs_rows_mask[None, :, :, None]

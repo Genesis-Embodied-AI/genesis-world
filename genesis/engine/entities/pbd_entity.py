@@ -1,4 +1,5 @@
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, overload
 
 import numpy as np
 import torch
@@ -189,19 +190,40 @@ class PBDTetEntity(PBDBaseEntity):
         self._mesh = self._vmesh.copy()
         self._mesh.remesh(edge_len_abs=self.particle_size, fix=isinstance(self, PBD3DEntity))
 
-    @gs.assert_built
+    @overload
     def set_texture(
         self,
         texture: "TextureValueType",
         envs_idx: IndexType | None = None,
         *,
         texture_map_type: TEXTURE_MAP_TYPE | None = None,
+    ) -> None: ...
+
+    @overload
+    def set_texture(
+        self,
+        texture: None = None,
+        envs_idx: IndexType | None = None,
+        *,
+        variant: "int | str | Sequence[int | str] | None" = None,
+        texture_map_type: TEXTURE_MAP_TYPE | None = None,
+    ) -> None: ...
+
+    @gs.assert_built
+    def set_texture(
+        self,
+        texture: "TextureValueType | None" = None,
+        envs_idx: IndexType | None = None,
+        *,
+        variant: "int | str | Sequence[int | str] | None" = None,
+        texture_map_type: TEXTURE_MAP_TYPE | None = None,
     ) -> None:
-        """Show a variant of a dynamic texture of the visual mesh of this entity, or write its batched variant.
+        """Write the batched variant of a dynamic texture of the visual mesh of this entity and show it, or show one of
+        its variants, giving both raising.
 
         The visual mesh is the single visual geom of the entity (see ``RigidVisGeom.set_texture``).
         """
-        self._solver._set_vgeom_texture(self, texture, envs_idx, texture_map_type)
+        self._solver.render_context.set_texture(self, texture, envs_idx, variant, texture_map_type)
         self._is_texture_written = True
 
     @gs.assert_built

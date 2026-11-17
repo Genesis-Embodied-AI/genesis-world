@@ -159,7 +159,7 @@ class TexturePainterPlugin(RaycasterViewerPlugin):
                 images[i_env] = tensor_to_array(image if env_idx is None else image[0])
 
             # A stroke joins its successive points, unless it crosses to another canvas or environment, or across a
-            # seam of the texture coordinates, which moves it to a distant part of the image
+            # seam of the texture coordinates, which moves it to a distant part of the image.
             stroke_start = pixel_pos
             if self._stroke_end is not None:
                 end_canvas, end_env_idx, end_pixel_pos = self._stroke_end
@@ -213,7 +213,7 @@ def main():
     width, height = TEXTURE_RESOLUTION
     is_stripe = np.broadcast_to(np.arange(width) // 32 % 2 == 0, (height, width))
     variants = {
-        "duck": gs.textures.AssetTexture(),
+        "duck": None,
         "purple": gs.textures.ColorTexture(
             color=(0.71, 0.62, 0.86),
         ),
@@ -283,13 +283,13 @@ def main():
     def show_variant(offset=0):
         nonlocal i_variant
         i_variant = (i_variant + offset) % len(variants)
-        duck.set_texture((i_variant + envs_idx) % len(variants))
+        duck.set_texture(variant=(i_variant + envs_idx) % len(variants))
 
     def draw():
         duck.set_texture(np.random.rand(len(envs_idx), 1, 1, 3))
 
     def clear():
-        board.set_texture("white")
+        board.set_texture(variant="white")
         show_variant()
 
     def stop():

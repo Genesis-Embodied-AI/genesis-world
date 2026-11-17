@@ -307,7 +307,7 @@ def get_wall_thickness(verts: np.ndarray, faces: np.ndarray, quantile: float, we
 class AssetTextures(NamedTuple):
     """The textures an asset gives the maps of a mesh that a dynamic texture may fill, None where it gives none.
 
-    The asset texture variants of a dynamic texture resolve to them (see ``gs.textures.AssetTexture``).
+    The variants of a dynamic texture left to None resolve to them (see ``gs.textures.DynamicTexture``).
     """
 
     color: "gs.textures.Texture | None"
@@ -465,7 +465,7 @@ _TEXTURE_MATERIALS_CACHE = OwnedCache()
 
 
 def texture_to_rgba(
-    texture: "gs.textures.ColorTexture | gs.textures.ImageTexture | gs.textures.AssetTexture | None",
+    texture: "gs.textures.ColorTexture | gs.textures.ImageTexture | None",
     resolution: tuple[int, int],
     texture_map_type: TEXTURE_MAP_TYPE = TEXTURE_MAP_TYPE.DIFFUSE,
 ) -> np.ndarray:
@@ -474,8 +474,8 @@ def texture_to_rgba(
     The diffuse map holds sRGB uint8 values and the emissive map linear float16 values (see
     ``gs.textures.DynamicTexture``). An image is resized to 'resolution', given as (width, height), and converted from
     its own encoding. A color is sRGB in the diffuse map and linear in the emissive map, as for a static texture. A gray
-    or gray-alpha color spans the three color channels, as an image of one or two channels does. No texture, an
-    unresolved asset texture included, gives a black and magenta checkerboard of 8 by 8 cells.
+    or gray-alpha color spans the three color channels, as an image of one or two channels does. No texture, which a
+    variant left to None resolves to where the asset gives none, gives a black and magenta checkerboard of 8 by 8 cells.
     """
     width, height = resolution
     if not isinstance(texture, (gs.textures.ColorTexture, gs.textures.ImageTexture)):
@@ -519,7 +519,8 @@ def _get_seed_image(texture: "gs.textures.Texture | None") -> np.ndarray | None:
     if isinstance(texture, gs.textures.DynamicTexture):
         variants = texture.variants
         return texture_to_rgba(
-            next(iter(variants.values())) if isinstance(variants, dict) else variants[0], texture.resolution
+            texture=next(iter(variants.values())) if isinstance(variants, dict) else variants[0],
+            resolution=texture.resolution,
         )
     return None
 
@@ -571,7 +572,7 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
             visual = trimesh.visual.TextureVisuals(uv=flipped_uvs, material=material)
         else:
             # A mesh without uvs drawn with the surface, such as the debug representation of a deformable entity, takes
-            # the mean color of the image, as for an image texture
+            # the mean color of the image, as for an image texture.
             visual = trimesh.visual.ColorVisuals(
                 vertex_colors=np.tile(texture_seed.mean(axis=(0, 1)) / 255.0, [n_verts, 1])
             )

@@ -234,7 +234,7 @@ class Texture(object):
             internal_fmt = GL_RGBA16F if fmt == GL_RGBA else GL_RGB16F
 
         # The source rows are tightly packed, while OpenGL reads each row from a 4-byte boundary by default, shifting
-        # every row after the first where a row is no multiple of 4 bytes, as an odd width of RGB half floats does
+        # every row after the first where a row is no multiple of 4 bytes, as an odd width of RGB half floats does.
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
 
         # Bind texture and generate mipmaps
@@ -253,7 +253,7 @@ class Texture(object):
         else:
             glTexImage2D(self.tex_type, 0, internal_fmt, width, height, 0, fmt, self.data_format, data)
         # A texture array has no mipmaps, since generating them covers every layer, which would make the upload of a
-        # single layer cost as much as the whole array
+        # single layer cost as much as the whole array.
         if self.source is not None and not is_array:
             glGenerateMipmap(self.tex_type)
 

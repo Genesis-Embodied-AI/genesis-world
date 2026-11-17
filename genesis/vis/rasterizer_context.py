@@ -413,6 +413,8 @@ class RasterizerContext(BuildableMixin):
                 if seg_nodes is not None:
                     seg_nodes.remove(node)
         shape_nodes.nodes.clear()
+        for binding in shape_nodes.textures:
+            binding.texture.subscribers.discard(binding.subscriber)
         shape_nodes.textures.clear()
 
     def _remove_shape_nodes(self, shape: Shape) -> None:
@@ -537,7 +539,7 @@ class RasterizerContext(BuildableMixin):
                     else:
                         mesh.visual = geometry.visual
                     # A marker is drawn with the colors its visual states alone, and a mesh showing a dynamic texture
-                    # binds the texture arrays it is drawn from to a material of its own
+                    # binds the texture arrays it is drawn from to a material of its own.
                     material_keys = []
                     if geometry.surface is not None and not geometry.textures:
                         is_textured = isinstance(mesh.visual, trimesh.visual.TextureVisuals)
@@ -811,7 +813,7 @@ class RasterizerContext(BuildableMixin):
         n_rendered = len(self.rendered_envs_idx)
         for texture in textures:
             # A dynamic texture is the base color of the material when the surface draws it as its color, and its
-            # emissive texture otherwise (see 'surface_uvs_to_trimesh_visual')
+            # emissive texture otherwise (see 'surface_uvs_to_trimesh_visual').
             is_diffuse = texture.map_type == TEXTURE_MAP_TYPE.DIFFUSE
             is_base_color = rgba is fields["diffuse_texture" if is_diffuse else "emissive_texture"]
             images = texture.variants

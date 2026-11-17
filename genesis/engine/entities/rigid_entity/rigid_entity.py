@@ -1242,15 +1242,36 @@ class KinematicEntity(Entity):
             )
         self._vgeoms[0].set_vverts(vverts, envs_idx, variant=variant)
 
-    @gs.assert_built
+    @overload
     def set_texture(
         self,
         texture: "TextureValueType",
         envs_idx: "IndexType | None" = None,
         *,
         texture_map_type: TEXTURE_MAP_TYPE | None = None,
+    ) -> None: ...
+
+    @overload
+    def set_texture(
+        self,
+        texture: None = None,
+        envs_idx: "IndexType | None" = None,
+        *,
+        variant: "int | str | Sequence[int | str] | None" = None,
+        texture_map_type: TEXTURE_MAP_TYPE | None = None,
+    ) -> None: ...
+
+    @gs.assert_built
+    def set_texture(
+        self,
+        texture: "TextureValueType | None" = None,
+        envs_idx: "IndexType | None" = None,
+        *,
+        variant: "int | str | Sequence[int | str] | None" = None,
+        texture_map_type: TEXTURE_MAP_TYPE | None = None,
     ) -> None:
-        """Show a variant of a dynamic texture of the visual geom of this entity, or write its batched variant.
+        """Write the batched variant of a dynamic texture of the visual geom of this entity and show it, or show one
+        of its variants, giving both raising.
 
         The entity holds a single visual geom, whose 'set_texture' this is (see ``RigidVisGeom.set_texture``).
         """
@@ -1259,7 +1280,7 @@ class KinematicEntity(Entity):
                 f"'entity.set_texture' requires an entity with a single visual geom, got {len(self._vgeoms)}. Use "
                 "'vgeom.set_texture' of its visual geoms instead."
             )
-        self._vgeoms[0].set_texture(texture, envs_idx, texture_map_type=texture_map_type)
+        self._vgeoms[0].set_texture(texture, envs_idx, variant=variant, texture_map_type=texture_map_type)
 
     @gs.assert_built
     def get_vverts(self, envs_idx: "IndexType | None" = None) -> torch.Tensor:
