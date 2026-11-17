@@ -21,8 +21,7 @@ class ForceField(RBC):
     """
     Base class for all force fields. This class should not be used directly.
 
-    A force field is active once created, and its `deactivate` and `activate` methods switch it off and back on at any
-    time.
+    A force field is active once created, and `deactivate` and `activate` switch it off and back on at any time.
 
     Note
     ----
