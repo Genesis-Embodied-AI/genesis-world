@@ -3,7 +3,10 @@ import pytest
 import torch
 import trimesh
 
+import quadrants as qd
+
 import genesis as gs
+from genesis.engine.solvers.mpm_material_physics import ElasticPhysicsBase
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -192,6 +195,14 @@ def test_perf_dispatch(variant, precision, show_viewer):
     class UnboundMaterial(gs.materials.MPM.Base):
         pass
 
+    class UnstressedElastic(gs.materials.MPM.Elastic):
+        pass
+
+    class UnstressedElasticPhysics(ElasticPhysicsBase[UnstressedElastic]):
+        @qd.func
+        def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+            return qd.Matrix.zero(gs.qd_float, 3, 3)
+
     with pytest.raises(gs.GenesisException, match="No MPMMaterialPhysics is registered"):
         gs.Scene().add_entity(morph=gs.morphs.Box(size=(0.08, 0.08, 0.08)), material=UnboundMaterial())
 
@@ -246,6 +257,19 @@ def test_perf_dispatch(variant, precision, show_viewer):
             size=(0.08, 0.08, 0.08),
         ),
         material=ElasticTwin(
+            E=3e5,
+            nu=0.2,
+            rho=200.0,
+            model=elastic_model,
+        ),
+    )
+    # A material bound to a physics of its own simulates with it, here one that keeps no stress and collapses
+    unstressed = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.025, 0.25, 0.2),
+            size=(0.08, 0.08, 0.08),
+        ),
+        material=UnstressedElastic(
             E=3e5,
             nu=0.2,
             rho=200.0,
@@ -331,7 +355,10 @@ def test_perf_dispatch(variant, precision, show_viewer):
     # the snow keep the flattening of their impact.
     elastic_height = final_elastic_pos[..., 2].amax(dim=-1) - final_elastic_pos[..., 2].amin(dim=-1)
     liquid_height = final_liquid_pos[..., 2].amax(dim=-1) - final_liquid_pos[..., 2].amin(dim=-1)
+    unstressed_pos = unstressed.get_particles_pos()
+    unstressed_height = unstressed_pos[..., 2].amax(dim=-1) - unstressed_pos[..., 2].amin(dim=-1)
     assert (liquid_height < 0.9 * elastic_height).all()
+    assert (unstressed_height < 0.6 * elastic_height).all()
     if variant == "svd":
         sand_pos = sand.get_particles_pos()
         elasto_plastic_pos = elasto_plastic.get_particles_pos()
