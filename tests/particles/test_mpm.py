@@ -260,6 +260,27 @@ def test_perf_dispatch(variant, show_viewer):
             ),
             material=gs.materials.MPM.Snow(),
         )
+        # A snow block differs from an elasto-plastic block of the same yield bounds by its hardening under compression
+        # alone. Both sample their particles on the same lattice.
+        snow_regular = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(-0.3, 0.1, 0.2),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.MPM.Snow(
+                sampler="regular",
+            ),
+        )
+        elasto_plastic_unhardened = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(-0.3, -0.1, 0.2),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.MPM.ElastoPlastic(
+                use_von_mises=False,
+                sampler="regular",
+            ),
+        )
     scene.build(n_envs=2)
 
     # Aggregate SVD flag must match the variant for the dispatch path under test to actually run.
@@ -304,6 +325,10 @@ def test_perf_dispatch(variant, show_viewer):
         assert (elasto_plastic_height < 0.97 * elastic_height).all()
         assert (clamp_height < 0.95 * elastic_height).all()
         assert (snow_height < 0.99 * init_snow_height).all()
+        # The hardened snow compresses less on impact, which keeps its particles higher
+        snow_regular_z = snow_regular.get_particles_pos()[..., 2].mean(dim=-1)
+        elasto_plastic_unhardened_z = elasto_plastic_unhardened.get_particles_pos()[..., 2].mean(dim=-1)
+        assert (snow_regular_z - elasto_plastic_unhardened_z > 5e-3).all()
 
 
 @pytest.mark.required
