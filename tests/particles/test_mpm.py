@@ -178,13 +178,22 @@ def test_particle_constraints(show_viewer, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("variant", ["svd", "no_svd"])
-def test_perf_dispatch(variant, show_viewer):
+def test_perf_dispatch(variant, precision, show_viewer):
     if variant == "svd":
         elastic_model = "corotation"
         liquid_viscous = True
     else:
         elastic_model = "neohooken"
         liquid_viscous = False
+
+    class ElasticTwin(gs.materials.MPM.Elastic):
+        pass
+
+    class UnboundMaterial(gs.materials.MPM.Base):
+        pass
+
+    with pytest.raises(gs.GenesisException, match="No MPMMaterialPhysics is registered"):
+        gs.Scene().add_entity(morph=gs.morphs.Box(size=(0.08, 0.08, 0.08)), material=UnboundMaterial())
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -223,6 +232,20 @@ def test_perf_dispatch(variant, show_viewer):
             size=(0.08, 0.08, 0.08),
         ),
         material=gs.materials.MPM.Elastic(
+            E=3e5,
+            nu=0.2,
+            rho=200.0,
+            model=elastic_model,
+        ),
+    )
+    # A subclass of a material without a physics of its own simulates with the physics of the material. It lies a whole
+    # number of cells away from its twin, so that both sit alike on the grid.
+    elastic_subclass = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.2875, 0.0, 0.2),
+            size=(0.08, 0.08, 0.08),
+        ),
+        material=ElasticTwin(
             E=3e5,
             nu=0.2,
             rho=200.0,
@@ -281,6 +304,7 @@ def test_perf_dispatch(variant, show_viewer):
     assert len({elastic.material, elastic_twin.material, liquid.material}) == 2
 
     init_elastic_pos = elastic.get_particles_pos()
+    init_elastic_subclass_pos = elastic_subclass.get_particles_pos()
     init_liquid_pos = liquid.get_particles_pos()
     if variant == "svd":
         init_snow_pos = snow.get_particles_pos()
@@ -290,6 +314,8 @@ def test_perf_dispatch(variant, show_viewer):
 
     final_elastic_pos = elastic.get_particles_pos()
     final_liquid_pos = liquid.get_particles_pos()
+    elastic_subclass_disp = elastic_subclass.get_particles_pos() - init_elastic_subclass_pos
+    assert_allclose(elastic_subclass_disp, final_elastic_pos - init_elastic_pos, tol=1e-13 if precision == "64" else 5e-6)
 
     # Gravity acted: particles moved down on average.
     assert init_elastic_pos[..., 2].mean() - final_elastic_pos[..., 2].mean() > 0.05
