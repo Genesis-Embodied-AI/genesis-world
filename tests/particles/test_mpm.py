@@ -181,34 +181,13 @@ def test_particle_constraints(show_viewer, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("variant", ["svd", "no_svd"])
-def test_perf_dispatch(variant, precision, show_viewer):
+def test_perf_dispatch(variant, show_viewer):
     if variant == "svd":
         elastic_model = "corotation"
         liquid_viscous = True
     else:
         elastic_model = "neohooken"
         liquid_viscous = False
-
-    class ElasticTwin(gs.materials.MPM.Elastic):
-        pass
-
-    class UnboundMaterial(gs.materials.MPM.Base):
-        pass
-
-    class UnstressedElastic(gs.materials.MPM.Elastic):
-        pass
-
-    class UnstressedElasticPhysics(MPMMaterialPhysics[UnstressedElastic]):
-        @property
-        def needs_svd(self) -> bool:
-            return False
-
-        @qd.func
-        def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-            return qd.Matrix.zero(gs.qd_float, 3, 3)
-
-    with pytest.raises(gs.GenesisException, match="No MPMMaterialPhysics is registered"):
-        gs.Scene().add_entity(morph=gs.morphs.Box(size=(0.08, 0.08, 0.08)), material=UnboundMaterial())
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -235,33 +214,6 @@ def test_perf_dispatch(variant, precision, show_viewer):
             size=(0.08, 0.08, 0.08),
         ),
         material=gs.materials.MPM.Elastic(
-            E=3e5,
-            nu=0.2,
-            rho=200.0,
-            model=elastic_model,
-        ),
-    )
-    # A subclass of a material without a physics of its own simulates with the physics of the material. It lies a whole
-    # number of cells away from its twin, so that both sit alike on the grid.
-    elastic_twin = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.2875, 0.0, 0.2),
-            size=(0.08, 0.08, 0.08),
-        ),
-        material=ElasticTwin(
-            E=3e5,
-            nu=0.2,
-            rho=200.0,
-            model=elastic_model,
-        ),
-    )
-    # A material bound to a physics of its own simulates with it, here one that keeps no stress and collapses
-    unstressed = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.025, 0.25, 0.2),
-            size=(0.08, 0.08, 0.08),
-        ),
-        material=UnstressedElastic(
             E=3e5,
             nu=0.2,
             rho=200.0,
@@ -317,7 +269,6 @@ def test_perf_dispatch(variant, precision, show_viewer):
     assert scene.mpm_solver.mpm_config.is_svd_needed == (variant == "svd")
 
     init_elastic_pos = elastic.get_particles_pos()
-    init_elastic_twin_pos = elastic_twin.get_particles_pos()
     init_liquid_pos = liquid.get_particles_pos()
     if variant == "svd":
         init_snow_pos = snow.get_particles_pos()
@@ -327,9 +278,6 @@ def test_perf_dispatch(variant, precision, show_viewer):
 
     final_elastic_pos = elastic.get_particles_pos()
     final_liquid_pos = liquid.get_particles_pos()
-    elastic_twin_disp = elastic_twin.get_particles_pos() - init_elastic_twin_pos
-    assert_allclose(elastic_twin_disp, final_elastic_pos - init_elastic_pos, tol=1e-13 if precision == "64" else 5e-6)
-
     # Gravity acted: particles moved down on average.
     assert init_elastic_pos[..., 2].mean() - final_elastic_pos[..., 2].mean() > 0.05
     assert init_liquid_pos[..., 2].mean() - final_liquid_pos[..., 2].mean() > 0.05
@@ -344,10 +292,7 @@ def test_perf_dispatch(variant, precision, show_viewer):
     # the snow keep the flattening of their impact.
     elastic_height = final_elastic_pos[..., 2].amax(dim=-1) - final_elastic_pos[..., 2].amin(dim=-1)
     liquid_height = final_liquid_pos[..., 2].amax(dim=-1) - final_liquid_pos[..., 2].amin(dim=-1)
-    unstressed_pos = unstressed.get_particles_pos()
-    unstressed_height = unstressed_pos[..., 2].amax(dim=-1) - unstressed_pos[..., 2].amin(dim=-1)
     assert (liquid_height < 0.9 * elastic_height).all()
-    assert (unstressed_height < 0.6 * elastic_height).all()
     if variant == "svd":
         sand_pos = sand.get_particles_pos()
         elasto_plastic_pos = elasto_plastic.get_particles_pos()
@@ -362,6 +307,95 @@ def test_perf_dispatch(variant, precision, show_viewer):
         assert (elasto_plastic_height < 0.97 * elastic_height).all()
         assert (clamp_height < 0.95 * elastic_height).all()
         assert (snow_height < 0.99 * init_snow_height).all()
+
+
+@pytest.mark.required
+def test_user_material_physics(precision, show_viewer):
+    class ElasticTwin(gs.materials.MPM.Elastic):
+        pass
+
+    class UnboundMaterial(gs.materials.MPM.Base):
+        pass
+
+    class UnstressedElastic(gs.materials.MPM.Elastic):
+        pass
+
+    class UnstressedElasticPhysics(MPMMaterialPhysics[UnstressedElastic]):
+        @qd.func
+        def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+            return qd.Matrix.zero(gs.qd_float, 3, 3)
+
+    with pytest.raises(TypeError, match="already binds"):
+
+        class DuplicatePhysics(MPMMaterialPhysics[UnstressedElastic]):
+            pass
+
+    with pytest.raises(TypeError, match="subclasses the registered physics"):
+
+        class DerivedPhysics(UnstressedElasticPhysics):
+            pass
+
+    with pytest.raises(gs.GenesisException, match="No MPMMaterialPhysics is registered"):
+        gs.Scene().add_entity(morph=gs.morphs.Box(size=(0.08, 0.08, 0.08)), material=UnboundMaterial())
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=2e-3,
+            substeps=10,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            grid_density=64,
+            lower_bound=(-0.4, -0.4, -0.05),
+            upper_bound=(0.4, 0.4, 0.5),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -0.8, 0.4),
+            camera_lookat=(-0.1, 0.0, 0.05),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    elastic = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.1, 0.0, 0.06),
+            size=(0.08, 0.08, 0.08),
+        ),
+        material=gs.materials.MPM.Elastic(),
+    )
+    # A subclass of a material without a physics of its own simulates with the physics of the material. It lies a whole
+    # number of cells away from its twin, so that both sit alike on the grid.
+    elastic_twin = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.2875, 0.0, 0.06),
+            size=(0.08, 0.08, 0.08),
+        ),
+        material=ElasticTwin(),
+    )
+    # A material bound to a physics of its own simulates with it, here one that keeps no stress and collapses
+    unstressed = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.1, 0.0, 0.06),
+            size=(0.08, 0.08, 0.08),
+        ),
+        material=UnstressedElastic(),
+    )
+    scene.build(n_envs=2)
+
+    init_elastic_pos = elastic.get_particles_pos()
+    init_elastic_twin_pos = elastic_twin.get_particles_pos()
+    for _ in range(50):
+        scene.step()
+
+    elastic_pos = elastic.get_particles_pos()
+    elastic_twin_disp = elastic_twin.get_particles_pos() - init_elastic_twin_pos
+    assert_allclose(elastic_twin_disp, elastic_pos - init_elastic_pos, tol=1e-13 if precision == "64" else 5e-6)
+
+    unstressed_pos = unstressed.get_particles_pos()
+    elastic_height = elastic_pos[..., 2].amax(dim=-1) - elastic_pos[..., 2].amin(dim=-1)
+    unstressed_height = unstressed_pos[..., 2].amax(dim=-1) - unstressed_pos[..., 2].amin(dim=-1)
+    assert (unstressed_height < 0.6 * elastic_height).all()
 
 
 @pytest.mark.required
