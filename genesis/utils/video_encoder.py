@@ -87,8 +87,8 @@ class VideoEncoder:
 
     The container is created when the first frame is written rather than upfront, because hardware encoders reject
     some resolutions and the codec can only be validated against the true frame size. A video that never receives a
-    frame therefore leaves no file behind. The video takes the size of its first frame, every later frame being cropped
-    or padded with black to it.
+    frame therefore leaves no file behind. The video takes the shape of its first frame, which every later frame must
+    match.
 
     Parameters
     ----------
@@ -131,7 +131,7 @@ class VideoEncoder:
         self._stream = None
         self._frame = None
         self._buffer = None
-        # Shape of the first frame of the video, the size of the video, set by the calling thread
+        # Shape of the first frame of the video, set by the calling thread so that a mismatch raises there
         self._frame_shape = None
 
         self._queue = queue.Queue(maxsize=ENCODER_QUEUE_SIZE) if is_threaded else None
@@ -208,10 +208,6 @@ class VideoEncoder:
         if self._buffer is None:
             self._open(frame)
 
-        if frame.shape != self._frame_shape:
-            # The padding of the video is written once (see '_open'), which a frame of another size invalidates
-            self._buffer[...] = 0
-            frame = frame[: self._frame_shape[0], : self._frame_shape[1]]
         self._buffer[: frame.shape[0], : frame[0].size] = frame.reshape((frame.shape[0], -1))
         for packet in self._stream.encode(self._frame):
             self._container.mux(packet)
@@ -233,8 +229,10 @@ class VideoEncoder:
         # No encoding thread and no frame storage means a new video, the encoder being reusable once closed
         if self._thread is None and self._buffer is None:
             self._frame_shape = frame.shape
-        elif frame.ndim != len(self._frame_shape):
-            gs.raise_exception("Frames must be all grayscale or all color.")
+        elif frame.shape != self._frame_shape:
+            gs.raise_exception(
+                f"Frame of shape {frame.shape} differs from the shape {self._frame_shape} of the first frame of the video."
+            )
 
         if self._is_threaded:
             if self._thread is None:
