@@ -272,7 +272,7 @@ def test_contact_force_transpose_matches_fd():
     # perturbs the row forces and the contact normals directly and checks both transposes against the engine's own
     # force assembly, re-run per perturbation through kernel_resolve_post with the solve skipped, so the row forces
     # stay frozen while the frame moves. The integration with the solve and the rest of the backward pass remains
-    # with the per-step cases.
+    # with the per-step cases, and the public-rollout coverage of the chain with the pose case below.
     # Engine modules resolve gs dtypes at import time, which requires gs.init: import after initialization
     from genesis.engine.solvers.rigid.constraint.backward import (
         kernel_load_dL_defc_force_from_contact_force,
@@ -401,6 +401,118 @@ def test_contact_force_transpose_matches_fd():
     assert_allclose(error / trials, 0.0, atol=1e-4, err_msg="contact-frame chain mismatch")
     constraint_state.efc_force.from_numpy(init_efc)
     collider_state.contact_data.normal.from_numpy(init_normal)
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.debug(False)
+def test_contact_pose_grad_matches_fd():
+    # The per-step FD cases perturb the control forces, under which the contact normals of their face contacts
+    # stay put to first order, so the contact-frame chain of the net-contact-force transpose cannot surface in
+    # their gradients, and the directed transpose test above drives the private kernels directly. This test
+    # covers the chain through the public rollout: a sphere resting in the groove of two fixed boxes touches
+    # their top inner edges, whose contact normals rotate when a pose moves, so the gradients of a loss reading
+    # get_links_net_contact_force() w.r.t. the sphere pose and a wall pose carry the frame chain end to end.
+    def _build_groove():
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(
+                substeps=2,
+                requires_grad=True,
+            ),
+            rigid_options=gs.options.RigidOptions(
+                constraint_timeconst=0.02,
+                impratio=2.0,
+            ),
+            show_viewer=False,
+        )
+        walls = [
+            scene.add_entity(
+                gs.morphs.Box(
+                    size=(0.36, 0.5, 0.4),
+                    pos=(x, 0.0, 0.0),
+                    fixed=True,
+                ),
+                vis_mode="collision",
+            )
+            for x in (-0.32, 0.32)
+        ]
+        sphere = scene.add_entity(
+            gs.morphs.Sphere(
+                radius=0.2,
+                pos=(0.0, 0.0, 0.33),
+            ),
+            vis_mode="collision",
+        )
+        scene.build(n_envs=0)
+        # The gravity load of a dense sphere sets the equilibrium edge penetration the pose perturbations stay
+        # inside, so the two edge contacts survive them.
+        sphere.set_mass(670.0)
+        return scene, walls, sphere
+
+    n_settle = 50
+    n_steps = 2
+    base_force = np.array([0.5, 0.0, -8.0, 0.0, 0.0, 0.0])
+    # The z directions of both leaves run through the stiff-cone derivative, so they share the ground-height
+    # relative bound of the per-step cases, and the step has to stay this small for the finite differences
+    # to converge inside it: larger steps bias the reference through the cone's curvature.
+    fd_eps = 1e-6
+
+    scene_ana, walls_ana, sphere_ana = _build_groove()
+
+    def settle(scene, sphere):
+        for _ in range(n_settle):
+            sphere.control_dofs_force(base_force)
+            scene.step()
+
+    scene_ana.reset()
+    settle(scene_ana, sphere_ana)
+    assert_allclose(sphere_ana.get_dofs_velocity()[2], 0.0, atol=5e-4)
+    n_contacts = len(sphere_ana.get_contacts()["geom_a"])
+    assert n_contacts == 2, "setup error: the sphere must touch both walls"
+
+    # The sphere rides up out of its built pose while settling, and the leaf must hold the settled pose: writing
+    # the built pose would teleport it into a deep corner penetration, a different contact regime.
+    init_sphere = tensor_to_array(sphere_ana.get_pos().detach())
+    init_wall = tensor_to_array(walls_ana[0].get_pos().detach())
+    sphere_pos = torch.tensor(init_sphere, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    wall_pos = torch.tensor(init_wall, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    sphere_ana.set_pos(sphere_pos, relative=False)
+    walls_ana[0].set_pos(wall_pos, relative=False)
+    for _ in range(n_steps):
+        sphere_ana.control_dofs_force(base_force)
+        scene_ana.step()
+        assert len(sphere_ana.get_contacts()["geom_a"]) == n_contacts, "contact set changed during grad window"
+    loss = (sphere_ana.get_links_net_contact_force() ** 2).sum()
+    scene_ana.backward(loss)
+
+    scene_fd, walls_fd, sphere_fd = _build_groove()
+
+    @torch.no_grad()
+    def loss_at(pos_sphere, pos_wall):
+        scene_fd.reset()
+        settle(scene_fd, sphere_fd)
+        sphere_fd.set_pos(tuple(pos_sphere), relative=False)
+        walls_fd[0].set_pos(tuple(pos_wall), relative=False)
+        for _ in range(n_steps):
+            sphere_fd.control_dofs_force(base_force)
+            scene_fd.step()
+            assert len(sphere_fd.get_contacts()["geom_a"]) == n_contacts, "contact set changed under FD perturbation"
+        return float((sphere_fd.get_links_net_contact_force() ** 2).sum())
+
+    for leaf, init, other_init, msg in (
+        (sphere_pos, init_sphere, init_wall, "sphere pose grad mismatch"),
+        (wall_pos, init_wall, init_sphere, "wall pose grad mismatch"),
+    ):
+        # The y axis is the symmetry axis of the groove, whose gradient the edge contacts leave at zero
+        for i_comp in (0, 2):
+            plus, minus = init.copy(), init.copy()
+            plus[i_comp] += fd_eps
+            minus[i_comp] -= fd_eps
+            if leaf is sphere_pos:
+                fd = (loss_at(plus, other_init) - loss_at(minus, other_init)) / (2 * fd_eps)
+            else:
+                fd = (loss_at(other_init, plus) - loss_at(other_init, minus)) / (2 * fd_eps)
+            assert_allclose(leaf.grad[i_comp], fd, rtol=1e-5, atol=1e-6, err_msg=msg)
 
 
 @pytest.mark.required
