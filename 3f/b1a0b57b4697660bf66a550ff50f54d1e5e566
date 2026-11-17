@@ -1,0 +1,19 @@
+tests/rigid/test_serialization.py
+  s_8e3e09cbc07082::t_8d6f056145f1fa 460,470,476-489,491,533,535
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3fb1a0b57b4697660bf66a550ff50f54d1e5e566",
+  "prompts": {},
+  "sessions": {
+    "s_8e3e09cbc07082": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a8f0475a-f9de-4602-9bce-61f4c50730a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
