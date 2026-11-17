@@ -294,7 +294,7 @@ def test_force_field_reads_time_of_each_env(show_viewer, tol):
     def acc_growing_with_time(pos, vel, t, i):
         return qd.Vector([t, 0.0, 0.0], dt=gs.qd_float)
 
-    scene.add_force_field(gs.force_fields.Custom(acc_growing_with_time))
+    custom = scene.add_force_field(gs.force_fields.Custom(acc_growing_with_time))
     scene.build(n_envs=2)
 
     # An environment reset mid-run restarts its clock, which the force fields read, while the other one carries on
@@ -313,10 +313,16 @@ def test_force_field_reads_time_of_each_env(show_viewer, tol):
     assert_allclose(particles_vel[1], particles_vel_0[0], tol=gs.EPS)
     assert_allclose(particles_vel[0, :, 0], vels_x_ana[1], tol=tol)
 
+    # A deactivated force field stops accelerating the particles
+    custom.deactivate()
+    for _ in range(N_STEPS):
+        scene.step()
+    assert_allclose(particles.get_particles_vel()[..., 0], particles_vel[..., 0], tol=tol)
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_vortex_force_field(n_envs, tol):
+def test_force_field_direction(n_envs, tol):
     DT = 1e-2
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(

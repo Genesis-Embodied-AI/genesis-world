@@ -425,16 +425,21 @@ class Custom(ForceField):
     """
     Custom force field with a user-defined force(acceleration) function `f(pos, vel, t, i)`.
 
+    Unlike the other force fields, it is active as soon as it is created.
+
     Parameters:
     -----------
     func: A callable Quadrants func (a python function wrapped by `@qd.func`)
-        The acceleration function. Must have the signature `f(pos: qd.types.vector(3), vel: qd.types.vector(3), t: float) -> qd.types.vector(3)`.
+        The acceleration function. Must have the signature
+        `f(pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i: int) -> qd.types.vector(3)`, `i` being the
+        index of the particle among those of its solver, -1 for a point of no particle.
     """
 
     def __init__(self, func):
         super().__init__()
 
-        self.get_acc = func
+        self._get_acc = func
+        self.activate()
 
 
 @qd.data_oriented
