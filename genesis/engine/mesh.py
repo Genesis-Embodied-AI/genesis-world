@@ -18,6 +18,7 @@ import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
 import genesis.utils.point_cloud as pc
 from genesis.constants import GLTF_FORMATS, MESH_FORMATS
+from genesis.engine.materials.base import split_legacy_sampler
 from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
 from genesis.typing import Matrix3x3Type, Vec3FType
@@ -290,6 +291,9 @@ class Mesh(RBC, serialization.SerializationMixin):
         'sdf_resolution' is the resolution of the signed distance field that the 'pbs' sampler relaxes the particles
         in, which the other samplers ignore.
         """
+        sampler, legacy_sdf_resolution = split_legacy_sampler(sampler)
+        if legacy_sdf_resolution is not None:
+            sdf_resolution = legacy_sdf_resolution
         if sampler == gs.sampler.pbs:
             return pu.trimesh_to_particles_pbs(self._mesh, p_size, sdf_resolution)
         return pu.trimesh_to_particles_simple(self._mesh, p_size, sampler)

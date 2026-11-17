@@ -50,15 +50,26 @@ class ParticleSampling(Options):
     def _split_resolution_from_sampler(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        sampler = data.get("sampler")
-        match = re.fullmatch(r"pbs-(\d+)", sampler) if isinstance(sampler, str) else None
-        if match is None:
+        sampler, sdf_resolution = split_legacy_sampler(data.get("sampler"))
+        if sdf_resolution is None:
             return data
+        if data.get("sdf_resolution", sdf_resolution) != sdf_resolution:
+            gs.raise_exception(f"Sampler '{data['sampler']}' contradicts 'sdf_resolution={data['sdf_resolution']}'.")
+        return {**data, "sampler": sampler, "sdf_resolution": sdf_resolution}
+
+
+def split_legacy_sampler(sampler: Any) -> tuple[Any, int | None]:
+    """Split the deprecated 'pbs-<res>' spelling of a sampler into the 'pbs' sampler and its distance field resolution.
+
+    Any other sampler comes back as given, with no resolution.
+    """
+    match = re.fullmatch(r"pbs-(\d+)", sampler) if isinstance(sampler, str) else None
+    if match is None:
+        return sampler, None
+    # A material may be created before 'gs.init', which sets up the logger
+    if gs.logger is not None:
         gs.logger.warning(
             f"Sampler '{sampler}' is deprecated and will be removed in a future release. Use "
             f"'sampler=gs.sampler.pbs' with 'sdf_resolution={match[1]}' instead."
         )
-        sdf_resolution = int(match[1])
-        if data.get("sdf_resolution", sdf_resolution) != sdf_resolution:
-            gs.raise_exception(f"Sampler '{sampler}' contradicts 'sdf_resolution={data['sdf_resolution']}'.")
-        return {**data, "sampler": gs.sampler.pbs, "sdf_resolution": sdf_resolution}
+    return gs.sampler.pbs, int(match[1])
