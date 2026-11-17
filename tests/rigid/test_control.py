@@ -248,6 +248,9 @@ def test_drone_advanced(show_viewer):
         sim_options=gs.options.SimOptions(
             dt=0.005,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.5, 0.0, 1.5),
             camera_lookat=(0.0, 0.0, 0.5),
@@ -265,7 +268,6 @@ def test_drone_advanced(show_viewer):
                 merge_fixed_links=merge_fixed_links,
                 pos=(0.0, offset, 1.5),
             ),
-            vis_mode="collision",
             visualize_contact=True,
         )
         drones.append(drone)

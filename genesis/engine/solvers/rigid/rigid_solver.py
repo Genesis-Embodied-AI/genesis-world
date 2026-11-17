@@ -3494,7 +3494,7 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
             roles=ShapeRoles.of(
                 [entity.idx for entity in entities],
                 is_looks=is_looks,
-                is_debug=[not is_looks and entity.surface.debug_vis_mode == debug_vis_mode for entity in entities],
+                is_debug=[not is_looks and entity.spec.vis.debug_vis_mode == debug_vis_mode for entity in entities],
             ),
             _views=frozenset() if is_looks else frozenset((debug_vis_mode,)),
         )
@@ -3525,7 +3525,7 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
         self._sdf_views: set[str] = set()
         if solver.n_geoms > 0:
             self._sdf_views.add("sdf")
-            if any(geom.entity.surface.debug_vis_mode == "sdf" for geom in solver.geoms):
+            if any(geom.entity.spec.vis.debug_vis_mode == "sdf" for geom in solver.geoms):
                 self._sdf_views.add(DEBUG)
             if any(entity.surface.vis_mode == "sdf" and entity.n_geoms > 0 for entity in solver.entities):
                 self._sdf_views.add(NORMAL)

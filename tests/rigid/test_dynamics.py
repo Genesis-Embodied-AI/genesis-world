@@ -817,6 +817,9 @@ def test_mass_mat(xml_path, show_viewer, tol):
             dt=0.01,
             substeps=1,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         show_viewer=show_viewer,
         show_FPS=False,
     )
@@ -828,7 +831,6 @@ def test_mass_mat(xml_path, show_viewer, tol):
             file="xml/franka_emika_panda/panda.xml",
             pos=(0, 0, 0),
         ),
-        vis_mode="collision",
         visualize_contact=True,
     )
     franka2 = scene.add_entity(
@@ -836,7 +838,6 @@ def test_mass_mat(xml_path, show_viewer, tol):
             file="xml/franka_emika_panda/panda.xml",
             pos=(0, 2, 0),
         ),
-        vis_mode="collision",
         visualize_contact=True,
     )
     # High-DOF single tree: its mass submatrix exceeds GPU shared memory, exercising the cooperative >shared-cap
@@ -1145,6 +1146,9 @@ def test_solve_arm_equivalence(n_stack, n_grid, monkeypatch, show_viewer, tol):
             dt=0.01,
             gravity=(0.0, 0.0, -9.81),
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.1, -1.1, 0.7),
             camera_lookat=(1.1, 0.1, 0.05),
@@ -1162,7 +1166,6 @@ def test_solve_arm_equivalence(n_stack, n_grid, monkeypatch, show_viewer, tol):
                 size=(SIZE, SIZE, SIZE),
                 pos=pos,
             ),
-            vis_mode="collision",
         )
     scene.build(n_envs=2)
     solver = scene.rigid_solver

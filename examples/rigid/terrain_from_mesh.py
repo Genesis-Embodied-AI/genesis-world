@@ -15,6 +15,9 @@ def main():
     gs.init(backend=gs.gpu if args.gpu else gs.cpu)
 
     scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0, -50, 0),
             camera_lookat=(0, 0, 0),
@@ -39,7 +42,6 @@ def main():
             height_field=hf_terrain,
             pos=translation,
         ),
-        vis_mode="collision",
     )
 
     ball = scene.add_entity(
@@ -47,7 +49,6 @@ def main():
             pos=(10, 15, 10),
             radius=1,
         ),
-        vis_mode="collision",
     )
 
     scene.build()

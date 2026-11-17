@@ -30,6 +30,9 @@ def create_sph_scene(show_viewer, particle_size=0.01, gravity=-9.81, mu=0.005):
             lower_bound=(-0.5, -0.5, 0.0),
             upper_bound=(0.5, 0.5, 1),
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         show_viewer=show_viewer,
     )
 
@@ -48,7 +51,6 @@ def create_sph_scene(show_viewer, particle_size=0.01, gravity=-9.81, mu=0.005):
         ),
         surface=gs.surfaces.Default(
             color=(0.4, 0.8, 1.0),
-            vis_mode="particle",
         ),
     )
 

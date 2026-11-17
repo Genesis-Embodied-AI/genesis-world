@@ -20,11 +20,12 @@ from .solvers import (
     SimOptions,
     SPHOptions,
 )
-from .vis import ViewerOptions, VisOptions
+from .vis import EntityVisOptions, ViewerOptions, VisOptions
 
 __all__ = [
     "BaseCouplerOptions",
     "CoacdOptions",
+    "EntityVisOptions",
     "FEMOptions",
     "FEMVisOptions",
     "FoamOptions",

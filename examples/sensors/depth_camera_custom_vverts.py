@@ -83,16 +83,16 @@ def main():
     box_tri.vertices += np.array([0.0, 1.0, 0.15], dtype=np.float32)
 
     kin_box = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=(box_tri,),
-            pos=(0, 0, 0),
-            fixed=True,
-        ),
-        material=gs.materials.Kinematic(
+        spec=gs.entities.Kinematic(
+            morph=gs.morphs.MeshSet(
+                files=(box_tri,),
+                pos=(0, 0, 0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.3, 0.3),
+            ),
             use_visual_raycasting=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.3, 0.3),
         ),
     )
 

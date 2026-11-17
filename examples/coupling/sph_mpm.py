@@ -19,14 +19,19 @@ def main():
         mpm_options=gs.options.MPMOptions(
             lower_bound=(0.0, 0.0, -0.1),
             upper_bound=(1.0, 1.0, 1.0),
+            vis=gs.options.ParticleVisOptions(
+                boundary=True,
+            ),
         ),
         sph_options=gs.options.SPHOptions(
             lower_bound=(-0.03, -0.03, -0.08),
             upper_bound=(1.03, 1.03, 1.0),
+            vis=gs.options.ParticleVisOptions(
+                boundary=True,
+            ),
         ),
         vis_options=gs.options.VisOptions(
-            visualize_mpm_boundary=True,
-            visualize_sph_boundary=True,
+            debug=True,
             rendered_envs_idx=[0],
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -45,7 +50,6 @@ def main():
         material=gs.materials.SPH.Liquid(),
         surface=gs.surfaces.Default(
             color=(0.2, 0.6, 1.0, 1.0),
-            vis_mode="particle",
         ),
     )
     duck = scene.add_entity(
@@ -60,7 +64,6 @@ def main():
         ),
         surface=gs.surfaces.Default(
             color=(0.9, 0.8, 0.2, 1.0),
-            vis_mode="particle",
         ),
     )
 

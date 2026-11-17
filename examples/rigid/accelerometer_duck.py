@@ -20,9 +20,6 @@ def main():
         sim_options=gs.options.SimOptions(
             dt=0.01,
         ),
-        vis_options=gs.options.VisOptions(
-            show_link_frame=False,
-        ),
         viewer_options=viewer_options,
         show_viewer=args.vis,
     )

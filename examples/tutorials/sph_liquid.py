@@ -15,9 +15,12 @@ scene = gs.Scene(
         particle_size=0.01,
         lower_bound=(-0.5, -0.5, 0.0),
         upper_bound=(0.5, 0.5, 1),
+        vis=gs.options.ParticleVisOptions(
+            boundary=True,
+        ),
     ),
     vis_options=gs.options.VisOptions(
-        visualize_sph_boundary=True,
+        debug=True,
     ),
     show_viewer=True,
 )
@@ -35,7 +38,6 @@ liquid = scene.add_entity(
     ),
     surface=gs.surfaces.Default(
         color=(0.4, 0.8, 1.0),
-        vis_mode="particle",
     ),
 )
 

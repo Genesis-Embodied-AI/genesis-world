@@ -17,6 +17,7 @@ from .morphs import Morph
 from .options import Options
 from .patches import Geom, Patch, Vertex, VGeom, _FrozenOptions
 from .surfaces import DynamicVertices, Surface
+from .vis import EntityVisOptions
 
 if TYPE_CHECKING:
     from genesis.engine.entities import (
@@ -94,8 +95,10 @@ class Spec(_FrozenOptions, Generic[EntityT]):
         environment simulates one of them (see ``Scene.add_entity``). It must be set once the spec reaches
         ``Scene.add_entity``, while the spec given to ``Scene.add_emitter`` leaves it None, since the emitter sets it.
     surface : Surface | None, optional
-        The appearance of the entity, its debug representation included (see ``Surface.debug_vis_mode``). If None, use
-        ``gs.surfaces.Default()``.
+        The appearance of the entity. If None, use ``gs.surfaces.Default()``.
+    vis : EntityVisOptions | None, optional
+        How the debug view draws the entity, for the kinds of entity with a debug representation. If None, the debug
+        view follows ``VisOptions.debug`` and draws the entity in the first debug representation of its kind.
     name : str | None, optional
         The name of the entity, unique within the scene. If None, a name is generated from the morph.
     patches : tuple[genesis.options.patches.Patch, ...], optional
@@ -105,7 +108,7 @@ class Spec(_FrozenOptions, Generic[EntityT]):
 
     # Whether the kind of entity admits several morphs, one per variant of a heterogeneous entity
     _admits_variants: ClassVar[bool] = False
-    # The representations of the kind of entity in the debug view (see 'Surface.debug_vis_mode'), the first by default
+    # The representations of the kind of entity in the debug view (see 'EntityVisOptions'), the first by default
     _debug_vis_modes: ClassVar[tuple[str, ...]] = ()
     # The patches of options the kind of entity admits, each with the selectors of the parts it is set on, from the
     # coarsest level to the finest.
@@ -114,6 +117,7 @@ class Spec(_FrozenOptions, Generic[EntityT]):
     # Checked by instance alone, since validation would run the validators of 'Morph' on the sequence of morphs
     morph: InstanceOf[Morph] | Annotated[tuple[InstanceOf[Morph], ...], Field(min_length=1, strict=False)] | None = None
     surface: Surface | None = None
+    vis: EntityVisOptions | None = None
     name: str | None = None
     patches: tuple[Patch, ...] = ()
 
@@ -148,25 +152,29 @@ class Spec(_FrozenOptions, Generic[EntityT]):
             gs.raise_exception(
                 f"An entity of gs.entities.{type(self).__name__} is created from one morph, got {len(self.morph)}."
             )
+        if self.vis is not None:
+            self._check_vis(self.vis)
         if self.surface is not None:
             self._check_surface(self.surface)
         for patch in self.patches:
             self._check_patch(patch)
         return self
 
-    def _check_surface(self, surface: Surface) -> None:
-        """Check that the kind of entity draws what a surface of the entity or of its visual geoms asks for."""
+    def _check_vis(self, vis: EntityVisOptions) -> None:
+        """Check that the kind of entity has the debug representation its vis options ask for."""
         name = f"gs.entities.{type(self).__name__}"
-        if surface.debug_vis_mode is not None and not self._debug_vis_modes:
+        if not self._debug_vis_modes and vis.model_fields_set:
             gs.raise_exception(
-                f"{name} is visual only and has no debug representation, which the debug view leaves out, got "
-                f"'debug_vis_mode={surface.debug_vis_mode}'."
+                f"{name} is visual only and has no debug representation, which the debug view leaves out."
             )
-        if surface.debug_vis_mode is not None and surface.debug_vis_mode not in self._debug_vis_modes:
+        if vis.debug_vis_mode is not None and vis.debug_vis_mode not in self._debug_vis_modes:
             gs.raise_exception(
                 f"{name} is drawn in the debug view as one of {list(self._debug_vis_modes)}, got "
-                f"'debug_vis_mode={surface.debug_vis_mode}'."
+                f"'debug_vis_mode={vis.debug_vis_mode}'."
             )
+
+    def _check_surface(self, surface: Surface) -> None:
+        """Check that the kind of entity draws what a surface of the entity or of its visual geoms asks for."""
         # The deprecated 'vis_mode' names the representation the material decides, 'visual' for a mesh and 'recon' for a
         # reconstructed surface, or a debug representation of the entity, which then shows it in every view.
         if surface.vis_mode is not None:
@@ -175,12 +183,13 @@ class Spec(_FrozenOptions, Generic[EntityT]):
                 gs.raise_exception(
                     f"The material {type(self.material).__name__} is drawn as '{vis_mode}' outside of the debug view, "
                     f"got 'vis_mode={surface.vis_mode}'. Leave 'vis_mode' unset, and draw the entity as "
-                    f"{list(self._debug_vis_modes)} with 'surface.debug_vis_mode' and 'VisOptions(debug=True)'."
+                    f"{list(self._debug_vis_modes)} in the debug view with 'gs.options.EntityVisOptions'."
                 )
-            if surface.vis_mode in self._debug_vis_modes and surface.debug_vis_mode not in (None, surface.vis_mode):
+            debug_vis_mode = None if self.vis is None else self.vis.debug_vis_mode
+            if surface.vis_mode in self._debug_vis_modes and debug_vis_mode not in (None, surface.vis_mode):
                 gs.raise_exception(
                     f"'vis_mode={surface.vis_mode}' shows the entity as its debug representation '{surface.vis_mode}' "
-                    f"in every view, which conflicts with 'debug_vis_mode={surface.debug_vis_mode}'."
+                    f"in every view, which conflicts with 'debug_vis_mode={debug_vis_mode}'."
                 )
 
     @property
@@ -685,6 +694,11 @@ class Hybrid(Spec["HybridEntity"]):
     _debug_vis_modes = ("particle",)
 
     material: materials.Hybrid
+
+    def _check_vis(self, vis: EntityVisOptions) -> None:
+        gs.raise_exception(
+            "gs.entities.Hybrid is drawn as its parts, entities of their own kinds, and takes no vis options."
+        )
 
     @property
     def structure(self) -> STRUCTURE:

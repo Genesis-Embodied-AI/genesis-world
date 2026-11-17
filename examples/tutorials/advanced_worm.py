@@ -18,10 +18,12 @@ scene = gs.Scene(
         dt=5e-5,
         lower_bound=(-1.0, -1.0, -0.2),
         upper_bound=(1.0, 1.0, 1.0),
+        vis=gs.options.ParticleVisOptions(
+            boundary=True,
+        ),
     ),
     vis_options=gs.options.VisOptions(
         show_world_frame=True,
-        visualize_mpm_boundary=True,
     ),
     viewer_options=gs.options.ViewerOptions(
         camera_pos=(1.5, 0, 0.8),

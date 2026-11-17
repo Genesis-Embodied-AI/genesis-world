@@ -38,6 +38,9 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                 # A non-neutral impratio makes the regularized cone coefficient observable to finite differences
                 impratio=2.0,
             ),
+            vis_options=gs.options.VisOptions(
+                debug=True,
+            ),
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(1.2, -1.2, 0.8),
                 camera_lookat=(0.0, 0.0, 0.2),
@@ -57,13 +60,11 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                     pos=(0.0, 0.0, -0.1),
                     fixed=True,
                 ),
-                vis_mode="collision",
             )
             scene.add_entity(
                 gs.morphs.MJCF(
                     file=mjcf_capsule_ground,
                 ),
-                vis_mode="collision",
             )
             entities = (
                 scene.add_entity(
@@ -72,14 +73,12 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                         pos=(-0.5, 0.0, 0.198),
                         euler=(1.0, 1.0, 0.0),
                     ),
-                    vis_mode="collision",
                 ),
                 scene.add_entity(
                     gs.morphs.Sphere(
                         radius=0.2,
                         pos=(0.6, 0.0, 0.2),
                     ),
-                    vis_mode="collision",
                 ),
                 scene.add_entity(
                     gs.morphs.MJCF(
@@ -87,7 +86,6 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                         pos=(1.5, 0.0, 0.1),
                         euler=(0.0, 90.0, 0.0),
                     ),
-                    vis_mode="collision",
                 ),
             )
         else:
@@ -98,7 +96,6 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                         size=(0.4, 0.4, 0.4),
                         pos=(0.0, 0.0, 0.2),
                     ),
-                    vis_mode="collision",
                 )
             elif shape == "sphere":
                 entity = scene.add_entity(
@@ -106,7 +103,6 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                         radius=0.2,
                         pos=(0.0, 0.0, 0.2),
                     ),
-                    vis_mode="collision",
                 )
             elif shape == "capsule":
                 entity = scene.add_entity(
@@ -114,7 +110,6 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                         file=mjcf_capsule,
                         pos=(0.0, 0.0, 0.3),
                     ),
-                    vis_mode="collision",
                 )
             else:
                 raise ValueError(shape)
@@ -250,6 +245,9 @@ def test_contact_no_tunneling_forward(show_viewer):
         sim_options=gs.options.SimOptions(
             requires_grad=True,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.0, -2.0, 1.2),
             camera_lookat=(0.0, 0.0, 0.4),
@@ -265,7 +263,6 @@ def test_contact_no_tunneling_forward(show_viewer):
                 pos=(x, 0.0, 0.2),
                 fixed=True,
             ),
-            vis_mode="collision",
         )
         tops.append(
             scene.add_entity(
@@ -273,7 +270,6 @@ def test_contact_no_tunneling_forward(show_viewer):
                     size=(0.4, 0.4, 0.4),
                     pos=(x, 0.0, 0.6),
                 ),
-                vis_mode="collision",
             )
         )
     scene.build()
