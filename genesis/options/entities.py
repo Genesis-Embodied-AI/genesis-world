@@ -176,10 +176,15 @@ class Spec(_FrozenOptions, Generic[EntityT]):
 
     def _check_surface(self, surface: Surface) -> None:
         """Check that the kind of entity draws what a surface of the entity or of its visual geoms asks for."""
-        if self.structure != STRUCTURE.RIGID and any(isinstance(texture, DynamicTexture) for _, texture in surface):
+        # A surface reconstructed from particles holds no texture coordinates, which a dynamic texture samples
+        if self.structure in (STRUCTURE.TEARABLE, STRUCTURE.AMORPHOUS) and any(
+            isinstance(texture, DynamicTexture) for _, texture in surface
+        ):
             gs.raise_exception(
-                f"gs.entities.{type(self).__name__} cannot show a DynamicTexture. Only the entities of a rigid "
-                "structure (gs.entities.Rigid and gs.entities.Kinematic) show one."
+                f"gs.entities.{type(self).__name__} cannot show a DynamicTexture, since it is drawn as a surface "
+                "reconstructed from its particles, always or once torn, which holds no texture coordinates. Only the "
+                "entities of a rigid or deformable structure (gs.entities.Rigid, gs.entities.Kinematic, "
+                "gs.entities.FEM, and gs.entities.PBD of cloth or elastic material) show one."
             )
         # The deprecated 'vis_mode' names the representation the material decides, 'visual' for a mesh and 'recon' for a
         # reconstructed surface, or a debug representation of the entity, which then shows it in every view.

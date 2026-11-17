@@ -13,6 +13,7 @@ from genesis.constants import STRUCTURE
 from genesis.engine.render_context import (
     ArrayRef,
     DynamicMesh,
+    DynamicTextures,
     Lines,
     ParticlesPhysics,
     Points,
@@ -244,7 +245,7 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
     The structure of the material of an entity decides how it is drawn (see 'Material.structure'): a deformable or
     tearable entity skins a visual mesh on its particles, an amorphous one is drawn as the surface reconstructed from
     them. A tearable entity whose skinned mesh tore is drawn as a reconstructed surface in that environment until the
-    next reset.
+    next reset. The skinned meshes whose surface shows a dynamic texture carry it (see DynamicTextures).
     """
 
     debug_vis_modes = gs.entities.MPM._debug_vis_modes
@@ -258,6 +259,9 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
         entities_n_vverts = np.array([entity.n_vverts for entity in self._skinned_entities], dtype=gs.np_int)
         self._entities_vvert_start = dict(
             zip(self._skinned_entities, (np.cumsum(entities_n_vverts) - entities_n_vverts).tolist())
+        )
+        self.textures = DynamicTextures(
+            [(entity, entity.vmesh.surface) for entity in self._skinned_entities], solver.n_envs
         )
         self._tearable_entities = [
             entity for entity in self._skinned_entities if entity.material.structure == STRUCTURE.TEARABLE
@@ -371,6 +375,7 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
                         seg_keys,
                         particles=points,
                         is_active=ArrayRef(self._skinned.entities_is_intact, i_t) if is_tearable else None,
+                        textures=self.textures.get(entity),
                         roles=ShapeRoles.of(entity.idx, is_looks=not is_pinned, is_debug=False),
                     )
                 )

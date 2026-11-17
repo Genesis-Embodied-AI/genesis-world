@@ -547,13 +547,18 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
 
     texture_seed = _get_seed_image(texture)
     if texture_seed is not None:
-        if flipped_uvs is None:
-            gs.raise_exception("A dynamic texture requires a mesh with texture coordinates, which it lacks.")
-        # The images of a dynamic texture may turn transparent, which the blending of a PBR material follows
-        material = trimesh.visual.material.PBRMaterial(
-            baseColorTexture=Image.fromarray(texture_seed), baseColorFactor=(255, 255, 255, 255), **emissive_kwargs
-        )
-        visual = trimesh.visual.TextureVisuals(uv=flipped_uvs, material=material)
+        if flipped_uvs is not None:
+            # The images of a dynamic texture may turn transparent, which the blending of a PBR material follows
+            material = trimesh.visual.material.PBRMaterial(
+                baseColorTexture=Image.fromarray(texture_seed), baseColorFactor=(255, 255, 255, 255), **emissive_kwargs
+            )
+            visual = trimesh.visual.TextureVisuals(uv=flipped_uvs, material=material)
+        else:
+            # A mesh without uvs drawn with the surface, such as the debug representation of a deformable entity, takes
+            # the mean color of the image, as for an image texture
+            visual = trimesh.visual.ColorVisuals(
+                vertex_colors=np.tile(texture_seed.mean(axis=(0, 1)) / 255.0, [n_verts, 1])
+            )
     elif isinstance(texture, gs.textures.ImageTexture):
         if flipped_uvs is not None:
             assert texture.image_array.dtype == np.uint8

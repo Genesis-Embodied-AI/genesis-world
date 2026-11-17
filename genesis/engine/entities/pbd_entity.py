@@ -10,11 +10,13 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
+from genesis.constants import TEXTURE_MAP_TYPE
 from genesis.engine.entities.particle_entity import ParticleEntity
 from genesis.options.surfaces import Surface
 from genesis.typing import IndexType
 
 if TYPE_CHECKING:
+    from genesis.engine.render_context import TextureValueType
     from genesis.engine.scene import Scene
     from genesis.engine.solvers.pbd_solver import PBDSolver
 
@@ -186,6 +188,30 @@ class PBDTetEntity(PBDBaseEntity):
 
         self._mesh = self._vmesh.copy()
         self._mesh.remesh(edge_len_abs=self.particle_size, fix=isinstance(self, PBD3DEntity))
+
+    @gs.assert_built
+    def set_texture(
+        self,
+        texture: "TextureValueType",
+        envs_idx: IndexType | None = None,
+        *,
+        texture_map_type: TEXTURE_MAP_TYPE | None = None,
+    ) -> None:
+        """Show a variant of a dynamic texture of the visual mesh of this entity, or write its batched variant.
+
+        The visual mesh is the single visual geom of the entity (see ``RigidVisGeom.set_texture``).
+        """
+        self._solver._set_vgeom_texture(self, texture, envs_idx, texture_map_type)
+        self._is_texture_written = True
+
+    @gs.assert_built
+    def get_texture(
+        self, envs_idx: IndexType | None = None, *, texture_map_type: TEXTURE_MAP_TYPE | None = None
+    ) -> torch.Tensor:
+        """Return a copy of the image a dynamic texture of the visual mesh of this entity shows in each environment, as
+        drawn (see ``RigidVisGeom.get_texture``)."""
+        textures = self._solver.render_context.textures
+        return textures.get_texture(self, envs_idx, texture_map_type)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

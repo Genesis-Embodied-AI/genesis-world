@@ -11,21 +11,24 @@ import genesis as gs
 import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
+from genesis.constants import TEXTURE_MAP_TYPE
 from genesis.engine.entities.rigid_entity import RigidLink
 from genesis.engine.render_context import MeshKey, SegmentationKeys
 from genesis.options.patches import resolve_patch_parts
 from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
-from genesis.utils.misc import broadcast_tensor, tensor_to_array, unique_rows
+from genesis.utils.misc import BuildableMixin, broadcast_tensor, tensor_to_array, unique_rows
 
 from .base_entity import Entity
 
 if TYPE_CHECKING:
+    from genesis.engine.render_context import TextureValueType
     from genesis.engine.scene import Scene
     from genesis.engine.solvers.fem_solver import FEMSolver
+    from genesis.typing import IndexType
 
 
-class FEMVisGeom(RBC):
+class FEMVisGeom(BuildableMixin, RBC):
     """A visual geom of a FEM entity, the deformable counterpart of `RigidVisGeom`.
 
     It carries the render mesh drawn by the visualizer, decoupled from the simulation mesh, and 'sim_verts_idx',
@@ -38,6 +41,39 @@ class FEMVisGeom(RBC):
         self._entity = entity
         self._vmesh = vmesh
         self._sim_verts_idx = sim_verts_idx
+
+    @gs.assert_unbuilt
+    def _build(self) -> None:
+        self._is_built = True
+
+    def _destroy(self) -> None:
+        self._is_built = False
+
+    @gs.assert_built
+    def set_texture(
+        self,
+        texture: "TextureValueType",
+        envs_idx: "IndexType | None" = None,
+        *,
+        texture_map_type: TEXTURE_MAP_TYPE | None = None,
+    ) -> None:
+        """Show a variant of a dynamic texture of this visual geom, or write its batched variant, in some environments.
+
+        See ``RigidVisGeom.set_texture``.
+        """
+        self._entity.solver._set_vgeom_texture(self, texture, envs_idx, texture_map_type)
+        self._entity._is_texture_written = True
+
+    @gs.assert_built
+    def get_texture(
+        self, envs_idx: "IndexType | None" = None, *, texture_map_type: TEXTURE_MAP_TYPE | None = None
+    ) -> torch.Tensor:
+        """Return a copy of the image a dynamic texture of this visual geom shows in each environment, as drawn.
+
+        See ``RigidVisGeom.get_texture``.
+        """
+        solver = self._entity.solver
+        return solver.render_context.textures.get_texture(self, envs_idx, texture_map_type)
 
     def get_trimesh(self):
         """The underlying `trimesh.Trimesh` of the render mesh."""
@@ -445,6 +481,8 @@ class FEMEntity(Entity):
                 tri2el=self._surface_el_np,
             )
 
+        for vgeom in self._vgeoms:
+            vgeom._build()
         self._is_built = True
 
     # ------------------------------------------------------------------------------------
@@ -598,6 +636,30 @@ class FEMEntity(Entity):
         """
         elements_idx = self._get_global_idx(None, self.n_elements, self._el_start, unsafe=True)
         return self._solver.get_elements_el2v(elements_idx) - self._v_start
+
+    @gs.assert_built
+    def set_texture(
+        self,
+        texture: "TextureValueType",
+        envs_idx: "IndexType | None" = None,
+        *,
+        texture_map_type: TEXTURE_MAP_TYPE | None = None,
+    ) -> None:
+        """Show a variant of a dynamic texture of the visual geom of this entity, or write its batched variant.
+
+        The entity holds a single visual geom, whose 'set_texture' this is (see ``RigidVisGeom.set_texture``).
+        """
+        if len(self._vgeoms) != 1:
+            gs.raise_exception(
+                f"'entity.set_texture' requires an entity with a single visual geom, got {len(self._vgeoms)}. Use "
+                "'vgeom.set_texture' of its visual geoms instead."
+            )
+        self._vgeoms[0].set_texture(texture, envs_idx, texture_map_type=texture_map_type)
+
+    def _destroy(self) -> None:
+        for vgeom in self._vgeoms:
+            vgeom._destroy()
+        super()._destroy()
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------

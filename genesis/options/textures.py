@@ -467,8 +467,8 @@ class DynamicTexture(_ImagelessTexture):
     position or by name in the selected environments, or writes the batched variant there and shows it, and
     ``vgeom.get_texture`` returns the images as drawn. The render context holds the variant each environment shows and the batched variant:
     they are appearance and take no part in checkpoints, and a reset shows the first variant again. The rasterizer draws
-    them, while the other renderers warn once and draw the meshes without them. Only the entities of a rigid structure
-    (rigid and kinematic) show them, the others refusing them.
+    them, while the other renderers warn once and draw the meshes without them. Only the entities of a rigid or
+    deformable structure (rigid, kinematic, FEM, PBD cloth and elastic) show them, the others refusing them.
 
     The images are RGBA, in the format the map sets. The diffuse map holds 8-bit sRGB values, the alpha channel standing
     for the opacity in place of the opacity of the surface. The emissive map holds 16-bit linear values, which let an

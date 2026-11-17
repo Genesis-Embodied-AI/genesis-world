@@ -39,6 +39,7 @@ from genesis.engine.render_context import (
     CONSTRAINT_POINT_RADIUS,
     ArrayRef,
     DynamicMesh,
+    DynamicTextures,
     Lines,
     MeshKey,
     Points,
@@ -1298,8 +1299,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
     """The visual meshes of the FEM entities, the surface of their tetrahedra, and the markers of their constraints.
 
-    Each vertex of a visual mesh stands at the position of the simulated vertex it stands for. The surface of the
-    tetrahedra of an entity is its debug representation ('tet' debug_vis_mode).
+    Each vertex of a visual mesh stands at the position of the simulated vertex it stands for. The visual meshes whose
+    surface shows a dynamic texture carry it (see DynamicTextures). The surface of the tetrahedra of an entity is its
+    debug representation ('tet' debug_vis_mode).
     """
 
     debug_vis_modes = gs.entities.FEM._debug_vis_modes
@@ -1308,6 +1310,9 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
 
     def build(self) -> None:
         solver = self.owner
+        self.textures = DynamicTextures(
+            [(vgeom, vgeom.surface) for entity in solver.entities for vgeom in entity.vgeoms], solver.n_envs
+        )
         # Every mesh views the simulated vertices of the whole solver, so that a renderer reads them once for all
         verts_pos = ArrayRef(solver.fem_state.vertices.pos)
         shapes = []
@@ -1316,7 +1321,16 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
             is_pinned = entity.surface.vis_mode is not None
             vgeoms_roles = ShapeRoles.of(entity.idx, is_looks=not is_pinned, is_debug=False)
             meshes = [
-                (vgeom.vmesh.faces, vgeom.surface, vgeom.uvs, vgeom.seg_keys, vgeom.sim_verts_idx, vgeoms_roles, ())
+                (
+                    vgeom.vmesh.faces,
+                    vgeom.surface,
+                    vgeom.uvs,
+                    vgeom.seg_keys,
+                    vgeom.sim_verts_idx,
+                    vgeoms_roles,
+                    (),
+                    self.textures.get(vgeom),
+                )
                 for vgeom in entity.vgeoms
             ]
             # The surface of the tetrahedra follows the visual geoms in the segmentation keys of the entity
@@ -1324,9 +1338,18 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
             tets_roles = ShapeRoles.of(entity.idx, is_looks=is_pinned, is_debug=True)
             tets_verts_idx = np.arange(entity.n_vertices)
             meshes.append(
-                (entity.surface_triangles, entity.surface, None, tets_seg_keys, tets_verts_idx, tets_roles, ("tet",))
+                (
+                    entity.surface_triangles,
+                    entity.surface,
+                    None,
+                    tets_seg_keys,
+                    tets_verts_idx,
+                    tets_roles,
+                    ("tet",),
+                    (),
+                )
             )
-            for faces, surface, uvs, seg_keys, verts_idx, roles, views in meshes:
+            for faces, surface, uvs, seg_keys, verts_idx, roles, views, textures in meshes:
                 shapes.append(
                     DynamicMesh(
                         faces,
@@ -1335,6 +1358,7 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
                         uvs,
                         seg_keys,
                         verts_idx=entity.v_start + verts_idx,
+                        textures=textures,
                         roles=roles,
                         _views=frozenset(views),
                     )

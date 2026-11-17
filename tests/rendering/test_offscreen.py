@@ -413,7 +413,7 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_dynamic_texture_side_by_side_envs(n_envs, show_viewer):
+def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer):
     # Drawing every environment in one pass needs 'split_envs' off, which 'test_dynamic_texture' needs on for the
     # images of each environment, and the option holds for a whole scene
     scene = gs.Scene(
@@ -474,10 +474,46 @@ def test_dynamic_texture_side_by_side_envs(n_envs, show_viewer):
             ),
         ),
     )
+    # The deformable entities show a dynamic texture too, out of the view of the first camera
+    deformable_surface = gs.surfaces.Emission(
+        emissive_texture=gs.textures.DynamicTexture(
+            resolution=(1, 1),
+            variants=(
+                gs.textures.ColorTexture(
+                    color=(1.0, 0.0, 0.0),
+                ),
+                gs.textures.ColorTexture(
+                    color=(0.0, 0.0, 1.0),
+                ),
+            ),
+        ),
+    )
+    block = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=textured_box_glb,
+            pos=(5.0, 0.0, 0.3),
+        ),
+        material=gs.materials.FEM.Elastic(),
+        surface=deformable_surface,
+    )
+    cube = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=textured_box_glb,
+            pos=(6.0, 0.0, 0.3),
+        ),
+        material=gs.materials.PBD.Elastic(),
+        surface=deformable_surface,
+    )
     camera = scene.add_camera(
         pos=(0.0, 0.75, 4.0),
         lookat=(0.0, 0.75, 0.0),
         res=(64, 128),
+        fov=40.0,
+    )
+    deformable_camera = scene.add_camera(
+        pos=(5.5, 0.75, 4.0),
+        lookat=(5.5, 0.75, 0.0),
+        res=(128, 128),
         fov=40.0,
     )
     scene.build(n_envs=n_envs, env_spacing=(0.0, 1.5))
@@ -527,6 +563,20 @@ def test_dynamic_texture_side_by_side_envs(n_envs, show_viewer):
     colors = np.einsum("hwc,ebhw->ebc", camera.render(rgb=True)[0], masks_weight)
     is_high = np.array([[False, True, False], [False, False, True]] if n_envs > 0 else [[False, False, True]])
     assert (colors[0][is_high] > 150.0).all() and (colors[0][~is_high] < 30.0).all()
+
+    # The deformable entities switch their variant per environment as a rigid one does
+    block.set_texture([1, 0][:n_envs_])
+    cube.set_texture([1, 0][:n_envs_])
+    _, _, segmentation, _ = deformable_camera.render(rgb=False, segmentation=True)
+    deformable_masks = (segmentation == np.array([block.idx + 1, cube.idx + 1])[:, None, None, None]) & (
+        envs_rows_mask[None, :, :, None]
+    )
+    deformable_npixel = deformable_masks.sum(axis=(2, 3), keepdims=True)
+    assert (deformable_npixel > 100).all()
+    rgb = deformable_camera.render(rgb=True)[0]
+    colors = np.einsum("hwc,ebhw->ebc", rgb, deformable_masks / deformable_npixel)
+    is_high = np.array([[False, False, True], [True, False, False]])[:n_envs_]
+    assert (colors[:, is_high] > 150.0).all() and (colors[:, ~is_high] < 30.0).all()
 
 
 @pytest.mark.required
