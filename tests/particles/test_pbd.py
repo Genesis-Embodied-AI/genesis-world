@@ -359,6 +359,8 @@ def test_vortex_force_field(n_envs, tol):
     acc = falloff * (vortex.strength_perpendicular * perpendicular - vortex.strength_radial * radial_pos)
     assert_allclose(particles.get_particles_vel(), DT * acc, tol=tol)
 
-    # A zero direction defines no axis to revolve around
-    with pytest.raises(ValueError):
-        gs.force_fields.Vortex(direction=(0.0, 0.0, 0.0))
+    # A zero or non-finite direction points nowhere
+    for force_field_type in (gs.force_fields.Constant, gs.force_fields.Wind, gs.force_fields.Vortex):
+        for direction in ((0.0, 0.0, 0.0), (float("nan"), 0.0, 1.0)):
+            with pytest.raises(ValueError):
+                force_field_type(direction=direction)

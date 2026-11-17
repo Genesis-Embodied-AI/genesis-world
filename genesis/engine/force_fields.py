@@ -6,6 +6,16 @@ import genesis as gs
 from genesis.repr_base import RBC
 
 
+def _normalize_direction(direction):
+    direction = np.array(direction)
+    if direction.shape != (3,):
+        raise ValueError("direction must have shape (3,)")
+    direction_norm = np.linalg.norm(direction)
+    if not (np.isfinite(direction_norm) and direction_norm >= gs.EPS):
+        raise ValueError("direction must be finite and non-zero")
+    return direction / direction_norm
+
+
 @qd.data_oriented
 class ForceField(RBC):
     """
@@ -62,11 +72,7 @@ class Constant(ForceField):
     def __init__(self, direction=(1, 0, 0), strength=1.0):
         super().__init__()
 
-        direction = np.array(direction)
-        if direction.shape != (3,):
-            raise ValueError("direction must have shape (3,)")
-
-        self._direction = direction / np.linalg.norm(direction)
+        self._direction = _normalize_direction(direction)
         self._strength = strength
         self._acc_qd = qd.Vector(self._direction * self._strength, dt=gs.qd_float)
 
@@ -102,16 +108,12 @@ class Wind(ForceField):
     def __init__(self, direction=(1, 0, 0), strength=1.0, radius=1, center=(0, 0, 0)):
         super().__init__()
 
-        direction = np.array(direction)
-        if direction.shape != (3,):
-            raise ValueError("direction must have shape (3,)")
-
         center = np.array(center)
         if center.shape != (3,):
             raise ValueError("center must have shape (3,)")
 
         self._center = center
-        self._direction = direction / np.linalg.norm(direction)
+        self._direction = _normalize_direction(direction)
         self._strength = strength
         self._radius = radius
 
@@ -298,20 +300,12 @@ class Vortex(ForceField):
     ):
         super().__init__()
 
-        direction = np.array(direction)
-        if direction.shape != (3,):
-            raise ValueError("direction must have shape (3,)")
-
-        direction_norm = np.linalg.norm(direction)
-        if direction_norm < gs.EPS:
-            raise ValueError("direction must be a non-zero vector")
-
         center = np.array(center)
         if center.shape != (3,):
             raise ValueError("center must have shape (3,)")
 
         self._center = center
-        self._direction = direction / direction_norm
+        self._direction = _normalize_direction(direction)
         self._damping = damping
 
         self._strength_perpendicular = strength_perpendicular
