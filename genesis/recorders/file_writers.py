@@ -25,6 +25,7 @@ class BaseFileWriter(Recorder):
 
     """
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -42,6 +43,7 @@ class BaseFileWriter(Recorder):
 class VideoFileWriter(BaseFileWriter):
     encoder: "VideoEncoder | None"
 
+    @gs.assert_unbuilt
     def build(self):
         self.encoder = None
 
@@ -148,6 +150,7 @@ class CSVFileWriter(BaseFileWriter):
 
 @register_recording(NPZFileWriterOptions)
 class NPZFileWriter(BaseFileWriter):
+    @gs.assert_unbuilt
     def build(self):
         self.all_data: dict[str, list] = defaultdict(list)
 

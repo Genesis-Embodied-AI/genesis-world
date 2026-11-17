@@ -117,8 +117,6 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
     scene.build(n_envs=n_envs)
     assert scene.sim is not None
     assert scene.sim.substeps == n_substeps
-    with pytest.raises(gs.GenesisException, match="not available with the IPC coupler"):
-        scene.sim.fem_solver.get_forces()
     coupler = cast("IPCCoupler", scene.sim.coupler)
 
     envs_idx = range(max(scene.n_envs, 1))
@@ -128,9 +126,9 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
     assert box.base_link in coupler._abd_slots_by_link
 
     # Verify that geometries are present in IPC for each environment
-    cloth_entity_idx = scene.sim.fem_solver.entities.index(cloth)
-    box_entity_idx = scene.sim.rigid_solver.entities.index(box)
-    sphere_entity_idx = scene.sim.fem_solver.entities.index(sphere)
+    cloth_entity_idx = scene.fem_solver.entities.index(cloth)
+    box_entity_idx = scene.rigid_solver.entities.index(box)
+    sphere_entity_idx = scene.fem_solver.entities.index(sphere)
     objs_kwargs = {
         obj: dict(solver_type=solver_type, idx=idx)
         for obj, solver_type, idx in (
@@ -522,9 +520,9 @@ def test_objects_colliding(n_envs, show_viewer):
     objs_kwargs = {
         obj: dict(solver_type=solver_type, idx=idx)
         for obj, solver_type, idx in (
-            (cloth, "cloth", scene.sim.fem_solver.entities.index(cloth)),
-            (box, "rigid", scene.sim.rigid_solver.entities.index(box)),
-            (sphere, "fem", scene.sim.fem_solver.entities.index(sphere)),
+            (cloth, "cloth", scene.fem_solver.entities.index(cloth)),
+            (box, "rigid", scene.rigid_solver.entities.index(box)),
+            (sphere, "fem", scene.fem_solver.entities.index(sphere)),
         )
     }
     p_history = {obj: [] for obj in objs_kwargs.keys()}
@@ -618,7 +616,7 @@ def test_momentum_conservation(n_envs, show_viewer):
 
     rigid_cube.set_dofs_velocity((*VELOCITY, 0.0, 0.0, 0.0))
 
-    fem_entity_idx = scene.sim.fem_solver.entities.index(blob)
+    fem_entity_idx = scene.fem_solver.entities.index(blob)
     assert len(find_ipc_geometries(scene, solver_type="fem", idx=fem_entity_idx, env_idx=0)) == 1
 
     rigid_link = rigid_cube.base_link

@@ -98,7 +98,7 @@ class Collider:
         # states of the passes run are opted in before the narrowphase sub-components build their scratch.
         if self._use_split_narrowphase:
             gpu_cores = self.collider_config.gpu_cores
-            n_contact0_threads = self._solver._B * ((gpu_cores + self._solver._B - 1) // self._solver._B)
+            n_contact0_threads = self._solver.n_envs_ * ((gpu_cores + self._solver.n_envs_ - 1) // self._solver.n_envs_)
             opt_in(MPRScratch.contact0, workers=n_contact0_threads)
             opt_in(MPRScratch.multicontact, workers=max(gpu_cores, self._n_terrain_threads))
             opt_in(GJKScratch.contact0, workers=n_contact0_threads)
@@ -107,7 +107,7 @@ class Collider:
             if self.collider_config.has_terrain:
                 opt_in(MPRScratch.multicontact, workers=self._n_terrain_threads)
             if self.collider_config.has_non_box_plane_convex_convex:
-                opt_in(GJKScratch.main, workers=self._solver._B)
+                opt_in(GJKScratch.main, workers=self._solver.n_envs_)
 
         if self.collider_config.has_nonconvex_nonterrain:
             opt_in(SDFInfo)
@@ -390,7 +390,7 @@ class Collider:
         config = self._solver.rigid_config
         self.collider_state = ColliderState(
             sizes=dict(
-                envs=self._solver._B,
+                envs=self._solver.n_envs_,
                 links=self._solver.n_links_,
                 valid_link_pairs=n_valid_link_pairs,
                 possible_pairs=self._n_possible_pairs,
@@ -423,7 +423,7 @@ class Collider:
             and not self._solver.rigid_config.requires_grad
             and self.collider_config.has_prunable_contacts
             and (self._solver._options.contact_pruning_tolerance or 0.0) > 0.0
-            and self._solver._B <= 0.5 * self.collider_config.gpu_cores
+            and self._solver.n_envs_ <= 0.5 * self.collider_config.gpu_cores
         )
 
     def _compute_collision_pair_idx(self):
@@ -551,7 +551,7 @@ class Collider:
         # links in a given environment, so a pair is kept only if some environment carries the variant of both geoms.
         # Each variant of every heterogeneous entity gets its own key, and the key 0 stands for every homogeneous geom.
         geoms_variant_key = np.zeros((n_geoms,), dtype=gs.np_int)
-        entities_envs_variant_key = [np.zeros((self._solver._B,), dtype=gs.np_int)]
+        entities_envs_variant_key = [np.zeros((self._solver.n_envs_,), dtype=gs.np_int)]
         n_variant_keys = 1
         for entity in self._solver.entities:
             if not entity.desc.variants:
@@ -560,7 +560,9 @@ class Collider:
                 for i_variant, (geom_start, geom_end) in enumerate(link._variant_geom_ranges):
                     geoms_variant_key[geom_start:geom_end] = n_variant_keys + i_variant
             n_variants = len(entity.desc.variants)
-            entities_envs_variant_key.append(n_variant_keys + _balanced_variant_mapping(n_variants, self._solver._B))
+            entities_envs_variant_key.append(
+                n_variant_keys + _balanced_variant_mapping(n_variants, self._solver.n_envs_)
+            )
             n_variant_keys += n_variants
         envs_variant_key = np.stack(entities_envs_variant_key)
         variant_keys_is_co_carried = np.zeros((n_variant_keys, n_variant_keys), dtype=bool)
@@ -589,7 +591,7 @@ class Collider:
             # same-root pair left belongs to a single variant of one entity, so the first environment carrying a geom
             # carries the other geom of its pair as well.
             _, _, geoms_pos, geoms_quat, _, _ = compute_forward_kinematics(
-                self._solver.entities, n_envs=self._solver._B
+                self._solver.entities, n_envs=self._solver.n_envs_
             )
             for i_g in self_root_geom_idxs:
                 geom = geoms[i_g]
@@ -870,7 +872,7 @@ class Collider:
                 torch.mps.synchronize()
             return
 
-        envs_idx = self._solver._scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self._solver.sim.sanitize_envs_idx(envs_idx)
         collider_kernel_reset(
             envs_idx, self.collider_state, self._solver.rigid_config, self.collider_config, cache_only
         )
@@ -888,7 +890,7 @@ class Collider:
         self._contact_data_cache.clear()
         # A kernel wipes the live contacts alone, while views over the contact buffers would wipe every slot of them
         if not isinstance(envs_idx, torch.Tensor):
-            envs_idx = self._solver._scene._sanitize_envs_idx(envs_idx)
+            envs_idx = self._solver.sim.sanitize_envs_idx(envs_idx)
         if isinstance(envs_idx, torch.Tensor) and envs_idx.dtype == torch.bool:
             fn = kernel_masked_collider_clear
         else:
@@ -964,8 +966,8 @@ class Collider:
                 n_contacts_max = (n_contacts if n_envs == 0 else n_contacts.max()).item()
 
             if not zerocopy_aligned:
-                # Build a (_B, n_contacts_max) index tensor once, expanded to (_B, n_contacts_max, 3) for vector
-                # fields. n_contacts_max comes from the max-across-envs reduction so the same index drives every
+                # Build a (n_envs_, n_contacts_max) index tensor once, expanded to (n_envs_, n_contacts_max, 3) for
+                # vector fields. n_contacts_max comes from the max-across-envs reduction so the same index drives every
                 # field; per-env trimming to n_contacts[i] happens in the ragged split below.
                 if not (as_tensor or n_envs == 0) and not padded:
                     n_contacts_max = n_contacts.max().item()
@@ -1001,7 +1003,7 @@ class Collider:
                     else:
                         data = tensor_to_array(data)
                 else:
-                    # data shape is (_B, max_candidate_contacts) for scalars, with a trailing 3 axis for vectors.
+                    # data shape is (n_envs_, max_candidate_contacts) for scalars, with a trailing 3 axis for vectors.
                     gidx = gather_idx_vec if data.dim() == 3 else gather_idx_flat
                     data = data.gather(dim=1, index=gidx)
                     if pad_mask is not None:

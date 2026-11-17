@@ -674,9 +674,12 @@ class JITRenderer:
         if env_idx < 0 or not self._has_env_filtered:
             yield
             return
-        inactive = (self.render_flags[:, 8].astype(bool) & ~self.env_active[:, env_idx]) | (
-            (self.env_row >= 0) & (self.env_row != env_idx)
-        )
+        inactive = (self.env_row >= 0) & (self.env_row != env_idx)
+        # Only the env filtered primitives carry one visibility per environment. Primitives standing in a single
+        # environment (env_row) alone may leave 'env_active' narrower than the rendered environments.
+        is_env_filtered = self.render_flags[:, 8].astype(bool)
+        if is_env_filtered.any():
+            inactive[is_env_filtered] |= ~self.env_active[is_env_filtered, env_idx]
         saved = self.n_indices[inactive].copy()
         self.n_indices[inactive] = 0
         try:

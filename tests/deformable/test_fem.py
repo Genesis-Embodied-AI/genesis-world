@@ -7,7 +7,8 @@ import torch
 import igl
 
 import genesis as gs
-from genesis.utils.misc import qd_to_numpy, tensor_to_array
+import genesis.utils.geom as gu
+from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
@@ -111,7 +112,7 @@ def test_multi_submesh_render_decoupling(n_envs, show_viewer):
     # The two sub-meshes share their boundary vertices, so welding strictly reduces the vertex count.
     n_render_verts = sum(len(vgeom.vmesh.verts) for vgeom in fem.vgeoms)
     assert fem.n_vertices < n_render_verts
-    vertices = tensor_to_array(fem.get_verts_pos())
+    vertices = fem.get_verts_pos()
     for vgeom in fem.vgeoms:
         # Negative indices would wrap around silently.
         assert vgeom.sim_verts_idx.min() >= 0
@@ -628,6 +629,69 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
         ),
         material=gs.materials.Rigid(),
     )
+    # Vertices fixed through the entity spec stay where they start. A box selects in the frame of the morph, which
+    # the rotation of the morph turns into a side face of the entity.
+    rotated_box_spec = gs.entities.FEM(
+        morph=gs.morphs.Box(
+            pos=(1.0, 0.0, HEIGHT),
+            size=(2.0 * BOX_SIZE, 2.0 * BOX_SIZE, 2.0 * BOX_SIZE),
+            euler=(90.0, 0.0, 0.0),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1e4,
+        ),
+    )
+    rotated_box_spec.select(gs.indices.Vertex.in_box(lower=(-0.1, -0.1, 0.1), upper=(0.1, 0.1, 0.1))).set_is_fixed(True)
+    rotated_box = scene.add_entity(spec=rotated_box_spec)
+    # The union of an ordinal selection of two top corners and of the vertices closest to the other two pins the whole
+    # top face. The ordinals come from the same box added to a scene that is not built.
+    probe_box = gs.Scene().add_entity(
+        spec=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                size=(2.0 * BOX_SIZE, 2.0 * BOX_SIZE, 2.0 * BOX_SIZE),
+            ),
+            material=gs.materials.FEM.Elastic(),
+        ),
+    )
+    probe_verts_pos = tensor_to_array(probe_box.init_positions)
+    top_verts_idx = np.flatnonzero(probe_verts_pos[:, 2] > BOX_SIZE - 1e-6)
+    top_face_selection = gs.indices.Vertex.at(top_verts_idx[:2])
+    for pos in probe_verts_pos[top_verts_idx[2:]]:
+        top_face_selection = top_face_selection | gs.indices.Vertex.closest_to(pos, max_distance=1e-3)
+    hanging_box_spec = gs.entities.FEM(
+        morph=gs.morphs.Box(
+            pos=(1.5, 0.0, HEIGHT),
+            size=(2.0 * BOX_SIZE, 2.0 * BOX_SIZE, 2.0 * BOX_SIZE),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1e4,
+        ),
+    )
+    hanging_box_spec.select(top_face_selection).set_is_fixed(True)
+    hanging_box = scene.add_entity(spec=hanging_box_spec)
+
+    cloth_spec = gs.entities.FEM(morph=gs.morphs.Sphere(), material=gs.materials.FEM.Cloth())
+    with pytest.raises(gs.GenesisException, match="vertices"):
+        cloth_spec.select(gs.indices.Vertex.at(0)).set_is_fixed(True)
+    for vertex_index, match in (
+        (gs.indices.Vertex.closest_to(pos=(0.1, 0.1, 0.2), max_distance=0.05), "max_distance"),
+        (gs.indices.Vertex.in_box(lower=(0.2, 0.2, 0.2), upper=(0.3, 0.3, 0.3)), "No vertex"),
+        (gs.indices.Vertex.at(probe_verts_pos.shape[0]), "no valid vertex"),
+    ):
+        rejected_spec = hanging_box.spec.model_copy()
+        rejected_spec.select(vertex_index).set_is_fixed(True)
+        with pytest.raises(gs.GenesisException, match=match):
+            gs.Scene().add_entity(spec=rejected_spec)
+    disjoint_spec = hanging_box.spec.model_copy()
+    disjoint_spec.select(gs.indices.Vertex.at(0) & gs.indices.Vertex.at(1)).set_is_fixed(True)
+    with pytest.raises(gs.GenesisException, match="holds no vertex"):
+        gs.Scene().add_entity(spec=disjoint_spec)
+    # A nested ordinal counts the vertices of the selection alone
+    nested_spec = hanging_box.spec.model_copy()
+    nested_spec.select(gs.indices.Vertex.at([0, 1])).select(gs.indices.Vertex.at(2)).set_is_fixed(True)
+    with pytest.raises(gs.GenesisException, match="no valid vertex among 2"):
+        gs.Scene().add_entity(spec=nested_spec)
+
     scene.build(n_envs=2)
     free_boxes_pos_0 = torch.stack([free_box.get_verts_pos() for free_box in free_boxes])
     substep_dt = DT / N_SUBSTEPS
@@ -741,6 +805,17 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
                 scene.draw_debug_spheres(poss=target_poss, radius=0.005, color=(1, 0, 1, 0.8))
             scene.visualizer.update(force=False, auto=True)
 
+    # The fixed vertices, on the top face of each box in the frame of its morph, hold it while the bottom face sags
+    for fixed_box in (rotated_box, hanging_box):
+        init_verts_pos = tensor_to_array(fixed_box.init_positions)
+        morph = fixed_box.spec.morph
+        morph_verts_pos = (init_verts_pos - morph.pos) @ gu.quat_to_R(np.array(morph.quat))
+        verts_pos = tensor_to_array(fixed_box.get_verts_pos())
+        is_fixed = morph_verts_pos[:, 2] > morph_verts_pos[:, 2].max() - 1e-3
+        assert_allclose(verts_pos[:, is_fixed], init_verts_pos[is_fixed], tol=1e-8)
+        is_opposite = morph_verts_pos[:, 2] < morph_verts_pos[:, 2].min() + 1e-3
+        assert (init_verts_pos[is_opposite, 2] - verts_pos[:, is_opposite, 2] > 1e-2).all()
+
     # Disable constraints
     box.remove_vertex_constraints()
 
@@ -785,22 +860,37 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
     assert_allclose(center_pos_delta, com_pos[..., 2] - com_pos_z_0, tol=0.05)
 
     # The internal forces are the opposite of the gradient of the elastic energy of the box with respect to the
-    # positions of its vertices. The linear corotated model takes the rotation of each element as given.
-    mu, lam = box.material.mu, box.material.lam
-    pos = box.get_verts_pos().requires_grad_()
-    F = (torch.linalg.inv(edges_rest) @ (pos[:, elems[:, :3]] - pos[:, elems[:, 3:]])).transpose(-1, -2)
-    if use_implicit_solver:
-        U, _, Vh = torch.linalg.svd(F.detach())
-        F_rot = (U @ Vh).transpose(-1, -2) @ F
-        eps = 0.5 * (F_rot + F_rot.transpose(-1, -2)) - torch.eye(3, dtype=gs.tc_float, device=gs.device)
-        energy_density = mu * eps.square().sum((-2, -1)) + 0.5 * lam * eps.diagonal(dim1=-2, dim2=-1).sum(-1) ** 2
-    else:
-        J_shift = torch.linalg.det(F) - 1.0 - mu / (lam + mu)
-        energy_density = 0.5 * mu * (F.square().sum((-2, -1)) - 3.0) + 0.5 * (lam + mu) * J_shift**2
-    energy = (elems_vol * energy_density).sum()
-    forces = scene.fem_solver.get_forces()[:, box.v_start : box.v_start + box.n_vertices]
+    # positions of its vertices, the same from the element data stored by the solver as from the rest shape of the box,
+    # and those of a body sum to zero. The linear corotated model takes the rotation of each element as given.
+    fem_solver = scene.fem_solver
+    elems_idx = slice(box.el_start, box.el_start + box.n_elements)
+    verts_pos = qd_to_torch(
+        fem_solver.fem_state.vertices.pos, None, slice(box.v_start, box.v_start + box.n_vertices), transpose=True
+    )
+    elements = fem_solver.fem_info.elements
+    elems_data = [
+        [
+            qd_to_torch(field, elems_idx, transpose=True)
+            for field in (elements.B, elements.V, elements.mu, elements.lam)
+        ],
+        [torch.linalg.inv(edges_rest).transpose(-1, -2), elems_vol, box.material.mu, box.material.lam],
+    ]
+    forces = []
+    for elems_B, elems_V, mu, lam in elems_data:
+        pos = verts_pos.clone().requires_grad_()
+        F = (pos[:, elems[:, :3]] - pos[:, elems[:, 3:]]).transpose(-1, -2) @ elems_B
+        if use_implicit_solver:
+            U, _, Vh = torch.linalg.svd(F.detach())
+            F_rot = (U @ Vh).transpose(-1, -2) @ F
+            eps = 0.5 * (F_rot + F_rot.transpose(-1, -2)) - torch.eye(3, dtype=gs.tc_float, device=gs.device)
+            energy_density = mu * eps.square().sum((-2, -1)) + 0.5 * lam * eps.diagonal(dim1=-2, dim2=-1).sum(-1) ** 2
+        else:
+            J_shift = torch.linalg.det(F) - 1.0 - mu / (lam + mu)
+            energy_density = 0.5 * mu * (F.square().sum((-2, -1)) - 3.0) + 0.5 * (lam + mu) * J_shift**2
+        forces.append(-torch.autograd.grad((elems_V * energy_density).sum(), pos)[0])
     tol = 1e-11 if precision == "64" else (5e-3 if use_implicit_solver else 5e-4)
-    assert_allclose(forces, -torch.autograd.grad(energy, pos)[0], tol=tol)
+    assert_allclose(forces[0], forces[1], tol=tol)
+    assert_allclose(forces[0].sum(dim=-2), 0.0, atol=tol)
 
     if use_implicit_solver:
         # Replaying the free fall reproduces it bitwise
@@ -1150,8 +1240,8 @@ def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show
     assert_allclose(cubes_overlap, cubes_overlap_ref, rtol=0.02)
 
     # The upper cube of the single entity comes to rest on its lower one as the separate cubes do
-    is_upper = tensor_to_array(cubes.init_positions)[:, 2] > 2 * CUBE_HALFSIZE + CUBES_GAP / 2
-    cubes_pos = tensor_to_array(cubes.get_verts_pos())
+    is_upper = cubes.init_positions[:, 2] > 2 * CUBE_HALFSIZE + CUBES_GAP / 2
+    cubes_pos = cubes.get_verts_pos()
     assert_allclose(cubes.get_verts_vel(), 0.0, atol=1e-3)
     assert_allclose(
         cubes_pos[~is_upper, 2].max() - cubes_pos[is_upper, 2].min(),
@@ -1245,7 +1335,7 @@ def test_sap_coupler_capacity(
         # A capacity holding the candidate pairs of the scene holds, however many tets the boxes of its faces span
         for _ in range(20):
             scene.step()
-        assert (tensor_to_array(box.get_pos())[..., 2] > 2 * SPHERE_RADIUS).all()
+        assert (box.get_pos()[..., 2] > 2 * SPHERE_RADIUS).all()
 
 
 @pytest.mark.required
@@ -1321,11 +1411,11 @@ def test_sap_coupler_default_capacity(show_viewer):
     for _ in range(40):
         scene.step()
 
-    landing_box_pos = tensor_to_array(landing_box.get_pos())
-    sphere_center = tensor_to_array(sphere.get_verts_pos()).mean(axis=-2)
+    landing_box_pos = landing_box.get_pos()
+    sphere_center = sphere.get_verts_pos().mean(dim=-2)
     assert_allclose(landing_box_pos[..., :2], sphere_center[..., :2], atol=0.01)
     assert (landing_box_pos[..., 2] > 2 * SPHERE_RADIUS).all()
-    stacked_box_pos = tensor_to_array(stacked_box.get_pos())
+    stacked_box_pos = stacked_box.get_pos()
     assert_allclose(stacked_box_pos[..., :2], (1.0, 0.0), atol=2e-3)
     assert_allclose(stacked_box_pos[..., 2], 2 * BOX_SIZE + BOX_SIZE / 2, atol=2e-3)
     assert_allclose(stacked_cube.get_verts_pos().mean(dim=-2), (-1.0, 0.0, 3 * BOX_SIZE), atol=2e-3)

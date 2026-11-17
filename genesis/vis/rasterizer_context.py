@@ -13,7 +13,7 @@ import genesis.utils.particle as pu
 from genesis.engine.state_change import StateChange, Subscriber
 from genesis.ext import pyrender
 from genesis.ext.pyrender.jit_render import JITRenderer
-from genesis.utils.misc import qd_to_numpy, sanitize_index, tensor_to_array
+from genesis.utils.misc import BuildableMixin, qd_to_numpy, sanitize_index, tensor_to_array
 
 if TYPE_CHECKING:
     from genesis.engine.sensors.base_sensor import Sensor
@@ -70,9 +70,9 @@ class TrackedNodeList:
     def invalidate(self, envs_idx=None):
         """Remove the nodes of the environments 'envs_idx' (None for all of them) until the next step or reset."""
         context = self._context
-        envs_idx = tensor_to_array(sanitize_index(envs_idx, -1, context.sim._B, 0, "envs_idx"))
+        envs_idx = tensor_to_array(sanitize_index(envs_idx, -1, max(context.scene.n_envs, 1), 0, "envs_idx"))
         envs_mask = np.isin(context.rendered_envs_idx, envs_idx)
-        with context.scene._visualizer.viewer_lock:
+        with context.scene.visualizer.viewer_lock:
             is_any_env_invalidated = envs_mask.any()
             nodes_kept = []
             for env_idx, node in self._nodes:
@@ -88,7 +88,7 @@ class TrackedNodeList:
     def update(self):
         """Draw the nodes again, except in the environments whose nodes are stale."""
         context = self._context
-        with context.scene._visualizer.viewer_lock:
+        with context.scene.visualizer.viewer_lock:
             if context.sim.cur_step_global != self._invalidated_step:
                 self._invalidated_envs_mask[:] = False
             self.clear()
@@ -101,7 +101,7 @@ class TrackedNodeList:
 
     def clear(self):
         """Remove every node."""
-        with self._context.scene._visualizer.viewer_lock:
+        with self._context.scene.visualizer.viewer_lock:
             for _, node in self._nodes:
                 self._context.remove_node_seg(node)
                 self._context.remove_node(node)
@@ -171,7 +171,7 @@ class SegmentationColorMap:
             self.idxc_to_color = rgb
 
 
-class RasterizerContext:
+class RasterizerContext(BuildableMixin):
     def __init__(self, options):
         self.show_world_frame = options.show_world_frame
         self.world_frame_size = options.world_frame_size
@@ -234,6 +234,7 @@ class RasterizerContext:
         )
         self.link_frame_mesh.vertices *= self.link_frame_size
 
+    @gs.assert_unbuilt
     def build(self, scene):
         self.scene = scene
         self.sim = scene.sim
@@ -243,7 +244,7 @@ class RasterizerContext:
         self.visualizer.update_visual_states()
 
         if self.rendered_envs_idx is None:
-            self.rendered_envs_idx = list(range(self.sim._B))
+            self.rendered_envs_idx = list(range(max(self.scene.n_envs, 1)))
         self.rendered_envs_mask = np.ones(len(self.rendered_envs_idx), dtype=np.bool_)
 
         # pyrender scene
@@ -282,8 +283,10 @@ class RasterizerContext:
 
         # segmentation mapping
         self.seg_color_map.generate_seg_colors()
+        self._is_built = True
 
     def destroy(self):
+        self._is_built = False
         self.clear_dynamic_nodes(only_outdated=False)
         for node_list in self.tracked_nodes.values():
             node_list.clear()
@@ -306,14 +309,14 @@ class RasterizerContext:
         self.clear_dynamic_nodes(only_outdated=False)
 
     def add_node(self, obj, **kwargs):
-        with self.scene._visualizer.viewer_lock:
+        with self.scene.visualizer.viewer_lock:
             return self._scene.add(obj, **kwargs)
 
     def remove_node(self, node):
-        if self.scene._visualizer is None:
+        if self.scene.visualizer is None:
             self._scene.remove_node(node)
         else:
-            with self.scene._visualizer.viewer_lock:
+            with self.scene.visualizer.viewer_lock:
                 self._scene.remove_node(node)
 
     def _get_geom_active_envs_idx(self, geom, rendered_envs_idx):
@@ -1093,14 +1096,14 @@ class RasterizerContext:
 
     def on_sensors(self):
         solvers = tuple(solver for solver in (self.sim.rigid_solver, self.sim.kinematic_solver) if solver.is_active)
-        for sensor in self.sim._sensor_manager.sensors:
+        for sensor in self.scene.sensors:
             if sensor._options.draw_debug:
                 self.tracked_nodes[sensor] = TrackedNodeList(
                     self, partial(sensor._draw_debug, self), solvers, sensor.invalidated_by
                 )
 
     def update_sensors(self):
-        for sensor in self.sim._sensor_manager.sensors:
+        for sensor in self.scene.sensors:
             if sensor in self.tracked_nodes:
                 self.tracked_nodes[sensor].update()
 
@@ -1324,7 +1327,7 @@ class RasterizerContext:
             solvers = None
 
         # The interactive viewer draws from its own thread whatever is uploaded here
-        with self.scene._visualizer.viewer_lock:
+        with self.scene.visualizer.viewer_lock:
             # Update current time right away
             self._t = self.scene.sim.cur_step_global
 

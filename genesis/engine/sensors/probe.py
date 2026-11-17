@@ -10,7 +10,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.options.sensors.tactile import TactileProbeSensorOptionsMixin
-from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
+from genesis.utils.misc import BuildableMixin, concat_with_tensor, make_tensor_field, tensor_to_array
 
 if TYPE_CHECKING:
     from genesis.ext.pyrender.mesh import Mesh
@@ -83,7 +83,7 @@ def get_measured_bufs(
     return measured_slot, shared_metadata.measured_scratch_T
 
 
-class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin]:
+class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin](BuildableMixin):
     """Shared logic for registering this sensor's probes in ``ProbeSensorMetadataMixin`` fields."""
 
     # Number of channel groups per probe in the cache layout. Used by the per-cache-col probe-index builder.
@@ -104,6 +104,7 @@ class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin]:
         self._probe_local_pos = raw_pos.reshape(self._n_probes, 3).contiguous()
         super().__init__(options, idx, shared_context, shared_metadata, manager)
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         super().build()
         self._shared_metadata.sensor_probe_start = concat_with_tensor(
@@ -145,7 +146,7 @@ class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin]:
 
         # Tactile-specific options (probe_gain, dead_taxel_*) live on ``TactileProbeSensorOptionsMixin``; generic
         # probe sensors (e.g. SurfaceDistanceProbe) don't carry them and register defaults (gain 1, no dead).
-        B = self._manager._sim._B
+        B = self._manager.n_envs_
         opts = self._options
         is_tactile = isinstance(opts, TactileProbeSensorOptionsMixin)
         # Initial per-probe gain (probe_gain may be scalar or per-probe array).
@@ -337,7 +338,7 @@ class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin]:
         environments. ``probe_world_flat`` is ``(n_debug_envs * n_probes, 3)`` with env-offset already added. Assumes
         ``self._link`` is set (consumer inherits ``RigidSensorMixin``).
         """
-        if self._manager._sim.n_envs > 0:
+        if self._manager.n_envs > 0:
             envs_idx = [context.rendered_envs_idx[i] for i in rendered_envs_idx]
             n_debug_envs = len(envs_idx)
             env_offsets = context.scene.envs_offset[np.asarray(envs_idx, dtype=gs.np_int)]
@@ -513,6 +514,7 @@ class ProbesWithNormalSensorMixin[ProbesWithNormalSensorSharedMetadataT: ProbesW
         else:
             self._probe_local_normal = raw_normal.reshape(self._n_probes, 3).contiguous()
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         super().build()
         self._shared_metadata.probe_local_normal = concat_with_tensor(

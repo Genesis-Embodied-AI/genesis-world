@@ -83,7 +83,7 @@ def test_lazy_sensor_discovery(show_viewer, tmp_path):
                 pass
 
             def build(self):
-                pass
+                super().build()
         """
         )
     )
@@ -329,13 +329,13 @@ def test_pipeline_contract(tol):
         scene.step()
         gt_observed[i] = tensor_to_array(sensor.read_ground_truth()).reshape(-1)
         measured_observed[i] = tensor_to_array(sensor.read()).reshape(-1)
-        baseline_observed[i] = tensor_to_array(s_baseline.read()).item()
+        baseline_observed[i] = s_baseline.read().item()
         history_observed[i] = tensor_to_array(s_history.read()).reshape(-1)
-        delay_observed[i] = tensor_to_array(s_delay.read()).item()
+        delay_observed[i] = s_delay.read().item()
         both_observed[i] = tensor_to_array(s_both.read()).reshape(-1)
-        jitter_observed[i] = tensor_to_array(s_jitter.read()).item()
-        late_jitter_observed[i] = tensor_to_array(s_late_jitter.read()).item()
-        substep_delay_observed[i] = tensor_to_array(s_substep_delay.read()).item()
+        jitter_observed[i] = s_jitter.read().item()
+        late_jitter_observed[i] = s_late_jitter.read().item()
+        substep_delay_observed[i] = s_substep_delay.read().item()
 
     # Analytical expectation for the vector sensor, per component. Let raw[k] = k, and (P, M, A, H) be the per-
     # component vectors.
@@ -448,7 +448,7 @@ def test_pipeline_contract_uint8_delay(tol):
     observed = np.zeros(n_steps, dtype=np.uint8)
     for i in range(n_steps):
         scene.step()
-        observed[i] = tensor_to_array(sensor.read()).item()
+        observed[i] = sensor.read().item()
 
     raw = np.arange(1, n_steps + 1, dtype=np.float32)
     expected = np.where(raw - DELAY_STEPS >= 1, raw - DELAY_STEPS, 0.0).astype(np.uint8)

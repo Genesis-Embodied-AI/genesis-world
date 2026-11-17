@@ -1,6 +1,7 @@
 import functools
 import textwrap
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -13,9 +14,14 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
+from genesis.options.surfaces import Surface
 from genesis.utils.misc import broadcast_tensor
 
 from .base_entity import Entity
+
+if TYPE_CHECKING:
+    from genesis.engine.scene import Scene
+    from genesis.engine.solvers.particle_solver import ParticleSolver
 
 # Number of vvert-particle distances computed at once when searching the supports of the vverts. Their difference
 # vectors take 24 MiB in double precision, while chunks of this size still amortize the per-chunk overhead of numpy.
@@ -66,10 +72,8 @@ class ParticleEntity(Entity):
         The scene object that this entity belongs to.
     solver : Solver
         The physics solver responsible for simulating the entity's particles.
-    material : Material
-        The material definition, including sampling strategy and physical properties.
-    morph : Morph
-        Geometry or volumetric shape used for sampling particles (e.g., mesh, primitive).
+    spec : gs.entities.MPM | gs.entities.SPH | gs.entities.PBD
+        The entity spec the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface material or texture information associated with the entity.
     particle_size : float
@@ -88,20 +92,18 @@ class ParticleEntity(Entity):
 
     def __init__(
         self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        particle_size,
-        idx,
-        particle_start,
-        vvert_start=None,
-        vface_start=None,
-        need_skinning=True,
-        name: str | None = None,
-    ):
-        super().__init__(idx, scene, morph, solver, material, surface, name=name)
+        scene: "Scene",
+        solver: "ParticleSolver",
+        surface: Surface,
+        particle_size: float,
+        idx: int,
+        particle_start: int,
+        spec: "gs.entities.MPM | gs.entities.SPH | gs.entities.PBD",
+        vvert_start: int | None = None,
+        vface_start: int | None = None,
+        need_skinning: bool = True,
+    ) -> None:
+        super().__init__(idx, scene, solver, surface, spec)
 
         self._particle_size = particle_size
         self._particle_start = particle_start
@@ -144,7 +146,7 @@ class ParticleEntity(Entity):
         GenesisException
             If the specified sampler is not supported or incorrectly formatted.
         """
-        self.sampler = self._material.sampler
+        self.sampler = self.material.sampler
 
         match self.sampler.split("-"):
             case ["regular"]:
@@ -171,6 +173,8 @@ class ParticleEntity(Entity):
         self._add_particles_to_solver()
         if self._need_skinning:
             self._add_vverts_to_solver()
+
+        self._is_built = True
 
     def _add_particles_to_solver(self):
         raise NotImplementedError
@@ -505,12 +509,12 @@ class ParticleEntity(Entity):
         closest_idx : torch.Tensor, shape (M,)
             The index of the closest particle.
         """
-        pos = broadcast_tensor(pos, gs.tc_float, (self._scene._B, 3), ("envs_idx", ""))
+        pos = broadcast_tensor(pos, gs.tc_float, (self._solver.n_envs_, 3), ("envs_idx", ""))
 
         cur_particles = self.get_particles_pos(envs_idx)
         distances = torch.linalg.norm(cur_particles - pos[:, None], dim=-1)
         closest_idx = torch.argmin(distances, dim=-1).to(dtype=gs.tc_int)
-        if self._scene.n_envs == 0:
+        if self._solver.n_envs == 0:
             closest_idx = closest_idx[0]
         return closest_idx
 
@@ -611,11 +615,6 @@ class ParticleEntity(Entity):
     def init_particles(self):
         """Initial sampled particle positions."""
         return self._particles
-
-    @property
-    def material(self):
-        """Material of this entity."""
-        return self._material
 
     @property
     def surface(self):

@@ -5,7 +5,6 @@ import torch
 
 import genesis as gs
 from genesis.engine.entities import RigidEntity
-from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose
 
@@ -102,7 +101,7 @@ def assert_grad_matches_fd(
     ana_grads = {}
     for i_step, x in x_anas.items():
         assert x.grad is not None, f"input {i_step}: x.grad is None after backward"
-        ana_grads[i_step] = tensor_to_array(x.grad)
+        ana_grads[i_step] = x.grad
 
     # Finite-difference reference on the production scene: perturb each entry of each input by +/- eps, re-run the
     # full trajectory for both signs, and central-difference the loss.

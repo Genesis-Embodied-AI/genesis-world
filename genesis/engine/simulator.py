@@ -1,17 +1,27 @@
+import os
 import weakref
 from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 import genesis as gs
 from genesis.engine.solvers.base_solver import BackwardErrorCode
 from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
-from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
+from genesis.typing import IndexType
 from genesis.utils.data import ArrayItem, DataItem, DataKind, check_data, iter_data
-from genesis.utils.misc import indices_to_mask, qd_destroy_data, qd_to_numpy, qd_to_torch
+from genesis.utils.misc import (
+    BatchedMixin,
+    BuildableMixin,
+    indices_to_mask,
+    qd_destroy_data,
+    qd_to_numpy,
+    qd_to_torch,
+    sanitize_index,
+)
 from genesis.utils.tools import StepTimer
 from genesis.utils.warnings import warn_once
 
@@ -38,6 +48,7 @@ if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity, EntityDescription
     from genesis.engine.scene import Scene
     from genesis.options.scene import SceneOptions
+    from genesis.options.surfaces import Surface
 
 
 def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SolverCheckpoint]]) -> None:
@@ -49,7 +60,7 @@ def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SolverChec
         torch.mps.synchronize()
 
 
-class Simulator(RBC):
+class Simulator(BatchedMixin, BuildableMixin, RBC):
     """
     A simulator is a scene-level simulation manager, which manages all simulation-related operations in the scene, including multiple solvers and the inter-solver coupler.
 
@@ -106,13 +117,13 @@ class Simulator(RBC):
         self._is_forward_ready = True
 
         # solvers
-        self.rigid_solver = RigidSolver(self.scene, self, options.rigid)
-        self.kinematic_solver = KinematicSolver(self.scene, self, options.kinematic)
-        self.mpm_solver = MPMSolver(self.scene, self, options.mpm)
-        self.sph_solver = SPHSolver(self.scene, self, options.sph)
-        self.pbd_solver = PBDSolver(self.scene, self, options.pbd)
-        self.fem_solver = FEMSolver(self.scene, self, options.fem)
-        self.newton_solver = NewtonSolver(self.scene, self, options.newton)
+        self.rigid_solver = RigidSolver(self, options.rigid)
+        self.kinematic_solver = KinematicSolver(self, options.kinematic)
+        self.mpm_solver = MPMSolver(self, options.mpm)
+        self.sph_solver = SPHSolver(self, options.sph)
+        self.pbd_solver = PBDSolver(self, options.pbd)
+        self.fem_solver = FEMSolver(self, options.fem)
+        self.newton_solver = NewtonSolver(self, options.newton)
 
         # The Newton solver goes first, so that it solves a substep once every other solver prepared it and the coupler
         # ran, and before the others finish it (see 'NewtonSolver.substep_post_coupling')
@@ -127,6 +138,13 @@ class Simulator(RBC):
                 self.fem_solver,
             ]
         )
+        # The solver simulating the entities of each entity spec class, a subclass going where its base goes. The Newton
+        # solver simulates no entity of its own.
+        solvers_with_entities = [solver for solver in self._solvers if solver is not self.newton_solver]
+        self._solvers_by_spec_cls: dict[type[gs.entities.Spec], "Solver"] = {
+            solver.entity_spec_cls: solver for solver in solvers_with_entities
+        }
+        assert len(self._solvers_by_spec_cls) == len(solvers_with_entities)
 
         self._active_solvers: list["Solver"] = gs.List()
         # What runs in the scene in its own right: the active solvers, then the coupler when one is active
@@ -153,49 +171,50 @@ class Simulator(RBC):
         # sensors
         self._sensor_manager = SensorManager(self)
 
-    def _add_entity(
+    def add_entity(
         self,
-        morph: Morph | None = None,
-        material=None,
-        surface=None,
-        visualize_contact=False,
-        name: str | None = None,
+        surface: "Surface | None" = None,
+        spec: "gs.entities.Spec | None" = None,
         desc: "EntityDescription | None" = None,
-    ):
+    ) -> "Entity":
         if desc is not None:
-            material = desc.material
-        if visualize_contact and not isinstance(material, gs.materials.Rigid):
-            gs.raise_exception("'visualize_contact' only applies to rigid entities.")
-        if isinstance(material, gs.materials.Hybrid):
-            # Note that adding to solver is handled in the hybrid entity
-            entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, name=name)
+            spec = desc.spec
+        if isinstance(spec, gs.entities.Hybrid):
+            # A hybrid entity adds its parts to the scene itself, as entities of their own
+            entity = HybridEntity(self.n_entities, self.scene, surface, spec)
         else:
-            # Several solvers may declare a class the material belongs to, since 'Rigid' derives from 'Kinematic'. The
-            # one declaring the most derived class simulates it (see 'Solver.material_cls').
-            solver = None
-            for candidate in self._solvers:
-                if candidate.material_cls is None or not isinstance(material, candidate.material_cls):
-                    continue
-                if solver is None or issubclass(candidate.material_cls, solver.material_cls):
-                    solver = candidate
-            if solver is None:
-                gs.raise_exception(f"No solver simulates entities of material {type(material).__name__}.")
-            entity = solver.add_entity(
-                self.n_entities, material, morph, surface, visualize_contact, name=name, desc=desc
+            solver = next(
+                (
+                    self._solvers_by_spec_cls[spec_cls]
+                    for spec_cls in type(spec).__mro__
+                    if spec_cls in self._solvers_by_spec_cls
+                ),
+                None,
             )
+            assert solver is not None
+            entity = solver.add_entity(self.n_entities, surface, spec, desc)
         self._entities.append(entity)
         if entity.desc is not None:
             self.scene._desc.entities.append(entity.desc)
         return entity
 
-    def _add_force_field(self, force_field):
+    def add_force_field(self, force_field):
         for solver in self._solvers:
             solver._add_force_field(force_field)
 
-    def build(self):
-        self.n_envs = self.scene.n_envs
-        self._B = self.scene._B
-        self._para_level = self.scene._para_level
+    @gs.assert_unbuilt
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
+        # On CPU every loop is serialized, parallelization only paying off for n_envs >= number of threads, so it is
+        # left to the user to enforce it through the environment variable 'GS_PARA_LEVEL'. On GPU, every loop of a
+        # batched scene is parallelized, and only the loops large enough to pay off otherwise.
+        if gs.backend == gs.cpu:
+            para_level = gs.PARA_LEVEL.NEVER
+        elif n_envs <= 1:
+            para_level = gs.PARA_LEVEL.PARTIAL
+        else:
+            para_level = gs.PARA_LEVEL.ALL
+        self._para_level = int(os.environ.get("GS_PARA_LEVEL", para_level))
 
         # Settled before any solver builds: a solver fills its own buffers with the interval it holds, so a rate
         # settled afterwards would leave those buffers describing an interval the loop does not run at. Whether a
@@ -206,9 +225,9 @@ class Simulator(RBC):
         ]
         # A solver given an interval asks for a rate of its own, whatever that interval works out to. A solver left
         # unset takes the rate the shorthand of SimOptions decides, and has nothing to reconcile.
-        asking_solvers = [solver for solver in integrating_solvers if "dt" in solver._options.model_fields_set]
+        asking_solvers = [solver for solver in integrating_solvers if "dt" in solver.options.model_fields_set]
         for solver in asking_solvers:
-            interval = solver._options.dt
+            interval = solver.options.dt
             n_substeps = solver.substeps
             if abs(n_substeps * interval - self._dt) > gs.EPS * self._dt:
                 gs.raise_exception(
@@ -225,7 +244,7 @@ class Simulator(RBC):
         if len(rates) > 1:
             gs.raise_exception(
                 "Solvers integrating at different rates are not supported yet, got "
-                + ", ".join(f"{type(solver).__name__} at dt={solver._options.dt}" for solver in asking_solvers)
+                + ", ".join(f"{type(solver).__name__} at dt={solver.options.dt}" for solver in asking_solvers)
                 + "."
             )
         substeps = next(iter(rates), self._substeps)
@@ -238,8 +257,8 @@ class Simulator(RBC):
             solver._substep_dt = self._substep_dt
 
         # Counted per environment to support per-env reset, as steps rather than seconds to avoid drifting over time.
-        self._steps = torch.zeros((self._B,), dtype=gs.tc_int, device=gs.device)
-        self.sim_state = SimulatorState(sizes=dict(envs=self._B))
+        self._steps = torch.zeros((self.n_envs_,), dtype=gs.tc_int, device=gs.device)
+        self.sim_state = SimulatorState(sizes=dict(envs=self.n_envs_))
 
         # solvers
         # IPCCoupler needs full substep flow for pre/post coupling phases
@@ -248,7 +267,7 @@ class Simulator(RBC):
         # of the implicit solver makes exact (see func_init_fem_reference_gradient in sap_coupler.py).
         self.fem_solver._is_free_solve_skipped = isinstance(self._coupler, SAPCoupler)
         for solver in self._solvers:
-            solver.build()
+            solver.build(n_envs)
             if solver.is_active:
                 self._active_solvers.append(solver)
                 self._active_systems.append(solver)
@@ -258,7 +277,7 @@ class Simulator(RBC):
         # A coupler exchanges state once per substep, so it is built once the rate that loop runs at is known.
         # The systems are listed as they are built, so that a scene whose build fails frees those built (see 'destroy')
         self._active_systems.append(self._coupler)
-        self._coupler.build()
+        self._coupler.build(n_envs)
         # The errors and the checkpoints of every system are handled at each step without further checks
         for system in self._active_systems:
             if not isinstance(system, ErrnoMixin):
@@ -313,10 +332,18 @@ class Simulator(RBC):
             ]
 
         self._step_timer.add_phases("physics", "sensors")
-        self._sensor_manager.build()
+        self._sensor_manager.build(n_envs)
+
+        self._is_built = True
 
     def destroy(self):
+        self._is_built = False
         self._sensor_manager.destroy()
+        for solver in self._solvers:
+            solver.destroy()
+        self._coupler.destroy()
+        if self._rigid_mpm_hybrid is not None:
+            self._rigid_mpm_hybrid.destroy()
 
         # The ndarrays of a solver are freed with its scene, whatever still references them, or else by 'qd.reset'.
         # They are gathered first, since 'data' reads the gradient of an array after yielding it, and once each, since
@@ -330,6 +357,8 @@ class Simulator(RBC):
                 }
                 for array in arrays.values():
                     qd_destroy_data(array)
+        # A scene destroyed again after a failed build frees nothing twice
+        self._active_systems.clear()
 
     def reset(self, state: SimState, envs_idx=None):
         """Put the given environments back in a state 'get_state' returned, all of them if None.
@@ -430,7 +459,7 @@ class Simulator(RBC):
 
     def get_error_envs_mask(self) -> torch.Tensor:
         """Return whether each env flagged an error in any solver or the coupler since its last reset."""
-        envs_mask = torch.zeros((self._B,), dtype=torch.bool, device=gs.device)
+        envs_mask = torch.zeros((self.n_envs_,), dtype=torch.bool, device=gs.device)
         for component in self._active_systems:
             envs_mask |= component.get_error_envs_mask()
         return envs_mask
@@ -563,6 +592,23 @@ class Simulator(RBC):
         }
         return SimState(self.scene, self.cur_step_global, solvers_state)
 
+    def get_entity(self, name: str | None = None, *, uid: str | None = None) -> "Entity":
+        """Return the entity of the given name or short UID (see 'Scene.get_entity')."""
+        if not ((name is None) ^ (uid is None)):
+            gs.raise_exception("Please specify either one argument between `name` or `uid`.")
+
+        if name is not None:
+            try:
+                return next(entity for entity in self._entities if entity.name == name)
+            except StopIteration as e:
+                gs.raise_exception_from(f"Entity not found for name: '{name}'.", e)
+        else:  # uid is not None
+            matches = [entity for entity in self._entities if entity.uid.match(uid, short_only=True)]
+            if matches:
+                (match,) = matches
+                return match
+            gs.raise_exception(f"Entity not found for uid: '{uid}'.")
+
     def set_gravity(self, gravity, envs_idx=None):
         for solver in self._solvers:
             if solver.is_active and isinstance(solver, GravityMixin):
@@ -571,6 +617,55 @@ class Simulator(RBC):
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
+
+    @property
+    def para_level(self) -> int:
+        """The level of parallelization of the loops of the kernels (see gs.PARA_LEVEL)."""
+        return self._para_level
+
+    @property
+    def _B(self) -> int:
+        warn_once(self, "'Simulator._B' is deprecated. Please use 'Simulator.n_envs_' instead.")
+        return self.n_envs_
+
+    @property
+    def rigid_only(self) -> bool:
+        """Whether the rigid solver alone advances the physics, which lets a step skip the coupling."""
+        return self._rigid_only
+
+    def sanitize_envs_idx(self, envs_idx: IndexType | None) -> torch.Tensor:
+        """Return the indices of the given parallel environments as a tensor, all of them if None.
+
+        A selection by a slice, a range or an integer returns a view of the indices of all the environments. A scene
+        without parallel environments takes no selection.
+        """
+        if envs_idx is None:
+            return self._envs_idx
+
+        if self.n_envs == 0:
+            gs.raise_exception("`envs_idx` is not supported for non-parallelized scene.")
+
+        if isinstance(envs_idx, slice):
+            if envs_idx.step is not None and envs_idx.step < 0:
+                return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
+            return self._envs_idx[envs_idx]
+        if isinstance(envs_idx, range):
+            if envs_idx.step < 0:
+                return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
+            return self._envs_idx[envs_idx]
+        if isinstance(envs_idx, (int, np.integer)):
+            if not -self.n_envs <= envs_idx < self.n_envs:
+                gs.raise_exception(f"`envs_idx` out of range: {envs_idx} not in [{-self.n_envs}, {self.n_envs}).")
+            if envs_idx < 0:
+                envs_idx = envs_idx + self.n_envs
+            return self._envs_idx[envs_idx : envs_idx + 1]
+
+        return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
+
+    @property
+    def sensor_manager(self) -> SensorManager:
+        """The manager of the sensors of the scene."""
+        return self._sensor_manager
 
     @property
     def steps(self) -> torch.Tensor:
@@ -623,9 +718,11 @@ class Simulator(RBC):
         return self._cur_substep_global
 
     @property
-    def cur_substep_local(self):
-        """The current substep within the step. Deprecated: use 'cur_substep_global % substeps' instead."""
-        warn_once("'cur_substep_local' is deprecated and will be removed. Use 'cur_substep_global % substeps' instead.")
+    def cur_substep_local(self) -> int:
+        """The current substep within the step."""
+        warn_once(
+            self, "'Simulator.cur_substep_local' is deprecated. Please use 'cur_substep_global % substeps' instead."
+        )
         return self._cur_substep_global % self._substeps
 
     @property

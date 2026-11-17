@@ -1,15 +1,17 @@
 import numpy as np
+import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
 from genesis.repr_base import RBC
-from genesis.utils.misc import DeprecationError, tensor_to_array
+from genesis.typing import FArrayType
+from genesis.utils.misc import BuildableMixin, DeprecationError, tensor_to_array
 
 from .description import RigidJointDescription
 
 
-class RigidJoint(RBC):
+class RigidJoint(BuildableMixin, RBC):
     """
     Joint class for rigid body entities. Each RigidLink is connected to its parent link via a RigidJoint.
     """
@@ -40,6 +42,13 @@ class RigidJoint(RBC):
                 getter = getattr(self, f"_{name_old}")
                 return getter()
         raise AttributeError
+
+    @gs.assert_unbuilt
+    def _build(self) -> None:
+        self._is_built = True
+
+    def _destroy(self) -> None:
+        self._is_built = False
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- real-time state -----------------------------------
@@ -84,14 +93,12 @@ class RigidJoint(RBC):
         """
         return self._solver.get_joints_anchor_axis(self._idx)[..., 0, :]
 
-    def set_sol_params(self, sol_params):
+    @gs.assert_built
+    def set_sol_params(self, sol_params: "FArrayType | torch.Tensor") -> None:
         """
         Set the solver parameters of this joint.
         """
-        if self._solver.is_built:
-            self._solver.set_sol_params(sol_params, joints_idx=self._idx, envs_idx=None)
-        else:
-            self.desc.sol_params = sol_params
+        self._solver.set_sol_params(sol_params, joints_idx=self._idx, envs_idx=None)
 
     @gs.assert_built
     def get_sol_params(self):
@@ -318,7 +325,7 @@ class RigidJoint(RBC):
         """
         n_dofs = self.n_dofs
         enable_heterogeneous = self._solver._enable_heterogeneous
-        n_envs = self._solver._B
+        n_envs = self._solver.n_envs_
         shape = (n_dofs, n_envs) if enable_heterogeneous else (n_dofs,)
         lengths = np.ones(shape, dtype=gs.np_float)
         if n_dofs == 0:
@@ -383,13 +390,6 @@ class RigidJoint(RBC):
                     perp.append(np.linalg.norm(geom_verts - np.outer(geom_verts @ axis, axis), axis=1).max())
                 lengths[i_d] = body_radius(perp)
         return lengths
-
-    @property
-    def is_built(self):
-        """
-        Returns whether the entity the joint belongs to is built.
-        """
-        return self.entity.is_built
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- repr ----------------------------------------

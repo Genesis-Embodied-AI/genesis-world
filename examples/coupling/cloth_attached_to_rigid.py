@@ -74,7 +74,7 @@ def main():
 
     for j in range(args.num_teleports):
         if j == 2:
-            cloth.release_particle(particles_idx)
+            cloth.release_particles(particles_idx)
 
         new_pos = (0.2 * math.sin(j), 0.2 * math.cos(j), 0.5)
         new_rot = gu.euler_to_quat((-30 * j, -40 * j, 70 * j))

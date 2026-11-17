@@ -37,7 +37,7 @@ from ..options import Options
 from .raycaster import DepthCameraPattern, RaycastPattern
 
 if TYPE_CHECKING:
-    from genesis.engine.scene import Scene
+    from genesis.engine.simulator import Simulator
     from genesis.engine.sensors.base_sensor import Sensor
     from genesis.engine.sensors.contact_force import ContactForceSensor, ContactSensor
     from genesis.engine.sensors.imu import IMUSensor
@@ -102,20 +102,15 @@ class SensorOptions[SensorT: "Sensor"](Options):
         if self.jitter > self.delay:
             gs.raise_exception(f"{type(self).__name__}: Jitter must be less than or equal to read delay.")
 
-    def validate_scene(self, scene: "Scene"):
-        """
-        Validate the sensor options values before the sensor is added to the scene.
-
-        Use pydantic's model_post_init() for validation that does not require scene context.
-        """
-        assert scene.sim is not None
+    def _validate(self, sim: "Simulator"):
+        # Checks needing the simulator. The ones on the values alone belong to model_post_init.
         if self.delay > 0:
-            delay_ratio = self.delay / scene.sim.dt
+            delay_ratio = self.delay / sim.dt
             delay_ts = round(delay_ratio)
             if not np.isclose(delay_ratio, delay_ts, atol=gs.EPS):
                 gs.logger.warning(
                     f"{type(self).__name__}: Read delay should be a multiple of the simulation time step. Got "
-                    f"{self.delay} and {scene.sim.dt}. Actual read delay will be {delay_ts * scene.sim.dt}."
+                    f"{self.delay} and {sim.dt}. Actual read delay will be {delay_ts * sim.dt}."
                 )
 
 
@@ -142,14 +137,14 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
     pos_offset: Vec3FType = (0.0, 0.0, 0.0)
     euler_offset: Vec3FType = (0.0, 0.0, 0.0)
 
-    def validate_scene(self, scene: "Scene"):
+    def _validate(self, sim: "Simulator"):
         from genesis.engine.entities import KinematicEntity
 
-        super().validate_scene(scene)
+        super()._validate(sim)
         if self.entity_idx >= 0:
-            if self.entity_idx >= len(scene.entities):
+            if self.entity_idx >= len(sim.entities):
                 gs.raise_exception(f"Invalid entity index {self.entity_idx}.")
-            entity = scene.entities[self.entity_idx]
+            entity = sim.entities[self.entity_idx]
             if not isinstance(entity, KinematicEntity):
                 gs.raise_exception(f"Entity at index {self.entity_idx} is not a KinematicEntity.")
             if self.link_idx_local >= entity.n_links:
@@ -164,12 +159,12 @@ class RigidSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMixin[Sen
     here.
     """
 
-    def validate_scene(self, scene: "Scene"):
+    def _validate(self, sim: "Simulator"):
         from genesis.engine.entities import RigidEntity
 
-        super().validate_scene(scene)
+        super()._validate(sim)
         if self.entity_idx >= 0:
-            entity = scene.entities[self.entity_idx]
+            entity = sim.entities[self.entity_idx]
             if not isinstance(entity, RigidEntity):
                 gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
 
@@ -182,8 +177,8 @@ class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[S
     The link offset parameters are inherited from RigidSensorOptionsMixin but ignored by joint-space sensors.
     """
 
-    def validate_scene(self, scene: "Scene"):
-        super().validate_scene(scene)
+    def _validate(self, sim: "Simulator"):
+        super()._validate(sim)
         if self.entity_idx < 0:
             gs.raise_exception(f"{type(self).__name__} requires entity_idx >= 0, got {self.entity_idx}.")
 
@@ -205,10 +200,10 @@ class ContactFilterOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[Senso
 
     filter_link_idx: OptionalIArrayType = Field(default_factory=tuple)
 
-    def validate_scene(self, scene: "Scene"):
-        super().validate_scene(scene)
+    def _validate(self, sim: "Simulator"):
+        super()._validate(sim)
         if self.filter_link_idx:
-            n_links = scene.sim.rigid_solver.n_links
+            n_links = sim.rigid_solver.n_links
             if np.any(np.array(self.filter_link_idx) < 0) or np.any(np.array(self.filter_link_idx) >= n_links):
                 gs.raise_exception(
                     f"{type(self).__name__}: filter_link_idx must be in [0, {n_links}). Got {self.filter_link_idx}."
@@ -336,9 +331,9 @@ class JointTorque(RigidEntitySensorOptionsMixin["JointTorqueSensor"], SimpleSens
 
     dofs_idx_local: OptionalIArrayType | None = None
 
-    def validate_scene(self, scene: "Scene"):
-        super().validate_scene(scene)
-        entity = scene.entities[self.entity_idx]
+    def _validate(self, sim: "Simulator"):
+        super()._validate(sim)
+        entity = sim.entities[self.entity_idx]
         if entity.n_dofs == 0:
             gs.raise_exception(f"JointTorque: entity at index {self.entity_idx} has no DOFs.")
         if self.dofs_idx_local is not None and any(i < 0 or i >= entity.n_dofs for i in self.dofs_idx_local):
@@ -596,9 +591,9 @@ class SurfaceDistanceProbe(
     probe_radius: PositiveFArrayType | PositiveFloat = 0.5
     track_link_idx: IArrayType = Field(default_factory=tuple)
 
-    def validate_scene(self, scene: "Scene"):
-        super().validate_scene(scene)
-        n_links = scene.sim.rigid_solver.n_links
+    def _validate(self, sim: "Simulator"):
+        super()._validate(sim)
+        n_links = sim.rigid_solver.n_links
         for i, link_idx in enumerate(self.track_link_idx):
             if not (0 <= link_idx < n_links):
                 gs.raise_exception(

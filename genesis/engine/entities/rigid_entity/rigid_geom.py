@@ -11,7 +11,8 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.mesh import Mesh
 from genesis.repr_base import RBC
-from genesis.utils.misc import DeprecationError, qd_to_torch, tensor_to_array
+from genesis.typing import FArrayType
+from genesis.utils.misc import BuildableMixin, DeprecationError, qd_to_torch, tensor_to_array
 
 from .description import RigidGeomDescription, RigidVisGeomDescription
 
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 NUM_VERTS_VISUAL_GEOM_AABB = 200
 
 
-class RigidGeom(RBC):
+class RigidGeom(BuildableMixin, RBC):
     """
     A `RigidGeom` is the basic building block of a `RigidEntity` for collision checking. It is usually constructed
     from a single mesh. This can be accessed via `link.geoms`.
@@ -88,8 +89,12 @@ class RigidGeom(RBC):
         self.vert_neighbors, self.vert_n_neighbors, self.vert_neighbor_start = mesh.get_vert_adjacency()
         assert self.n_verts == len(self.vert_n_neighbors)
 
-    def _build(self):
-        pass
+    @gs.assert_unbuilt
+    def _build(self) -> None:
+        self._is_built = True
+
+    def _destroy(self) -> None:
+        self._is_built = False
 
     @property
     def trimesh(self):
@@ -138,7 +143,7 @@ class RigidGeom(RBC):
         """
         Visualizes the signed distance field (SDF) of the rigid geometry in the viewer.
         """
-        if self._solver.scene.viewer is None:
+        if self._solver.sim.scene.viewer is None:
             gs.raise_exception("Viewer is not available.")
 
         if self._solver.n_envs > 0:
@@ -157,14 +162,14 @@ class RigidGeom(RBC):
                 T = gu.trans_to_T(np.array(pos))
         else:
             T = np.array(T)
-        self._solver.scene.draw_debug_mesh(sdf_mesh, T=T)
+        self._solver.sim.scene.draw_debug_mesh(sdf_mesh, T=T)
 
         if show_axis:
             axis_mesh = trimesh.creation.axis(origin_size=0.01, axis_radius=0.005, axis_length=axis_length)
             axis_mesh.visual = trimesh.visual.ColorVisuals(
                 vertex_colors=np.tile(np.array([axis_color]), [len(axis_mesh.vertices), 1])
             )
-            self._solver.scene.draw_debug_mesh(axis_mesh, T=T)
+            self._solver.sim.scene.draw_debug_mesh(axis_mesh, T=T)
 
         if show_boundary:
             sdf_grid = self.desc.mesh.get_sdf_grid(self.desc.sdf)
@@ -175,7 +180,7 @@ class RigidGeom(RBC):
             boundary_mesh.visual = trimesh.visual.ColorVisuals(
                 vertex_colors=np.tile(np.array([boundary_color]), [len(boundary_mesh.vertices), 1])
             )
-            self._solver.scene.draw_debug_mesh(boundary_mesh, T=T)
+            self._solver.sim.scene.draw_debug_mesh(boundary_mesh, T=T)
 
     @gs.assert_built
     def set_friction(self, friction):
@@ -290,14 +295,12 @@ class RigidGeom(RBC):
         verts = self.get_verts()
         return torch.stack((verts.min(dim=-2).values, verts.max(dim=-2).values), dim=-2)
 
-    def set_sol_params(self, sol_params):
+    @gs.assert_built
+    def set_sol_params(self, sol_params: "FArrayType | torch.Tensor") -> None:
         """
         Set the solver parameters of this geometry.
         """
-        if self._solver.is_built:
-            self._solver.set_sol_params(sol_params, geoms_idx=self._idx, envs_idx=None)
-        else:
-            self.desc.sol_params = sol_params
+        self._solver.set_sol_params(sol_params, geoms_idx=self._idx, envs_idx=None)
 
     @gs.assert_built
     def get_sol_params(self):
@@ -567,13 +570,6 @@ class RigidGeom(RBC):
         return self.n_edges + self.edge_start
 
     @property
-    def is_built(self):
-        """
-        Whether the rigid entity the geom belongs to is built.
-        """
-        return self.entity.is_built
-
-    @property
     def is_free(self):
         raise DeprecationError("This property has been removed.")
 
@@ -592,7 +588,7 @@ class RigidGeom(RBC):
         return f"{self.__repr_name__()}: {self._uid}, idx: {self._idx} (from entity {self._entity.uid}, link {self._link.uid})"
 
 
-class RigidVisGeom(RBC):
+class RigidVisGeom(BuildableMixin, RBC):
     """
     A `RigidVisGeom` is a counterpart of `RigidGeom`, but for visualization purposes. This can be accessed via `link.vis_geoms`.
     """
@@ -619,8 +615,12 @@ class RigidVisGeom(RBC):
         self.active_envs_mask: torch.Tensor | None = None
         self.active_envs_idx: np.ndarray | None = None
 
-    def _build(self):
-        pass
+    @gs.assert_unbuilt
+    def _build(self) -> None:
+        self._is_built = True
+
+    def _destroy(self) -> None:
+        self._is_built = False
 
     @property
     def trimesh(self):
@@ -718,7 +718,6 @@ class RigidVisGeom(RBC):
                 self.vvert_start + custom_offset, self.vvert_end + custom_offset, envs_idx
             )
 
-        self._solver.update_vgeoms()
         vgeoms_pos = qd_to_torch(self._solver.dyn_state.vgeoms.pos, envs_idx, transpose=True, copy=None)
         vgeoms_quat = qd_to_torch(self._solver.dyn_state.vgeoms.quat, envs_idx, transpose=True, copy=None)
         init = torch.as_tensor(self.init_vverts, dtype=gs.tc_float, device=gs.device)
@@ -867,13 +866,6 @@ class RigidVisGeom(RBC):
         Get the ending index of the vgeom's faces in the rigid solver.
         """
         return self.n_vfaces + self.vface_start
-
-    @property
-    def is_built(self):
-        """
-        Whether the rigid entity the vgeom belongs to is built.
-        """
-        return self.entity.is_built
 
     @property
     def is_free(self):

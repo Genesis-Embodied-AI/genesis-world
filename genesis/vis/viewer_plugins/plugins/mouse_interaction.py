@@ -218,7 +218,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
     @with_lock
     @override
     def on_draw(self) -> None:
-        if self.scene._visualizer is None or not self.scene._visualizer.is_built:
+        if self.scene.visualizer is None or not self.scene.visualizer.is_built:
             return
         # When detached at runtime, copy-on-write removal already dropped this plugin from viewer.plugins, but an
         # in-flight dispatch loop may still walk its pre-removal snapshot and call us once more. Skip drawing so we
@@ -301,7 +301,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
         # Release any held link and drop the debug visuals so detaching the plugin (or viewer teardown) leaves no
         # orphaned hover arrow or drag-plane nodes behind.
         self._held_link = None
-        if self.scene._visualizer is not None and self.scene._visualizer.is_built:
+        if self.scene.visualizer is not None and self.scene.visualizer.is_built:
             for node in self._debug_interact_nodes:
                 self.scene.clear_debug_object(node)
             if self._debug_normal_node is not None:

@@ -434,13 +434,13 @@ def test_multicontact_sphere_vs_terrain(show_viewer, tol):
 
     for _ in range(80):
         scene.step()
-        print(tensor_to_array(sphere.get_dofs_velocity()))
+        print(sphere.get_dofs_velocity())
 
     # Sphere is at rest at the apex of the pit. Equilibrium height is set by the four-wall solid angle: contacts on the
     # opposing pyramid walls push the sphere upward, so it sits above the apex vertex but well below the rim.
-    pos_final = tensor_to_array(sphere.get_pos())
+    pos_final = sphere.get_pos()
     assert_allclose(pos_final[:2], 0.0, tol=2.0 * HORIZONTAL_SCALE)
     assert SPHERE_RADIUS < pos_final[2] < APEX_IDX * VERTICAL_SCALE + SPHERE_RADIUS
 
-    vel_final = tensor_to_array(sphere.get_dofs_velocity())
+    vel_final = sphere.get_dofs_velocity()
     assert_allclose(vel_final, 0.0, tol=1e-5)

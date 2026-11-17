@@ -1,6 +1,6 @@
 from collections.abc import Iterator, Sequence
 from enum import auto
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -58,6 +58,7 @@ from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.grad.bridge import no_grad, register_custom_backward, reversed_with
 from genesis.options.solvers import MPMOptions
+from genesis.options.surfaces import Surface
 from genesis.utils.data import (
     ENVS,
     Config,
@@ -88,6 +89,7 @@ from .base_solver import ErrorCode, SimulatorState, kernel_set_actu
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -577,19 +579,19 @@ class MPMData(Data):
                 (MPMData.mpm_state.hash_grid.cell_size, MPMData.mpm_state.hash_grid.grid_res): True,
             }
         # The sorted particles span every environment, padded to whole warps for the sums by environment over them
-        n_sorted_particles = max((solver._B * solver._n_particles + 255) // 256 * 256, 256)
+        n_sorted_particles = max((solver.n_envs_ * solver.n_particles + 255) // 256 * 256, 256)
         super().__init__(
             sizes={
-                "particles": solver._n_particles,
-                "envs": solver._B,
+                "particles": solver.n_particles,
+                "envs": solver.n_envs_,
                 "grid_x": grid_x,
                 "grid_y": grid_y,
                 "grid_z": grid_z,
-                "geoms": solver._sim.rigid_solver.n_geoms_,
+                "geoms": solver.sim.rigid_solver.n_geoms_,
                 # The slots of the hash grid hash the cells of the grid, one per particle
-                **hash_grid_sizes(max(solver._n_particles, 1)),
+                **hash_grid_sizes(max(solver.n_particles, 1)),
                 "tiles": n_tiles,
-                "envs_groups": (solver._B + 31) // 32,
+                "envs_groups": (solver.n_envs_ + 31) // 32,
                 "materials": max(len(solver._materials), 1),
                 "sorted_particles": n_sorted_particles,
                 MPMData.mpm_state.sorted_particles.sorter: radix_sort_sizes(key_bits=64, capacity=n_sorted_particles),
@@ -677,17 +679,17 @@ class MPMMaterials:
 
 
 class MPMSolver(ParticleSolver):
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]] = gs.entities.MPM
+
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
-
-    material_cls = MPM.Base
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: MPMOptions) -> None:
-        super().__init__(scene, sim, options)
+    def __init__(self, sim: "Simulator", options: MPMOptions) -> None:
+        super().__init__(sim, options)
 
         self._grid_density = options.grid_density
         self._enable_CPIC = options.enable_CPIC
@@ -742,8 +744,9 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         self.sparse_grid: MPMSparseGrid | None = None
         self._sparse_grids_replaced: list[MPMSparseGrid] = []
 
-    def build(self) -> None:
-        super().build()
+    @gs.assert_unbuilt
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
 
         if self.is_active and self._enable_CPIC and self._requires_grad:
             gs.raise_exception(
@@ -752,7 +755,7 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
 
         is_implicit = self.is_active and self._use_implicit_solver
         if is_implicit:
-            if self._B > MAX_KEY_ENVS:
+            if self.n_envs_ > MAX_KEY_ENVS:
                 gs.raise_exception(f"The implicit MPM solver supports {MAX_KEY_ENVS} environments at most.")
             # The cells of a particle and of the blocks around it must fit in the keys of the sparse grid
             cells = np.concatenate((self._lower_bound, self._upper_bound)) * self._grid_density
@@ -764,7 +767,7 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
                 )
             liquid_smoothing_velocity = self._liquid_smoothing_velocity
             if liquid_smoothing_velocity is None:
-                liquid_smoothing_velocity = self._scene.options.newton.velocity_tol
+                liquid_smoothing_velocity = self._sim.scene.options.newton.velocity_tol
             self._liquid_band = liquid_smoothing_velocity * self.substep_dt / self._dx
             if self._liquid_band >= 0.5:
                 gs.raise_exception(
@@ -887,7 +890,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
                 # once they outgrow it (see 'build_grid')
                 particles_pos = qd_to_numpy(self.mpm_state.particles.pos, transpose=True)
                 cells = np.floor(particles_pos * self._inv_dx).astype(gs.np_int)
-                envs = np.broadcast_to(np.arange(self._B)[:, None, None], (*cells.shape[:2], 1))
+                envs = np.broadcast_to(np.arange(self.n_envs_)[:, None, None], (*cells.shape[:2], 1))
                 particle_blocks = np.unique(np.concatenate((envs, cells // BLOCK_DIM), axis=-1).reshape(-1, 4), axis=0)
                 octant = np.array([[0, (a >> 2) & 1, (a >> 1) & 1, a & 1] for a in range(8)])
                 n_blocks = len(np.unique((particle_blocks[:, None] + octant).reshape(-1, 4), axis=0))
@@ -918,6 +921,8 @@ Please decrease the simulation timestep or adjust the material parameters."""
 
         self._build_gravity(self.mpm_info.gravity)
 
+        self._is_built = True
+
     def reset_grad(self) -> None:
         if self._requires_grad:
             qd_zero_grad(self.mpm_state.particles)
@@ -928,24 +933,29 @@ Please decrease the simulation timestep or adjust the material parameters."""
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self,
+        idx: int,
+        surface: Surface,
+        spec: "gs.entities.MPM",
+        desc: "EntityDescription | None" = None,
     ) -> "MPMEntity":
-        self.add_material(material)
+        self.add_material(spec.material)
 
         entity = MPMEntity(
-            scene=self._scene,
+            scene=self._sim.scene,
             solver=self,
-            material=material,
-            morph=morph,
             surface=surface,
             particle_size=self._particle_size,
             idx=idx,
             particle_start=self.n_particles,
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
-            name=name,
+            spec=spec,
         )
         self._entities.append(entity)
+        self._n_particles += entity.n_particles
+        self._n_vverts += entity.n_vverts
+        self._n_vfaces += entity.n_vfaces
         return entity
 
     def add_material(self, material: MPM.Base) -> None:
@@ -1126,7 +1136,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
     def get_particles_actu(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
         """Get the actuation of some particles (see 'set_particles_actu')."""
         tensor = self._read_data(self.mpm_state.particles.actu, envs_idx, particles_idx, copy=True)
-        return tensor[0] if self._scene.n_envs == 0 else tensor
+        return tensor[0] if self.n_envs == 0 else tensor
 
     @mutates(StateChange.MODEL)
     def set_particles_muscle_group(self, muscle_group, particles_idx=None) -> None:
@@ -1218,8 +1228,8 @@ Please decrease the simulation timestep or adjust the material parameters."""
         with torch.no_grad():
             link_pos = rigid_solver.get_links_pos(links_idx=link_idx)[..., 0, :]
             link_quat = rigid_solver.get_links_quat(links_idx=link_idx)[..., 0, :]
-        link_pos = broadcast_tensor(link_pos, gs.tc_float, (self._B, 3)).contiguous()
-        link_quat = broadcast_tensor(link_quat, gs.tc_float, (self._B, 4)).contiguous()
+        link_pos = broadcast_tensor(link_pos, gs.tc_float, (self.n_envs_, 3)).contiguous()
+        link_quat = broadcast_tensor(link_quat, gs.tc_float, (self.n_envs_, 4)).contiguous()
         kernel_set_particle_constraints(
             particles_start,
             link_idx,
@@ -1238,7 +1248,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
             particles_mask = True
             n_particles = self.n_particles - particles_start
         particles_mask = broadcast_tensor(
-            particles_mask, gs.tc_bool, (self._B, n_particles), ("envs_idx", "particles_idx")
+            particles_mask, gs.tc_bool, (self.n_envs_, n_particles), ("envs_idx", "particles_idx")
         ).contiguous()
         if particles_start < 0 or particles_start + particles_mask.shape[1] > self.n_particles:
             gs.raise_exception("The particle mask overruns the particles of the solver.")
@@ -1247,7 +1257,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
     def _init_particle_constraints(self) -> None:
         # Allocated once some particles are constrained, which most scenes never do
         self.particle_constraints = MPMParticleConstraints(
-            sizes=dict(particles=self._n_particles, envs=self._B), env_first=False
+            sizes=dict(particles=self._n_particles, envs=self.n_envs_), env_first=False
         )
         kernel_clear_particle_constraints(self.particle_constraints)
         self._is_constrained = True

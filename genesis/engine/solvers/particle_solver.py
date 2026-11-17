@@ -64,19 +64,20 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
     then read and write.
     """
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: MPMOptions | PBDOptions | SPHOptions) -> None:
-        super().__init__(scene, sim, options)
+    def __init__(self, sim: "Simulator", options: MPMOptions | PBDOptions | SPHOptions) -> None:
+        super().__init__(sim, options)
 
         self._particle_size = options.particle_size
         self._upper_bound = np.array(options.upper_bound)
         self._lower_bound = np.array(options.lower_bound)
-        self._n_vvert_supports = scene.options.vis.n_support_neighbors
+        self._n_vvert_supports = sim.scene.options.vis.n_support_neighbors
         # The distance from the walls of the domain to the boundary confining the particles
         self.boundary_padding = 0.0
 
-        self._n_particles: int | None = None
-        self._n_vverts: int | None = None
-        self._n_vfaces: int | None = None
+        # The totals over the entities added so far, which 'add_entity' keeps up to date
+        self._n_particles = 0
+        self._n_vverts = 0
+        self._n_vfaces = 0
 
         # The arrays of the particles the accessors read and write, and those the rendering reads
         self._particles_pos: qd.Tensor | None = None
@@ -87,12 +88,9 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         self.particles_render: ParticlesRender | None = None
         self.vverts_render: VVertsRender | None = None
 
-    def build(self) -> None:
-        super().build()
-        self._B = self._sim._B
-        self._n_particles = self.n_particles
-        self._n_vverts = self.n_vverts
-        self._n_vfaces = self.n_vfaces
+    @gs.assert_unbuilt
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
 
     def _build_render(self, has_vverts: bool) -> None:
         """
@@ -102,14 +100,14 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         """
         is_unused = not self.is_active
         self.particles_render = ParticlesRender(
-            sizes=dict(envs=self._B, particles=self._n_particles), env_first=False, unused=is_unused
+            sizes=dict(envs=self.n_envs_, particles=self._n_particles), env_first=False, unused=is_unused
         )
         if has_vverts:
             self._vverts_support = VVertsSupport(
                 sizes=dict(vverts=self._n_vverts, vvert_supports=self._n_vvert_supports), unused=is_unused
             )
             self.vverts_render = VVertsRender(
-                sizes=dict(envs=self._B, vverts=self._n_vverts), env_first=False, unused=is_unused
+                sizes=dict(envs=self.n_envs_, vverts=self._n_vverts), env_first=False, unused=is_unused
             )
 
     def add_vverts(
@@ -152,7 +150,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
     def get_particles_pos(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
         """Get the position of some particles, the same in every environment (see 'set_particles_pos')."""
         tensor = self._read_data(self._particles_pos, envs_idx, particles_idx, copy=True)
-        return tensor[0] if self._scene.n_envs == 0 else tensor
+        return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
     @mutates(StateChange.DYNAMICS)
@@ -167,7 +165,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
     def get_particles_vel(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
         """Get the velocity of some particles, the same in every environment (see 'set_particles_pos')."""
         tensor = self._read_data(self._particles_vel, envs_idx, particles_idx, copy=True)
-        return tensor[0] if self._scene.n_envs == 0 else tensor
+        return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
     @mutates(StateChange.GEOMETRY, differentiable=False)
@@ -182,14 +180,14 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
     def get_particles_active(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
         """Get whether some particles take part in the simulation (see 'set_particles_pos')."""
         tensor = self._read_data(self._particles_is_active, envs_idx, particles_idx, copy=True)
-        return tensor[0] if self._scene.n_envs == 0 else tensor
+        return tensor[0] if self.n_envs == 0 else tensor
 
     def get_particles_mass(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
         """Get the mass of some particles (see 'set_particles_pos')."""
         # The particles store their mass multiplied by 'particle_mass_scale', the same in every environment
-        masses = (qd_to_torch(self._particles_mass) / self.particle_mass_scale)[None].expand(self._B, -1)
-        masses = masses[indices_to_mask(envs_idx, particles_idx, pair_rows=True)]
-        return masses[0] if self._scene.n_envs == 0 else masses
+        masses = (qd_to_torch(self._particles_mass) / self.particle_mass_scale)[None].expand(self.n_envs_, -1)
+        masses = masses[indices_to_mask(envs_idx, particles_idx, boolean_mask=False, pair_rows=True)]
+        return masses[0] if self.n_envs == 0 else masses
 
     def _reset_particles(self, particles_idx: torch.Tensor, envs_idx: torch.Tensor, reset_deformation: bool) -> None:
         """
@@ -220,9 +218,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @property
     def n_particles(self) -> int:
-        if self.is_built:
-            return self._n_particles
-        return sum([entity.n_particles for entity in self._entities])
+        return self._n_particles
 
     @property
     def n_vvert_supports(self) -> int:
@@ -231,15 +227,11 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @property
     def n_vverts(self) -> int:
-        if self.is_built:
-            return self._n_vverts
-        return sum([entity.n_vverts for entity in self._entities])
+        return self._n_vverts
 
     @property
     def n_vfaces(self) -> int:
-        if self.is_built:
-            return self._n_vfaces
-        return sum([entity.n_vfaces for entity in self._entities])
+        return self._n_vfaces
 
     @property
     def particle_size(self) -> float:

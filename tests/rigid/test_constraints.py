@@ -177,9 +177,9 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
 
     # add weld constraint and move back up. The hanging box is welded in the air afterwards, so that deleting the
     # cube weld goes through the swap-remove path and must preserve the full record of the hanging box weld.
-    scene.sim.rigid_solver.add_weld_constraint(cube.base_link.idx, end_effector.idx, envs_idx=(0, 1, 2))
+    scene.rigid_solver.add_weld_constraint(cube.base_link.idx, end_effector.idx, envs_idx=(0, 1, 2))
     hanging_box.set_pos(HANGING_BOX_POS)
-    scene.sim.rigid_solver.add_weld_constraint(hanging_box.base_link.idx, fixed_box.base_link.idx)
+    scene.rigid_solver.add_weld_constraint(hanging_box.base_link.idx, fixed_box.base_link.idx)
     robot.control_dofs_position(qpos_up)
     for _ in range(60):
         scene.step()
@@ -191,8 +191,8 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
     assert_allclose(hanging_box.get_pos(), HANGING_BOX_POS, tol=1e-3)
 
     # drop
-    scene.sim.rigid_solver.delete_weld_constraint(cube.base_link.idx, end_effector.idx, envs_idx=(0, 1))
-    weld_const_info = scene.sim.rigid_solver.get_weld_constraints(as_tensor=True, to_torch=True)
+    scene.rigid_solver.delete_weld_constraint(cube.base_link.idx, end_effector.idx, envs_idx=(0, 1))
+    weld_const_info = scene.rigid_solver.get_weld_constraints(as_tensor=True, to_torch=True)
     links_ab = torch.stack((weld_const_info["link_a"], weld_const_info["link_b"]), dim=-1)
     box_weld = (hanging_box.base_link.idx, fixed_box.base_link.idx)
     cube_weld = (cube.base_link.idx, end_effector.idx)
@@ -302,7 +302,7 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
     scene.build(n_envs=2, env_spacing=(0.0, 1.5))
 
     # Every nut but the helix one is screwed differently in each environment.
-    rigid = scene.sim.rigid_solver
+    rigid = scene.rigid_solver
     rigid.add_screw_constraint(post_helix.base_link.idx, nut_helix.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=PITCH)
 
     # The free nut slides in the first environment and spins on a hinge in the second.
@@ -369,8 +369,8 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
     # The nut descends with the acceleration g_eff of a mass m sliding along the axis while spinning with an axial
     # inertia I, the two being coupled by the travel per radian p: g_eff = g * m * p^2 / (m * p^2 + I). The
     # compliance of the coupling row lets the turn lag the travel slightly, hence the relative tolerances.
-    mass = tensor_to_array(nut_helix.get_links_mass())[0]
-    inertia = tensor_to_array(nut_helix.get_links_inertia())[0, 2, 2]
+    mass = nut_helix.get_links_mass()[0]
+    inertia = nut_helix.get_links_inertia()[0, 2, 2]
     pitch_rad = PITCH / (2.0 * np.pi)
     g_eff = GRAVITY * mass * pitch_rad**2 / (mass * pitch_rad**2 + inertia)
     # Semi-implicit Euler moves a body under a constant acceleration a by -a * dt^2 * n * (n + 1) / 2 after n substeps.
@@ -554,12 +554,12 @@ def test_get_constraints_api(show_viewer, tol):
     scene.build(n_envs=2)
 
     link_a, link_b = robot.base_link.idx, cube.base_link.idx
-    scene.sim.rigid_solver.add_weld_constraint(link_a, link_b, envs_idx=[1])
+    scene.rigid_solver.add_weld_constraint(link_a, link_b, envs_idx=[1])
     with pytest.raises(gs.GenesisException, match="already coupled"):
-        scene.sim.rigid_solver.add_weld_constraint(link_a, link_b, envs_idx=[1])
+        scene.rigid_solver.add_weld_constraint(link_a, link_b, envs_idx=[1])
 
     for as_tensor, to_torch in ((True, True), (True, False), (False, True), (False, False)):
-        weld_const_info = scene.sim.rigid_solver.get_weld_constraints(as_tensor, to_torch)
+        weld_const_info = scene.rigid_solver.get_weld_constraints(as_tensor, to_torch)
         link_a_, link_b_ = weld_const_info["link_a"], weld_const_info["link_b"]
         if as_tensor:
             assert_allclose((link_a_[0], link_b_[0]), ((-1,), (-1,)), tol=0)
@@ -589,8 +589,14 @@ def test_set_sol_params(n_envs, batched, tol):
             euler=(0, 0, 90),
         ),
     )
+    robot_b = scene.add_entity(
+        gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+            pos=(0.0, -0.4, 0.1),
+        ),
+    )
     scene.build(n_envs=2)
-    assert scene.sim._substep_dt == 0.01
+    assert scene.sim.substep_dt == 0.01
 
     for objs, batched in ((robot.joints, batched), (robot.geoms, False), (robot.equalities, True)):
         for obj in objs:
@@ -600,3 +606,10 @@ def test_set_sol_params(n_envs, batched, tol):
                 assert_allclose(obj.get_sol_params(), sol_params, tol=tol)
             obj.set_sol_params([0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0])
             assert_allclose(obj.get_sol_params(), [2.0e-02, 0.5, 1e-4, 1e-4, 0.0, 1e-4, 1.0], tol=tol)
+
+    # Each entity reads and writes the parameters of its own equality constraints
+    (equality_a,), (equality_b,) = robot.equalities, robot_b.equalities
+    equality_a.set_sol_params([0.03, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0])
+    equality_b.set_sol_params([0.04, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0])
+    assert_allclose(equality_a.get_sol_params(), [0.03, 0.6, 1e-4, 1e-4, 0.0, 1e-4, 1.0], tol=tol)
+    assert_allclose(equality_b.get_sol_params(), [0.04, 0.7, 1e-4, 1e-4, 0.0, 1e-4, 1.0], tol=tol)

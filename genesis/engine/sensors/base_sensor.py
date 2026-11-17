@@ -13,7 +13,12 @@ from genesis.engine.state_change import StateChange
 from genesis.repr_base import RBC
 from genesis.typing import NumArrayType, NumericType
 from genesis.utils.geom import euler_to_quat
-from genesis.utils.misc import broadcast_tensor, concat_with_tensor, make_tensor_field
+from genesis.utils.misc import (
+    BuildableMixin,
+    broadcast_tensor,
+    concat_with_tensor,
+    make_tensor_field,
+)
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
@@ -159,7 +164,7 @@ DataT = TypeVarWithDefault("DataT", default=tuple, covariant=True)
 SharedSensorContextT = TypeVar("SharedSensorContextT")
 
 
-class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT, DataT]):
+class Sensor(BuildableMixin, RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT, DataT]):
     """
     Base class for all types of sensors.
 
@@ -176,6 +181,9 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
     in a cache in SensorManager. Cache size is inferred from the return format and cache length of each sensor.
     `read()` and `read_ground_truth()`, the public-facing methods of every Sensor, automatically handles indexing into
     the shared cache to return the correct data.
+
+    A sensor class overriding `build` calls `super().build()` before reading its own guarded accessors, since the build
+    of the base class marks the sensor built.
     """
 
     _options_cls: ClassVar[type]
@@ -248,7 +256,6 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         # instance methods (build / debug); the per-step classmethod hooks receive it as the ``shared_context`` argument.
         self._shared_context: SharedSensorContextT = shared_context
         self._shared_metadata: SharedSensorMetadataT = shared_metadata
-        self._is_built = False
 
         # Classes that opt out of the ring pipeline (e.g. cameras handling rendering lazily on read) cannot honor delay
         # / jitter / history because those features depend on the per-class return-space ring. Reject the inputs at
@@ -264,7 +271,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
                     f"history_length={options.history_length}."
                 )
 
-        self._dt = self._manager._sim.dt
+        self._dt = self._manager.sim.dt
         self._delay_ts = round(self._options.delay / self._dt)
 
         self._cache_slices: list[slice] = []
@@ -297,6 +304,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
 
     # =============================== methods to implement ===============================
 
+    @gs.assert_unbuilt
     def build(self):
         """
         Build the sensor.
@@ -304,13 +312,18 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         This method is called by SensorManager during the scene build phase. This is where any shared metadata should be
         initialized.
         """
+        # Set first, since the builds of the derived sensors call their own guarded accessors
+        self._is_built = True
         self._shared_metadata.delays_ts = concat_with_tensor(
-            self._shared_metadata.delays_ts, self._delay_ts, expand=(self._manager._sim._B, 1), dim=1
+            self._shared_metadata.delays_ts, self._delay_ts, expand=(self._manager.n_envs_, 1), dim=1
         )
         self._shared_metadata.cache_sizes.append(self._cache_size)
         self._shared_metadata.history_lengths.append(self._options.history_length)
         if self._delay_ts > 0:
             self._shared_metadata.has_any_delay = True
+
+    def destroy(self) -> None:
+        self._is_built = False
 
     @classmethod
     def reset(cls, shared_metadata: SharedSensorMetadataT, shared_ground_truth_cache: torch.Tensor, envs_idx):
@@ -512,11 +525,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         rec_options : RecorderOptions
             The options for the recording.
         """
-        return self._manager._sim._scene._recorder_manager.add_recorder(self.read, rec_options)
-
-    @property
-    def is_built(self) -> bool:
-        return self._is_built
+        return self._manager.sim.scene.add_recorder(self.read, rec_options)
 
     # =============================== private shared methods ===============================
 
@@ -534,7 +543,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         for i, shape in enumerate(self._return_shapes):
             sl = self._read_flat_slices[i]
             field_data = tensor_chunk[..., sl].reshape((len(envs_idx), *shape))
-            if self._manager._sim.n_envs == 0:
+            if self._manager.n_envs == 0:
                 field_data = field_data[0]
             return_values.append(field_data)
 
@@ -543,7 +552,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         return self._return_data_cls(*return_values)
 
     def _sanitize_envs_idx(self, envs_idx) -> torch.Tensor:
-        return self._manager._sim._scene._sanitize_envs_idx(envs_idx)
+        return self._manager.sim.sanitize_envs_idx(envs_idx)
 
     def _set_metadata_field(self, value, field, field_start, field_size, envs_idx=None):
         envs_idx = self._sanitize_envs_idx(envs_idx)
@@ -597,7 +606,7 @@ class RigidSensorMetadataMixin:
     offsets_quat: torch.Tensor = make_tensor_field((0, 0, 4))
 
 
-class _LinkAttachedSensorMixin:
+class _LinkAttachedSensorMixin(BuildableMixin):
     """
     Common boilerplate for sensors attached to a link.
 
@@ -609,12 +618,13 @@ class _LinkAttachedSensorMixin:
 
     _link: "RigidLink | None" = None
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
-        batch_size = self._manager._sim._B
+        batch_size = self._manager.n_envs_
         if self._options.entity_idx >= 0:
-            entity = self._manager._sim.entities[self._options.entity_idx]
+            entity = self._manager.sim.entities[self._options.entity_idx]
             self._link = entity.links[self._options.link_idx_local]
             link_idx = self._options.link_idx_local + entity.link_start
             self._register_link(entity, link_idx)
@@ -644,9 +654,10 @@ class _LinkAttachedSensorMixin:
 class RigidSensorMixin[RigidSensorMetadataMixinT: RigidSensorMetadataMixin](_LinkAttachedSensorMixin):
     """Base sensor class for sensors that are attached to a RigidEntity."""
 
+    @gs.assert_unbuilt
     def build(self):
         if self._shared_metadata.solver is None:
-            self._shared_metadata.solver = self._manager._sim.rigid_solver
+            self._shared_metadata.solver = self._manager.sim.rigid_solver
         super().build()
 
     def _register_link(self, entity, link_idx: int):
@@ -760,6 +771,7 @@ class SimpleSensor(Sensor[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         # setters are not hot path. The check covers partial envs_idx writes and other sensors.
         self._shared_metadata.has_any_jitter = bool((self._shared_metadata.jitter_ts > gs.EPS).any().item())
 
+    @gs.assert_unbuilt
     def build(self):
         """
         Initialize all shared metadata needed to update all noisy sensors.
@@ -770,7 +782,7 @@ class SimpleSensor(Sensor[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         super().build()
         to_tuple = partial(_to_tuple, length_per_value=self._cache_size)
 
-        batch_size = self._manager._sim._B
+        batch_size = self._manager.n_envs_
 
         # Jitter must not exceed the step, so a read shifts by at most one extra ring slot - the margin the return-space
         # ring is sized for (see `cls_delay_depth` in sensor_manager.py). An EPS slack lets `jitter == dt` pass cleanly

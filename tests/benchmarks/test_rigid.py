@@ -367,8 +367,11 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
     # Snapshot the state exercised by the per-step partial reset in the 'accessors' variant: the same per-env
     # accessor + reset workload seen in RL rollouts, run on top of the falling-humanoid dynamics.
     if accessors:
-        qpos0 = torch.tile(init_qpos, (n_envs, 1)) if n_envs > 0 else init_qpos
-        vel0 = torch.zeros((*((n_envs,) if n_envs > 0 else ()), robot.n_dofs), dtype=gs.tc_float, device=gs.device)
+        # The joints alone, the floating base aside, selected on top of the environments being reset
+        joints_qs_idx = torch.arange(7, robot.n_qs, device=gs.device)
+        joints_dofs_idx = torch.arange(6, robot.n_dofs, device=gs.device)
+        qpos0 = init_qpos[joints_qs_idx]
+        vel0 = torch.zeros((len(joints_dofs_idx),), dtype=gs.tc_float, device=gs.device)
         state_rigid_0 = scene.rigid_solver.get_state()
 
         if n_envs > 0:
@@ -376,7 +379,7 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
             reset_envs_idx = torch.as_tensor(
                 np.random.permutation(n_envs)[:n_reset_envs], dtype=gs.tc_int, device=gs.device
             )
-            reset_envs_mask = torch.isin(scene._envs_idx, reset_envs_idx)
+            reset_envs_mask = torch.isin(torch.arange(n_envs, device=gs.device), reset_envs_idx)
         else:
             reset_envs_mask = None
 
@@ -406,8 +409,8 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
 
             robot.set_dofs_stiffness(dofs_stiffness)
             robot.set_dofs_damping(dofs_damping)
-            robot.set_dofs_velocity(vel0, envs_idx=reset_envs_mask, skip_forward=True)
-            robot.set_qpos(qpos0, envs_idx=reset_envs_mask, zero_velocity=False, skip_forward=True)
+            robot.set_dofs_velocity(vel0, joints_dofs_idx, envs_idx=reset_envs_mask, skip_forward=True)
+            robot.set_qpos(qpos0, joints_qs_idx, envs_idx=reset_envs_mask, zero_velocity=False, skip_forward=True)
             robot.set_pos(base_pos0, envs_idx=reset_envs_mask, skip_forward=True)
             robot.set_quat(base_quat0, envs_idx=reset_envs_mask, relative=False, skip_forward=True)
 

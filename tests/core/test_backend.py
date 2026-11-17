@@ -77,7 +77,7 @@ def test_switching(backend, order):
             for _ in range(10):
                 scene.step()
 
-            rigid_solver = scene.sim.rigid_solver
+            rigid_solver = scene.rigid_solver
             data_refs = {
                 item.name: weakref.ref(item.array._unwrap() if isinstance(item.array, qd.Tensor) else item.array)
                 for item in rigid_solver.data

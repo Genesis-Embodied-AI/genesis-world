@@ -1,6 +1,6 @@
 import math
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 
@@ -14,6 +14,7 @@ from genesis.engine.entities.pbd_entity import PBDTetEntity
 from genesis.engine.materials import PBD
 from genesis.engine.state_change import StateChange, mutates
 from genesis.options.solvers import PBDOptions
+from genesis.options.surfaces import Surface
 from genesis.utils.data import ENVS, Config, ConfigItem, Data, DataItem, DataKind, Size, eoa, field, iter_data
 from genesis.utils.geom import (
     PARTICLES,
@@ -31,6 +32,7 @@ from .base_solver import VFACES, VVERTS, SimulatorState
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -169,10 +171,10 @@ class PBDConfig(Config):
 
 
 class PBDSolver(ParticleSolver):
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]] = gs.entities.PBD
+
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
-
-    material_cls = PBD.Base
 
     class MATERIAL(gs.IntEnum):
         CLOTH = 0
@@ -185,8 +187,8 @@ class PBDSolver(ParticleSolver):
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: PBDOptions) -> None:
-        super().__init__(scene, sim, options)
+    def __init__(self, sim: "Simulator", options: PBDOptions) -> None:
+        super().__init__(sim, options)
 
         self._max_stretch_solver_iterations = options.max_stretch_solver_iterations
         self._max_bending_solver_iterations = options.max_bending_solver_iterations
@@ -197,23 +199,21 @@ class PBDSolver(ParticleSolver):
         self._hash_grid_cell_size = options.hash_grid_cell_size
         self._hash_grid_res = options._hash_grid_res
 
-        self._n_edges: int | None = None
-        self._n_inner_edges: int | None = None
-        self._n_elems: int | None = None
+        # The totals over the entities added so far, which 'add_entity' keeps up to date
+        self._n_edges = 0
+        self._n_inner_edges = 0
+        self._n_elems = 0
 
         self.pbd_state: PBDState | None = None
         self.pbd_info: PBDInfo | None = None
         self.pbd_config: PBDConfig | None = None
 
-    def build(self) -> None:
-        super().build()
-
-        self._n_edges = self.n_edges
-        self._n_inner_edges = self.n_inner_edges
-        self._n_elems = self.n_elems
+    @gs.assert_unbuilt
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
 
         is_unused = not self.is_active
-        sizes = dict(envs=self._B, particles=self._n_particles)
+        sizes = dict(envs=self.n_envs_, particles=self._n_particles)
         self.pbd_state = PBDState(
             sizes=dict(sizes, **hash_grid_sizes(math.prod(self._hash_grid_res))),
             values=dict(hash_grid=dict(cell_size=self._hash_grid_cell_size, grid_res=self._hash_grid_res)),
@@ -268,6 +268,8 @@ class PBDSolver(ParticleSolver):
                 entity._add_to_solver()
 
         self._build_gravity(self.pbd_info.gravity)
+
+        self._is_built = True
 
     def add_uvs_and_faces(self, vvert_start: int, vface_start: int, uvs: np.ndarray, faces: np.ndarray) -> None:
         """
@@ -361,14 +363,16 @@ class PBDSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self,
+        idx: int,
+        surface: Surface,
+        spec: "gs.entities.PBD",
+        desc: "EntityDescription | None" = None,
     ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
-        if isinstance(material, gs.materials.PBD.Cloth):
+        if isinstance(spec.material, gs.materials.PBD.Cloth):
             entity = PBD2DEntity(
-                scene=self.scene,
+                scene=self._sim.scene,
                 solver=self,
-                material=material,
-                morph=morph,
                 surface=surface,
                 particle_size=self._particle_size,
                 idx=idx,
@@ -377,14 +381,12 @@ class PBDSolver(ParticleSolver):
                 inner_edge_start=self.n_inner_edges,
                 vvert_start=self.n_vverts,
                 vface_start=self.n_vfaces,
-                name=name,
+                spec=spec,
             )
-        elif isinstance(material, gs.materials.PBD.Elastic):
+        elif isinstance(spec.material, gs.materials.PBD.Elastic):
             entity = PBD3DEntity(
-                scene=self.scene,
+                scene=self._sim.scene,
                 solver=self,
-                material=material,
-                morph=morph,
                 surface=surface,
                 particle_size=self._particle_size,
                 idx=idx,
@@ -393,36 +395,41 @@ class PBDSolver(ParticleSolver):
                 elem_start=self.n_elems,
                 vvert_start=self.n_vverts,
                 vface_start=self.n_vfaces,
-                name=name,
+                spec=spec,
             )
-        elif isinstance(material, gs.materials.PBD.Liquid):
+        elif isinstance(spec.material, gs.materials.PBD.Liquid):
             entity = PBDParticleEntity(
-                scene=self.scene,
+                scene=self._sim.scene,
                 solver=self,
-                material=material,
-                morph=morph,
                 surface=surface,
                 particle_size=self._particle_size,
                 idx=idx,
                 particle_start=self.n_particles,
-                name=name,
+                spec=spec,
             )
-        elif isinstance(material, gs.materials.PBD.Particle):
+        elif isinstance(spec.material, gs.materials.PBD.Particle):
             entity = PBDFreeParticleEntity(
-                scene=self.scene,
+                scene=self._sim.scene,
                 solver=self,
-                material=material,
-                morph=morph,
                 surface=surface,
                 particle_size=self._particle_size,
                 idx=idx,
                 particle_start=self.n_particles,
-                name=name,
+                spec=spec,
             )
         else:
             raise NotImplementedError()
 
         self._entities.append(entity)
+        self._n_particles += entity.n_particles
+        self._n_vverts += entity.n_vverts
+        self._n_vfaces += entity.n_vfaces
+        if isinstance(entity, PBDTetEntity):
+            self._n_edges += entity.n_edges
+        if isinstance(entity, PBD2DEntity):
+            self._n_inner_edges += entity.n_inner_edges
+        if isinstance(entity, PBD3DEntity):
+            self._n_elems += entity.n_elems
         return entity
 
     # ------------------------------------------------------------------------------------
@@ -536,21 +543,15 @@ class PBDSolver(ParticleSolver):
 
     @property
     def n_edges(self) -> int:
-        if self.is_built:
-            return self._n_edges
-        return sum([entity.n_edges for entity in self._entities if isinstance(entity, PBDTetEntity)])
+        return self._n_edges
 
     @property
     def n_inner_edges(self) -> int:
-        if self.is_built:
-            return self._n_inner_edges
-        return sum([entity.n_inner_edges for entity in self._entities if isinstance(entity, PBD2DEntity)])
+        return self._n_inner_edges
 
     @property
     def n_elems(self) -> int:
-        if self.is_built:
-            return self._n_elems
-        return sum([entity.n_elems for entity in self._entities if isinstance(entity, PBD3DEntity)])
+        return self._n_elems
 
     @property
     def hash_grid_res(self) -> tuple[int, int, int]:

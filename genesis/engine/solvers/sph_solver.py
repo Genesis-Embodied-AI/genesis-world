@@ -1,6 +1,6 @@
 import math
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -12,6 +12,7 @@ from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import SPHEntity
 from genesis.engine.materials import SPH
 from genesis.options.solvers import SPHOptions
+from genesis.options.surfaces import Surface
 from genesis.utils.data import ENVS, Config, ConfigItem, Data, DataItem, DataKind, eoa, field, is_opted_in, iter_data
 from genesis.utils.geom import (
     PARTICLES,
@@ -37,6 +38,7 @@ from .base_solver import SimulatorState
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -211,17 +213,17 @@ class SPHConfig(Config):
 
 
 class SPHSolver(ParticleSolver):
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]] = gs.entities.SPH
+
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
-
-    material_cls = SPH.Base
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: SPHOptions) -> None:
-        super().__init__(scene, sim, options)
+    def __init__(self, sim: "Simulator", options: SPHOptions) -> None:
+        super().__init__(sim, options)
 
         self._support_radius = options._support_radius
 
@@ -244,11 +246,12 @@ class SPHSolver(ParticleSolver):
         self.sph_info: SPHInfo | None = None
         self.sph_config: SPHConfig | None = None
 
-    def build(self) -> None:
-        super().build()
+    @gs.assert_unbuilt
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
 
         is_deterministic = requires_deterministic_accumulation()
-        sizes = dict(envs=self._B, particles=self._n_particles)
+        sizes = dict(envs=self.n_envs_, particles=self._n_particles)
         hash_grid_values = dict(cell_size=self._hash_grid_cell_size, grid_res=self._hash_grid_res)
         self.sph_state = SPHState(
             sizes=dict(
@@ -290,7 +293,7 @@ class SPHSolver(ParticleSolver):
                         BLOCK_LOG2_LANES, math.floor(math.log2((self._hash_grid_cell_size / self._particle_size) ** 3))
                     ),
                 )
-                if 0 < self._n_particles * self._B <= get_gpu_core_count()
+                if 0 < self._n_particles * self.n_envs_ <= get_gpu_core_count()
                 else 0
             ),
         )
@@ -348,25 +351,32 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
 
         self._build_gravity(self.sph_info.gravity)
 
+        self._is_built = True
+
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self,
+        idx: int,
+        surface: Surface,
+        spec: "gs.entities.SPH",
+        desc: "EntityDescription | None" = None,
     ) -> "SPHEntity":
         entity = SPHEntity(
-            scene=self.scene,
+            scene=self._sim.scene,
             solver=self,
-            material=material,
-            morph=morph,
             surface=surface,
             particle_size=self._particle_size,
             idx=idx,
             particle_start=self.n_particles,
-            name=name,
+            spec=spec,
         )
-        self.entities.append(entity)
+        self._entities.append(entity)
+        self._n_particles += entity.n_particles
+        self._n_vverts += entity.n_vverts
+        self._n_vfaces += entity.n_vfaces
         return entity
 
     def add_particles(self, is_active: bool, particle_start: int, material: SPH.Base, pos: np.ndarray) -> None:

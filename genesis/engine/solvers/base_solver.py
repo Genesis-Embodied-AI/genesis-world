@@ -1,6 +1,6 @@
 from collections.abc import Callable, Iterator, Sequence
 from enum import IntFlag
-from typing import TYPE_CHECKING, NamedTuple, overload
+from typing import TYPE_CHECKING, ClassVar, NamedTuple, overload
 
 import numpy as np
 import torch
@@ -12,7 +12,6 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.force_fields import ForceField, ForceFields
-from genesis.engine.materials.base import Material
 from genesis.engine.state_change import StateChange, Subscriber, mutates
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import RolloutGraph, no_grad
@@ -33,6 +32,8 @@ from genesis.utils.data import (
     fill_data,
 )
 from genesis.utils.misc import (
+    BatchedMixin,
+    BuildableMixin,
     assign_indexed_tensor,
     broadcast_tensor,
     data_to_array,
@@ -51,6 +52,7 @@ from genesis.utils.misc import (
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
+    from genesis.options import Options
 
 
 # The bits of an errno: those of an int32 without its sign bit, the flags being int32 kernel literals
@@ -107,21 +109,16 @@ class TimeBasedMixin:
     _substeps: int
     _substep_dt: float
 
-    def __init__(self, scene, sim, options):
+    def __init__(self, sim, options):
         """Compute how many substeps this solver runs per scene step, from the interval it integrates over.
 
         The count is `SimOptions.dt` divided by the interval the options of this solver ask for. A solver whose `dt`
         was left unset takes `SimOptions.substeps` instead. Since the substep loop advances every solver together,
         `Simulator.build` then checks that the active solvers all end up on the same count.
         """
-        super().__init__(scene, sim, options)
+        super().__init__(sim, options)
         self._substeps = max(1, round(sim.dt / options.dt)) if "dt" in options.model_fields_set else sim.substeps
         self._substep_dt = sim.dt / self._substeps
-
-    @property
-    def dt(self):
-        """Duration of one scene step, in seconds, which this solver covers in `substeps` substeps."""
-        return self._sim.dt
 
     @property
     def substep_dt(self):
@@ -223,23 +220,28 @@ class ErrnoMixin:
         the copy the previous call enqueued is checked instead: an error raises one call later, with the context of the
         call that enqueued it, and the host only waits for the device when it runs ahead of it by more than the interval
         between two calls. A blocking check raises what no copy has reported yet with the context of the last one.
-        `context` says where the check runs, ahead of the message.
+        `context` says where the check runs, ahead of the message. In a scene with parallel environments, the message
+        ends with the environments flagged with the error it reports, summarized as numpy does beyond six of them.
         """
         if not self._error_reports:
             return
         if not blocking and self._errno_host is not None:
             self._errno_event.synchronize()
-            errno = np.bitwise_or.reduce(self._errno_host.numpy())
+            errno_envs = self._errno_host.numpy()
+            errno = np.bitwise_or.reduce(errno_envs)
             context, self._errno_host_context = self._errno_host_context, context
             # The flags stay raised on the device until a reset, so a copy that raises is cleared rather than renewed,
-            # which spares raising it again once a valid state is set.
+            # which spares raising it again once a valid state is set. The message reads the flags of the copy, which
+            # its clearing overwrites.
             if errno:
+                errno_envs = errno_envs.copy()
                 self._errno_host.zero_()
             else:
                 self._errno_host.copy_(self._errno_latched, non_blocking=True)
                 self._errno_event.record()
         else:
-            errno = np.bitwise_or.reduce(tensor_to_array(self._errno_latched))
+            errno_envs = tensor_to_array(self._errno_latched)
+            errno = np.bitwise_or.reduce(errno_envs)
             if context is None:
                 context = self._errno_host_context
             self._errno_host_context = None
@@ -248,6 +250,14 @@ class ErrnoMixin:
         for code, report in self._error_reports.items():
             if errno & code:
                 message = report()
+                if self.n_envs > 0:
+                    envs_idx = np.flatnonzero(errno_envs & code)
+                    envs_idx_str = np.array2string(envs_idx, separator=", ", threshold=6, edgeitems=3)
+                    if envs_idx.size > 6:
+                        envs_idx_str = f"({envs_idx.size}): {envs_idx_str}"
+                    else:
+                        envs_idx_str = f": {envs_idx_str}"
+                    message = f"{message} Failing environments{envs_idx_str}."
                 gs.raise_exception(message if context is None else f"{context}: {message}")
 
 
@@ -409,7 +419,7 @@ class CheckpointMixin:
             if envs_idx is not None:
                 # The saved arrays are written back whole through a mask of the selected environments, which spares
                 # reading their count back from the device (see 'assign_indexed_tensor').
-                envs_mask = torch.zeros((self.sim._B,), dtype=torch.bool, device=gs.device)
+                envs_mask = torch.zeros((self.n_envs_,), dtype=torch.bool, device=gs.device)
                 assign_indexed_tensor(envs_mask, indices_to_mask(envs_idx), value=True)
                 for item in self._boundary_items.items:
                     if isinstance(item, ArrayItem):
@@ -451,7 +461,7 @@ class CheckpointMixin:
         The state is restored exactly as saved, and the errors the component flagged for these environments are cleared.
         """
         # The selection reaches the zero-copy views of the state as it came (see 'load_checkpoint')
-        n_envs = self.sim.scene.n_envs
+        n_envs = self.n_envs
         if n_envs == 0 and envs_idx is not None:
             gs.raise_exception("`envs_idx` is not supported for non-parallelized scene.")
         if isinstance(envs_idx, (int, np.integer)) and not -n_envs <= envs_idx < n_envs:
@@ -470,7 +480,7 @@ class CheckpointMixin:
         self.load_checkpoint(state)
 
 
-class GravityMixin:
+class GravityMixin(BuildableMixin):
     """Gravity of one solver: the buffer storing it, and the accessors reading and writing it.
 
     Mixed into every solver whose options carry a gravity vector.
@@ -495,9 +505,9 @@ class GravityMixin:
         if not self.is_active:
             return
         if gravity is None:
-            gravity = qd.tensor(gs.qd_vec3, (self._B,), backend=qd.Backend.FIELD)
+            gravity = qd.tensor(gs.qd_vec3, (self.n_envs_,), backend=qd.Backend.FIELD)
         self._gravity = gravity
-        self._gravity.from_numpy(np.tile(np.array(self._options.gravity, dtype=gs.np_float), (self._B, 1)))
+        self._gravity.from_numpy(np.tile(np.array(self._options.gravity, dtype=gs.np_float), (self.n_envs_, 1)))
 
     @gs.assert_built
     @mutates(StateChange.MODEL)
@@ -524,7 +534,7 @@ class GravityMixin:
                 torch.mps.synchronize()
             return
 
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self._sim.sanitize_envs_idx(envs_idx)
         gravity = broadcast_tensor(gravity, gs.tc_float, (len(envs_idx), 3), ("envs_idx", ""))
         kernel_set_gravity(gravity.contiguous(), envs_idx, self._gravity)
 
@@ -545,19 +555,18 @@ class GravityMixin:
         if self._gravity is None:
             gs.raise_exception(f"{type(self).__name__} holds no body for a gravity to act on.")
         tensor = qd_to_torch(self._gravity, envs_idx, transpose=True, copy=True)
-        return tensor[0] if self._sim.n_envs == 0 else tensor
+        return tensor[0] if self.n_envs == 0 else tensor
 
 
-class Solver(ErrnoMixin, CheckpointMixin, RBC):
-    # The material of the entities this solver simulates, None for a solver holding no entity of its own
-    material_cls: type[Material] | None = None
+class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
     # Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must
     is_differentiable: bool = False
+    # The entity spec class whose entities the solver simulates, which the simulator dispatches on
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]]
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options):
+    def __init__(self, sim: "Simulator", options):
         self._uid = gs.UID()
         self._sim = sim
-        self._scene = scene
         self._options = options
         self._entities: list[Entity] = gs.List()
 
@@ -624,9 +633,9 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
         """
         if dtype is None:
             dtype = gs.tc_float
-        n_envs = self._scene.n_envs
+        n_envs = self.n_envs
         is_overwrite = tensor is not None and not accumulate
-        envs_idx_ = self._scene._sanitize_envs_idx(envs_idx) if batched else self._scene._envs_idx[:0]
+        envs_idx_ = self._sim.sanitize_envs_idx(envs_idx) if batched else self._envs_idx[:0]
 
         if batched and batched_idx and np.ndim(inputs_idx) == 2:
             dim_names = ("envs_idx", idx_name, *["" for _ in element_shape])
@@ -677,9 +686,16 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
                 tensor_ = tensor_[None]
         return tensor_, inputs_idx_, envs_idx_
 
-    def build(self):
-        self._B = self._sim._B
-        self.build_errno(self._B)
+    @gs.assert_unbuilt
+    def build(self, n_envs: int) -> None:
+        """Settle the parallel environments the solver simulates and allocate its error flags.
+
+        'n_envs' is the number of parallel environments, 0 for a scene without them. The build of a derived solver
+        calls it first, then sets `_is_built` once its own data is valid.
+        """
+        super().build(n_envs)
+
+        self.build_errno(self.n_envs_)
         if self._requires_grad:
             self._error_reports = {
                 **self._error_reports,
@@ -688,6 +704,11 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
                     "to differentiate over this horizon: shorten it, or decrease the simulation timestep."
                 ),
             }
+
+    def destroy(self) -> None:
+        for entity in self._entities:
+            entity._destroy()
+        self._is_built = False
 
     # ------------------------------------------------------------------------------------
     # ------------------------------ differentiable simulation ---------------------------
@@ -766,7 +787,10 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
         tensors = [qd_to_torch(field, transpose=is_batched, copy=copy) for field in fields]
         if self.is_recording:
             self.record_read(tuple(tensors), fields)
-        mask = indices_to_mask(envs_idx, idx, pair_rows=True) if is_batched else indices_to_mask(idx)
+        if is_batched:
+            mask = indices_to_mask(envs_idx, idx, boolean_mask=False, pair_rows=True)
+        else:
+            mask = indices_to_mask(idx)
         tensors = [tensor[mask] for tensor in tensors]
         return tensors[0] if is_single else tensors
 
@@ -791,7 +815,7 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
         every environment, or one row per environment (see '_sanitize_io_variables'). On Metal, the caller synchronizes
         the torch stream before the next kernel.
         """
-        n_envs = self._scene.n_envs
+        n_envs = self.n_envs
         if gs.use_zerocopy:
             if n_envs == 0 and envs_idx is not None:
                 gs.raise_exception("`envs_idx` is not supported for non-parallelized scene.")
@@ -855,16 +879,13 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
         return self._uid
 
     @property
-    def scene(self):
-        return self._scene
-
-    @property
     def sim(self):
         return self._sim
 
     @property
-    def is_built(self):
-        return self._scene._is_built
+    def options(self) -> "Options":
+        """The options the solver was created with."""
+        return self._options
 
     @property
     def entities(self) -> list[Entity]:

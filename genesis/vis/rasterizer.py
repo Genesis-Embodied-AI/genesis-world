@@ -8,7 +8,7 @@ import OpenGL
 
 import genesis as gs
 from genesis.repr_base import RBC
-from genesis.utils.misc import has_display
+from genesis.utils.misc import BuildableMixin, has_display
 
 
 # PyOpenGL binds every OpenGL function to the library of the platform selected when pyrender is first imported (see
@@ -22,7 +22,7 @@ from genesis.ext import pyrender
 from genesis.vis.camera import Camera
 
 
-class Rasterizer(RBC):
+class Rasterizer(BuildableMixin, RBC):
     def __init__(self, viewer, context):
         self._viewer = viewer
         self._context = context
@@ -32,14 +32,14 @@ class Rasterizer(RBC):
         self._renderer = None
         self._buffer_updates = None
 
+    @gs.assert_unbuilt
     def build(self):
-        if self._context is None:
-            return
+        if self._context is not None:
+            if self._offscreen:
+                self._renderer = pyrender.OffscreenRenderer(seg_node_map=self._context.seg_node_map)
+            self.visualizer = self._context.visualizer
 
-        if self._offscreen:
-            self._renderer = pyrender.OffscreenRenderer(seg_node_map=self._context.seg_node_map)
-
-        self.visualizer = self._context.visualizer
+        self._is_built = True
 
     def add_camera(self, camera):
         self._camera_nodes[camera.uid] = self._context.add_node(
@@ -66,14 +66,19 @@ class Rasterizer(RBC):
             self._viewer.close_offscreen(self._camera_targets[camera.uid])
         del self._camera_targets[camera.uid]
 
-    def render_camera(self, camera, rgb=True, depth=False, segmentation=False, normal=False, *, split_envs):
+    @gs.assert_built
+    def render_camera(
+        self, camera, rgb=True, depth=False, segmentation=False, normal=False, *, split_envs, env_idx=None
+    ):
         """Render a camera. With 'split_envs', the environments are rendered one by one from the pose the camera
-        holds in each, and stacked; otherwise one image is rendered of the environments laid out side by side."""
+        holds in each, and stacked; otherwise one image is rendered of the environments laid out side by side. With
+        'env_idx', the index of an environment among the rendered ones, that environment alone is rendered."""
         # Update camera
         self.update_camera(camera)
 
         rgb_arr, depth_arr, seg_idxc_arr, normal_arr = None, None, None, None
         skip_markers = not camera.debug if isinstance(camera, Camera) else True
+        split_envs = split_envs or env_idx is not None
         if self._offscreen:
             # Set the context
             self._renderer.make_current()
@@ -92,6 +97,7 @@ class Rasterizer(RBC):
                         plane_reflection=rgb and self._context.plane_reflection,
                         shadow=rgb and self._context.shadow,
                         skip_markers=skip_markers,
+                        env_idx=env_idx,
                     )
 
                 if segmentation:
@@ -107,6 +113,7 @@ class Rasterizer(RBC):
                         plane_reflection=False,
                         shadow=False,
                         skip_markers=skip_markers,
+                        env_idx=env_idx,
                     )
             finally:
                 # Unset the context
@@ -123,6 +130,7 @@ class Rasterizer(RBC):
                     seg=False,
                     skip_markers=skip_markers,
                     split_envs=split_envs,
+                    env_idx=env_idx,
                 )
 
             if segmentation:
@@ -135,6 +143,7 @@ class Rasterizer(RBC):
                     seg=True,
                     skip_markers=skip_markers,
                     split_envs=split_envs,
+                    env_idx=env_idx,
                 )
 
         if segmentation:
@@ -187,6 +196,7 @@ class Rasterizer(RBC):
                 except (OpenGL.error.NullFunctionError, OSError):
                     pass
         self._camera_targets.clear()
+        self._is_built = False
 
     @property
     def viewer(self):

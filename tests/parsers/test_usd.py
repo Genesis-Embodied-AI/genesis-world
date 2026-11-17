@@ -17,7 +17,7 @@ if find_spec("pxr") is None:
     pytest.skip("USD is not supported because 'pxr' module is not available.", allow_module_level=True)
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
-from genesis.utils.usd import UsdContext, HAS_OMNIVERSE_KIT_SUPPORT
+from genesis.utils.usd import HAS_OMNIVERSE_KIT_SUPPORT
 from ..conftest import SKIP_NO_OMNIVERSE_KIT
 
 import genesis as gs
@@ -558,20 +558,37 @@ def test_collision_filtering(collision_filtering_usd, show_viewer, caplog):
                 pos=(0.0, 0.0, 0.05),
             ),
         )
-    scene.build()
-
     # The link pairs whose colliders are filtered in part alone are reported together, once
     partial_records = [record.getMessage() for record in caplog.records if "but not all of them" in record.getMessage()]
     assert len(partial_records) == 1
     assert "col_e" in partial_records[0] and "col_f" in partial_records[0]
+
+    ghosts = scene.add_stage(
+        spec=gs.entities.Kinematic(
+            morph=gs.morphs.USD(
+                file=collision_filtering_usd,
+                pos=(0.0, 0.0, 0.5),
+            ),
+        ),
+    )
+    stage_spec = gs.entities.Rigid(morph=gs.morphs.USD(file=collision_filtering_usd))
+    stage_spec.select(gs.indices.Link.named("base")).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="selects no part"):
+        scene.add_stage(spec=stage_spec)
+    scene.build()
+    ghosts_pos = [tensor_to_array(ghost.get_pos()) for ghost in ghosts]
 
     for _ in range(50):
         scene.step()
 
     # Both filtered bodies must be stopped by the ground plane, resting on it without penetration.
     for entity in entities:
-        aabb_min, _aabb_max = tensor_to_array(entity.get_AABB())
+        aabb_min, _aabb_max = entity.get_AABB()
         assert -5e-4 < aabb_min[-1] < 0.0
+    # The same stage constructed from a kinematic spec keeps its pose, neither falling nor colliding
+    assert len(ghosts) == len(entities)
+    for ghost, pos in zip(ghosts, ghosts_pos):
+        assert_allclose(ghost.get_pos(), pos, tol=gs.EPS)
 
     # Every link rests on the ground. Among the links overlapping their base, those whose colliders are all filtered
     # against it never collide with it, and those filtered in part alone keep colliding.
@@ -630,9 +647,7 @@ def test_oriented_capsule(oriented_capsule_usd, show_viewer, tol):
     for _ in range(50):
         scene.step()
 
-    capsule_aabb_min, _capsule_aabb_max = tensor_to_array(
-        scene.rigid_solver.get_AABB(entities_idx=(capsule.idx,))[..., 0, :]
-    )
+    capsule_aabb_min, _capsule_aabb_max = capsule.get_AABB()
     capsule_aabb_min_z = float(capsule_aabb_min[-1])
     assert -5e-4 < capsule_aabb_min_z < 0.0
 
@@ -665,6 +680,6 @@ def test_ant_capsule_axis_collision(show_viewer):
     for _ in range(50):
         scene.step()
 
-    ant_aabb_min, _capsule_aabb_max = tensor_to_array(ant.get_AABB())
+    ant_aabb_min, _capsule_aabb_max = ant.get_AABB()
     ant_aabb_min_z = float(ant_aabb_min[-1])
     assert -0.001 < ant_aabb_min_z < 0.001

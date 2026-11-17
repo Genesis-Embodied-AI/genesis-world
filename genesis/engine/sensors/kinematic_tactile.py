@@ -710,6 +710,7 @@ class KinematicTactileSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadat
     own metadata.
     """
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
         self._shared_metadata.append_filter(self._options.filter_link_idx)
@@ -719,7 +720,7 @@ class KinematicTactileSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadat
         if self._idx == n_sensors - 1 and self._shared_metadata.contact_depth_query == "raycast":
             solver = self._shared_metadata.solver
             self._shared_metadata.candidate_geoms = CandidateGeoms(
-                sizes=dict(candidate_sensors=n_sensors, candidate_geoms=solver.n_geoms, envs=self._manager._sim._B)
+                sizes=dict(candidate_sensors=n_sensors, candidate_geoms=solver.n_geoms, envs=self._manager.n_envs_)
             )
             self._shared_metadata.closest_query = self._shared_context.collision_target.build_closest_query(
                 tensor_to_array(self._shared_metadata.probe_sensor_idx), self._shared_metadata.candidate_geoms
@@ -749,10 +750,11 @@ class ContactDepthProbeSensor(
     Returns contact depth in meters per probe.
     """
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
         # Re-allocate the per-(env, sensor) contact prefilter buffers to absorb the newly-registered sensor.
-        B = self._manager._sim._B
+        B = self._manager.n_envs_
         n_sensors_built = self._shared_metadata.n_probes_per_sensor.shape[0]
         self._shared_metadata.sensor_contacts_idx = torch.zeros(
             (B, n_sensors_built, _MAX_CONTACTS_PER_SENSOR), dtype=gs.tc_int, device=gs.device
@@ -847,7 +849,7 @@ class ContactDepthProbeSensor(
         def mask(batch_envs_idx):
             depth = self.read_ground_truth(batch_envs_idx)
             if self._options.history_length > 0:
-                depth = depth.select(1 if self._manager._sim.n_envs > 0 else 0, -1)
+                depth = depth.select(1 if self._manager.n_envs > 0 else 0, -1)
             return depth >= gs.EPS
 
         nodes, *_ = self._draw_debug_probes(context, envs_idx, self._tactile_color_groups_fn(mask))
@@ -876,6 +878,7 @@ class ContactProbeSensor(
     cleanly with the env (the manager zeros the ring on reset).
     """
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
         self._shared_metadata.contact_threshold = concat_with_tensor(
@@ -927,7 +930,7 @@ class ContactProbeSensor(
         def mask(batch_envs_idx):
             contact = self.read_ground_truth(batch_envs_idx)
             if self._options.history_length > 0:
-                contact = contact.select(1 if self._manager._sim.n_envs > 0 else 0, -1)
+                contact = contact.select(1 if self._manager.n_envs > 0 else 0, -1)
             return contact
 
         nodes, *_ = self._draw_debug_probes(context, envs_idx, self._tactile_color_groups_fn(mask))
@@ -985,6 +988,7 @@ class KinematicTaxelSensor(
         # Resolve the grid frame for spatial crosstalk (flat pos/normals are already populated by the base mixins).
         self._setup_crosstalk_grid(options)
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -1009,7 +1013,7 @@ class KinematicTaxelSensor(
 
         # Re-allocate the per-(env, sensor) contact prefilter buffers to absorb the newly-registered sensor.
         # Sized at build time; the per-step kernel writes into the same buffers without further allocation.
-        B = self._manager._sim._B
+        B = self._manager.n_envs_
         n_sensors_built = self._shared_metadata.n_probes_per_sensor.shape[0]
         self._shared_metadata.sensor_contacts_idx = torch.zeros(
             (B, n_sensors_built, _MAX_CONTACTS_PER_SENSOR), dtype=gs.tc_int, device=gs.device
@@ -1127,7 +1131,7 @@ class KinematicTaxelSensor(
         def mask(batch_envs_idx):
             force = self.read_ground_truth(batch_envs_idx).force
             if self._options.history_length > 0:
-                force = force.select(1 if self._manager._sim.n_envs > 0 else 0, -1)
+                force = force.select(1 if self._manager.n_envs > 0 else 0, -1)
             return torch.linalg.norm(force, dim=-1) >= gs.EPS
 
         nodes, *_ = self._draw_debug_probes(context, envs_idx, self._tactile_color_groups_fn(mask))

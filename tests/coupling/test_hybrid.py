@@ -165,11 +165,11 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
         scene.step()
 
     # Check that the sand moved the box along the negative Y direction
-    pos = tensor_to_array(obj_rigid.get_pos())
+    pos = obj_rigid.get_pos()
     assert (pos[..., 1] + 0.25 < 0.0).all()
 
     # Resetting one environment leaves the other one as it was
-    sand_pos = tensor_to_array(obj_sand.get_particles_pos())
+    sand_pos = obj_sand.get_particles_pos()
     scene.reset(envs_idx=[1])
     assert_equal(obj_rigid.get_pos()[0], pos[0])
     assert_equal(obj_sand.get_particles_pos()[0], sand_pos[0])
@@ -812,7 +812,7 @@ def test_sap_equality_constraints(show_viewer, xml_path, n_envs, is_batched, tol
     )
     entity.set_dofs_velocity(dofs_vel)
     for anchor_link, link in ((entity.get_link("drop_anchor"), ball), (ground.base_link, cube)):
-        scene.sim.rigid_solver.add_weld_constraint(anchor_link.idx, link.idx, envs_idx=welded_envs_idx)
+        scene.rigid_solver.add_weld_constraint(anchor_link.idx, link.idx, envs_idx=welded_envs_idx)
     scene.step()
     qpos_expected = qpos[..., joints_qs_idx] + dofs_vel[..., joints_dofs_idx] * DT
     assert_allclose(entity.get_qpos()[..., joints_qs_idx], qpos_expected, tol=tol)

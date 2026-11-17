@@ -52,7 +52,14 @@ from genesis.utils.geom import (
     qd_transform_by_quat,
     qd_transform_by_trans_quat,
 )
-from genesis.utils.misc import get_gpu_core_count, qd_from_torch, qd_to_numpy, tensor_to_array
+from genesis.utils.misc import (
+    BatchedMixin,
+    BuildableMixin,
+    get_gpu_core_count,
+    qd_from_torch,
+    qd_to_numpy,
+    tensor_to_array,
+)
 from genesis.utils.raycast_qd import triangle_face_normal
 from genesis.utils.sdf import SDFInfo
 from genesis.utils.simt import (
@@ -326,7 +333,7 @@ def clip_triangles(tris_verts_pos: np.ndarray, tris_verts_dist: np.ndarray) -> n
     return np.concatenate([parts_verts_pos[is_kept] for is_kept, parts_verts_pos in clipped_parts])
 
 
-class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
+class LegacyCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
     """
     This class handles all the coupling between different solvers. LegacyCoupler will be deprecated in the future.
     """
@@ -424,7 +431,9 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             ]
         )
 
-    def build(self) -> None:
+    @gs.assert_unbuilt
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
         has_rigid_mpm, _, has_rigid_pbd, has_rigid_fem = self.rigid_couplings
         has_mpm_sph = self.mpm_solver.is_active and self.sph_solver.is_active and self.options.mpm_sph
         has_mpm_pbd = self.mpm_solver.is_active and self.pbd_solver.is_active and self.options.mpm_pbd
@@ -458,19 +467,19 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             has_fem_sph=self.has_fem_sph,
             is_links_info_batched=self.rigid_solver.rigid_config.batch_links_info,
             is_external_wrench_exact=has_rigid_sph and is_opted_in(RigidData.dyn_state.links.cfrc_external_sums),
-            enable_cooperative_particles=0 < self.sph_solver.n_particles * self.sim._B <= get_gpu_core_count(),
-            enable_cooperative_segments=0 < n_segments * self.sim._B <= get_gpu_core_count(),
+            enable_cooperative_particles=0 < self.sph_solver.n_particles * self.n_envs_ <= get_gpu_core_count(),
+            enable_cooperative_segments=0 < n_segments * self.n_envs_ <= get_gpu_core_count(),
         )
 
         self.legacy_coupler_state = LegacyCouplerState(
-            sizes=dict(pbd_particles=self.pbd_solver.n_particles, envs=self.sim._B),
+            sizes=dict(pbd_particles=self.pbd_solver.n_particles, envs=self.n_envs_),
             env_first=False,
             unused=dict(rigid_pbd=not has_rigid_pbd),
         )
         if has_rigid_pbd:
             self.legacy_coupler_state.pbd_attach_link_idx.fill(-1)
             self.legacy_coupler_state.pbd_attach_local_pos.fill(0.0)
-        self.build_errno(self.sim._B)
+        self.build_errno(self.n_envs_)
         self.register_errors(self.legacy_coupler_state.errno, {})
 
         # The cells of the MPM grid reach the particles of the hash grid cells they overlap, plus one on each side
@@ -493,7 +502,11 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         )
 
         if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
-            kernel_reset_mpm_rigid_normal(self.sim.scene._sanitize_envs_idx(None), self.mpm_solver.mpm_state)
+            kernel_reset_mpm_rigid_normal(self.sim.sanitize_envs_idx(None), self.mpm_solver.mpm_state)
+        self._is_built = True
+
+    def destroy(self) -> None:
+        self._is_built = False
 
     def _build_sph_boundaries(self, rigid_sph_geoms: list["RigidGeom"]) -> tuple[bool, bool]:
         """
@@ -533,7 +546,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             np.array([geom.is_fixed for geom in geoms], dtype=bool), [len(geom.init_faces) for geom in geoms]
         )
         # The geoms of the variants of a heterogeneous entity are only active in some environments
-        geoms_is_active = np.ones((self.rigid_solver.n_geoms, self.sim._B), dtype=bool)
+        geoms_is_active = np.ones((self.rigid_solver.n_geoms, self.n_envs_), dtype=bool)
         for geom in geoms:
             if geom.active_envs_mask is not None:
                 geoms_is_active[geom.idx] = tensor_to_array(geom.active_envs_mask)
@@ -801,7 +814,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         self.sph_boundaries = SPHBoundaries(
             sizes=dict(
                 particles=len(fem_segments_tri_idx) + len(rigid_segments_geom_idx),
-                envs=self.sim._B,
+                envs=self.n_envs_,
                 quad_points=len(quad_weight),
                 fem_segments=len(fem_segments_tri_idx),
                 surfaces=len(fem_tris_verts_pos),
@@ -904,7 +917,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             (gs.GEOM_TYPE.TERRAIN, gs.GEOM_TYPE.PLANE),
         )
         particles_pos = qd_to_numpy(self.sph_solver.sph_state.particles.pos, transpose=True)[0]
-        is_inside = np.zeros((len(particles_pos), self.sim._B), dtype=bool)
+        is_inside = np.zeros((len(particles_pos), self.n_envs_), dtype=bool)
         # The variants of a heterogeneous entity may start at other poses in the environments where they are active, so
         # each group of environments takes the poses of its first one
         geoms_pos_envs = qd_to_numpy(self.rigid_solver.dyn_state.geoms.pos, transpose=True)

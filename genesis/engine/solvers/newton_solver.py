@@ -182,8 +182,8 @@ class NewtonSolver(Solver):
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: NewtonOptions) -> None:
-        super().__init__(scene, sim, options)
+    def __init__(self, sim: "Simulator", options: NewtonOptions) -> None:
+        super().__init__(sim, options)
         self.data_manager: NewtonData | None = None
         self.newton_envs: NewtonEnvs | None = None
         self.newton_loops: NewtonLoops | None = None
@@ -203,9 +203,11 @@ class NewtonSolver(Solver):
         mpm_solver = self._sim.mpm_solver
         return mpm_solver.is_active and mpm_solver._use_implicit_solver
 
-    def build(self) -> None:
-        super().build()
+    @gs.assert_unbuilt
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
         if not self.is_active:
+            self._is_built = True
             return
         if self._requires_grad:
             gs.raise_exception(
@@ -218,7 +220,7 @@ class NewtonSolver(Solver):
                 f"{type(self._sim.coupler.options).__name__}."
             )
         rigid_solver = self._sim.rigid_solver
-        rigid_options = self._scene.options.rigid
+        rigid_options = self._sim.scene.options.rigid
         has_rigid_dofs = rigid_solver.is_solved_in_global_newton
         if has_rigid_dofs:
             # The Newton solve preconditions the dofs of the rigid solver by the factor of the Hessian of its Newton
@@ -243,7 +245,7 @@ class NewtonSolver(Solver):
             has_rigid_rows=not rigid_options.disable_constraint,
         )
         self.data_manager = NewtonData(
-            sizes={"envs": self._B, "dofs": max(rigid_solver.n_dofs, 1), "links": max(rigid_solver.n_links, 1)},
+            sizes={"envs": self.n_envs_, "dofs": max(rigid_solver.n_dofs, 1), "links": max(rigid_solver.n_links, 1)},
             values=dict(
                 newton_info=dict(
                     max_iterations=self._options.max_iterations,
@@ -271,6 +273,8 @@ class NewtonSolver(Solver):
         self.newton_info = self.data_manager.newton_info
         self.rigid_dofs = self.data_manager.rigid_dofs
         self.rigid_links = self.data_manager.rigid_links
+
+        self._is_built = True
 
     @property
     def data(self) -> Iterator[DataItem]:

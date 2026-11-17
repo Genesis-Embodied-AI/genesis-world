@@ -44,13 +44,14 @@ def _ellipsoid_mjcf_path(tmp_path, semi_axes):
 @pytest.mark.parametrize("gjk_collision", [True, False])
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_edge_cases(gs_sim, mode):
-    qpos_0 = gs_sim.rigid_solver.get_dofs_position()
+    (gs_robot,) = gs_sim.entities
+    qpos_0 = gs_robot.get_dofs_position()
     for _ in range(200):
         gs_sim.scene.step()
 
-    qvel = gs_sim.rigid_solver.get_dofs_velocity()
+    qvel = gs_robot.get_dofs_velocity()
     assert_allclose(qvel, 0, atol=1e-2)
-    qpos = gs_sim.rigid_solver.get_dofs_position()
+    qpos = gs_robot.get_dofs_position()
     atol = 1e-3 if mode in (4, 6) else 1e-4
     assert_allclose(qpos[[0, 1, 3, 4, 5]], qpos_0[[0, 1, 3, 4, 5]], atol=atol)
 
@@ -2057,7 +2058,7 @@ def test_contype_conaffinity(xml_path, show_viewer, tol):
     assert_allclose(box1.get_pos(), (0.0, 0.0, 0.25), atol=5e-4)
     assert_allclose(box2.get_pos(), (0.0, 0.0, 0.75), atol=2e-3)
     assert_allclose(box2.get_pos(), box3.get_pos(), atol=2e-3)
-    assert_allclose(scene.rigid_solver.get_links_acc(slice(box4.link_start, box4.link_end)), GRAVITY, atol=tol)
+    assert_allclose(box4.get_links_acc(relative=False), GRAVITY, atol=tol)
 
 
 @pytest.mark.required
@@ -2205,9 +2206,10 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
 def test_nan_reset(gs_sim, mode):
+    (gs_robot,) = gs_sim.entities
     for _ in range(200):
         gs_sim.scene.step()
-        qvel = gs_sim.rigid_solver.get_dofs_velocity()
+        qvel = gs_robot.get_dofs_velocity()
         if torch.isnan(qvel).any():
             break
     else:
@@ -2216,7 +2218,7 @@ def test_nan_reset(gs_sim, mode):
     gs_sim.scene.reset()
     for _ in range(5):
         gs_sim.scene.step()
-    qvel = gs_sim.rigid_solver.get_dofs_velocity()
+    qvel = gs_robot.get_dofs_velocity()
     assert not torch.isnan(qvel).any()
 
 
@@ -2247,10 +2249,7 @@ def test_neutral_self_collision_masks_across_merged_entities(merged_overlapping_
     scene.build()
 
     # The merged hand shares the arm's kinematic-tree root, so cross-entity pairs are self-collision candidates.
-    geoms_root_idx = np.array([geom.link.root_idx for geom in scene.rigid_solver.geoms])
-    arm_geoms = [geom.idx for geom in arm.geoms]
-    hand_geoms = [geom.idx for geom in hand.geoms]
-    assert set(geoms_root_idx[arm_geoms].tolist()) == set(geoms_root_idx[hand_geoms].tolist())
+    assert {geom.link.root_idx for geom in arm.geoms} == {geom.link.root_idx for geom in hand.geoms}
 
     # The palm overlaps the non-adjacent a2 link at qpos0, so the neutral-overlap check masks this cross-entity pair.
     collision_pair_idx = scene.rigid_solver.collider.collider_info.collision_pair_idx.to_numpy()

@@ -15,7 +15,7 @@ from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.grad.bridge import reversed_with
 from genesis.utils.data import Data, DataKind, Size, eoa, field
 from genesis.utils.geom import PARTICLES
-from genesis.utils.misc import qd_from_torch
+from genesis.utils.misc import BuildableMixin, qd_from_torch
 
 # The muscle groups of the soft parts of every hybrid entity
 GROUPS = Size("groups")
@@ -42,9 +42,7 @@ class RigidMPMHybridInfo(Data, kind=DataKind.CONSTANT):
 @reversed_with(is_backward=True)
 @qd.kernel(fastcache=True)
 def kernel_update_hybrid_soft_part(
-    substep_dt: float,
     dt: float,
-    rigid_dt: float,
     mpm_state: MPMState,
     links_state: LinksState,
     mpm_info: MPMInfo,
@@ -87,22 +85,21 @@ def kernel_update_hybrid_soft_part(
             )
             new_x_pos = gu.qd_transform_by_trans_quat(x_init_local, trans=tx_pos, quat=tx_quat)
 
-            # The velocity closing the gap moves the soft part incrementally over the substeps of the soft solver,
-            # scaled linearly between the time steps of the soft and rigid solvers
+            # The velocity closing the gap over the step moves the soft part incrementally over its substeps
             x_pos = mpm_state.particles.pos[i_p, i_b]
-            xd_vel = (new_x_pos - x_pos) / substep_dt * (substep_dt / rigid_dt)
+            xd_vel = (new_x_pos - x_pos) / dt
             vel_d = (xd_vel - mpm_state.particles.vel[i_p, i_b]) * qd.exp(
                 -dt * rigid_mpm_hybrid_info.groups_damping[i_group]
             )
 
-            # Soft-to-rigid coupling, the rigid time step integrating the force within the substep of the soft solver
+            # Soft-to-rigid coupling, the step integrating the force
             mass_real = mpm_info.particles.mass[i_p] / mpm_info.particle_volume_scale[None]
             # The force on the link is the reaction of the force the link applies the particle
             func_add_external_wrench(
                 i_l,
                 i_b,
                 x_pos,
-                force=-mass_real * (vel_d / rigid_dt),
+                force=-mass_real * (vel_d / dt),
                 torque=qd.Vector.zero(gs.qd_float, 3),
                 links_state=links_state,
                 is_exact=mpm_config.is_deterministic and not is_backward,
@@ -114,7 +111,7 @@ def kernel_update_hybrid_soft_part(
             )
 
 
-class RigidMPMHybrid:
+class RigidMPMHybrid(BuildableMixin):
     """
     Drive the particles of the soft part of the hybrid entities toward the links of their rigid part (see
     kernel_update_hybrid_soft_part).
@@ -129,9 +126,10 @@ class RigidMPMHybrid:
         self.rigid_solver = rigid_solver
         self.rigid_mpm_hybrid_info: RigidMPMHybridInfo | None = None
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         for entity in self._entities:
-            entity.build()
+            entity._build()
 
         soft_parts = [entity.mpm_hybrid_part for entity in self._entities]
         groups_count = [len(part.groups_link_idx) for part in soft_parts]
@@ -153,11 +151,17 @@ class RigidMPMHybrid:
             torch.mps.synchronize()
         self.rigid_mpm_hybrid_info = hybrid_info
 
+        self._is_built = True
+
+    def destroy(self) -> None:
+        for entity in self._entities:
+            entity._destroy()
+        self._is_built = False
+
+    @gs.assert_built
     def update_soft_parts(self) -> None:
         kernel_update_hybrid_soft_part(
-            self.mpm_solver.substep_dt,
-            self.mpm_solver.dt,
-            self.rigid_solver.dt,
+            self.mpm_solver.sim.dt,
             self.mpm_solver.mpm_state,
             self.rigid_solver.dyn_state.links,
             self.mpm_solver.mpm_info,

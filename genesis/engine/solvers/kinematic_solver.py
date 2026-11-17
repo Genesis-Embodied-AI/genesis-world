@@ -1,16 +1,17 @@
 from collections.abc import Iterator, Sequence
 from dataclasses import asdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.entities.rigid_entity import KinematicEntity
-from genesis.engine.entities.rigid_entity.description import _balanced_variant_mapping
+from genesis.engine.entities.rigid_entity import KinematicEntity, RigidGeom, RigidJoint, RigidVisGeom
+from genesis.engine.entities.rigid_entity.description import KinematicEntityDescription, _balanced_variant_mapping
 from genesis.engine.entities.rigid_entity.rigid_entity import get_variants_kinematics
-from genesis.engine.materials import Kinematic
+from genesis.engine.entities.rigid_entity.rigid_equality import RigidEquality
+from genesis.engine.entities.rigid_entity.rigid_link import KinematicLink
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     IKScratch,
     kernel_forward_kinematics_query,
@@ -24,6 +25,7 @@ from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
+from genesis.options.surfaces import Surface
 from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data
 from genesis.utils.misc import assign_indexed_tensor, broadcast_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
@@ -44,7 +46,6 @@ from .rigid.abd.forward_kinematics import (
     kernel_forward_velocity,
     kernel_masked_forward_kinematics,
     kernel_masked_forward_velocity,
-    kernel_update_vgeoms,
     kernel_update_vverts_for_vgeoms,
 )
 from .rigid.abd.misc import (
@@ -75,7 +76,7 @@ def _select_links_offset(offset, links_idx, envs_idx):
     """
     if offset.ndim == 2:
         return offset[indices_to_mask(links_idx)]
-    return offset[indices_to_mask(envs_idx, links_idx)]
+    return offset[indices_to_mask(envs_idx, links_idx, boolean_mask=False)]
 
 
 def _offset_world_shift(offset_pos, offset_quat, world_quat):
@@ -143,6 +144,8 @@ class KinematicSolver(Solver):
     RigidSolver extends this with physics (collision, constraints, dynamics).
     """
 
+    entity_spec_cls: ClassVar[type[gs.entities.Spec]] = gs.entities.Kinematic
+
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
 
@@ -150,18 +153,28 @@ class KinematicSolver(Solver):
     # The rigid solver deriving from this one reverses its own dynamics.
     is_differentiable = True
 
-    material_cls = Kinematic
     # The kinds of entity this solver builds, each with the morph class it is built from, the most specific first
     _entity_classes = ((Morph, KinematicEntity),)
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: "KinematicOptions") -> None:
-        super().__init__(scene, sim, options)
+    def __init__(self, sim: "Simulator", options: "KinematicOptions") -> None:
+        super().__init__(sim, options)
 
         self._enable_collision = False
         self._enable_mujoco_compatibility = False
         # See 'is_differentiable' above
         self._requires_grad = False
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
+
+        # The structure of the entities added so far, which 'add_entity' and 'attach' keep up to date
+        self._links: list[KinematicLink] = gs.List()
+        self._joints: list[RigidJoint] = gs.List()
+        self._vgeoms: list[RigidVisGeom] = gs.List()
+        self._n_qs = 0
+        self._n_dofs = 0
+        self._n_vverts = 0
+        self._n_vfaces = 0
+        self._n_custom_vverts = 0
+        self._n_custom_vfaces = 0
 
         self.collider = None
         self.constraint_solver = None
@@ -179,20 +192,21 @@ class KinematicSolver(Solver):
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name=None, desc=None
-    ) -> "KinematicEntity":
+        self,
+        idx: int,
+        surface: Surface | None,
+        spec: "gs.entities.Kinematic | gs.entities.Rigid | None",
+        desc: KinematicEntityDescription | None = None,
+    ) -> KinematicEntity:
         """Create an entity from its description.
 
-        Given no description, one is resolved from the other arguments (see 'KinematicEntityDescription'), the morph
-        deciding the kind of entity among those the solver builds ('_entity_classes'). The class of a given description
-        says which kind it holds. Creation from a description reads no asset.
+        Given no description, one is resolved from the entity spec and its resolved surface (see
+        'KinematicEntityDescription'), the primary morph deciding the kind of entity ('_entity_classes'). A given
+        description says the kind by its class, and creating from it reads no asset.
         """
         if desc is None:
-            morphs = (morph,) if isinstance(morph, Morph) else tuple(morph)
-            entity_cls = next(cls for morph_cls, cls in self._entity_classes if isinstance(morphs[0], morph_cls))
-            desc = entity_cls._description_cls.resolve(
-                morphs, material, surface, self._options, self._enable_mujoco_compatibility, visualize_contact, name
-            )
+            entity_cls = next(cls for morph_cls, cls in self._entity_classes if isinstance(spec.morphs[0], morph_cls))
+            desc = entity_cls._description_cls.resolve(spec, surface, self._options, self._enable_mujoco_compatibility)
         else:
             for _, entity_cls in self._entity_classes:
                 if entity_cls._description_cls is type(desc):
@@ -200,45 +214,34 @@ class KinematicSolver(Solver):
             else:
                 gs.raise_exception(f"{type(self).__name__} simulates no entity described by {type(desc).__name__}.")
         self._enable_heterogeneous |= bool(desc.variants)
-        entity = entity_cls(self._scene, self, idx, desc)
+        entity = entity_cls(self._sim.scene, self, idx, desc)
         self._entities.append(entity)
+        self._links.extend(entity.links)
+        self._joints.extend(entity.joints)
+        self._vgeoms.extend(entity.vgeoms)
+        self._n_qs += entity.n_qs
+        self._n_dofs += entity.n_dofs
+        self._n_vverts += entity.n_vverts
+        self._n_vfaces += entity.n_vfaces
+        if entity._morph.enable_custom_vverts:
+            self._n_custom_vverts += entity.n_vverts
+            self._n_custom_vfaces += entity.n_vfaces
         # An attachment names an entity added before this one, which 'attach' requires, so it is restored here
         if desc.attachment is not None:
-            entity.attach(self._scene.get_entity(desc.attachment.entity_name), desc.attachment.link_name)
+            entity.attach(self._sim.get_entity(desc.attachment.entity_name), desc.attachment.link_name)
         return entity
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ build -----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def build(self):
-        super().build()
-
-        self.n_envs = self.sim.n_envs
-        self._B = self.sim._B
-        self._para_level = self.sim._para_level
-
-        for entity in self._entities:
-            entity._build()
+    @gs.assert_unbuilt
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
 
         # Resolve the link-reach structures of @mutates notifications; see Solver.__init__.
         self._articulated_links_idx = np.array([link.idx for link in self.links if not link.is_fixed])
         self._links_parent_idx = np.array([link.parent_idx for link in self.links])
-
-        self._n_qs = self.n_qs
-        self._n_dofs = self.n_dofs
-        self._n_links = self.n_links
-        self._n_joints = self.n_joints
-        self._n_vgeoms = self.n_vgeoms
-        self._n_vfaces = self.n_vfaces
-        self._n_vverts = self.n_vverts
-        self._n_custom_vverts = self.n_custom_vverts
-        self._n_custom_vfaces = self.n_custom_vfaces
-        self._n_entities = self.n_entities
-
-        self._vgeoms = self.vgeoms
-        self._links = self.links
-        self._joints = self.joints
 
         base_links_idx = []
         for link in self.links:
@@ -263,18 +266,18 @@ class KinematicSolver(Solver):
             )
             for entity in self._entities
         )
-        offset_shape = (self._B, self.n_links) if links_offset_per_env else (self.n_links,)
+        offset_shape = (self.n_envs_, self.n_links) if links_offset_per_env else (self.n_links,)
         links_offset_pos = np.zeros((*offset_shape, 3), dtype=gs.np_float)
         links_offset_quat = np.tile(gu.identity_quat(), (*offset_shape, 1))
         vgeoms_offset_pos = np.zeros((self.n_vgeoms, 3), dtype=gs.np_float)
         vgeoms_offset_quat = np.tile(gu.identity_quat(), (self.n_vgeoms, 1))
         for entity in self._entities:
             if links_offset_per_env and entity._desc.variants:
-                variant_idx = _balanced_variant_mapping(len(entity._desc.variants), self._B)
-                links_offset_pos[np.arange(self._B), entity.base_link_idx] = np.stack(
+                variant_idx = _balanced_variant_mapping(len(entity._desc.variants), self.n_envs_)
+                links_offset_pos[np.arange(self.n_envs_), entity.base_link_idx] = np.stack(
                     [entity._desc.variants[v].offset_pos for v in variant_idx]
                 )
-                links_offset_quat[np.arange(self._B), entity.base_link_idx] = np.stack(
+                links_offset_quat[np.arange(self.n_envs_), entity.base_link_idx] = np.stack(
                     [entity._desc.variants[v].offset_quat for v in variant_idx]
                 )
                 vgeoms_ranges = entity.base_link._variant_vgeom_ranges
@@ -369,6 +372,12 @@ class KinematicSolver(Solver):
 
         self._init_vverts_state()
 
+        # The entities, their links, joints and geoms read the data of the solver, which exists from now on. The rest
+        # of the build of the rigid solver calls their accessors, and theirs alike.
+        for entity in self._entities:
+            entity._build()
+        self._is_built = True
+
     def _init_vverts_state(self):
         # Seed vverts_state.pos with one FK pass so opt-in entities show their initial pose from frame 0 even before
         # the user touches the buffer with set_vverts.
@@ -380,14 +389,14 @@ class KinematicSolver(Solver):
         )
         if opt_in_vgeoms_idx.size == 0:
             return
-        self.update_vgeoms()
+        kernel_forward_kinematics(self._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         self.update_vverts_for_vgeoms(opt_in_vgeoms_idx)
 
     def _build_config(self):
         # Static config with all physics disabled
         self.rigid_config = RigidConfig(
             backend=gs.backend,
-            para_level=self.sim._para_level,
+            para_level=self.sim.para_level,
             requires_grad=False,
             use_hibernation=False,
             batch_links_info=self._options.batch_links_info,
@@ -632,18 +641,18 @@ class KinematicSolver(Solver):
         self.qpos = self.rigid_info.qpos
         self.qpos0 = self.rigid_info.qpos0
         if self.n_qs > 0:
-            init_qpos = np.tile(np.expand_dims(self.init_qpos, -1), (1, self._B))
+            init_qpos = np.tile(np.expand_dims(self.init_qpos, -1), (1, self.n_envs_))
 
             # Dispatch per-variant init_qpos for heterogeneous entities
             for entity in self.entities:
                 if not entity._desc.variants:
                     continue
-                _, _, variants_qpos0, envs_variant_idx = get_variants_kinematics(entity, n_envs=self._B)
+                _, _, variants_qpos0, envs_variant_idx = get_variants_kinematics(entity, n_envs=self.n_envs_)
                 init_qpos[entity.q_start : entity.q_end] = np.array(variants_qpos0)[envs_variant_idx].T
 
             self.qpos0.from_numpy(init_qpos)
             dofs_limit = np.broadcast_to(
-                qd_to_numpy(self.dyn_info.dofs.limit, transpose=True), (self._B, self.n_dofs_, 2)
+                qd_to_numpy(self.dyn_info.dofs.limit, transpose=True), (self.n_envs_, self.n_dofs_, 2)
             )
             is_init_qpos_out_of_bounds = False
             for joint in self.joints:
@@ -688,7 +697,7 @@ class KinematicSolver(Solver):
         dofs_values = [qd_to_numpy(field, transpose=False, copy=True) for field, _ in dofs_fields]
 
         for entity in entities:
-            variants_links, variants_j_descs, _, envs_variant_idx = get_variants_kinematics(entity, n_envs=self._B)
+            variants_links, variants_j_descs, _, envs_variant_idx = get_variants_kinematics(entity, n_envs=self.n_envs_)
             links_slice = slice(entity.link_start, entity.link_end)
             variants_links_pos = np.stack([[l_desc.pos for l_desc in links] for links in variants_links])
             variants_links_quat = np.stack([[l_desc.quat for l_desc in links] for links in variants_links])
@@ -741,7 +750,7 @@ class KinematicSolver(Solver):
                 continue
 
             n_variants = len(link._variant_vgeom_ranges)
-            variant_idx = _balanced_variant_mapping(n_variants, self._B)
+            variant_idx = _balanced_variant_mapping(n_variants, self.n_envs_)
 
             vgeom_starts = np.array([link._variant_vgeom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
             vgeom_ends = np.array([link._variant_vgeom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
@@ -831,9 +840,7 @@ class KinematicSolver(Solver):
 
     def substep_post_coupling(self):
         if not self._is_forward_pos_updated or not self._is_forward_vel_updated:
-            kernel_forward_kinematics(
-                self.scene._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
-            )
+            kernel_forward_kinematics(self._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
             self._is_forward_pos_updated = True
             self._is_forward_vel_updated = True
 
@@ -869,7 +876,7 @@ class KinematicSolver(Solver):
             # FIXME: quadrants#1086 - fast math reassociates sums by code layout, so the kinematics recomputed here can
             # differ in the last bits from those the step left, and a replay from a saved state matches up to rounding.
             kernel_forward_kinematics(
-                self._scene._sanitize_envs_idx(envs_idx),
+                self._sim.sanitize_envs_idx(envs_idx),
                 self.dyn_state,
                 self.dyn_info,
                 self.rigid_info,
@@ -1010,7 +1017,7 @@ class KinematicSolver(Solver):
 
         if not skip_forward:
             if not isinstance(envs_idx, torch.Tensor):
-                envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+                envs_idx = self._sim.sanitize_envs_idx(envs_idx)
             if envs_idx.dtype == torch.bool:
                 fn = kernel_masked_forward_kinematics
             else:
@@ -1033,7 +1040,7 @@ class KinematicSolver(Solver):
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
             if not skip_forward and not isinstance(envs_idx, torch.Tensor):
-                envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+                envs_idx = self._sim.sanitize_envs_idx(envs_idx)
         else:
             velocity, dofs_idx, envs_idx = self._sanitize_io_variables(
                 velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
@@ -1081,7 +1088,7 @@ class KinematicSolver(Solver):
         if positions.ndim == 0 or positions.ndim > 3 or positions.shape[-1] != 2:
             gs.raise_exception("`positions` must have shape (2,), (n_points, 2), or (n_envs, n_points, 2).")
 
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self._sim.sanitize_envs_idx(envs_idx)
         n_envs = len(envs_idx)
         is_single_position = positions.ndim == 1
         n_points = 1 if is_single_position else positions.shape[-2]
@@ -1221,16 +1228,11 @@ class KinematicSolver(Solver):
             tensor = tensor[0]
         return tensor[..., 0], tensor[..., 1]
 
-    def update_vgeoms(self):
-        kernel_update_vgeoms(self.dyn_state, self.dyn_info, self.rigid_config)
-
     def update_forward_pos(self):
         """Run forward kinematics if links_state is not already up to date for the current pose."""
         if self._is_forward_pos_updated:
             return
-        kernel_forward_kinematics(
-            self.scene._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
-        )
+        kernel_forward_kinematics(self._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         self._is_forward_pos_updated = True
 
     def update_vverts_for_vgeoms(self, vgeoms_idx):
@@ -1262,7 +1264,7 @@ class KinematicSolver(Solver):
             assign_indexed_tensor(data, pos_mask, vverts)
             return
 
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self._sim.sanitize_envs_idx(envs_idx)
         target_shape = (envs_idx.shape[0], custom_vvert_end - custom_vvert_start, 3)
         vverts = broadcast_tensor(vverts, gs.tc_float, target_shape, ("envs", "vverts", "xyz")).contiguous()
         kernel_set_vverts(custom_vvert_start, envs_idx, vverts, self.dyn_state, self.rigid_config)
@@ -1290,11 +1292,18 @@ class KinematicSolver(Solver):
         jacobian = self.kinematics_scratch.jacobian
         if local_point is None:
             kernel_get_jacobian_zero(
-                link_idx, dof_start, jacobian, self.dyn_state, self.dyn_info, self.rigid_config, self._B
+                link_idx, dof_start, jacobian, self.dyn_state, self.dyn_info, self.rigid_config, self.n_envs_
             )
         else:
             kernel_get_jacobian(
-                link_idx, dof_start, local_point, jacobian, self.dyn_state, self.dyn_info, self.rigid_config, self._B
+                link_idx,
+                dof_start,
+                local_point,
+                jacobian,
+                self.dyn_state,
+                self.dyn_info,
+                self.rigid_config,
+                self.n_envs_,
             )
         return qd_to_torch(jacobian, transpose=True, copy=True)[..., :n_dofs]
 
@@ -1305,7 +1314,7 @@ class KinematicSolver(Solver):
         hold, and restores the one it does. Returns positions (n_envs, n_links, 3) and orientations
         (n_envs, n_links, 4), without the batch dimension when the scene is not batched.
         """
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        envs_idx = self._sim.sanitize_envs_idx(envs_idx)
         qpos = broadcast_tensor(qpos, gs.tc_float, (len(envs_idx), entity.n_qs), ("envs_idx", "qs_idx")).contiguous()
 
         qs_idx = torch.arange(entity._q_start, entity._q_start + entity.n_qs, dtype=gs.tc_int, device=gs.device)
@@ -1379,7 +1388,7 @@ class KinematicSolver(Solver):
             entities = self.entities
             self._ik_scratch = IKScratch(
                 sizes=dict(
-                    envs=self._B,
+                    envs=self.n_envs_,
                     entity_qs=max([entity.n_qs for entity in entities], default=0),
                     entity_dofs=max([entity.n_dofs for entity in entities], default=0),
                     entity_links=max([entity.n_links for entity in entities], default=0),
@@ -1469,33 +1478,29 @@ class KinematicSolver(Solver):
     # ------------------------------------------------------------------------------------
 
     @property
-    def links(self):
-        if self.is_built:
-            return self._links
-        return gs.List(link for entity in self._entities for link in entity.links)
+    def links(self) -> gs.List[KinematicLink]:
+        """The links of the solver, as a copy."""
+        return gs.List(self._links)
 
     @property
-    def joints(self):
-        if self.is_built:
-            return self._joints
-        return gs.List(joint for entity in self._entities for joint in entity.joints)
+    def joints(self) -> gs.List[RigidJoint]:
+        """The joints of the solver, as a copy."""
+        return gs.List(self._joints)
 
     @property
-    def equalities(self):
+    def equalities(self) -> gs.List[RigidEquality]:
         """The equality constraints the solver enforces, which a kinematic solver holds none of."""
         return gs.List()
 
     @property
-    def geoms(self):
-        if self.is_built:
-            return self._geoms
-        return gs.List(geom for entity in self._entities for geom in entity.geoms)
+    def geoms(self) -> gs.List[RigidGeom]:
+        """The collision geoms of the solver, which a kinematic solver holds none of."""
+        return gs.List()
 
     @property
-    def vgeoms(self):
-        if self.is_built:
-            return self._vgeoms
-        return gs.List(vgeom for entity in self._entities for vgeom in entity.vgeoms)
+    def vgeoms(self) -> gs.List[RigidVisGeom]:
+        """The visual geoms of the solver, as a copy."""
+        return gs.List(self._vgeoms)
 
     @property
     def vfaces_raycast_mask(self) -> torch.Tensor:
@@ -1509,58 +1514,40 @@ class KinematicSolver(Solver):
         return self._vfaces_raycast_mask
 
     @property
-    def n_links(self):
-        if self.is_built:
-            return self._n_links
-        return len(self.links)
+    def n_links(self) -> int:
+        return len(self._links)
 
     @property
-    def n_joints(self):
-        if self.is_built:
-            return self._n_joints
-        return len(self.joints)
+    def n_joints(self) -> int:
+        return len(self._joints)
 
     @property
-    def n_vgeoms(self):
-        if self.is_built:
-            return self._n_vgeoms
-        return len(self.vgeoms)
+    def n_vgeoms(self) -> int:
+        return len(self._vgeoms)
 
     @property
-    def n_vverts(self):
-        if self.is_built:
-            return self._n_vverts
-        return sum(entity.n_vverts for entity in self._entities)
+    def n_vverts(self) -> int:
+        return self._n_vverts
 
     @property
-    def n_vfaces(self):
-        if self.is_built:
-            return self._n_vfaces
-        return sum(entity.n_vfaces for entity in self._entities)
+    def n_vfaces(self) -> int:
+        return self._n_vfaces
 
     @property
-    def n_custom_vverts(self):
-        if self.is_built:
-            return self._n_custom_vverts
-        return sum(entity.n_vverts for entity in self._entities if entity._morph.enable_custom_vverts)
+    def n_custom_vverts(self) -> int:
+        return self._n_custom_vverts
 
     @property
-    def n_custom_vfaces(self):
-        if self.is_built:
-            return self._n_custom_vfaces
-        return sum(entity.n_vfaces for entity in self._entities if entity._morph.enable_custom_vverts)
+    def n_custom_vfaces(self) -> int:
+        return self._n_custom_vfaces
 
     @property
-    def n_qs(self):
-        if self.is_built:
-            return self._n_qs
-        return sum(entity.n_qs for entity in self._entities)
+    def n_qs(self) -> int:
+        return self._n_qs
 
     @property
-    def n_dofs(self):
-        if self.is_built:
-            return self._n_dofs
-        return sum(entity.n_dofs for entity in self._entities)
+    def n_dofs(self) -> int:
+        return self._n_dofs
 
     @property
     def init_qpos(self):

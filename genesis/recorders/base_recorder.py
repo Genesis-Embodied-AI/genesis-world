@@ -7,12 +7,13 @@ from typing import TYPE_CHECKING
 import genesis as gs
 from genesis.options.recorders import RecorderOptions
 from genesis.utils import data_to_array
+from genesis.utils.misc import BuildableMixin
 
 if TYPE_CHECKING:
     from .recorder_manager import RecorderManager
 
 
-class Recorder[T]:
+class Recorder[T](BuildableMixin):
     """
     Base class for all recorders.
 
@@ -26,7 +27,6 @@ class Recorder[T]:
         self._data_func = data_func
         self._steps_per_sample = 1
         self._error: Exception | None = None
-        self._is_built = False
         self._is_recording = False
         self._is_alive = True
 
@@ -51,6 +51,9 @@ class Recorder[T]:
         Build the recorder, e.g. by initializing variables and creating widgets or file handles.
         """
         self._is_built = True
+
+    def destroy(self) -> None:
+        self._is_built = False
 
     @gs.assert_built
     def process(self, data, cur_time):
@@ -263,10 +266,6 @@ class Recorder[T]:
             pass
         finally:
             self._data_queue.put_nowait((data, global_time))
-
-    @property
-    def is_built(self) -> bool:
-        return self._is_built
 
     @property
     def is_alive(self) -> bool:

@@ -1,4 +1,3 @@
-import collections.abc
 import dataclasses
 import gc
 import hashlib
@@ -42,6 +41,7 @@ from genesis.options import (
     ViewerOptions,
     VisOptions,
 )
+from genesis.options.entities import EntityT, get_entity_spec
 from genesis.options.morphs import Morph
 from genesis.options.recorders import RecorderOptions, TrajectoryFile
 from genesis.options.renderers import RendererOptions
@@ -49,9 +49,10 @@ from genesis.options.surfaces import Surface
 from genesis.recorders import RecorderManager
 from genesis.recorders.trajectory import Trajectory, save_checkpoint
 from genesis.repr_base import RBC
+from genesis.typing import IndexType
 from genesis.utils import serialization
 from genesis.utils.data import Namespace, namespace
-from genesis.utils.misc import sanitize_index, tensor_to_array
+from genesis.utils.misc import BuildableMixin, sanitize_index, tensor_to_array
 from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME, pixel_less_textures
 from genesis.utils.tools import RunningMean
 from genesis.utils.warnings import warn_once
@@ -59,6 +60,7 @@ from genesis.vis import Visualizer
 
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity
+    from genesis.engine.entities.emitter import Emitter
     from genesis.engine.entities.rigid_entity import RigidEntity
     from genesis.engine.sensors.base_sensor import Sensor
     from genesis.engine.simulator import Simulator
@@ -139,7 +141,7 @@ def description_digest(desc: SceneDescription) -> str:
 
 
 @gs.assert_initialized
-class Scene(RBC):
+class Scene(BuildableMixin, RBC):
     """
     A ``genesis.Scene`` object wraps all components in a simulation environment, including a simulator (containing multiple physics solvers), entities, and a visualizer (controlling both the viewer and all the cameras).
     Basically, everything happens inside a scene.
@@ -149,17 +151,17 @@ class Scene(RBC):
     sim_options : gs.options.SimOptions
         The options configuring the overarching `simulator`, which in turn manages all the solvers.
     rigid_options : gs.options.RigidOptions
-        The options configuring the rigid_solver (``scene.sim.RigidSolver``).
+        The options configuring the rigid_solver (``scene.rigid_solver``).
     mpm_options : gs.options.MPMOptions
-        The options configuring the mpm_solver (``scene.sim.MPMSolver``).
+        The options configuring the mpm_solver (``scene.mpm_solver``).
     sph_options : gs.options.SPHOptions
-        The options configuring the sph_solver (``scene.sim.SPHSolver``).
+        The options configuring the sph_solver (``scene.sph_solver``).
     fem_options : gs.options.FEMOptions
-        The options configuring the fem_solver (``scene.sim.FEMSolver``).
+        The options configuring the fem_solver (``scene.fem_solver``).
     pbd_options : gs.options.PBDOptions
-        The options configuring the pbd_solver (``scene.sim.PBDSolver``).
+        The options configuring the pbd_solver (``scene.pbd_solver``).
     newton_options : gs.options.NewtonOptions
-        The options configuring the newton_solver (``scene.sim.NewtonSolver``), which solves every substep of the
+        The options configuring the newton_solver (``scene.sim.newton_solver``), which solves every substep of the
         implicit MPM solver together with the rigid entities in contact with its particles.
     coupler_options : gs.options.CouplerOptions
         The options configuring the `coupler` between different solvers.
@@ -236,7 +238,7 @@ class Scene(RBC):
                 renderer=renderer,
             )
         if show_FPS is not None:
-            warn_once("Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
+            warn_once(self, "Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
             self.options.profiling.show_FPS = show_FPS
 
         # description
@@ -267,7 +269,6 @@ class Scene(RBC):
         self._emitters = gs.List()
 
         self._uid = gs.UID()
-        self._is_built = False
         self._pre_step_callbacks: list = []
 
         gs.logger.info(f"Scene ~~~<{self._uid}>~~~ created.")
@@ -288,6 +289,8 @@ class Scene(RBC):
             if getattr(self, "_recorder_manager", None) is not None and self._recorder_manager.is_recording:
                 self.stop_recording()
         finally:
+            if getattr(self, "_recorder_manager", None) is not None:
+                self._recorder_manager.destroy()
             self._recorder_manager = None
 
             if getattr(self, "_visualizer", None) is not None:
@@ -310,39 +313,64 @@ class Scene(RBC):
             self._is_built = False
 
     @overload
+    def add_entity(self, *, spec: gs.entities.Spec[EntityT]) -> EntityT: ...
+
+    @overload
+    def add_entity(self, *, spec: gs.entities.Spec) -> "Entity": ...
+
+    @overload
     def add_entity(
         self,
         morph: Morph | Iterable[Morph],
-        material: None = ...,
+        material: gs.materials.Rigid | None = ...,
         surface: Surface | None = ...,
-        visualize_contact: bool = ...,
+        visualize_contact: bool | None = ...,
         vis_mode: str | None = ...,
         name: str | None = ...,
     ) -> "RigidEntity": ...
 
     @overload
-    def add_entity[EntityT: "Entity"](
+    def add_entity(
         self,
         morph: Morph | Iterable[Morph],
-        material: Material[EntityT] = ...,
+        material: gs.materials.Kinematic,
         surface: Surface | None = ...,
-        visualize_contact: bool = ...,
+        visualize_contact: Literal[False] | None = ...,
         vis_mode: str | None = ...,
         name: str | None = ...,
-    ) -> EntityT: ...
+    ) -> KinematicEntity: ...
+
+    @overload
+    def add_entity[MaterialEntityT: "Entity"](
+        self,
+        morph: Morph | Iterable[Morph],
+        material: Material[MaterialEntityT],
+        surface: Surface | None = ...,
+        visualize_contact: Literal[False] | None = ...,
+        vis_mode: str | None = ...,
+        name: str | None = ...,
+    ) -> MaterialEntityT: ...
 
     @gs.assert_unbuilt
     def add_entity(
         self,
-        morph: Morph | Iterable[Morph],
+        morph: Morph | Iterable[Morph] | None = None,
         material: Material | None = None,
         surface: Surface | None = None,
-        visualize_contact: bool = False,
+        visualize_contact: bool | None = None,
         vis_mode: str | None = None,
         name: str | None = None,
+        *,
+        spec: gs.entities.Spec | None = None,
     ) -> "Entity":
-        """
-        Add an entity to the scene.
+        """Add an entity to the scene, constructed from an entity spec or from individual arguments.
+
+        The class of ``spec``, such as ``gs.entities.Rigid``, ``gs.entities.Kinematic`` or ``gs.entities.FEM``,
+        decides the kind of entity and the solver simulating it. The entity holds it as ``entity.spec``.
+
+        The individual arguments are a shorthand for the spec of the entities the material is given to, such as
+        ``spec=gs.entities.Rigid(...)`` for ``gs.materials.Rigid``, and stand for that spec alone. Passing
+        spec and individual arguments together raises an error.
 
         Parameters
         ----------
@@ -357,55 +385,44 @@ class Scene(RBC):
             The material of the entity. If None, use ``gs.materials.Rigid()``.
         surface : gs.surfaces.Surface | None, optional
             The surface of the entity. If None, use ``gs.surfaces.Default()``.
-        visualize_contact : bool
+        visualize_contact : bool | None, optional
             Whether to visualize contact forces applied to this entity as arrows in the viewer and rendered images.
-            Note that this will not be displayed in images rendered by camera using the `RayTracer` renderer.
+            The `RayTracer` renderer draws no arrows. If None, defaults to False.
         vis_mode : str | None, optional
             The visualization mode of the entity. This is a handy shortcut for setting `surface.vis_mode` without
             explicitly creating a surface object.
         name : str | None, optional
             User-specified name for the entity. If not provided, an auto-generated name will be assigned
             based on the morph type and entity UID (e.g., "box_a1b2c3d4"). Must be unique within the scene.
+        spec : gs.entities.Spec | None, optional
+            The spec to construct the entity from, an instance of a subclass of ``gs.entities.Spec``.
 
         Returns
         -------
         entity : genesis.Entity
-            The created entity.
+            The created entity, of the kind its spec class decides.
         """
-        if material is None:
-            material = gs.materials.Rigid()
-
-        if surface is None:
-            # assign a local surface, otherwise modification will apply on global default surface
-            surface = gs.surfaces.Default()
-
-        # Handle heterogeneous morphs (any iterable of morphs, excluding Morph objects). Whether a morph, or several,
-        # can be built from is for the entity created from it to say.
-        if isinstance(morph, collections.abc.Iterable) and not isinstance(morph, Morph):
-            morph = tuple(morph)
+        if spec is None:
+            spec = get_entity_spec(morph, material, surface, visualize_contact, vis_mode, name)
+        elif any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode, name)):
+            gs.raise_exception("Pass either an entity spec or individual entity arguments, never both.")
+        if spec.morph is None:
+            gs.raise_exception("Entity construction requires a morph.")
+        material = spec.material
+        # The surface resolves on a copy, since other entities may share it. The morph resolves in place, as shared
+        # morphs rely on (see 'Entity.spec').
+        surface = gs.surfaces.Default() if spec.surface is None else spec.surface.model_copy()
 
         # some morph should not smooth surface normal
-        if isinstance(
-            morph[0] if isinstance(morph, tuple) else morph, (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)
-        ):
+        if isinstance(spec.morphs[0], (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)):
             surface.smooth = False
 
         if surface.double_sided is None:
             surface.double_sided = isinstance(material, (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth))
 
-        if vis_mode is not None:
-            surface.vis_mode = vis_mode
-        # validate and populate default surface.vis_mode considering morph type
-        if isinstance(material, gs.materials.Kinematic):
-            if surface.vis_mode is None:
-                surface.vis_mode = "visual"
-
-            if surface.vis_mode not in ("visual", "collision", "sdf"):
-                gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: "
-                    "['visual', 'collision', 'sdf']."
-                )
-
+        # validate and populate default surface.vis_mode considering the kind of entity
+        if isinstance(spec, (gs.entities.Rigid, gs.entities.Kinematic)):
+            vis_modes = ("visual", "collision", "sdf")
         elif isinstance(
             material,
             (
@@ -417,90 +434,115 @@ class Scene(RBC):
                 gs.materials.SPH.Liquid,
             ),
         ):
-            if surface.vis_mode is None:
-                surface.vis_mode = "particle"
-
-            if surface.vis_mode not in ("particle", "recon"):
-                gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'recon']."
-                )
-
-        elif isinstance(material, (gs.materials.PBD.Base, gs.materials.MPM.Base, gs.materials.SPH.Base)):
-            if surface.vis_mode is None:
-                surface.vis_mode = "visual"
-
-            if surface.vis_mode not in ("visual", "particle", "recon"):
-                gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['visual', 'particle', 'recon']."
-                )
-
-        elif isinstance(material, gs.materials.FEM.Base):
-            if surface.vis_mode is None:
-                surface.vis_mode = "visual"
-
-            if surface.vis_mode not in ("visual",):
-                gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['visual']."
-                )
-
-        elif isinstance(material, gs.materials.Hybrid):  # determine the visual of the outer soft part
-            if surface.vis_mode is None:
-                surface.vis_mode = "particle"
-
-            if surface.vis_mode not in ("particle", "visual"):
-                gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'visual']."
-                )
-
+            vis_modes = ("particle", "recon")
+        elif isinstance(spec, (gs.entities.PBD, gs.entities.MPM, gs.entities.SPH)):
+            vis_modes = ("visual", "particle", "recon")
+        elif isinstance(spec, gs.entities.FEM):
+            vis_modes = ("visual",)
         else:
-            gs.raise_exception()
+            # The visual of a hybrid entity is the one of its outer soft part
+            vis_modes = ("particle", "visual")
+        if surface.vis_mode is None:
+            surface.vis_mode = vis_modes[0]
+        if surface.vis_mode not in vis_modes:
+            gs.raise_exception(
+                f"Unsupported `surface.vis_mode` for gs.entities.{type(spec).__name__}: '{surface.vis_mode}'. "
+                f"Expected one of: {list(vis_modes)}."
+            )
 
-        entity = self._sim._add_entity(morph, material, surface, visualize_contact, name)
+        return self._sim.add_entity(surface, spec)
 
-        return entity
+    @overload
+    def add_stage(self, *, spec: gs.entities.Kinematic) -> list[KinematicEntity]: ...
+
+    @overload
+    def add_stage(self, *, spec: gs.entities.Rigid) -> list["RigidEntity"]: ...
+
+    @overload
+    def add_stage(
+        self,
+        morph: gs.morphs.USD,
+        material: gs.materials.Rigid | None = ...,
+        surface: Surface | None = ...,
+        visualize_contact: bool | None = ...,
+        vis_mode: Literal["visual", "collision"] | None = ...,
+    ) -> list["RigidEntity"]: ...
+
+    @overload
+    def add_stage(
+        self,
+        morph: gs.morphs.USD,
+        material: gs.materials.Kinematic,
+        surface: Surface | None = ...,
+        visualize_contact: Literal[False] | None = ...,
+        vis_mode: Literal["visual", "collision"] | None = ...,
+    ) -> list[KinematicEntity]: ...
 
     @gs.assert_unbuilt
     def add_stage(
         self,
-        morph: gs.morphs.USD,
-        material: Material | None = None,
+        morph: gs.morphs.USD | None = None,
+        material: gs.materials.Rigid | gs.materials.Kinematic | None = None,
         surface: Surface | None = None,
-        visualize_contact: bool = False,
-        vis_mode: Literal["visual", "collision"] = "visual",
-    ):
-        """
-        Add a stage to the scene.
+        visualize_contact: bool | None = None,
+        vis_mode: Literal["visual", "collision"] | None = None,
+        *,
+        spec: gs.entities.Rigid | gs.entities.Kinematic | None = None,
+    ) -> list:
+        """Add a USD stage to the scene, as one entity per articulation or rigid body it holds.
+
+        The class of ``spec`` decides the kind of every entity of the stage, ``gs.entities.Rigid`` or
+        ``gs.entities.Kinematic``, its morph being the stage. The spec names no entity, since a stage
+        adds several. As for ``Scene.add_entity``, the individual arguments are a shorthand for the spec of the
+        entities their material is given to, and passing both raises an error.
 
         Parameters
         ----------
-        morph : gs.morphs.USD
+        morph : gs.morphs.USD | None, optional
             The stage to add to the scene.
         material : gs.materials.Material | None, optional
             The material of the stage. If None, use ``gs.materials.Rigid()`` for all morphs.
         surface : gs.surfaces.Surface | None, optional
             The surface of the stage. If None, use ``gs.surfaces.Default()`` for all morphs.
-        visualize_contact : bool
+        visualize_contact : bool | None, optional
             Whether to visualize contact forces applied to this stage as arrows in the viewer and rendered images.
-            Note that this will not be displayed in images rendered by camera using the `RayTracer` renderer.
+            The `RayTracer` renderer draws no arrows. If None, defaults to False.
         vis_mode : str | None, optional
             The visualization mode of the stage. This is a handy shortcut for setting `surface.vis_mode` without
             explicitly creating a surface object.
+        spec : gs.entities.Rigid | gs.entities.Kinematic | None, optional
+            The spec to construct the entities of the stage from.
 
         Returns
         -------
         entities : list[genesis.Entity]
             The created entities.
         """
-        if not isinstance(morph, gs.morphs.USD):
-            gs.raise_exception(f"Unsupported morph: {morph}.")
+        if spec is None:
+            stage_spec = get_entity_spec(morph, material, surface, visualize_contact, vis_mode)
+        else:
+            if any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode)):
+                gs.raise_exception("Pass either an entity spec or individual entity arguments, never both.")
+            stage_spec = spec
+        if not isinstance(stage_spec, (gs.entities.Rigid, gs.entities.Kinematic)):
+            gs.raise_exception(
+                f"A stage holds rigid or kinematic entities, which gs.entities.{type(stage_spec).__name__} cannot "
+                "construct."
+            )
+        if stage_spec.name is not None:
+            gs.raise_exception("A stage adds several entities, so its spec takes no name.")
+        if stage_spec.patches:
+            gs.raise_exception("A stage adds entities of different links, so its spec selects no part.")
+        if not isinstance(stage_spec.morph, gs.morphs.USD):
+            gs.raise_exception(f"Unsupported morph: {stage_spec.morph}.")
         from genesis.utils.usd import parse_usd_stage
 
-        # One `gs.morphs.USD` per rigid entity of the stage, added while the stage it was split from stays open.
-        with parse_usd_stage(morph) as entity_morphs:
-            entities = []
-            for entity_morph in entity_morphs:
-                entities.append(self.add_entity(entity_morph, material, surface, visualize_contact, vis_mode))
-        return entities
+        # One `gs.morphs.USD` per entity of the stage, added while the stage it was split from stays open.
+        with parse_usd_stage(stage_spec.morph) as entity_morphs:
+            return [
+                self.add_entity(spec=stage_spec.model_copy(update={"morph": entity_morph}))
+                for entity_morph in entity_morphs
+            ]
 
     @gs.assert_unbuilt
     def add_mesh_light(
@@ -598,7 +640,7 @@ class Scene(RBC):
             The options for the sensor.
         """
         with namespace(self._namespace):
-            return self._sim._sensor_manager.create_sensor(sensor_options)
+            return self._sim.sensor_manager.create_sensor(sensor_options)
 
     @gs.assert_built
     def read_sensors(self, envs_idx=None) -> "dict[type[Sensor], torch.Tensor]":
@@ -618,7 +660,7 @@ class Scene(RBC):
         dict[type[Sensor], torch.Tensor]
             For each sensor class present in the scene, a tensor of shape (B, [history,] class_cache_size).
         """
-        return self._sim._sensor_manager.read_sensors(entity_idx=None, envs_idx=envs_idx)
+        return self._sim.sensor_manager.read_sensors(entity_idx=None, envs_idx=envs_idx)
 
     @gs.assert_unbuilt
     def add_recorder(self, data_func: Callable, rec_options: "RecorderOptions") -> "Recorder":
@@ -757,26 +799,44 @@ class Scene(RBC):
             res, pos, lookat, up, model, fov, aperture, focus_dist, GUI, spp, denoise, near, far, env_idx, debug
         )
 
+    @overload
+    def add_emitter(
+        self, *, spec: gs.entities.MPM | gs.entities.SPH | gs.entities.PBD, max_particles: int = ...
+    ) -> "Emitter": ...
+
+    @overload
+    def add_emitter(
+        self,
+        material: gs.materials.MPM.Base | gs.materials.SPH.Base | gs.materials.PBD.Liquid | gs.materials.PBD.Particle,
+        max_particles: int = ...,
+        surface: Surface | None = ...,
+    ) -> "Emitter": ...
+
     @gs.assert_unbuilt
     def add_emitter(
         self,
-        material: Material,
-        max_particles=20000,
+        material: Material | None = None,
+        max_particles: int = 20000,
         surface: Surface | None = None,
-    ):
+        *,
+        spec: gs.entities.MPM | gs.entities.SPH | gs.entities.PBD | None = None,
+    ) -> "Emitter":
         """
         Add a fluid emitter to the scene.
 
         Parameters
         ----------
-        material : gs.materials.Material
+        material : gs.materials.Material | None, optional
             The material of the fluid to be emitted. Must be an instance of `gs.materials.MPM.Base`,
             `gs.materials.SPH.Base`, `gs.materials.PBD.Particle` or `gs.materials.PBD.Liquid`.
-        max_particles : int
-            The maximum number of particles that can be emitted by the emitter. Particles will be recycled once this
-            limit is reached.
+        max_particles : int, optional
+            The maximum number of particles the emitter holds at once, recycled once all are emitted. Each one costs
+            memory and simulation time from the start, emitted or not. Default is 20000.
         surface : gs.surfaces.Surface | None, optional
-            The surface of the emitter. If None, use `gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))`.
+            The surface of the emitted particles. Defaults to ``gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))``.
+            Its ``vis_mode`` defaults to 'particle'.
+        spec : gs.entities.MPM | gs.entities.SPH | gs.entities.PBD | None, optional
+            The entity spec of the emitted particles, which replaces the material and the surface.
 
         Returns
         -------
@@ -788,29 +848,36 @@ class Scene(RBC):
         if self.requires_grad:
             gs.raise_exception("Emitter is not supported in differentiable mode.")
 
-        if not isinstance(
-            material, (gs.materials.MPM.Base, gs.materials.SPH.Base, gs.materials.PBD.Particle, gs.materials.PBD.Liquid)
+        if spec is None:
+            if material is None:
+                gs.raise_exception("An emitter requires a material or an entity spec.")
+            emitter_spec = get_entity_spec(material=material, surface=surface)
+        else:
+            if material is not None or surface is not None:
+                gs.raise_exception("Pass either an entity spec or a material and a surface, never both.")
+            emitter_spec = spec
+        if not isinstance(emitter_spec, (gs.entities.MPM, gs.entities.SPH)) and not (
+            isinstance(emitter_spec, gs.entities.PBD)
+            and isinstance(emitter_spec.material, (gs.materials.PBD.Liquid, gs.materials.PBD.Particle))
         ):
             gs.raise_exception(
-                "Non-supported material for emitter. Supported materials are: `gs.materials.MPM.Base`, "
-                "`gs.materials.SPH.Base`, `gs.materials.PBD.Particle`, `gs.materials.PBD.Liquid`."
+                f"Non-supported entity spec class for emitter: gs.entities.{type(emitter_spec).__name__}. Supported "
+                "ones are gs.entities.MPM, gs.entities.SPH and gs.entities.PBD with a Liquid or a Particle material."
             )
+        if emitter_spec.morph is not None:
+            gs.raise_exception("The emitter sets the morph of its entity spec. Leave it None.")
 
+        surface = emitter_spec.surface
         if surface is None:
             surface = gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))
-
         if surface.vis_mode is None:
-            surface.vis_mode = "particle"
+            surface = surface.model_copy(update={"vis_mode": "particle"})
         if surface.vis_mode == "visual":
             gs.raise_exception("surface.vis_mode='visual' is not supported for fluid emitters.")
 
-        emitter = Emitter(max_particles)
-        entity = self.add_entity(
-            morph=gs.morphs.Nowhere(n_particles=max_particles),
-            material=material,
-            surface=surface,
-        )
-        emitter.set_entity(entity)
+        morph = gs.morphs.Nowhere(n_particles=max_particles)
+        entity = self.add_entity(spec=emitter_spec.model_copy(update={"morph": morph, "surface": surface}))
+        emitter = Emitter(entity, max_particles)
         self._emitters.append(emitter)
         return emitter
 
@@ -830,7 +897,7 @@ class Scene(RBC):
             The added force field.
         """
         force_field.scene = self
-        self._sim._add_force_field(force_field)
+        self._sim.add_force_field(force_field)
         return force_field
 
     @gs.assert_unbuilt
@@ -869,88 +936,65 @@ class Scene(RBC):
 
         gs._scene_registry.append(weakref.ref(self, _destroy_callback))
 
-        with gs.logger.timer(f"Building scene ~~~<{self._uid}>~~~..."):
-            self._parallelize(n_envs, env_spacing, n_envs_per_row, center_envs_at_origin)
+        # A failed build destroys the scene, so that it never stays half built
+        is_done = False
+        try:
+            with gs.logger.timer(f"Building scene ~~~<{self._uid}>~~~..."):
+                self.env_spacing = env_spacing
+                self.n_envs_per_row = n_envs_per_row
+                self._center_envs_at_origin = center_envs_at_origin
 
-            with namespace(self._namespace):
-                self._sim.build()
+                # A scene without parallel environments lays out one
+                n_envs_ = max(1, n_envs)
+                if self.n_envs_per_row is None:
+                    self.n_envs_per_row = math.ceil(math.sqrt(n_envs_))
 
-            # reset state
-            self._reset()
+                # compute offset values for visualizing each env
+                if not isinstance(env_spacing, (list, tuple)) or len(env_spacing) != 2:
+                    gs.raise_exception("`env_spacing` should be a tuple of length 2.")
+                self._layout = EnvironmentLayout(n_envs, tuple(env_spacing), self.n_envs_per_row, center_envs_at_origin)
+                offset_x = (np.arange(n_envs_) // self.n_envs_per_row) * self.env_spacing[0]
+                offset_y = (np.arange(n_envs_) % self.n_envs_per_row) * self.env_spacing[1]
+                offset_z = np.zeros((n_envs_,))
+                self.envs_offset = np.stack((offset_x, offset_y, offset_z), axis=-1, dtype=gs.np_float)
+
+                # move to center
+                if center_envs_at_origin:
+                    center = (np.max(self.envs_offset, axis=0) + np.min(self.envs_offset, axis=0)) / 2.0
+                    self.envs_offset -= center
+
+                with namespace(self._namespace):
+                    self._sim.build(n_envs)
+
+                # reset state
+                self._reset()
+
+            with gs.logger.timer("Compiling simulation kernels..."):
+                self._sim.step()
+                try:
+                    self._sim.check_errno()
+                except gs.GenesisException as e:
+                    gs.logger.warning(
+                        "The initial state is invalid. Register a valid one with 'scene.reset(state)', or overwrite it "
+                        "manually following 'scene.build' and every call to 'scene.reset()', otherwise stepping will "
+                        f"fail with: {e}"
+                    )
+                self._sim.reset(self._init_state)
+                self._restart()
+
+            # visualizer
+            with gs.logger.timer("Building visualizer..."):
+                self._visualizer.build()
+
+            # recorders, which lay out the phases a step times once (see 'StepTimer.add_phases')
+            self._sim.step_timer.add_phases("recorders", "rendering", "video")
+            self._recorder_manager.build()
 
             self._is_built = True
-
-        with gs.logger.timer("Compiling simulation kernels..."):
-            self._sim.step()
-            try:
-                self._sim.check_errno()
-            except gs.GenesisException as e:
-                gs.logger.warning(
-                    "The initial state is invalid. Register a valid one with 'scene.reset(state)', or overwrite it "
-                    "manually following 'scene.build' and every call to 'scene.reset()', otherwise stepping will fail "
-                    f"with: {e}"
-                )
-            self._reset()
-
-        # visualizer
-        with gs.logger.timer("Building visualizer..."):
-            self._visualizer.build()
-
-        # recorders, which lay out the phases a step times once (see 'StepTimer.add_phases')
-        self._sim.step_timer.add_phases("recorders", "rendering", "video")
-        self._recorder_manager.build()
-
-    def _parallelize(
-        self,
-        n_envs: int,
-        env_spacing: tuple[float, float],
-        n_envs_per_row: int,
-        center_envs_at_origin: bool,
-    ):
-        self.n_envs = n_envs
-        self.env_spacing = env_spacing
-        self.n_envs_per_row = n_envs_per_row
-        self._center_envs_at_origin = center_envs_at_origin
-
-        # true batch size
-        self._B = max(1, self.n_envs)
-        self._envs_idx = torch.arange(self._B, dtype=gs.tc_int, device=gs.device)
-
-        if self.n_envs_per_row is None:
-            self.n_envs_per_row = math.ceil(math.sqrt(self._B))
-
-        # compute offset values for visualizing each env
-        if not isinstance(env_spacing, (list, tuple)) or len(env_spacing) != 2:
-            gs.raise_exception("`env_spacing` should be a tuple of length 2.")
-        self._layout = EnvironmentLayout(n_envs, tuple(env_spacing), self.n_envs_per_row, center_envs_at_origin)
-        offset_x = (np.arange(self._B) // self.n_envs_per_row) * self.env_spacing[0]
-        offset_y = (np.arange(self._B) % self.n_envs_per_row) * self.env_spacing[1]
-        offset_z = np.zeros((self._B,))
-        self.envs_offset = np.stack((offset_x, offset_y, offset_z), axis=-1, dtype=gs.np_float)
-
-        # move to center
-        if center_envs_at_origin:
-            center = (np.max(self.envs_offset, axis=0) + np.min(self.envs_offset, axis=0)) / 2.0
-            self.envs_offset -= center
-
-        """
-        Notes:
-        - When using gpu
-            - for non-batched env, we only parallelize certain loops that have big loop size
-            - for batched env, we parallelize all loops
-        - When using cpu, we serialize everything.
-            - Parallelization only provides a boost for n_envs >= num_threads.
-              It is always disabled by default but can be enforced by setting the env var `GS_PARA_LEVEL=2`.
-            - In order to exploit full cpu power, users are encouraged to launch multiple processes manually, so that
-              each process uses a single cpu thread.
-        """
-        if gs.backend == gs.cpu:
-            para_level = gs.PARA_LEVEL.NEVER
-        elif self.n_envs <= 1:
-            para_level = gs.PARA_LEVEL.PARTIAL
-        else:
-            para_level = gs.PARA_LEVEL.ALL
-        self._para_level = int(os.environ.get("GS_PARA_LEVEL", para_level))
+            is_done = True
+        finally:
+            if not is_done:
+                self.destroy()
 
     @gs.assert_built
     def reset(self, state: SimState | None = None, envs_idx=None):
@@ -973,7 +1017,7 @@ class Scene(RBC):
         self._recorder_manager.reset(envs_idx)
         self._reset(state, envs_idx=envs_idx)
 
-    def _reset(self, state: SimState | None = None, *, envs_idx=None, keep_init: bool = False):
+    def _reset(self, state: SimState | None = None, *, envs_idx: IndexType | None = None, keep_init: bool = False):
         if self._is_built:
             if state is None:
                 state = self._init_state
@@ -1027,13 +1071,13 @@ class Scene(RBC):
         # Snapshot the current state before the backward pass rewinds the physics. The clocks go with it: the backward
         # pass of each step winds them down, and the restore below puts the physics back where they were.
         snapshot = self._sim.get_state()
-        steps = self._sim._steps.clone()
+        steps = self._sim.steps.clone()
         # The autograd nodes of the steps unroll the rollout within this backward pass (see genesis.grad.bridge).
         torch.autograd.backward(loss, *args, **kwargs)
         # keep_init semantics: see _reset. Restoring the snapshot puts the physics back where the forward pass left
         # it, and the clocks snapshotted above with it.
         self._reset(snapshot, keep_init=True)
-        self._sim._steps[:] = steps
+        self._sim.steps.copy_(steps)
         return snapshot
 
     @gs.assert_built
@@ -1550,8 +1594,7 @@ class Scene(RBC):
         """
         Get the simulated time of each environment, in seconds.
 
-        Environments are stepped and reset independently, so each one carries its own simulated time. The number of
-        `scene.step()` calls is a separate scalar, `Simulator.cur_step_global`.
+        Environments are stepped and reset independently, so each one carries its own simulated time.
 
         Parameters
         ----------
@@ -1579,7 +1622,7 @@ class Scene(RBC):
         rejected_kinds = Counter(type(entity).__name__ for entity in self.entities if entity.desc is None)
         rejected_kinds.update(type(emitter).__name__ for emitter in self._emitters)
         rejected_kinds.update(type(force_field).__name__ for force_field in self._sim.solvers[0].force_fields.fields)
-        omitted_kinds = Counter(type(sensor).__name__ for sensor in self._sim._sensor_manager.sensors)
+        omitted_kinds = Counter(type(sensor).__name__ for sensor in self.sensors)
         if self._visualizer is not None:
             omitted_kinds.update(type(camera).__name__ for camera in self._visualizer.cameras)
         if self._pre_step_callbacks:
@@ -1699,7 +1742,7 @@ class Scene(RBC):
         # 'add_entity' would resolve a material and a surface the description already holds, and read the asset it
         # replaces.
         for desc in described.entities:
-            scene._sim._add_entity(desc=desc)
+            scene._sim.add_entity(desc=desc)
         return scene
 
     @gs.assert_built
@@ -1850,33 +1893,6 @@ class Scene(RBC):
         # The restored state is rendered at the scheduled framerate without forcing immediate refresh, as after a step
         self._restart(refresh_viewer=False)
 
-    def _sanitize_envs_idx(
-        self, envs_idx: int | range | slice | tuple[int, ...] | list[int] | torch.Tensor | np.ndarray | None
-    ) -> torch.Tensor:
-        if envs_idx is None:
-            return self._envs_idx
-
-        if self.n_envs == 0:
-            gs.raise_exception("`envs_idx` is not supported for non-parallelized scene.")
-
-        if isinstance(envs_idx, slice):
-            if envs_idx.step is not None and envs_idx.step < 0:
-                return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
-            return self._envs_idx[envs_idx]
-        if isinstance(envs_idx, range):
-            if envs_idx.step < 0:
-                return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
-            return self._envs_idx[envs_idx]
-        if isinstance(envs_idx, (int, np.integer)):
-            n_envs = self.n_envs
-            if not -n_envs <= envs_idx < n_envs:
-                gs.raise_exception(f"`envs_idx` out of range: {envs_idx} not in [{-n_envs}, {n_envs}).")
-            if envs_idx < 0:
-                envs_idx = envs_idx + n_envs
-            return self._envs_idx[envs_idx : envs_idx + 1]
-
-        return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
-
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
@@ -1895,6 +1911,11 @@ class Scene(RBC):
     def substeps(self):
         """The number of substeps per simulation step."""
         return self._sim.substeps
+
+    @property
+    def n_envs(self) -> int:
+        """The number of parallel environments, 0 for a scene without a batch dimension."""
+        return self._sim.n_envs
 
     @property
     def timings(self):
@@ -1933,7 +1954,7 @@ class Scene(RBC):
     @property
     def show_FPS(self):
         """Whether to print the frames per second (FPS) in the terminal."""
-        warn_once("Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
+        warn_once(self, "Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
         return self.options.profiling.show_FPS
 
     @property
@@ -1960,6 +1981,11 @@ class Scene(RBC):
     def entities(self) -> list["Entity"]:
         """All the entities in the scene."""
         return self._sim.entities
+
+    @property
+    def sensors(self) -> list["Sensor"]:
+        """All the sensors in the scene."""
+        return self._sim.sensor_manager.sensors
 
     @property
     def entity_names(self) -> tuple[str, ...]:
@@ -2004,20 +2030,7 @@ class Scene(RBC):
         Entity
             The matching entity.
         """
-        if not ((name is None) ^ (uid is None)):
-            gs.raise_exception("Please specify either one argument between `name` or `uid`.")
-
-        if name is not None:
-            try:
-                return next(entity for entity in self.entities if entity.name == name)
-            except StopIteration as e:
-                gs.raise_exception_from(f"Entity not found for name: '{name}'.", e)
-        else:  # uid is not None
-            matches = [entity for entity in self.entities if entity.uid.match(uid, short_only=True)]
-            if matches:
-                (match,) = matches
-                return match
-            gs.raise_exception(f"Entity not found for uid: '{uid}'.")
+        return self._sim.get_entity(name, uid=uid)
 
     @property
     def emitters(self):

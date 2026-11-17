@@ -225,7 +225,7 @@ def test_perf_dispatch(variant, show_viewer):
     scene.build(n_envs=2)
 
     # Aggregate SVD flag must match the variant for the dispatch path under test to actually run.
-    assert scene.sim.mpm_solver.mpm_config.is_svd_needed == (variant == "svd")
+    assert scene.mpm_solver.mpm_config.is_svd_needed == (variant == "svd")
 
     init_elastic_pos = elastic.get_particles_pos()
     init_liquid_pos = liquid.get_particles_pos()
@@ -282,7 +282,9 @@ def test_halt_on_nan(show_viewer):
     assert_equal(scene.get_error_envs_mask(), (False, True))
 
     # The error raises at the beginning of the next step on CPU, and at worst of the one after it on GPU
-    with pytest.raises(gs.GenesisException, match="Invalid MPM particle velocities"):
+    with pytest.raises(
+        gs.GenesisException, match=r"(?s)Invalid MPM particle velocities.* Failing environments: \[1\]\.$"
+    ):
         for _ in range(1 if gs.backend == gs.cpu else 2):
             scene.step()
 

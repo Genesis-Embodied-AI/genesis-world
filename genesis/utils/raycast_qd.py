@@ -728,7 +728,7 @@ class RaycastTarget:
         # The arrays alone, the collision and the visual structs naming their fields differently
         self.verts_init_pos = dyn_info.vverts.init_pos if is_visual else dyn_info.verts.init_pos
         self.faces_verts_idx = dyn_info.vfaces.vverts_idx if is_visual else dyn_info.faces.verts_idx
-        bvh = get_bvh_data(solver._B, meshes.instances_tree_idx.shape[0])
+        bvh = get_bvh_data(solver.n_envs_, meshes.instances_tree_idx.shape[0])
         self.tree_state = bvh.state
         self.tree_config = bvh.config
         self.ray_query = InstancesQuery(
@@ -743,7 +743,6 @@ class RaycastTarget:
         """Fit the top-level trees to the current poses of the geoms."""
         if self.is_visual:
             self.solver.update_forward_pos()
-            self.solver.update_vgeoms()
             dyn_info = self.solver.dyn_info
             kernel_fit_mesh_instances(
                 self.geoms_info.link_idx,
@@ -775,7 +774,7 @@ class RaycastTarget:
         candidate geoms of each sensor."""
         queries = ClosestQueries(sizes=dict(closest_queries=len(queries_sensor_idx)))
         queries.sensor_idx.from_numpy(queries_sensor_idx)
-        hits = ClosestHits(sizes=dict(closest_queries=len(queries_sensor_idx), envs=self.solver._B))
+        hits = ClosestHits(sizes=dict(closest_queries=len(queries_sensor_idx), envs=self.solver.n_envs_))
         closest_triangles = ClosestTriangles(
             self.verts_init_pos, self.faces_verts_idx, self.geoms_state, self.eps, queries, candidate_geoms, hits
         )
@@ -824,7 +823,7 @@ class RaycastWorldTarget(RaycastTarget):
         self.faces = WorldFaces(sizes=dict(world_faces=len(faces_idx)))
         self.faces.faces_verts_idx.from_numpy(vverts_state_idx[faces_vverts_idx[faces_idx]])
         self.faces.faces_geom_idx.from_numpy(qd_to_numpy(dyn_info.vfaces.vgeom_idx, transpose=True)[faces_idx])
-        bvh = get_bvh_data(solver._B, len(faces_idx))
+        bvh = get_bvh_data(solver.n_envs_, len(faces_idx))
         self.tree_state = bvh.state
         self.tree_config = bvh.config
         self.ray_query = RayTriangles(

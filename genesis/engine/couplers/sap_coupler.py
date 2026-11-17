@@ -83,7 +83,13 @@ from genesis.utils.data import (
     field,
     iter_data,
 )
-from genesis.utils.misc import get_gpu_block_shared_memory_bytes, qd_to_numpy, tensor_to_array
+from genesis.utils.misc import (
+    BatchedMixin,
+    BuildableMixin,
+    get_gpu_block_shared_memory_bytes,
+    qd_to_numpy,
+    tensor_to_array,
+)
 from genesis.utils.raycast_qd import get_solver_meshes
 
 if TYPE_CHECKING:
@@ -1276,7 +1282,7 @@ def compute_pressure_field(depth: np.ndarray, modulus: float) -> np.ndarray:
     return depth / depth_max * modulus
 
 
-class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
+class SAPCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
     """
     This class handles all the coupling between different solvers using the
     Semi-Analytic Primal (SAP) contact solver used in Drake.
@@ -1321,8 +1327,9 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         # The handlers as the kernels take them, one argument each (see SAPHandlers)
         self.handlers: SAPHandlers | None = None
 
-    def build(self) -> None:
-        self._B = self.sim._B
+    @gs.assert_unbuilt
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
         # Distinct FEM entities always collide, an entity with itself on demand
         self._has_fem_tet_contact = self.fem_solver.is_active and (
             len(self.fem_solver.entities) > 1 or self.options.enable_fem_self_collision
@@ -1400,12 +1407,12 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             # The rigid solver leaves its equality constraints to this coupler, unless constraints are disabled. The
             # joint equalities are those of the scene, while the slots of the equalities coupling two links also take
             # the ones added after the build (see 'RigidSolver.add_weld_constraint').
-            if not self.rigid_solver._options.disable_constraint:
+            if not self.rigid_solver.options.disable_constraint:
                 equalities_type = [equality.type for equality in self.rigid_solver.equalities]
                 self._has_joint_equalities = gs.EQUALITY_TYPE.JOINT in equalities_type
                 self._has_link_equalities = (
                     any([eq_type != gs.EQUALITY_TYPE.JOINT for eq_type in equalities_type])
-                    or self.rigid_solver._options.max_dynamic_constraints > 0
+                    or self.rigid_solver.options.max_dynamic_constraints > 0
                 )
 
         # The floor holds each FEM entity as a rigid half-space holds it in hydroelastic contact, the pressure growing
@@ -1493,7 +1500,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         n_slots = int(handlers_slot_start[-1])
         key_bits = max([handler.key_bits for handler in self.handlers.constraints] + [1])
         handler_bits = max(1, len(self.handlers.constraints) - 1).bit_length()
-        env_bits = max(1, self._B - 1).bit_length()
+        env_bits = max(1, self.n_envs_ - 1).bit_length()
         assert env_bits + handler_bits + key_bits <= 64
         # Outside performance mode, the device radix sort orders the widest keys, with a scan depth reaching any count
         # of them a device holds, so that its kernels serve every scene.
@@ -1510,13 +1517,13 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             constraints_sort_log256 = max(constraints_sort_log256, 4)
         is_device_sort = gs.backend != gs.cpu
         # The chunks of the sorted constraints of each environment
-        n_units = self._B * math.ceil(n_slots // self._B / CHUNK_SIZE) if n_slots >= self._B else 1
+        n_units = self.n_envs_ * math.ceil(n_slots // self.n_envs_ / CHUNK_SIZE) if n_slots >= self.n_envs_ else 1
         # The contacts of each FEM vertex and rigid link, each environment owning the capacity of its contacts
         n_env_fem_entries = sum(
-            [handler.max_constraints // self._B * handler.n_fem_corners for handler in self.handlers.constraints]
+            [handler.max_constraints // self.n_envs_ * handler.n_fem_corners for handler in self.handlers.constraints]
         )
         n_env_link_entries = sum(
-            [handler.max_constraints // self._B * handler.n_rigid_sides for handler in self.handlers.constraints]
+            [handler.max_constraints // self.n_envs_ * handler.n_rigid_sides for handler in self.handlers.constraints]
         )
         # A contact moves rigid dofs only when the rigid solver holds any, a link without dofs being fixed
         has_link_constraints = n_env_link_entries > 0 and self.rigid_solver.n_dofs > 0
@@ -1586,7 +1593,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     n_mass_block_entries += n_block_dofs**2
 
         sizes = dict(
-            envs=self._B,
+            envs=self.n_envs_,
             mass_block_entries=n_mass_block_entries,
             vertices=self.fem_solver.n_vertices,
             elements=self.fem_solver.n_elements,
@@ -1602,10 +1609,10 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             constraint_slots=n_slots,
             constraint_units=n_units,
             constraint_sort_slots=sort_scratch_slots(n_slots, constraints_sort_log256) if is_device_sort else 0,
-            fem_incidence=self._B * n_env_fem_entries,
-            link_incidence=self._B * n_env_link_entries,
+            fem_incidence=self.n_envs_ * n_env_fem_entries,
+            link_incidence=self.n_envs_ * n_env_link_entries,
             link_wrench_shares=n_links * n_link_wrench_shares,
-            sap_env_contacts=sum([handler.max_contact_pairs // self._B for handler in self.handlers.contacts]),
+            sap_env_contacts=sum([handler.max_contact_pairs // self.n_envs_ for handler in self.handlers.contacts]),
             chain_slots=qd.cfg.cpu_max_num_threads * 2 * n_chain_dofs_max,
         )
         precision = np.finfo(gs.np_float).eps
@@ -1625,8 +1632,8 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     patches_env_shift=2 * patches_body_bits + handler_bits,
                     n_chain_dofs=n_chain_dofs_max,
                     ground_geom_idx=ground_geom_idx,
-                    substep_dt=self.sim._substep_dt,
-                    dt2=self.sim._substep_dt**2,
+                    substep_dt=self.sim.substep_dt,
+                    dt2=self.sim.substep_dt**2,
                     n_newton_iterations=options.n_sap_iterations,
                     n_pcg_iterations=options.n_pcg_iterations,
                     n_linesearch_iterations=options.n_linesearch_iterations,
@@ -1720,7 +1727,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             has_fem_contacts=n_env_fem_entries > 0,
             has_link_constraints=has_link_constraints,
             enable_lagged_friction=self._enable_lagged_friction,
-            batch_links_info=self.rigid_solver._options.batch_links_info,
+            batch_links_info=self.rigid_solver.options.batch_links_info,
             enable_cooperative_kernels=enable_cooperative_kernels,
             chain_storage=chain_storage,
             n_max_chain_dofs=n_max_chain_dofs,
@@ -1730,7 +1737,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         )
 
         # The errors of each env, raised at the beginning of the next step (see 'ErrnoMixin.register_errors')
-        self.build_errno(self._B)
+        self.build_errno(self.n_envs_)
 
         def report_overflow(code: SAPErrorCode) -> str:
             # One error flag serves every handler of a kind of contact, so the message reads the counts of the last
@@ -1741,18 +1748,18 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     if not contact.has_query:
                         continue
                     envs_n = contact.query_results.trees_count
-                    n_max = contact.query_results.triplets.shape[0] // self._B
+                    n_max = contact.query_results.triplets.shape[0] // self.n_envs_
                     what = "box overlaps in its query before testing them as collision pairs"
                 elif code == SAPErrorCode.OVERFLOW_CANDIDATE_CONTACTS:
                     if not contact.has_candidates:
                         continue
                     envs_n, n_max = (
                         contact.contact_candidates.envs_n_candidates,
-                        contact.max_contact_candidates // self._B,
+                        contact.max_contact_candidates // self.n_envs_,
                     )
                     what = "collision pairs"
                 else:
-                    envs_n, n_max = contact.contact_pairs.envs_n_pairs, contact.max_contact_pairs // self._B
+                    envs_n, n_max = contact.contact_pairs.envs_n_pairs, contact.max_contact_pairs // self.n_envs_
                     what = "contacts"
                 envs_n = qd_to_numpy(envs_n)
                 (envs_idx,) = np.nonzero(envs_n > n_max)
@@ -1791,8 +1798,12 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         has_fem_tet_tree = self._has_fem_tet_contact or self._has_rigid_fem_contact
         n_tets = self.fem_solver.n_surface_elements if has_fem_tet_tree else 0
         self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config = get_bvh_data(
-            self.sim._B, n_tets, is_active=has_fem_tet_tree
+            self.n_envs_, n_tets, is_active=has_fem_tet_tree
         )
+        self._is_built = True
+
+    def destroy(self) -> None:
+        self._is_built = False
 
     def reset(self, envs_idx=None):
         # The state of the coupler, its errors included, is written back by 'set_state', which precedes the restart
@@ -2882,7 +2893,6 @@ def kernel_init_sap_solve(
             fem_state.elements_energy.energy[i_e, i_b] = energy
             fem_state.elements_energy.stress[i_e, i_b] = -fem_info.elements.V[i_e] * gradient
         func_accumulate_vertices(
-            forces=None,
             envs_is_active=fem_state.envs_solve.is_active,
             pcg_counter=pcg_counter,
             fem_state=fem_state,
@@ -2890,7 +2900,6 @@ def kernel_init_sap_solve(
             vertex_constraints=vertex_constraints,
             fem_config=fem_config,
             gather_Ap=False,
-            gather_internal_force=False,
             update_loop_flag=False,
         )
         for i_v, i_b in qd.ndrange(*sap_state.fem_vertices.v.shape, axes=qd.static(eoa(sap_state.fem_vertices.v))):
@@ -5265,7 +5274,7 @@ class JointEqualityHandler(RBC):
             i_e for i_e, equality in enumerate(rigid_solver.equalities) if equality.type == gs.EQUALITY_TYPE.JOINT
         ]
         n_env_constraints = len(joint_equalities_idx)
-        self.max_constraints = n_env_constraints * simulator._B
+        self.max_constraints = n_env_constraints * rigid_solver.n_envs_
         self.key_bits = max(1, (max(self.max_constraints, 1) - 1).bit_length())
         self.joint_equalities = SAPJointEqualities(
             sizes=dict(
@@ -5467,11 +5476,11 @@ class LinkEqualityHandler(DelassusRegularizationMixin, RBC):
     def __init__(self, simulator: "Simulator") -> None:
         rigid_solver = simulator.rigid_solver
         n_env_constraints = rigid_solver.n_candidate_equalities_
-        self.max_constraints = n_env_constraints * simulator._B
+        self.max_constraints = n_env_constraints * rigid_solver.n_envs_
         # The key of a constraint is its equality
         self.key_bits = max(1, n_env_constraints - 1).bit_length()
         self.link_equalities = SAPLinkEqualities(
-            sizes=dict(envs=simulator._B, link_equalities=self.max_constraints),
+            sizes=dict(envs=rigid_solver.n_envs_, link_equalities=self.max_constraints),
             values=dict(beta=EQUALITY_BETA),
         )
 
@@ -6364,13 +6373,13 @@ class FEMSelfContactHandler(BaseContactHandler):
         # Each pair of surface tets gives one candidate and one contact at most
         n_pairs_max = fem_solver.n_surface_elements * (fem_solver.n_surface_elements - 1) // 2
         n_contacts, n_candidates = get_contact_capacities(options, n_pairs_max, n_pairs_max)
-        self.max_contact_candidates = n_candidates * simulator._B
+        self.max_contact_candidates = n_candidates * fem_solver.n_envs_
         self.contact_candidates = FEMSelfCandidates(
-            sizes=dict(envs=simulator._B, contact_candidates=self.max_contact_candidates)
+            sizes=dict(envs=fem_solver.n_envs_, contact_candidates=self.max_contact_candidates)
         )
 
-        self.max_contact_pairs = n_contacts * simulator._B
-        self.contact_pairs = FEMSelfPairs(sizes=dict(envs=simulator._B, contact_pairs=self.max_contact_pairs))
+        self.max_contact_pairs = n_contacts * fem_solver.n_envs_
+        self.contact_pairs = FEMSelfPairs(sizes=dict(envs=fem_solver.n_envs_, contact_pairs=self.max_contact_pairs))
 
         # The entity and the rest box of each surface tet, from the rest positions of the vertices of each entity
         entities = fem_solver.entities
@@ -6394,11 +6403,11 @@ class FEMSelfContactHandler(BaseContactHandler):
 
         # The pairs of surface tets that the tets of each environment find in their own tree
         self.query_results = BVHQueryResults(
-            sizes=dict(query_results=self.max_contact_candidates, bvh_trees=simulator._B)
+            sizes=dict(query_results=self.max_contact_candidates, bvh_trees=fem_solver.n_envs_)
         )
         # The nodes of one environment are neighbours in memory, as the threads fitting and walking a tree take them
         surface_tet_nodes = FEMSurfaceTetNodes(
-            sizes=dict(bvh_nodes=2 * len(surface_elements) - 1, envs=simulator._B), env_first=True
+            sizes=dict(bvh_nodes=2 * len(surface_elements) - 1, envs=fem_solver.n_envs_), env_first=True
         )
         self.query = FEMSurfaceTetsQuery(
             self.query_results,
@@ -6709,8 +6718,8 @@ class FEMFloorContactHandler(FloorContactMixin, BaseContactHandler):
         self.key_bits = max(1, fem_solver.n_vertices - 1).bit_length()
         # Every surface vertex of an entity lying flat may touch the floor
         n_contacts, _ = get_contact_capacities(options, fem_solver.n_surface_elements, 0)
-        self.max_contact_pairs = n_contacts * simulator._B
-        self.contact_pairs = FEMFloorPairs(sizes=dict(envs=simulator._B, contact_pairs=self.max_contact_pairs))
+        self.max_contact_pairs = n_contacts * fem_solver.n_envs_
+        self.contact_pairs = FEMFloorPairs(sizes=dict(envs=fem_solver.n_envs_, contact_pairs=self.max_contact_pairs))
 
     @qd.func
     def detection(
@@ -6836,8 +6845,10 @@ class RigidFloorContactHandler(FloorContactMixin, RigidContactHandler):
         self.key_bits = max(1, rigid_solver.n_verts - 1).bit_length()
         # Every vertex of a geom lying flat may touch the floor
         n_contacts, _ = get_contact_capacities(options, rigid_solver.n_free_verts, 0)
-        self.max_contact_pairs = n_contacts * simulator._B
-        self.contact_pairs = RigidFloorPairs(sizes=dict(envs=simulator._B, contact_pairs=self.max_contact_pairs))
+        self.max_contact_pairs = n_contacts * rigid_solver.n_envs_
+        self.contact_pairs = RigidFloorPairs(
+            sizes=dict(envs=rigid_solver.n_envs_, contact_pairs=self.max_contact_pairs)
+        )
 
     @qd.func
     def detection(
@@ -6925,20 +6936,20 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
         # Each pair of a triangle of a geom and a surface tet gives one candidate and one contact at most
         n_pairs_max = rigid_solver.n_faces * fem_solver.n_surface_elements
         n_contacts, n_candidates = get_contact_capacities(options, n_pairs_max, n_pairs_max)
-        self.max_contact_candidates = n_candidates * simulator._B
+        self.max_contact_candidates = n_candidates * fem_solver.n_envs_
         self.contact_candidates = RigidFEMCandidates(
-            sizes=dict(envs=simulator._B, contact_candidates=self.max_contact_candidates)
+            sizes=dict(envs=fem_solver.n_envs_, contact_candidates=self.max_contact_candidates)
         )
-        self.max_contact_pairs = n_contacts * simulator._B
-        self.contact_pairs = RigidFEMPairs(sizes=dict(envs=simulator._B, contact_pairs=self.max_contact_pairs))
+        self.max_contact_pairs = n_contacts * fem_solver.n_envs_
+        self.contact_pairs = RigidFEMPairs(sizes=dict(envs=fem_solver.n_envs_, contact_pairs=self.max_contact_pairs))
 
         # The tree of the geoms of each environment but the ground, which the floor contacts hold (see
         # FloorContactMixin), and the pairs of a surface tet and a triangle that the tets of each environment find
         # through it in the tree of the mesh of each geom.
-        self.geoms_tree, self.geoms_tree_config = get_bvh_data(simulator._B, rigid_solver.n_geoms)
+        self.geoms_tree, self.geoms_tree_config = get_bvh_data(fem_solver.n_envs_, rigid_solver.n_geoms)
         self.excluded_geom_idx = ground_geom_idx
         self.query_results = BVHQueryResults(
-            sizes=dict(query_results=self.max_contact_candidates, bvh_trees=simulator._B)
+            sizes=dict(query_results=self.max_contact_candidates, bvh_trees=fem_solver.n_envs_)
         )
         # The tets crossing the plane of a triangle alone take a result, as the candidates of the pairs require
         self.query = InstancesQuery(
@@ -7241,13 +7252,15 @@ class RigidRigidContactHandler(GeomsTreeMixin, RigidContactHandler):
         geoms_is_pair = (collision_pair_idx >= 0) | (collision_pair_idx.T >= 0)
         n_pairs_max = int(np.triu(np.outer(geoms_n_tets, geoms_n_tets) * geoms_is_pair, k=1).sum())
         n_contacts, n_candidates = get_contact_capacities(options, n_pairs_max, n_pairs_max)
-        self.max_contact_candidates = n_candidates * simulator._B
+        self.max_contact_candidates = n_candidates * rigid_solver.n_envs_
         self.contact_candidates = RigidRigidCandidates(
-            sizes=dict(envs=simulator._B, contact_candidates=self.max_contact_candidates)
+            sizes=dict(envs=rigid_solver.n_envs_, contact_candidates=self.max_contact_candidates)
         )
 
-        self.max_contact_pairs = n_contacts * simulator._B
-        self.contact_pairs = RigidRigidPairs(sizes=dict(envs=simulator._B, contact_pairs=self.max_contact_pairs))
+        self.max_contact_pairs = n_contacts * rigid_solver.n_envs_
+        self.contact_pairs = RigidRigidPairs(
+            sizes=dict(envs=rigid_solver.n_envs_, contact_pairs=self.max_contact_pairs)
+        )
 
         # The tets of the geoms, the first elements of the rigid volumes, in the frame of their geom, a tree per
         # distinct mesh, and the tree of the geoms of each environment.
@@ -7269,10 +7282,10 @@ class RigidRigidContactHandler(GeomsTreeMixin, RigidContactHandler):
             np.repeat(np.arange(rigid_solver.n_geoms, dtype=gs.np_int), geoms_n_tets)
         )
         self.rigid_geoms.geoms_is_pair.from_numpy(geoms_is_pair)
-        self.geoms_tree, self.geoms_tree_config = get_bvh_data(simulator._B, rigid_solver.n_geoms)
+        self.geoms_tree, self.geoms_tree_config = get_bvh_data(rigid_solver.n_envs_, rigid_solver.n_geoms)
         self.excluded_geom_idx = -1
         self.query_results = BVHQueryResults(
-            sizes=dict(query_results=self.max_contact_candidates, bvh_trees=simulator._B)
+            sizes=dict(query_results=self.max_contact_candidates, bvh_trees=rigid_solver.n_envs_)
         )
         self.query = InstancesQuery(
             RigidTetsQuery(

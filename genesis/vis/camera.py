@@ -10,13 +10,13 @@ import genesis.utils.geom as gu
 from genesis.constants import IMAGE_TYPE
 from genesis.repr_base import RBC
 from genesis.utils.image_exporter import as_grayscale_image
-from genesis.utils.misc import get_entry_point_name, tensor_to_array
+from genesis.utils.misc import BuildableMixin, get_entry_point_name, sanitize_index, tensor_to_array
 from genesis.utils.video_encoder import VideoEncoder
 
 RECORDING_DEFAULT_FPS = 60
 
 
-class Camera(RBC):
+class Camera(BuildableMixin, RBC):
     """
     A camera which can be used to render RGB, depth, and segmentation images.
     Supports either rasterizer or raytracer for rendering, specified by `scene.renderer`.
@@ -115,13 +115,13 @@ class Camera(RBC):
         self._visualizer = visualizer
         self._debug = debug
 
-        self._is_built = False
-
         self._rasterizer = None
         self._raytracer = None
         self._batch_renderer = None
 
         self._env_idx = int(env_idx) if env_idx is not None else None
+        # The index of the environment among the rendered ones, for a camera rendering its environment alone
+        self._render_env_idx = None
         self._envs_offset = None
 
         self._is_recording = False
@@ -145,6 +145,7 @@ class Camera(RBC):
         if self._focus_dist is None:
             self._focus_dist = np.linalg.norm(np.asarray(lookat) - np.asarray(pos))
 
+    @gs.assert_unbuilt
     def build(self):
         self._rasterizer = self._visualizer.rasterizer
         if not self._debug:
@@ -161,7 +162,9 @@ class Camera(RBC):
                 self._is_batched = False
                 self._raytracer.add_camera(self)
             else:
-                self._is_batched = self._visualizer.scene.n_envs > 0 and self._visualizer._context.split_envs
+                self._is_batched = (
+                    self._visualizer.scene.n_envs > 0 and self._visualizer._context.split_envs and self._env_idx is None
+                )
             if self._visualizer.scene.n_envs > 0:
                 if self._env_idx is None:
                     if not self._is_batched:
@@ -173,6 +176,11 @@ class Camera(RBC):
                             )
                 elif self._env_idx not in self._visualizer._context.rendered_envs_idx:
                     gs.raise_exception("Environment index bound to the camera not in 'VisOptions.rendered_envs_idx'.")
+                # A bound camera renders its environment alone when the environments are rendered separately. The
+                # raytracer lays out every environment side by side, so the channels the rasterizer renders for a
+                # raytraced camera keep that layout.
+                if self._raytracer is None and self._env_idx is not None and self._visualizer._context.split_envs:
+                    self._render_env_idx = self._visualizer._context.rendered_envs_idx.index(self._env_idx)
             else:
                 assert self._env_idx is None
 
@@ -216,6 +224,7 @@ class Camera(RBC):
                 # Tearing down carries on regardless, so that a video failing to encode takes neither the other
                 # cameras nor the renderers down with it. The encoding error itself was reported when it happened.
                 gs.logger.warning(f"{e}")
+        self._is_built = False
 
     def attach(self, rigid_link, offset_T):
         """
@@ -416,15 +425,14 @@ class Camera(RBC):
 
         Note
         ----
-        The segmentation mask can be colorized, and if not colorized, it will store an object index in each pixel based
-        on the segmentation level specified in `VisOptions.segmentation_level`.
-        For example, if `segmentation_level='link'`, the segmentation mask will store `link_idx`, which can then be
-        used to retrieve the actual link objects using `scene.rigid_solver.links[link_idx]`.
+        The segmentation mask can be colorized, and if not colorized, it will store a segmentation index in each pixel
+        based on the segmentation level specified in `VisOptions.segmentation_level`. `scene.segmentation_idx_dict` maps
+        each index to its entity, (entity, link) or (entity, link, geom).
 
         Note
         ----
-        If `split_envs` in `VisOptions` is set to True, each component will return a stack of images, with the
-        number of images equal to `len(rendered_envs_idx)`.
+        If `split_envs` in `VisOptions` is set to True, an unbound camera returns a stack of images, with the
+        number of images equal to `len(rendered_envs_idx)`. A bound camera returns one image of its environment.
 
         Parameters
         ----------
@@ -473,7 +481,7 @@ class Camera(RBC):
         else:
             self._rasterizer.update_scene(force_render)
             rgb_arr, depth_arr, seg_idxc_arr, normal_arr = self._rasterizer.render_camera(
-                self, rgb, depth, segmentation, normal=normal, split_envs=self._is_batched
+                self, rgb, depth, segmentation, normal=normal, split_envs=self._is_batched, env_idx=self._render_env_idx
             )
 
         # Colorize the segmentation map is necessary
@@ -557,7 +565,13 @@ class Camera(RBC):
         else:
             self._rasterizer.update_scene(force_render=False)
             _, depth_arr, _, _ = self._rasterizer.render_camera(
-                self, rgb=False, depth=True, segmentation=False, normal=False, split_envs=self._is_batched
+                self,
+                rgb=False,
+                depth=True,
+                segmentation=False,
+                normal=False,
+                split_envs=self._is_batched,
+                env_idx=self._render_env_idx,
             )
 
         # Convert OpenGL projection matrix to camera intrinsics
@@ -625,7 +639,7 @@ class Camera(RBC):
                 envs_idx = (self._env_idx,) if self._env_idx is not None else ()
                 n_envs = len(self._visualizer._context.rendered_envs_idx)
             else:
-                envs_idx = tensor_to_array(self._visualizer._scene._sanitize_envs_idx(envs_idx))
+                envs_idx = tensor_to_array(sanitize_index(envs_idx, -1, self._visualizer.scene.n_envs, 0, "envs_idx"))
                 rendered_envs_idx = np.array(self._visualizer._context.rendered_envs_idx)
                 is_rendered = envs_idx[:, None] == rendered_envs_idx
                 if not is_rendered.any(axis=1).all():

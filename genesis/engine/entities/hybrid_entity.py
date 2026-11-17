@@ -1,6 +1,6 @@
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import torch
@@ -11,6 +11,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.urdf as uu
 from genesis.ext.urdfpy.urdf import URDF
+from genesis.options.surfaces import Surface
 from genesis.utils.hybrid import (
     check_graph,
     compute_graph_attribute,
@@ -23,6 +24,9 @@ from genesis.utils.hybrid import (
 from genesis.utils.mesh import load_mesh
 
 from .base_entity import Entity
+
+if TYPE_CHECKING:
+    from genesis.engine.scene import Scene
 
 
 class MPMHybridPart(NamedTuple):
@@ -53,18 +57,23 @@ class HybridEntity(Entity):
         The index of the entity within the scene.
     scene : genesis.Scene
         The simulation scene where the entity is added.
-    material : genesis.materials.Hybrid
-        The hybrid material that includes both rigid and soft sub-materials,
-        and defines coupling behavior.
-    morph : genesis.morphs.Morph
-        The shape/morphology of the entity. Must be either a `URDF` or `Mesh`.
+    spec : gs.entities.Hybrid
+        The entity spec the entity is constructed from, whose morph, a URDF or a Mesh, gives its shape.
     surface : genesis.surfaces.Surface
         The surface properties applied to the soft part of the entity.
     """
 
-    def __init__(self, idx, scene, material, morph, surface, name: str | None = None):
-        super().__init__(idx, scene, morph, None, material, surface, name=name)
+    def __init__(
+        self,
+        idx: int,
+        scene: "Scene",
+        surface: Surface,
+        spec: "gs.entities.Hybrid",
+    ) -> None:
+        super().__init__(idx, scene, None, surface, spec)
 
+        morph = spec.morph
+        material = spec.material
         material_rigid = material.material_rigid
         material_soft = material.material_soft
 
@@ -161,13 +170,8 @@ class HybridEntity(Entity):
         # set members
         self._material_rigid = material_rigid
         self._part_rigid = part_rigid
-        self._solver_rigid = part_rigid.solver
         self._material_soft = material_soft
         self._part_soft = part_soft
-        self._solver_soft = part_soft.solver
-
-        # TODO: test with different dt
-        assert self._solver_rigid.dt == self._solver_soft.dt, "Rigid and soft solver should have the same dt for now"
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------
@@ -346,7 +350,8 @@ class HybridEntity(Entity):
     # ----------------------------------- instantiation ----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def build(self):
+    @gs.assert_unbuilt
+    def _build(self):
         """
         Finalize the hybrid entity setup during simulation build.
         """
@@ -356,6 +361,8 @@ class HybridEntity(Entity):
                 muscle_group=torch.tensor(self._muscle_group_cache, dtype=gs.tc_int, device=gs.device)
                 # no muscle direction as the soft body is actuated by rigid parts
             )
+
+        self._is_built = True
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -385,16 +392,6 @@ class HybridEntity(Entity):
     def part_soft(self):
         """The soft part of the hybrid entity."""
         return self._part_soft
-
-    @property
-    def solver_rigid(self):
-        """The solver associated with the rigid part of the hybrid entity."""
-        return self._solver_rigid
-
-    @property
-    def solver_soft(self):
-        """The solver associated with the soft part of the hybrid entity."""
-        return self._solver_soft
 
 
 # ------------------------------------------------------------------------------------
