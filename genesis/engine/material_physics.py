@@ -17,8 +17,8 @@ class MaterialPhysics[MaterialT: Material]:
 
     A subclass parameterized by a material class registers itself in the `PHYSICS_TYPES_MAP` of the physics base of its
     solver, and serves the subclasses of that material class that no other physics names. A subclass keeping a type
-    parameter registers nothing, which lets several registered physics share code. Subclassing a registered physics
-    raises a TypeError.
+    parameter registers nothing, which lets several registered physics share code. Subclassing a registered physics, or
+    binding a material class that another physics already binds, raises a TypeError.
     """
 
     PHYSICS_TYPES_MAP: ClassVar[dict[type[Material], type["MaterialPhysics"]]]
@@ -45,6 +45,12 @@ class MaterialPhysics[MaterialT: Material]:
                 break
             for physics_base in cls.__mro__:
                 if "PHYSICS_TYPES_MAP" in physics_base.__dict__:
+                    registered_cls = physics_base.PHYSICS_TYPES_MAP.get(material_cls)
+                    if registered_cls is not None:
+                        raise TypeError(
+                            f"{cls.__name__} binds {material_cls.__name__}, which the physics "
+                            f"{registered_cls.__name__} already binds."
+                        )
                     physics_base.PHYSICS_TYPES_MAP[material_cls] = cls
                     break
             else:
