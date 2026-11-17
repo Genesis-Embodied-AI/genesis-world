@@ -87,7 +87,8 @@ class VideoEncoder:
 
     The container is created when the first frame is written rather than upfront, because hardware encoders reject
     some resolutions and the codec can only be validated against the true frame size. A video that never receives a
-    frame therefore leaves no file behind.
+    frame therefore leaves no file behind. The video takes the size of its first frame, every later frame being cropped
+    or padded with black to it.
 
     Parameters
     ----------
@@ -131,6 +132,8 @@ class VideoEncoder:
         self._frame = None
         self._buffer = None
         self._row_bytes = 0
+        # Shape of the first frame, the size of the video, set by the calling thread
+        self._frame_shape = None
 
         self._queue = queue.Queue(maxsize=ENCODER_QUEUE_SIZE) if is_threaded else None
         self._thread = None
@@ -207,7 +210,11 @@ class VideoEncoder:
         if self._buffer is None:
             self._open(frame)
 
-        self._buffer[: frame.shape[0], : self._row_bytes] = frame.reshape((frame.shape[0], -1))
+        if frame.shape != self._frame_shape:
+            # The padding of the video is written once (see '_open'), which a frame of another size invalidates
+            self._buffer[...] = 0
+            frame = frame[: self._frame_shape[0], : self._frame_shape[1]]
+        self._buffer[: frame.shape[0], : frame[0].size] = frame.reshape((frame.shape[0], -1))
         for packet in self._stream.encode(self._frame):
             self._container.mux(packet)
 
@@ -225,6 +232,10 @@ class VideoEncoder:
         is_color = frame.ndim == 3 and frame.shape[-1] == 3
         if frame.ndim != 2 + is_color or not np.issubdtype(frame.dtype, np.integer):
             gs.raise_exception("Frames must be either grayscale [H, W] or color [H, W, RGB] of integer type.")
+        if self._frame_shape is None:
+            self._frame_shape = frame.shape
+        elif frame.ndim != len(self._frame_shape):
+            gs.raise_exception("Frames must be all grayscale or all color.")
 
         if self._is_threaded:
             if self._thread is None:
@@ -242,6 +253,16 @@ class VideoEncoder:
             self._enqueue(frame)
         else:
             self._encode(frame)
+
+    @property
+    def filename(self):
+        """Path of the output video file."""
+        return self._filename
+
+    @property
+    def is_empty(self):
+        """Whether no frame was written, in which case the encoder leaves no video file."""
+        return self._frame_shape is None
 
     def close(self):
         """

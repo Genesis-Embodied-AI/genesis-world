@@ -437,6 +437,15 @@ def test_video_writer(tmp_path):
             filename=video_depth_path,
         ),
     )
+    # White frames whose size changes along the recording, cropped or padded with black to the size of the first one
+    video_resized_path = tmp_path / "test_resized.mp4"
+    frames_resized_size = [64, 32, 96] * 4
+    scene.add_recorder(
+        data_func=lambda: np.full((frames_resized_size.pop(0),) * 2 + (3,), 255, dtype=np.uint8),
+        rec_options=gs.recorders.VideoFile(
+            filename=video_resized_path,
+        ),
+    )
     scene.build()
 
     for _ in range(STEPS):
@@ -447,7 +456,16 @@ def test_video_writer(tmp_path):
     # Every sampled step must survive into the file: frames buffered by the encoder but never flushed, or dropped
     # because it fell behind, would leave a shorter video that a size check cannot distinguish from a complete one. Each
     # file holds the state before each step, then the state the run stopped at.
-    for video_path in (video_rgb_path, video_depth_path):
+    for video_path in (video_rgb_path, video_depth_path, video_resized_path):
         assert video_path.exists(), "Recorded video file should exist"
         with av.open(video_path) as container:
             assert sum(1 for _ in container.decode(video=0)) == STEPS + 1
+
+    # The encoding is lossy, so the colors are compared away from the edges of the white area
+    with av.open(video_resized_path) as container:
+        frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)]
+    for frame, size in zip(frames, [64, 32, 96] * 4):
+        assert frame.shape == (64, 64, 3)
+        assert_allclose(frame[: min(size, 64) - 8, : min(size, 64) - 8], 255, atol=10)
+        if size < 64:
+            assert_allclose(frame[size + 8 :, size + 8 :], 0, atol=10)
