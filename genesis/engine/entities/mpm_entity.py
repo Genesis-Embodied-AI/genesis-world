@@ -26,6 +26,10 @@ def assert_muscle(method):
     return wrapper
 
 
+class MPMEntityDescription(ParticleEntityDescription):
+    """Describe one MPM entity as its resolution left it: its sampled particles and its posed visual mesh."""
+
+
 @qd.data_oriented
 class MPMEntity(ParticleEntity):
     """
@@ -37,7 +41,7 @@ class MPMEntity(ParticleEntity):
         Scene object this entity belongs to.
     solver : Solver
         The solver responsible for simulating this entity.
-    desc : ParticleEntityDescription
+    desc : MPMEntityDescription
         The description the entity is created from, holding its spec, its surface and its sampled particles.
     particle_size : float
         Particle size for discretization.
@@ -51,7 +55,7 @@ class MPMEntity(ParticleEntity):
         self,
         scene: "Scene",
         solver: "MPMSolver",
-        desc: ParticleEntityDescription,
+        desc: MPMEntityDescription,
         particle_size: float,
         idx: int,
         particle_start: int,

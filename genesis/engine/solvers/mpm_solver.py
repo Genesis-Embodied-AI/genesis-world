@@ -13,7 +13,7 @@ import genesis.utils.mesh as mu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import MPMEntity
-from genesis.engine.entities.particle_entity import ParticleEntityDescription
+from genesis.engine.entities.mpm_entity import MPMEntityDescription
 from genesis.engine.materials import MPM
 from genesis.engine.render_context import (
     LABELS_HUE_STEP,
@@ -502,13 +502,15 @@ Please decrease the simulation timestep or adjust the material parameters."""
         idx: int,
         surface: Surface | None,
         spec: "gs.entities.MPM | None",
-        desc: ParticleEntityDescription | None = None,
+        desc: MPMEntityDescription | None = None,
     ) -> MPMEntity:
         """Create an entity from its description, resolving one from the entity spec and its surface if none is given."""
         if desc is None:
-            desc = ParticleEntityDescription.resolve(
+            desc = MPMEntityDescription.resolve(
                 spec, surface, self._particle_size, self.boundary_lower, self.boundary_upper
             )
+        elif type(desc) is not MPMEntityDescription:
+            gs.raise_exception(f"{type(self).__name__} simulates no entity described by {type(desc).__name__}.")
         self._materials_idx.setdefault(desc.spec.material, len(self._materials_idx))
 
         entity = MPMEntity(
