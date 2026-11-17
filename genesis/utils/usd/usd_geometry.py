@@ -65,7 +65,7 @@ def parse_prim_geoms(
 
     if link_prim is not None and prim.IsA(UsdGeom.Gprim):
         # parse materials
-        geom_surface, geom_uvname, _surface_id, bake_success = context.apply_surface(prim, surface)
+        geom_surface, geom_uvname, _surface_id, bake_success, asset_textures = context.apply_surface(prim, surface)
         gprim = UsdGeom.Gprim(prim)
         uvs = {geom_uvname: None}
 
@@ -119,17 +119,28 @@ def parse_prim_geoms(
                     if subset_face_ids.size == 0:
                         continue
                     face_used_mask[subset_face_ids] = True
-                    subset_surface, subset_uvname, _, subset_bake_success = context.apply_surface(subset_prim, surface)
+                    subset_surface, subset_uvname, _, subset_bake_success, subset_asset_textures = (
+                        context.apply_surface(subset_prim, surface)
+                    )
                     subset_name = subset_prim.GetPath().pathString
                     subset_infos.append(
-                        (subset_face_ids, subset_surface, subset_uvname, subset_name, subset_bake_success)
+                        (
+                            subset_face_ids,
+                            subset_surface,
+                            subset_uvname,
+                            subset_name,
+                            subset_bake_success,
+                            subset_asset_textures,
+                        )
                     )
                     uvs[subset_uvname] = None
                 else:
                     gs.logger.warning(f"Unsupported geom subset element type: {elem_type} for {geom_id}")
             subset_unused = ~face_used_mask
             if subset_unused.any():
-                subset_infos.append((subset_unused, geom_surface, geom_uvname, prim.GetPath().pathString, bake_success))
+                subset_infos.append(
+                    (subset_unused, geom_surface, geom_uvname, prim.GetPath().pathString, bake_success, asset_textures)
+                )
 
             # parse UVs
             for uvname in uvs.keys():
@@ -187,7 +198,14 @@ def parse_prim_geoms(
                     face_triangle_starts = np.arange(len(face_vertex_counts), dtype=np.int32)
 
             # process mesh
-            for subset_face_ids, subset_surface, subset_uvname, subset_name, subset_bake_success in subset_infos:
+            for (
+                subset_face_ids,
+                subset_surface,
+                subset_uvname,
+                subset_name,
+                subset_bake_success,
+                subset_asset_textures,
+            ) in subset_infos:
                 tri_starts = face_triangle_starts[subset_face_ids]
                 tri_counts = face_vertex_counts[subset_face_ids] - 2
                 tri_ids = get_triangle_ids(tri_starts, tri_counts)
@@ -233,6 +251,7 @@ def parse_prim_geoms(
                     normals=subset_normals,
                     surface=subset_surface,
                     uvs=subset_uv,
+                    asset_textures=subset_asset_textures,
                 )
                 # Named by prim path, as a link is, so the name holds nothing of the author's filesystem
                 mesh.metadata.update(
@@ -319,7 +338,9 @@ def parse_prim_geoms(
                 "name": prim.GetPath().pathString,
                 "bake_success": bool(bake_success),
             }
-            meshes.append(gs.Mesh.from_trimesh(tmesh, surface=geom_surface, metadata=metadata))
+            meshes.append(
+                gs.Mesh.from_trimesh(tmesh, surface=geom_surface, metadata=metadata, asset_textures=asset_textures)
+            )
 
         # Compose axis rotation into geom transform for oriented primitives.
         if axis_T is not None:
@@ -399,7 +420,10 @@ def parse_prim_geoms(
                     bv_tmesh = trimesh.creation.icosphere(radius=radius, subdivisions=2)
                     bv_type, bv_data = gs.GEOM_TYPE.SPHERE, np.array([radius])
                 bv_mesh = gs.Mesh.from_trimesh(
-                    bv_tmesh, surface=geom_surface, metadata={"name": prim.GetPath().pathString}
+                    bv_tmesh,
+                    surface=geom_surface,
+                    metadata={"name": prim.GetPath().pathString},
+                    asset_textures=asset_textures,
                 )
                 g_infos.append(
                     {

@@ -6,7 +6,7 @@ from typing import Annotated, Literal, Self, cast
 import numpy as np
 
 from PIL import Image
-from pydantic import BeforeValidator, Field, PrivateAttr, StrictBool, computed_field, model_validator
+from pydantic import BeforeValidator, Field, StrictBool, computed_field, model_validator
 
 import genesis as gs
 import genesis.utils.mesh as mu
@@ -497,26 +497,3 @@ class DynamicTexture(_ImagelessTexture):
         | Annotated[dict[str, ColorTexture | ImageTexture | AssetTexture | None], Field(min_length=1)]
     ) = (None,)
     is_batched: StrictBool = False
-
-    # The texture an asset gives the map it fills, which its asset texture variants show (see '_resolve_asset_texture')
-    _asset_texture: "ColorTexture | ImageTexture | None" = PrivateAttr(default=None)
-
-    def _resolve_asset_texture(self, asset_texture: Texture | None) -> "DynamicTexture":
-        """Return a copy whose asset texture variants show the texture an asset gives the map.
-
-        If 'asset_texture' is itself a dynamic texture, the asset texture that one resolved to is used instead. The
-        texture itself is returned when it holds no asset texture variant, or when the asset gives no color and no
-        image.
-        """
-        if isinstance(asset_texture, DynamicTexture):
-            asset_texture = asset_texture._asset_texture
-        is_named = isinstance(self.variants, dict)
-        variants = tuple(self.variants.values()) if is_named else self.variants
-        if not isinstance(asset_texture, (ColorTexture, ImageTexture)) or not any(
-            isinstance(variant, AssetTexture) for variant in variants
-        ):
-            return self
-        variants = tuple(asset_texture if isinstance(variant, AssetTexture) else variant for variant in variants)
-        texture = self.model_copy(update={"variants": dict(zip(self.variants, variants)) if is_named else variants})
-        texture._asset_texture = asset_texture
-        return texture

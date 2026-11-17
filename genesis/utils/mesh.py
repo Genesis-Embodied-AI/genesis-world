@@ -4,6 +4,7 @@ import os
 import weakref
 from functools import lru_cache, wraps
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -303,9 +304,22 @@ def get_wall_thickness(verts: np.ndarray, faces: np.ndarray, quantile: float, we
     return wall_thickness
 
 
+class AssetTextures(NamedTuple):
+    """The textures an asset gives the maps of a mesh that a dynamic texture may fill, None where it gives none.
+
+    The asset texture variants of a dynamic texture resolve to them (see ``gs.textures.AssetTexture``).
+    """
+
+    color: "gs.textures.Texture | None"
+    """The texture of the color map, diffuse or emissive depending on the surface."""
+    emission: "gs.textures.Texture | None"
+    """The texture of the emissive map."""
+
+
 class MeshInfo:
     def __init__(self):
         self.surface = None
+        self.asset_textures = None
         self.metadata = {}
         self.verts = []
         self.faces = []
@@ -313,9 +327,10 @@ class MeshInfo:
         self.uvs = []
         self.n_points = 0
 
-    def set_property(self, surface=None, metadata=None):
+    def set_property(self, surface=None, metadata=None, asset_textures: AssetTextures | None = None):
         self.surface = surface
         self.metadata = metadata
+        self.asset_textures = asset_textures
 
     def append(self, verts, faces, normals, uvs):
         faces += self.n_points
@@ -346,6 +361,7 @@ class MeshInfo:
             scale=scale,
             metadata=self.metadata,
             is_mesh_zup=is_mesh_zup,
+            asset_textures=self.asset_textures,
         )
 
 

@@ -134,6 +134,9 @@ class Mesh(RBC, serialization.SerializationMixin):
         the original geometry if necessary. 8 does what needs to be done at all costs. Default to 0.
     metadata : dict
         The metadata of the mesh.
+    asset_textures : AssetTextures | None
+        The textures the asset gives the maps of the mesh, which the asset texture variants of the dynamic textures of
+        its surface show, at construction and whenever a surface is set. None for a mesh made without an asset.
     """
 
     def __init__(
@@ -148,10 +151,12 @@ class Mesh(RBC, serialization.SerializationMixin):
         decimate_aggressiveness=0,
         metadata=None,
         is_mesh_zup: bool = True,
+        asset_textures: mu.AssetTextures | None = None,
     ):
         self._uid = gs.UID()
         self._mesh = mesh  # .copy() FIXME: For some reason forcing copy is causing some tests to fails...
         self._surface: Surface | None = None
+        self._asset_textures = asset_textures
         if uvs is not None:
             uvs = uvs.astype(gs.np_float, copy=False)
         self._uvs = uvs
@@ -429,6 +434,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             surface=self._surface.model_copy(),
             uvs=self._uvs.copy() if self._uvs is not None else None,
             metadata=self._metadata.copy(),
+            asset_textures=self._asset_textures,
         )
 
     @classmethod
@@ -444,6 +450,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         surface=None,
         is_mesh_zup=True,
         share_arrays=False,
+        asset_textures: mu.AssetTextures | None = None,
     ):
         """
         Create a genesis.Mesh from a trimesh.Trimesh object.
@@ -452,6 +459,9 @@ class Mesh(RBC, serialization.SerializationMixin):
         its own, so that the meshes built from one trimesh share its geometry. Sharing requires that nothing writes into
         those arrays in place, which holds for a trimesh that Genesis alone holds, transforms replacing the arrays they
         change.
+
+        'asset_textures' are the textures the asset gives the maps of the mesh (see 'Mesh'), or else those the visual
+        of the trimesh gives.
         """
         if surface is None:
             surface = gs.surfaces.Default()
@@ -552,6 +562,8 @@ class Mesh(RBC, serialization.SerializationMixin):
                         texture.image_array.flags.writeable = False
             color_texture, opacity_texture = color_textures
             roughness_texture = mu.create_texture(None, roughness_factor, "linear")
+            if asset_textures is None:
+                asset_textures = mu.AssetTextures(color=color_texture, emission=None)
 
             surface.update_texture(
                 color_texture=color_texture,
@@ -573,6 +585,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             decimate_aggressiveness=decimate_aggressiveness,
             metadata=metadata,
             is_mesh_zup=is_mesh_zup,
+            asset_textures=asset_textures,
         )
         if color_textures_key is not None:
             _COLOR_TEXTURES_CACHE.own(gs_mesh, color_textures_key, color_textures)
@@ -580,10 +593,21 @@ class Mesh(RBC, serialization.SerializationMixin):
 
     @classmethod
     def from_attrs(
-        cls, verts, faces, normals=None, surface=None, uvs=None, scale=None, metadata=None, is_mesh_zup=True
+        cls,
+        verts,
+        faces,
+        normals=None,
+        surface=None,
+        uvs=None,
+        scale=None,
+        metadata=None,
+        is_mesh_zup=True,
+        asset_textures: mu.AssetTextures | None = None,
     ):
         """
         Create a genesis.Mesh from mesh attributes including vertices, faces, and normals.
+
+        'asset_textures' are the textures the asset gives the maps of the mesh (see 'Mesh').
         """
         if surface is None:
             surface = gs.surfaces.Default()
@@ -607,6 +631,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             scale=scale,
             metadata=metadata,
             is_mesh_zup=is_mesh_zup,
+            asset_textures=asset_textures,
         )
 
     @classmethod
@@ -660,10 +685,12 @@ class Mesh(RBC, serialization.SerializationMixin):
         """Replace the surface of the mesh, the textures the given surface leaves unset keeping their current images.
 
         Every other field takes the value of the given surface, its defaults included, so a surface of another type
-        renders as that type does. A dynamic texture of the given surface shows the texture of the asset that its map
-        held. A mesh being made takes the surface as given, and keeps the visual of its asset.
+        renders as that type does. The asset texture variants of a dynamic texture of the given surface show the
+        textures the asset gives the mesh. A mesh being made takes the surface as given, and keeps the visual of its
+        asset.
         """
-        if self._surface is None:
+        is_replaced = self._surface is not None
+        if not is_replaced:
             # The meshes of an asset share its surface, so that the images of its textures are held once
             self._surface = surface
         else:
@@ -674,7 +701,6 @@ class Mesh(RBC, serialization.SerializationMixin):
             for name, value in surface:
                 if name in surface.model_fields_set:
                     (shortcuts if surface_fields[name].exclude else fields)[name] = value
-            slots_texture = dict(self._surface)
             for name, value in self._surface:
                 if (
                     name in surface_fields
@@ -683,11 +709,35 @@ class Mesh(RBC, serialization.SerializationMixin):
                     and isinstance(value, gs.textures.Texture)
                 ):
                     fields[name] = value
-            for name, texture in fields.items():
-                if isinstance(texture, gs.textures.DynamicTexture):
-                    fields[name] = texture._resolve_asset_texture(slots_texture.get(name))
             self._surface = type(surface)(**fields).model_copy(update=shortcuts)
-            self.update_trimesh_visual()
+        # The color map is resolved first, so that a surface drawing its color in the emissive map shows the color the
+        # asset gives, and the emission only where the asset gives no color
+        for is_emission, asset_texture in (
+            ((False, self._asset_textures.color), (True, self._asset_textures.emission))
+            if self._asset_textures is not None
+            else ()
+        ):
+            texture = self._surface.emission if is_emission else self._surface.texture
+            if not isinstance(texture, gs.textures.DynamicTexture) or not isinstance(
+                asset_texture, (gs.textures.ColorTexture, gs.textures.ImageTexture)
+            ):
+                continue
+            is_named = isinstance(texture.variants, dict)
+            variants = tuple(texture.variants.values()) if is_named else texture.variants
+            if not any(isinstance(variant, gs.textures.AssetTexture) for variant in variants):
+                continue
+            variants = tuple(
+                asset_texture if isinstance(variant, gs.textures.AssetTexture) else variant for variant in variants
+            )
+            texture = texture.model_copy(
+                update={"variants": dict(zip(texture.variants, variants)) if is_named else variants}
+            )
+            # The surface may be shared with the caller, or between the meshes of one material
+            self._surface = self._surface.model_copy()
+            if is_emission:
+                self._surface.emissive_texture = texture
+            else:
+                self._surface.texture = texture
         if self._uvs is None and any(
             isinstance(texture, gs.textures.DynamicTexture)
             for texture in (self._surface.texture, self._surface.emission)
@@ -700,6 +750,8 @@ class Mesh(RBC, serialization.SerializationMixin):
                 )
             else:
                 gs.logger.warning("Texture given but asset missing uv info (or failed to load).")
+        if is_replaced:
+            self.update_trimesh_visual()
 
     def update_trimesh_visual(self):
         """
