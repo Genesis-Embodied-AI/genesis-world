@@ -9,8 +9,15 @@ from genesis.repr_base import RBC
 from genesis.typing import LaxPositiveFArrayType
 from genesis.utils.misc import BuildableMixin, DeprecationError, qd_to_torch
 
-from .description import KinematicLinkDescription, RigidGeomDescription, RigidLinkDescription, RigidVisGeomDescription
+from .description import (
+    KinematicLinkDescription,
+    RigidGeomDescription,
+    RigidLinkDescription,
+    RigidSiteDescription,
+    RigidVisGeomDescription,
+)
 from .rigid_geom import RigidGeom, RigidVisGeom
+from .rigid_site import RigidSite
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.rigid import RigidSolver
@@ -37,6 +44,7 @@ class KinematicLink(BuildableMixin, RBC):
         vvert_start: int,
         vface_start: int,
         desc: KinematicLinkDescription,
+        site_start: int = 0,
     ):
         self.desc: KinematicLinkDescription = desc
         self._entity: "KinematicEntity" = entity
@@ -67,8 +75,10 @@ class KinematicLink(BuildableMixin, RBC):
         self._vgeom_start: int = vgeom_start
         self._vvert_start: int = vvert_start
         self._vface_start: int = vface_start
+        self._site_start: int = site_start
 
         self._vgeoms: list[RigidVisGeom] = gs.List()
+        self._sites: list[RigidSite] = gs.List()
 
         # Heterogeneous variant tracking (None = not heterogeneous)
         self._variant_vgeom_ranges: list[tuple[int, int]] | None = None
@@ -86,12 +96,16 @@ class KinematicLink(BuildableMixin, RBC):
     def _build(self) -> None:
         for vgeom in self._vgeoms:
             vgeom._build()
+        for site in self._sites:
+            site._build()
 
         self._is_built = True
 
     def _destroy(self) -> None:
         for vgeom in self._vgeoms:
             vgeom._destroy()
+        for site in self._sites:
+            site._destroy()
         self._is_built = False
 
     def _add_vgeom(self, desc: RigidVisGeomDescription):
@@ -103,6 +117,14 @@ class KinematicLink(BuildableMixin, RBC):
             desc=desc,
         )
         self._vgeoms.append(vgeom)
+
+    def _add_site(self, desc: RigidSiteDescription):
+        site = RigidSite(
+            link=self,
+            idx=self.n_sites + self._site_start,
+            desc=desc,
+        )
+        self._sites.append(site)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- real-time state -----------------------------------
@@ -350,6 +372,26 @@ class KinematicLink(BuildableMixin, RBC):
         return self._vgeoms
 
     @property
+    def sites(self) -> list[RigidSite]:
+        """The list of attachment / landmark sites (`RigidSite`) on the link."""
+        return self._sites
+
+    @property
+    def n_sites(self) -> int:
+        """Number of sites on the link."""
+        return len(self._sites)
+
+    @property
+    def site_start(self) -> int:
+        """Start index of the link's sites in the solver."""
+        return self._site_start
+
+    @property
+    def site_end(self) -> int:
+        """End index of the link's sites in the solver."""
+        return self._site_start + self.n_sites
+
+    @property
     def geom_start(self) -> int:
         """Start index of collision geoms. Always 0 for KinematicLink."""
         return 0
@@ -432,9 +474,20 @@ class RigidLink(KinematicLink):
         vface_start: int,
         visualize_contact: bool,
         desc: RigidLinkDescription,
+        site_start: int = 0,
     ):
         super().__init__(
-            entity, idx, parent_idx, root_idx, joint_start, n_joints, vgeom_start, vvert_start, vface_start, desc
+            entity,
+            idx,
+            parent_idx,
+            root_idx,
+            joint_start,
+            n_joints,
+            vgeom_start,
+            vvert_start,
+            vface_start,
+            desc,
+            site_start=site_start,
         )
 
         if self._is_fixed and not entity._batch_fixed_verts:

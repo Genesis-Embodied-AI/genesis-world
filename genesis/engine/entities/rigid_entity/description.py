@@ -73,6 +73,17 @@ class RigidVisGeomDescription(BaseRigidGeomDescription):
     vmesh: "gs.Mesh"
 
 
+@dataclass(kw_only=True)
+class RigidSiteDescription(BaseRigidGeomDescription):
+    """Describe an attachment or landmark frame on a link, authored in its link frame."""
+
+    name: str
+    type: GEOM_TYPE = GEOM_TYPE.SPHERE
+    size: np.ndarray = field(default_factory=lambda: np.full((3,), 0.005))
+    rgba: np.ndarray = field(default_factory=lambda: np.array((0.5, 0.5, 0.5, 1.0), dtype=np.float32))
+    group: int = 0
+
+
 @dataclass(frozen=True, kw_only=True)
 class SignedDistanceFieldDescription:
     """Describe the grid sampling the signed distance field (SDF) of a geometry (see 'Mesh.get_sdf_grid')."""
@@ -247,6 +258,7 @@ class KinematicLinkDescription:
     is_aligned: bool = False
     joints: list["RigidJointDescription"] = field(default_factory=list)
     vgeoms: list[RigidVisGeomDescription] = field(default_factory=list)
+    sites: list[RigidSiteDescription] = field(default_factory=list)
 
 
 @dataclass(kw_only=True)
@@ -295,6 +307,7 @@ class KinematicVariantLinkDescription:
     quat: np.ndarray
     joints: list["RigidJointDescription"]
     vgeoms: list[RigidVisGeomDescription] = field(default_factory=list)
+    sites: list[RigidSiteDescription] = field(default_factory=list)
 
 
 @dataclass(kw_only=True)
@@ -707,11 +720,13 @@ class KinematicEntityDescription(EntityDescription):
         self, i_link, v_l_info, link_pos, link_quat, joints, cg_infos, vg_infos, morph, inertial_info
     ):
         """Describe the frame, the joints and the visual geoms one variant gives one link."""
+        s_infos = [] if v_l_info is None else v_l_info.get("sites", [])
         return KinematicVariantLinkDescription(
             pos=link_pos,
             quat=link_quat,
             joints=joints,
             vgeoms=[description_from_info(RigidVisGeomDescription, vg_info) for vg_info in vg_infos],
+            sites=[description_from_info(RigidSiteDescription, s_info) for s_info in s_infos],
         )
 
     def _load_primitive(self, morph, resolution: Resolution, load_geom_only_for_heterogeneous=False):
@@ -1033,7 +1048,12 @@ class KinematicEntityDescription(EntityDescription):
         # Remove this virtual world link if the child has a free joint (the free joint absorbs the full pose into
         # 'init_qpos' regardless of pos/quat), or if the child has an identity transform.
         base_j_info, base_g_info = links_j_infos[0], links_g_infos[0]
-        if len(l_infos) > 1 and (sum(j_info["n_dofs"] for j_info in base_j_info) == 0) and not base_g_info:
+        if (
+            len(l_infos) > 1
+            and (sum(j_info["n_dofs"] for j_info in base_j_info) == 0)
+            and not base_g_info
+            and not l_infos[0].get("sites")
+        ):
             child_has_freejoint = any(j_info["type"] == gs.JOINT_TYPE.FREE for j_info in links_j_infos[1])
             child_is_identity = np.allclose(l_infos[1]["pos"], 0.0, rtol=0.0, atol=POSE_EPS) and np.allclose(
                 l_infos[1]["quat"], (1.0, 0.0, 0.0, 0.0), rtol=0.0, atol=POSE_EPS
@@ -1332,7 +1352,7 @@ class KinematicEntityDescription(EntityDescription):
                     if i_v == 0:
                         links_alignment_inv[links[i_l].name] = (pos, quat)
                     link_desc = variant_links[i_l]
-                    geoms = list(link_desc.vgeoms)
+                    geoms = list(link_desc.vgeoms) + list(link_desc.sites)
                     if isinstance(link_desc, (RigidLinkDescription, RigidVariantLinkDescription)):
                         geoms += link_desc.geoms
                     for geom in geoms:
@@ -1431,6 +1451,7 @@ class KinematicEntityDescription(EntityDescription):
             is_aligned=l_info["is_aligned"],
             joints=[description_from_info(RigidJointDescription, j_info) for j_info in j_infos],
             vgeoms=[description_from_info(RigidVisGeomDescription, vg_info) for vg_info in vg_infos],
+            sites=[description_from_info(RigidSiteDescription, s_info) for s_info in l_info.get("sites", [])],
         )
 
     def _resolve_geoms_values(
@@ -1768,11 +1789,13 @@ class RigidEntityDescription(KinematicEntityDescription):
         inertial = finalize_inertial(
             mass, com, quat, inertia, *inertial_info.hint, clamp_min_mass=not is_link_fixed(self.links, i_link)
         )
+        s_infos = [] if v_l_info is None else v_l_info.get("sites", [])
         return RigidVariantLinkDescription(
             pos=link_pos,
             quat=link_quat,
             joints=joints,
             vgeoms=[description_from_info(RigidVisGeomDescription, vg_info) for vg_info in vg_infos],
+            sites=[description_from_info(RigidSiteDescription, s_info) for s_info in s_infos],
             mass=inertial.mass,
             inertial_pos=inertial.com,
             inertial_quat=inertial.quat,
@@ -1980,6 +2003,7 @@ class RigidEntityDescription(KinematicEntityDescription):
             is_aligned=l_info["is_aligned"],
             joints=[description_from_info(RigidJointDescription, j_info) for j_info in j_infos],
             vgeoms=[description_from_info(RigidVisGeomDescription, vg_info) for vg_info in vg_infos],
+            sites=[description_from_info(RigidSiteDescription, s_info) for s_info in l_info.get("sites", [])],
             inertial_pos=inertial.com,
             inertial_quat=inertial.quat,
             inertia=inertial.inertia,

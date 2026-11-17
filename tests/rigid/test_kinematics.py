@@ -1156,3 +1156,75 @@ def test_host_forward_kinematics(
         assert_allclose(geoms_quat, solver.get_geoms_quat(geoms_idx), tol=tol)
         assert_allclose(joints_xanchor[:, joints_mask], solver.get_joints_anchor_pos(joints_idx), tol=tol)
         assert_allclose(joints_xaxis[:, joints_mask], solver.get_joints_anchor_axis(joints_idx), tol=tol)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_mjcf_sites_forward_kinematics_and_velocity(n_envs, tol):
+    import mujoco
+
+    xml = """
+    <mujoco model="two_link_sites">
+      <worldbody>
+        <site name="origin_ref" pos="0.1 -0.2 0.3" euler="0.2 -0.1 0.3" size="0.01"/>
+        <body name="link1" pos="0 0 0.5">
+          <joint name="j1" type="hinge" axis="0 0 1"/>
+          <geom type="capsule" fromto="0 0 0 0.4 0 0" size="0.03"/>
+          <site name="elbow_anchor" pos="0.2 0.05 -0.02" quat="0.9238795 0 0.3826834 0" size="0.008"/>
+          <body name="link2" pos="0.4 0 0">
+            <joint name="j2" type="hinge" axis="0 1 0"/>
+            <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.025"/>
+            <site name="wrist_tip" pos="0.3 -0.01 0.04" euler="0.1 0.4 -0.2" size="0.006"/>
+          </body>
+        </body>
+      </worldbody>
+    </mujoco>
+    """
+    mj_model = mujoco.MjModel.from_xml_string(xml)
+    mj_data = mujoco.MjData(mj_model)
+
+    scene = gs.Scene(show_viewer=False, show_FPS=False)
+    entity = scene.add_entity(gs.morphs.MJCF(file=xml))
+    scene.build(n_envs=n_envs)
+
+    assert entity.n_sites == 3
+    assert [s.name for s in entity.sites] == ["origin_ref", "elbow_anchor", "wrist_tip"]
+
+    qpos_vals = np.array([0.6, -0.4], dtype=gs.np_float)
+    qvel_vals = np.array([1.2, -0.8], dtype=gs.np_float)
+    if n_envs > 0:
+        qpos_batch = np.stack([qpos_vals, -0.5 * qpos_vals], axis=0)
+        qvel_batch = np.stack([qvel_vals, 0.75 * qvel_vals], axis=0)
+    else:
+        qpos_batch = qpos_vals
+        qvel_batch = qvel_vals
+
+    entity.set_qpos(qpos_batch)
+    entity.set_dofs_velocity(qvel_batch)
+
+    sites_pos = tensor_to_array(entity.get_sites_pos())
+    sites_quat = tensor_to_array(entity.get_sites_quat())
+    sites_vel = tensor_to_array(entity.get_sites_vel())
+    tip = entity.get_site("wrist_tip")
+    assert_allclose(tip.get_pos(), sites_pos[..., 2, :], tol=tol)
+    assert_allclose(tip.get_quat(), sites_quat[..., 2, :], tol=tol)
+    assert_allclose(tip.get_vel(), sites_vel[..., 2, :], tol=tol)
+
+    rows = [0] if n_envs == 0 else range(n_envs)
+    for b in rows:
+        mj_data.qpos[:] = qpos_vals if n_envs == 0 else qpos_batch[b]
+        mj_data.qvel[:] = qvel_vals if n_envs == 0 else qvel_batch[b]
+        mujoco.mj_forward(mj_model, mj_data)
+        pos_b = sites_pos if n_envs == 0 else sites_pos[b]
+        quat_b = sites_quat if n_envs == 0 else sites_quat[b]
+        vel_b = sites_vel if n_envs == 0 else sites_vel[b]
+        assert_allclose(pos_b, mj_data.site_xpos, tol=tol)
+        for i_s in range(3):
+            mj_quat = np.zeros(4)
+            mujoco.mju_mat2Quat(mj_quat, mj_data.site_xmat[i_s])
+            if np.dot(mj_quat, quat_b[i_s]) < 0:
+                mj_quat = -mj_quat
+            assert_allclose(quat_b[i_s], mj_quat, tol=tol)
+            vel6 = np.zeros(6)
+            mujoco.mj_objectVelocity(mj_model, mj_data, mujoco.mjtObj.mjOBJ_SITE, i_s, vel6, 0)
+            assert_allclose(vel_b[i_s], vel6[3:], tol=tol)

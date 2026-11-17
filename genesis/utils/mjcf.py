@@ -249,8 +249,9 @@ def parse_xml(morph, surface, rigid_options=None):
     # Parse all geometries grouped by parent joint (or world)
     links_g_infos = parse_geoms(mj, morph.scale, surface, file)
 
-    # Parse all bodies (links and joints)
+    # Parse all bodies (links and joints) and attach authored sites to their owning body
     l_infos, links_j_infos = parse_links(mj, morph.scale)
+    parse_sites(mj, l_infos, morph.scale)
 
     # Every body pair excluded from collision is recorded on the link of its first body, naming the second. A body
     # without geometry has nothing to collide, and leaving it out spares the geometry-less world link removed later on.
@@ -775,6 +776,39 @@ def parse_geoms(mj, scale, surface, xml_path):
         )
 
     return links_g_info
+
+
+_MJ_SITE_TYPE_MAP = {
+    int(mujoco.mjtGeom.mjGEOM_SPHERE): gs.GEOM_TYPE.SPHERE,
+    int(mujoco.mjtGeom.mjGEOM_ELLIPSOID): gs.GEOM_TYPE.ELLIPSOID,
+    int(mujoco.mjtGeom.mjGEOM_CAPSULE): gs.GEOM_TYPE.CAPSULE,
+    int(mujoco.mjtGeom.mjGEOM_CYLINDER): gs.GEOM_TYPE.CYLINDER,
+    int(mujoco.mjtGeom.mjGEOM_BOX): gs.GEOM_TYPE.BOX,
+}
+
+
+def parse_sites(mj, l_infos, scale):
+    for i_s in range(mj.nsite):
+        link_idx = int(mj.site_bodyid[i_s])
+        if link_idx < 0:
+            continue
+        mj_site = mj.site(i_s)
+        name_start = mj.name_siteadr[i_s]
+        name, *_ = mj.names[name_start:].decode("utf-8").split("\x00")
+        if not name:
+            name = f"site_{i_s}"
+        gs_type = _MJ_SITE_TYPE_MAP.get(int(mj.site_type[i_s]), gs.GEOM_TYPE.SPHERE)
+        l_infos[link_idx].setdefault("sites", []).append(
+            {
+                "name": name,
+                "type": gs_type,
+                "pos": mj.site_pos[i_s].copy() * scale,
+                "quat": mj.site_quat[i_s].copy(),
+                "size": mj.site_size[i_s].copy() * scale,
+                "rgba": np.asarray(mj_site.rgba, dtype=np.float32).copy(),
+                "group": int(mj_site.group[0]),
+            }
+        )
 
 
 def parse_equalities(mj, scale):
