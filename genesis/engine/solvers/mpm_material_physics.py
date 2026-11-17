@@ -15,6 +15,34 @@ from genesis.engine.material_physics import MaterialPhysics
 from genesis.engine.materials import MPM
 
 
+@qd.func
+def elastic_stress(
+    J: float,
+    U: qd.types.matrix(3, 3),
+    V: qd.types.matrix(3, 3),
+    F_tmp: qd.types.matrix(3, 3),
+    F_new: qd.types.matrix(3, 3),
+    mu: float,
+    lam: float,
+    corotated: qd.template(),
+):
+    """
+    Return the Kirchhoff stress of an elastic material, of the fixed corotated model or of the neo-Hookean one.
+
+    The fixed corotated stress reads the deformation gradient `F_new` once plasticity applies and the rotation `U @ V^T`
+    of the singular value decomposition of the advected deformation gradient. The neo-Hookean stress reads the advected
+    deformation gradient `F_tmp` and its determinant `J` alone. `mu` and `lam` are the Lame parameters.
+    """
+    stress = qd.Matrix.zero(gs.qd_float, 3, 3)
+    if qd.static(corotated):
+        stress = 2 * mu * (F_new - U @ V.transpose()) @ F_new.transpose() + qd.Matrix.identity(
+            gs.qd_float, 3
+        ) * lam * J * (J - 1)
+    else:
+        stress = mu * (F_tmp @ F_tmp.transpose()) + qd.Matrix.identity(gs.qd_float, 3) * (lam * qd.log(J) - mu)
+    return stress
+
+
 @qd.data_oriented
 class MPMMaterialPhysics[MaterialT: MPM.Base](MaterialPhysics[MaterialT]):
     """
@@ -41,9 +69,13 @@ class MPMMaterialPhysics[MaterialT: MPM.Base](MaterialPhysics[MaterialT]):
         Return the deformation gradient, its singular values and the plastic volume ratio once plasticity applies.
 
         `F_tmp` is the deformation gradient advected over the substep, of determinant `J` and singular value
-        decomposition `U`, `S`, `V`. `Jp` is the plastic volume ratio the substep starts from.
+        decomposition `U`, `S`, `V`. `Jp` is the plastic volume ratio the substep starts from. By default the material
+        is purely elastic, and the substep keeps all three.
         """
-        raise NotImplementedError
+        F_new = F_tmp
+        S_new = S
+        Jp_new = Jp
+        return F_new, S_new, Jp_new
 
     @qd.func
     def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
@@ -53,47 +85,33 @@ class MPMMaterialPhysics[MaterialT: MPM.Base](MaterialPhysics[MaterialT]):
         `F_new` and `S` are the deformation gradient and its singular values once plasticity applies (see
         'update_F_S_Jp'). `actu` is the actuation of the particle along its muscle direction `m_dir`.
         """
-        stress = 2 * self.material.mu * (F_new - U @ V.transpose()) @ F_new.transpose() + qd.Matrix.identity(
-            gs.qd_float, 3
-        ) * self.material.lam * J * (J - 1)
-        return stress
+        return elastic_stress(J, U, V, F_tmp, F_new, self.material.mu, self.material.lam, corotated=True)
 
 
-class ElasticPhysicsBase[MaterialT: MPM.Elastic](MPMMaterialPhysics[MaterialT]):
-    """The constitutive model of the elastic materials, shared by the physics of each of them."""
-
+class ElasticPhysics(MPMMaterialPhysics[MPM.Elastic]):
     @property
     def needs_svd(self) -> bool:
-        # The Neo-Hookean stress reads the advected deformation gradient and its determinant alone
+        # The neo-Hookean stress reads the advected deformation gradient and its determinant alone
         return self.material.model == "corotation"
 
     @qd.func
-    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
-        F_new = F_tmp
-        S_new = S
-        Jp_new = Jp
-        return F_new, S_new, Jp_new
+    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+        return elastic_stress(
+            J, U, V, F_tmp, F_new, self.material.mu, self.material.lam, corotated=self.material.model == "corotation"
+        )
+
+
+class MusclePhysics(MPMMaterialPhysics[MPM.Muscle]):
+    @property
+    def needs_svd(self) -> bool:
+        # See 'ElasticPhysics.needs_svd'
+        return self.material.model == "corotation"
 
     @qd.func
     def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-        stress = qd.Matrix.zero(gs.qd_float, 3, 3)
-        if qd.static(self.material.model == "corotation"):
-            stress = MPMMaterialPhysics.update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir)
-        else:
-            stress = self.material.mu * (F_tmp @ F_tmp.transpose()) + qd.Matrix.identity(gs.qd_float, 3) * (
-                self.material.lam * qd.log(J) - self.material.mu
-            )
-        return stress
-
-
-class ElasticPhysics(ElasticPhysicsBase[MPM.Elastic]):
-    pass
-
-
-class MusclePhysics(ElasticPhysicsBase[MPM.Muscle]):
-    @qd.func
-    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-        stress = ElasticPhysicsBase.update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir)
+        stress = elastic_stress(
+            J, U, V, F_tmp, F_new, self.material.mu, self.material.lam, corotated=self.material.model == "corotation"
+        )
 
         AAt = m_dir.outer_product(m_dir)
         stress += self.material.E * actu * F_tmp @ AAt @ F_tmp.transpose()

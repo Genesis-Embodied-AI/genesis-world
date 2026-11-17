@@ -6,7 +6,7 @@ import trimesh
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.solvers.mpm_material_physics import ElasticPhysicsBase
+from genesis.engine.solvers.mpm_material_physics import MPMMaterialPhysics
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -198,7 +198,11 @@ def test_perf_dispatch(variant, precision, show_viewer):
     class UnstressedElastic(gs.materials.MPM.Elastic):
         pass
 
-    class UnstressedElasticPhysics(ElasticPhysicsBase[UnstressedElastic]):
+    class UnstressedElasticPhysics(MPMMaterialPhysics[UnstressedElastic]):
+        @property
+        def needs_svd(self) -> bool:
+            return False
+
         @qd.func
         def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
             return qd.Matrix.zero(gs.qd_float, 3, 3)
