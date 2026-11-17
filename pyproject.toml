@@ -26,7 +26,6 @@ dependencies = [
     # Cross-platform library to get various kind of CPU information such as model name
     "py-cpuinfo",
     "mujoco>=3.2.5",
-    "moviepy>=2.0.0",
     # Streams video frames to file, for 'camera.start_recording' and the 'VideoFile' recorder
     "av",
     # Compresses the frames of trajectory files, fast enough for the writer thread to keep pace with stepping
