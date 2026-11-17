@@ -87,8 +87,7 @@ class VideoEncoder:
 
     The container is created when the first frame is written rather than upfront, because hardware encoders reject
     some resolutions and the codec can only be validated against the true frame size. A video that never receives a
-    frame therefore leaves no file behind. The video takes the shape of its first frame, which every later frame must
-    match.
+    frame therefore leaves no file behind. Every later frame must have the shape of the first one.
 
     Parameters
     ----------
