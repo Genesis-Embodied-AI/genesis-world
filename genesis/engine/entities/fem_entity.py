@@ -27,18 +27,18 @@ if TYPE_CHECKING:
 class FEMVisGeom(RBC):
     """A visual geom of a FEM entity, the deformable counterpart of `RigidVisGeom`.
 
-    It carries the render mesh drawn by the visualizer, decoupled from the simulation mesh, and 'sim_verts_idx',
+    It carries the render mesh drawn by the visualizer, decoupled from the simulation mesh, and 'verts_idx',
     the map from each render-mesh vertex to the simulated vertex standing for it (vertices co-located across visual
     geoms or duplicated by texture seams share a single simulated vertex).
     """
 
-    def __init__(self, entity, vvert_start, vface_start, vmesh, sim_verts_idx):
+    def __init__(self, entity, vvert_start, vface_start, vmesh, verts_idx):
         self._uid = gs.UID()
         self._entity = entity
         self._vvert_start = vvert_start
         self._vface_start = vface_start
         self._vmesh = vmesh
-        self._sim_verts_idx = sim_verts_idx
+        self._verts_idx = verts_idx
 
     def get_trimesh(self):
         """The underlying `trimesh.Trimesh` of the render mesh."""
@@ -60,9 +60,17 @@ class FEMVisGeom(RBC):
         return self._vmesh
 
     @property
-    def sim_verts_idx(self):
+    def verts_idx(self):
         """Map from render-mesh vertex index to the entity's simulated vertex index."""
-        return self._sim_verts_idx
+        return self._verts_idx
+
+    @property
+    def sim_verts_idx(self):
+        """Map from render-mesh vertex index to the entity's simulated vertex index. Deprecated: use 'verts_idx'."""
+        gs.logger.warning(
+            "'sim_verts_idx' is deprecated and will be removed in a future release. Use 'verts_idx' instead."
+        )
+        return self._verts_idx
 
     @property
     def surface(self):
@@ -115,7 +123,7 @@ class FEMVisGeomDescription:
     """Describe one visual geom of a FEM entity: its render mesh, and the simulated vertex of each render vertex."""
 
     vmesh: "gs.Mesh"
-    sim_verts_idx: np.ndarray
+    verts_idx: np.ndarray
 
 
 @dataclass
@@ -140,7 +148,7 @@ class FEMEntityDescription(EntityDescription):
 
         'surface' is the one resolved from the spec. Each morph sub-mesh becomes a visual geom with its own surface and
         UVs, while the simulation operates on a single welded copy of their vertices, tracked through
-        'FEMVisGeomDescription.sim_verts_idx': welding and tetrahedralization both keep the input vertices first and in
+        'FEMVisGeomDescription.verts_idx': welding and tetrahedralization both keep the input vertices first and in
         order, so these maps remain valid indices into the simulated vertices.
         """
         morph = spec.morphs[0]
@@ -148,9 +156,7 @@ class FEMEntityDescription(EntityDescription):
         surface_verts, surface_faces, verts_maps = mu.merge_submeshes(
             [mesh.verts for mesh in meshes], [mesh.faces for mesh in meshes]
         )
-        vgeoms = [
-            FEMVisGeomDescription(vmesh=mesh, sim_verts_idx=verts_idx) for mesh, verts_idx in zip(meshes, verts_maps)
-        ]
+        vgeoms = [FEMVisGeomDescription(vmesh=mesh, verts_idx=verts_idx) for mesh, verts_idx in zip(meshes, verts_maps)]
 
         if isinstance(spec.material, gs.materials.FEM.Cloth):
             # Cloth needs no tetrahedralization: the welded surface triangles are the simulation elements.
@@ -280,7 +286,7 @@ class FEMEntity(Entity):
                     vvert_start=vvert_start,
                     vface_start=vface_start,
                     vmesh=vgeom_desc.vmesh,
-                    sim_verts_idx=vgeom_desc.sim_verts_idx,
+                    verts_idx=vgeom_desc.verts_idx,
                 )
             )
             vvert_start += len(vgeom_desc.vmesh.verts)
@@ -471,7 +477,7 @@ class FEMEntity(Entity):
                 vvert_start=vgeom.vvert_start,
                 vface_start=vgeom.vface_start,
                 v_start=self._v_start,
-                verts_idx=vgeom.sim_verts_idx,
+                verts_idx=vgeom.verts_idx,
                 uvs=uvs,
                 vfaces=vgeom.vmesh.faces.astype(gs.np_int, copy=False),
             )
