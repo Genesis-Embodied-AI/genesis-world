@@ -692,8 +692,6 @@ class Viewer(pyglet.window.Window):
             try:
                 self._video_recorder.close()
             except gs.GenesisException as e:
-                # The teardown carries on regardless, so that a failed encoding does not leave the window open. The
-                # encoding error was already reported.
                 gs.logger.warning(f"{e}")
             if not self._video_recorder.is_empty:
                 os.remove(self._video_recorder.filename)
