@@ -9,10 +9,10 @@ from genesis.repr_base import RBC
 def _normalize_direction(direction):
     direction = np.array(direction)
     if direction.shape != (3,):
-        raise ValueError("direction must have shape (3,)")
+        gs.raise_exception("direction must have shape (3,)")
     direction_norm = np.linalg.norm(direction)
     if not (np.isfinite(direction_norm) and direction_norm >= gs.EPS):
-        raise ValueError("direction must be finite and non-zero")
+        gs.raise_exception("direction must be finite and non-zero")
     return direction / direction_norm
 
 
@@ -431,8 +431,8 @@ class Custom(ForceField):
     -----------
     func: A callable Quadrants func (a python function wrapped by `@qd.func`)
         The acceleration function. Must have the signature
-        `f(pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i: int) -> qd.types.vector(3)`, `i` being the
-        index of the particle among those of its solver, -1 for a point of no particle.
+        `f(pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i: int) -> qd.types.vector(3)`, its arguments
+        being those of `ForceFields.add_acc`.
     """
 
     def __init__(self, func):

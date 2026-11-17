@@ -294,7 +294,7 @@ def test_force_field_reads_time_of_each_env(show_viewer, tol):
     def acc_growing_with_time(pos, vel, t, i):
         return qd.Vector([t, 0.0, 0.0], dt=gs.qd_float)
 
-    custom = scene.add_force_field(gs.force_fields.Custom(acc_growing_with_time))
+    scene.add_force_field(gs.force_fields.Custom(acc_growing_with_time))
     scene.build(n_envs=2)
 
     # An environment reset mid-run restarts its clock, which the force fields read, while the other one carries on
@@ -313,11 +313,46 @@ def test_force_field_reads_time_of_each_env(show_viewer, tol):
     assert_allclose(particles_vel[1], particles_vel_0[0], tol=gs.EPS)
     assert_allclose(particles_vel[0, :, 0], vels_x_ana[1], tol=tol)
 
-    # A deactivated force field stops accelerating the particles
-    custom.deactivate()
-    for _ in range(N_STEPS):
-        scene.step()
-    assert_allclose(particles.get_particles_vel()[..., 0], particles_vel[..., 0], tol=tol)
+
+@pytest.mark.required
+def test_force_field_activation(show_viewer, tol):
+    DT, N_STEPS = 1e-2, 10
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, 1.0, 1.0),
+            camera_lookat=(0.0, 0.0, 0.4),
+        ),
+        show_viewer=show_viewer,
+    )
+    particles = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.5),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.PBD.Particle(),
+    )
+
+    @qd.func
+    def acc_unit_x(pos, vel, t, i):
+        return qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
+
+    custom = scene.add_force_field(gs.force_fields.Custom(acc_unit_x))
+    scene.build(n_envs=2)
+
+    # The particles gain the acceleration times the duration over which the field is active
+    for is_active, n_runs_active in ((True, 1), (False, 1), (True, 2)):
+        if is_active:
+            custom.activate()
+        else:
+            custom.deactivate()
+        assert custom.active == is_active
+        for _ in range(N_STEPS):
+            scene.step()
+        assert_allclose(particles.get_particles_vel()[..., 0], n_runs_active * N_STEPS * DT, tol=tol)
 
 
 @pytest.mark.required
@@ -367,6 +402,6 @@ def test_force_field_direction(n_envs, tol):
 
     # A zero or non-finite direction points nowhere
     for force_field_type in (gs.force_fields.Constant, gs.force_fields.Wind, gs.force_fields.Vortex):
-        for direction in ((0.0, 0.0, 0.0), (float("nan"), 0.0, 1.0)):
-            with pytest.raises(ValueError):
+        for direction in ((0.0, 0.0, 0.0), (float("nan"), 0.0, 1.0), (float("inf"), 0.0, 0.0)):
+            with pytest.raises(gs.GenesisException):
                 force_field_type(direction=direction)
