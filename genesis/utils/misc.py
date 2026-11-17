@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import field
 from importlib import import_module
 from itertools import combinations
-from typing import Any, NoReturn
+from typing import Any, NoReturn, TypeVar, get_args, get_origin
 
 import numpy as np
 import torch
@@ -211,6 +211,21 @@ def assert_initialized(cls):
 
     cls.__init__ = new_init
     return cls
+
+
+def get_generic_args(cls: type, generic_cls: type) -> tuple[Any, ...]:
+    """
+    Return the type arguments that a class gives to its first generic base deriving from a given class.
+
+    The bases are those written in the definition of `cls`, so that a class inherits no binding of its parents. Each
+    argument left as a type variable is None. The tuple is empty when no such base parameterizes a subclass of
+    `generic_cls`.
+    """
+    for base in cls.__dict__.get("__orig_bases__", ()):
+        origin = get_origin(base)
+        if origin is not None and issubclass(origin, generic_cls):
+            return tuple(None if isinstance(arg, TypeVar) else arg for arg in get_args(base))
+    return ()
 
 
 class BuildableMixin:

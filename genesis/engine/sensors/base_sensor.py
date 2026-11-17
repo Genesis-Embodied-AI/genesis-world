@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, ClassVar, Generic, NamedTuple, TypeVar, get_args, get_origin
+from typing import TYPE_CHECKING, ClassVar, Generic, NamedTuple, TypeVar
 
 import numpy as np
 import torch
@@ -17,6 +17,7 @@ from genesis.utils.misc import (
     BuildableMixin,
     broadcast_tensor,
     concat_with_tensor,
+    get_generic_args,
     make_tensor_field,
 )
 
@@ -203,19 +204,18 @@ class Sensor(BuildableMixin, RBC, Generic[OptionsT, SharedSensorContextT, Shared
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        for base in cls.__orig_bases__:
-            origin = get_origin(base)
-            if origin is not None and issubclass(origin, Sensor):
-                args = get_args(base)
-                if len(args) >= 1 and not isinstance(args[0], TypeVar):
-                    cls._options_cls = args[0]
-                if len(args) >= 2 and not isinstance(args[1], TypeVar):
-                    cls._shared_context_cls = args[1]
-                if len(args) >= 3 and not isinstance(args[2], TypeVar):
-                    cls._metadata_cls = args[2]
-                if len(args) >= 4 and not isinstance(args[3], TypeVar):
-                    cls._return_data_cls = args[3]
-                break
+        generic_args = get_generic_args(cls, Sensor)
+        options_cls, shared_context_cls, metadata_cls, return_data_cls = generic_args + (None,) * (
+            4 - len(generic_args)
+        )
+        if options_cls is not None:
+            cls._options_cls = options_cls
+        if shared_context_cls is not None:
+            cls._shared_context_cls = shared_context_cls
+        if metadata_cls is not None:
+            cls._metadata_cls = metadata_cls
+        if return_data_cls is not None:
+            cls._return_data_cls = return_data_cls
         # Strict contract: overriding `_post_process` requires overriding `_get_intermediate_format` and/or
         # `_get_intermediate_dtype`. The intermediate buffer must be a distinct buffer regardless of whether its
         # shape/dtype happen to coincide with the return space (the timeline ring is in intermediate space; mixing data
