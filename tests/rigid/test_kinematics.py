@@ -372,26 +372,38 @@ def test_inverse_kinematics_multilink(show_viewer, tol):
     assert_allclose(middle_finger_distal.get_pos(envs_idx=(1,)), middle_finger_pos, tol=tol)
     assert_allclose(wrist.get_pos(envs_idx=(1,)), wrist_pos, tol=tol)
 
-    # A fingertip pose reached by the joints of its finger alone, fewer than the six components of its error
-    index_finger_dofs_idx = [robot.get_joint(f"index_finger_joint{i}").dofs_idx_local[0] for i in range(1, 5)]
-    robot.set_dofs_position((0.1, 0.4, 0.4, 0.3), dofs_idx_local=index_finger_dofs_idx, envs_idx=(0,))
-    index_finger_pos = index_finger_distal.get_pos(envs_idx=(0,))
-    index_finger_quat = index_finger_distal.get_quat(envs_idx=(0,))
-    robot.set_dofs_position((0.0, 0.0, 0.0, 0.0), dofs_idx_local=index_finger_dofs_idx, envs_idx=(0,))
+
+@pytest.mark.required
+def test_inverse_kinematics_dofs_subset(show_viewer, tol):
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+    )
+    robot = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        ),
+    )
+    scene.build(n_envs=2)
+    hand = robot.get_link("hand")
+
+    # A hand pose reached by four joints of the arm alone, fewer than the six components of its error
+    dofs_idx_local = [1, 3, 5, 6]
+    robot.set_dofs_position((0.3, -1.8, 1.6, 0.4), dofs_idx_local=dofs_idx_local)
+    hand_pos, hand_quat = hand.get_pos(), hand.get_quat()
+    robot.set_dofs_position((0.0, -1.5, 1.2, 0.0), dofs_idx_local=dofs_idx_local)
     qpos, err = robot.inverse_kinematics(
-        link=index_finger_distal,
-        pos=index_finger_pos,
-        quat=index_finger_quat,
+        link=hand,
+        pos=hand_pos,
+        quat=hand_quat,
         pos_tol=tol,
         rot_tol=tol,
         max_solver_iters=100,
-        dofs_idx_local=index_finger_dofs_idx,
+        dofs_idx_local=dofs_idx_local,
         return_error=True,
-        envs_idx=(0,),
     )
     assert_allclose(err, 0.0, atol=tol)
-    robot.set_qpos(qpos, envs_idx=(0,))
-    assert_allclose(index_finger_distal.get_pos(envs_idx=(0,)), index_finger_pos, tol=tol)
+    robot.set_qpos(qpos)
+    assert_allclose(hand.get_pos(), hand_pos, tol=tol)
 
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])

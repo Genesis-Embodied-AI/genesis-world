@@ -1290,8 +1290,8 @@ class KinematicSolver(Solver):
         if n_links > n_tgts:
             gs.raise_exception(f"Cannot solve for {n_links} targets. Raise 'IK_max_targets' above {n_tgts}.")
 
-        # The damped normal matrix of inverse kinematics is quadratic in RigidOptions.IK_max_targets, so the scratch is
-        # allocated by the first solve and a scene that never solves inverse kinematics allocates none of it
+        # The scratch of inverse kinematics grows with RigidOptions.IK_max_targets, so it is allocated by the first solve
+        # and a scene that never solves inverse kinematics allocates none of it
         if self._ik_scratch is None:
             entities = self.entities
             entity_dofs = max([entity.n_dofs for entity in entities], default=0)
