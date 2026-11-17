@@ -45,6 +45,8 @@ class MPMEntity(ParticleEntity):
         Particle size for discretization.
     idx : int
         Unique index of the entity.
+    material_idx : int
+        Index of the material of the entity among the distinct materials of the solver.
     particle_start : int
         Starting particle index.
     vvert_start : int
@@ -60,11 +62,13 @@ class MPMEntity(ParticleEntity):
         surface: Surface,
         particle_size: float,
         idx: int,
+        material_idx: int,
         particle_start: int,
         vvert_start: int,
         vface_start: int,
         spec: "gs.entities.MPM",
     ) -> None:
+        self._material_idx = material_idx
         need_skinning = not isinstance(
             spec.material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
         )
@@ -87,7 +91,7 @@ class MPMEntity(ParticleEntity):
             self.set_muscle_group(self.mesh_set_group_ids)
 
     def _add_particles_to_solver(self):
-        self._solver.add_particles(self.active, self._particle_start, self.material, self._particles)
+        self._solver.add_particles(self.active, self._particle_start, self._material_idx, self._particles)
 
     # ------------------------------------------------------------------------------------
     # ---------------------------------- io & control ------------------------------------

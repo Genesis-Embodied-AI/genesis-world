@@ -40,6 +40,7 @@ from genesis.utils.sdf import SDFInfo
 from genesis.utils.simt import requires_deterministic_accumulation
 
 from .base_solver import ErrorCode, kernel_set_actu
+from .mpm_material_physics import MPMMaterialPhysics
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
@@ -301,13 +302,13 @@ class MPMData(Data):
 @qd.data_oriented
 class MPMMaterials:
     """
-    The distinct materials of the material point method (MPM) entities.
+    The constitutive models of the distinct materials of the material point method (MPM) entities.
 
     The kernels dispatch the particles to them by material index.
     """
 
-    def __init__(self, materials: tuple[MPM.Base, ...]) -> None:
-        self.materials = materials
+    def __init__(self, materials_physics: tuple[MPMMaterialPhysics, ...]) -> None:
+        self.materials_physics = materials_physics
 
     @qd.func
     def update_F_S_Jp(
@@ -324,14 +325,14 @@ class MPMMaterials:
         """
         Return the deformation gradient, its singular values and the plastic volume ratio once plasticity applies.
 
-        The particle is of the material `i_mat`, the other arguments being those of 'MPM.Base.update_F_S_Jp'.
+        The particle is of the material `i_mat`, the other arguments being those of 'MPMMaterialPhysics.update_F_S_Jp'.
         """
         F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         Jp_new = gs.qd_float(1.0)
-        for j_mat in qd.static(range(len(self.materials))):
+        for j_mat in qd.static(range(len(self.materials_physics))):
             if i_mat == j_mat:
-                F_new, S_new, Jp_new = self.materials[j_mat].update_F_S_Jp(J, F_tmp, U, S, V, Jp, eps)
+                F_new, S_new, Jp_new = self.materials_physics[j_mat].update_F_S_Jp(J, F_tmp, U, S, V, Jp, eps)
         return F_new, S_new, Jp_new
 
     @qd.func
@@ -349,14 +350,14 @@ class MPMMaterials:
         m_dir: qd.types.vector(3),
     ):
         """
-        Return the stress of a particle (see 'MPM.Base.update_stress').
+        Return the stress of a particle (see 'MPMMaterialPhysics.update_stress').
 
         The particle is of the material `i_mat`.
         """
         stress = qd.Matrix.zero(gs.qd_float, 3, 3)
-        for j_mat in qd.static(range(len(self.materials))):
+        for j_mat in qd.static(range(len(self.materials_physics))):
             if i_mat == j_mat:
-                stress = self.materials[j_mat].update_stress(U, S, V, F_tmp, F_new, J, Jp, actu, m_dir)
+                stress = self.materials_physics[j_mat].update_stress(U, S, V, F_tmp, F_new, J, Jp, actu, m_dir)
         return stress
 
 
@@ -403,8 +404,9 @@ class MPMSolver(ParticleSolver):
 Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upper_bound'."""
             )
 
-        # The distinct materials of the entities, each one dispatched to by its index (see 'add_material')
-        self._materials: list[MPM.Base] = []
+        # The constitutive models of the distinct materials of the entities, each one dispatched to by its index (see
+        # 'add_material')
+        self._materials_physics: list[MPMMaterialPhysics] = []
 
         # The particles stay a few cells away from the walls, where the stencil of a particle reaches outside the grid
         self.boundary_padding = 3 * self._dx
@@ -430,12 +432,12 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         # deformation gradient, which spares the singular value decomposition. The backward pass reverses it alone.
         # TODO: validate the J = det(F_tmp) shortcut composes with quadrants autograd before enabling it there.
         self.mpm_config = MPMConfig(
-            is_svd_needed=self._requires_grad or any([material.needs_svd for material in self._materials]),
+            is_svd_needed=self._requires_grad or any([physics.needs_svd for physics in self._materials_physics]),
             requires_grad=self._requires_grad,
             is_cpic=self._enable_CPIC and self._sim.rigid_solver.is_active,
             is_deterministic=requires_deterministic_accumulation(),
         )
-        self._mpm_materials = MPMMaterials(tuple(self._materials))
+        self._mpm_materials = MPMMaterials(tuple(self._materials_physics))
 
         self.data_manager = MPMData(self)
         self.mpm_state = self.data_manager.mpm_state
@@ -490,7 +492,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
         spec: "gs.entities.MPM",
         desc: "EntityDescription | None" = None,
     ) -> "MPMEntity":
-        self.add_material(spec.material)
+        material_idx = self.add_material(spec.material)
 
         entity = MPMEntity(
             scene=self._sim.scene,
@@ -498,6 +500,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
             surface=surface,
             particle_size=self._particle_size,
             idx=idx,
+            material_idx=material_idx,
             particle_start=self.n_particles,
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
@@ -509,26 +512,26 @@ Please decrease the simulation timestep or adjust the material parameters."""
         self._n_vfaces += entity.n_vfaces
         return entity
 
-    def add_material(self, material: MPM.Base) -> None:
-        """Give a material its index among the distinct materials of the solver, registering it unless one equals it.
+    def add_material(self, material: MPM.Base) -> int:
+        """Return the index of a material among the distinct materials of the solver, registering it if none equals it.
 
         A material equal to one already registered shares its index, and so the branches of the kernels it compiles.
         """
-        for material_registered in self._materials:
-            if material == material_registered:
-                material.idx = material_registered.idx
-                return
-        material.idx = len(self._materials)
-        self._materials.append(material)
+        for material_idx, physics in enumerate(self._materials_physics):
+            if material == physics.material:
+                return material_idx
+        self._materials_physics.append(MPMMaterialPhysics.from_material(material))
+        return len(self._materials_physics) - 1
 
-    def add_particles(self, is_active: bool, particle_start: int, material: MPM.Base, pos: np.ndarray) -> None:
+    def add_particles(self, is_active: bool, particle_start: int, material_idx: int, pos: np.ndarray) -> None:
         """Add the particles of an entity at rest, with the parameters of its material, between two steps."""
+        physics = self._materials_physics[material_idx]
         kernel_add_particles(
             particle_start,
-            material.idx,
+            material_idx,
             is_active,
-            material._default_Jp,
-            material.rho,
+            physics.default_Jp,
+            physics.material.rho,
             pos,
             self.mpm_state,
             self.mpm_info,

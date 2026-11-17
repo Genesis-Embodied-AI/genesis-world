@@ -1,12 +1,10 @@
 import re
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any
 
-import quadrants as qd
-from pydantic import BeforeValidator, Field, PrivateAttr
+from pydantic import BeforeValidator, Field
 from pydantic_core import PydanticCustomError
 
-import genesis as gs
-from genesis.typing import PositiveFloat, StrictInt, ValidFloat
+from genesis.typing import PositiveFloat, ValidFloat
 
 from ..base import Material
 
@@ -29,7 +27,6 @@ def _validate_sampler(v: str) -> str:
 SamplerType = Annotated[str, BeforeValidator(_validate_sampler)]
 
 
-@qd.data_oriented
 class Base(Material["MPMEntity"]):
     """
     The base class of MPM materials.
@@ -63,39 +60,8 @@ class Base(Material["MPMEntity"]):
     mu: ValidFloat | None = None
     sampler: SamplerType = "pbs"
 
-    # Dispatch fields - set by subclass model_post_init, not user-specified. needs_svd flips the solver's forward-mode
-    # SVD kernel off when no material in the scene reads U/V/S from SVD(F_tmp) (e.g. non-viscous liquid, neohooken
-    # elastic).
-    update_F_S_Jp: Any = Field(default=None, exclude=True, repr=False)
-    update_stress: Any = Field(default=None, exclude=True, repr=False)
-    needs_svd: bool = Field(default=True, exclude=True, repr=False)
-
-    # Auto-generated fields.
-    idx: StrictInt | None = Field(default=None, exclude=True)
-
-    # Internal solver state - does not belong in an options class, kept pending larger refactor.
-    _default_Jp: float = PrivateAttr(default=1.0)
-
     def model_post_init(self, context: Any) -> None:
-        # Resolve Lame parameters
         if self.mu is None:
             self.mu = self.E / (2.0 * (1.0 + self.nu))
         if self.lam is None:
             self.lam = self.E * self.nu / ((1.0 + self.nu) * (1.0 - 2.0 * self.nu))
-
-        # Set dispatch defaults
-        if self.update_F_S_Jp is None:
-            self.update_F_S_Jp = self._update_F_S_Jp_noop
-        if self.update_stress is None:
-            self.update_stress = self._update_stress_default
-
-    @qd.func
-    def _update_F_S_Jp_noop(self, J, F_tmp, U, S, V, Jp, eps):
-        raise NotImplementedError
-
-    @qd.func
-    def _update_stress_default(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-        stress = 2 * self.mu * (F_new - U @ V.transpose()) @ F_new.transpose() + qd.Matrix.identity(
-            gs.qd_float, 3
-        ) * self.lam * J * (J - 1)
-        return stress
