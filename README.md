@@ -37,6 +37,8 @@ Genesis World occupies the four layers inside the dashed box. Above sits whateve
 - **Render** — three rendering paths plug in as camera sensors: **[Nyx](https://github.com/Genesis-Embodied-AI/genesis-nyx)** (our in-house renderer designed for robotics), Luisa (DSL ray tracer), and Pyrender (rasterizer).
 - **Compiler** — **[Quadrants](https://github.com/Genesis-Embodied-AI/quadrants)** lowers Python kernel code to CUDA, AMD ROCm, Apple Metal, Vulkan, x86, and ARM64. It carries Genesis's autodiff, GPU graphs, and fastcache machinery.
 
+**[Eden](https://github.com/embodied-ai-nexus/Eden)** is one example of the application layer: a robot-learning framework built on Genesis World.
+
 ### Documentation
 - [Genesis World](https://genesis-world.readthedocs.io/en/latest/)
 - [Quadrants](https://genesis-embodied-ai.github.io/quadrants/index.html)
