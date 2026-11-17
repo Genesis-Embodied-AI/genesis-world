@@ -72,15 +72,13 @@ class MPMMaterialPhysics[MaterialT: MPM.Base](MaterialPhysics[MaterialT]):
 
     PHYSICS_TYPES_MAP: ClassVar[dict[type[MPM.Base], type["MPMMaterialPhysics"]]] = {}
 
+    # The plastic volume ratio of a particle at rest
+    default_Jp: ClassVar[float] = 1.0
+
     @property
     def needs_svd(self) -> bool:
         """Whether the model reads the singular value decomposition U, S, V of the advected deformation gradient."""
         return True
-
-    @property
-    def default_Jp(self) -> float:
-        """The plastic volume ratio of a particle at rest."""
-        return 1.0
 
     @qd.func
     def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
@@ -207,15 +205,13 @@ class LiquidPhysics(MPMMaterialPhysics[MPM.Liquid]):
 
 
 class SandPhysics(MPMMaterialPhysics[MPM.Sand]):
+    # The plastic volume ratio of the sand stores the volume correction of its projection, none at rest
+    default_Jp: ClassVar[float] = 0.0
+
     def __init__(self, material: MPM.Sand) -> None:
         super().__init__(material)
         sin_phi = math.sin(math.radians(material.friction_angle))
         self.alpha = math.sqrt(2 / 3) * 2 * sin_phi / (3 - sin_phi)
-
-    @property
-    def default_Jp(self) -> float:
-        # The plastic volume ratio of the sand stores the volume correction of its projection, none at rest
-        return 0.0
 
     @qd.func
     def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
