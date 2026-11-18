@@ -724,10 +724,8 @@ def test_urdf_capsule(tmp_path, show_viewer, tol):
 @pytest.mark.parametrize("model_name", ["pendulum_with_joint_dynamics", "joint_with_partial_dynamics"])
 @pytest.mark.parametrize("joint_damping, joint_friction", [(1.0, 2.0), (1.0, None), (None, 2.0)])
 def test_urdf_joint_dynamics(joint_damping, joint_friction, model_name, xml_path):
-    # A <dynamics> tag authoring only one of damping/friction leaves the other one unset. It must fall back to zero
-    # like an absent tag rather than reaching the solver as a null value. Likewise, a <limit> tag authoring no effort
-    # leaves the actuation force unbounded, a zero effort bounds it to zero, and a negative effort bounds it by its
-    # absolute value.
+    # A <dynamics> tag authoring only one of damping/friction leaves the other at zero. A <limit> tag authoring no
+    # effort leaves the force unbounded, a zero effort bounds it to zero, and a negative effort by its absolute value.
     scene = gs.Scene()
     robot = scene.add_entity(
         gs.morphs.URDF(
