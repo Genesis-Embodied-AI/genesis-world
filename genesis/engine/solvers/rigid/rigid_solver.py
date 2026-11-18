@@ -2553,13 +2553,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # Zeroing the velocity marks a jump of the pose, such as the reset of an episode, which restarts the integral term
         # of the controller (see func_ctrl_force_int_next)
         if velocity is None and gs.use_zerocopy:
-            mask = (
-                (0, *indices_to_mask(dofs_idx))
-                if self.n_envs == 0
-                else indices_to_mask(envs_idx, dofs_idx, boolean_mask=False)
-            )
+            mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_force_int = qd_to_torch(self.dyn_state.dofs.ctrl_force_int, transpose=True, copy=False)
-            ctrl_force_int[mask] = 0.0
+            assign_indexed_tensor(ctrl_force_int, mask, value=0.0)
         is_force_int_cleared_by_kernel = velocity is None and not gs.use_zerocopy
         # Wake the owning entities before delegating to the base setter, which re-sanitizes and applies the write.
         if self._use_hibernation or is_force_int_cleared_by_kernel:

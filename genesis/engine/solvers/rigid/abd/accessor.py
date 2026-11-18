@@ -528,7 +528,7 @@ def kernel_set_dofs_act_ki(
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     if qd.static(rigid_config.batch_dofs_info):
-        for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0]):
+        for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_info.dofs.act_ki))):
             dyn_info.dofs.act_ki[dofs_idx[i_d_], envs_idx[i_b_]] = ki[i_b_, i_d_]
     else:
         for i_d_ in range(dofs_idx.shape[0]):
