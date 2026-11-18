@@ -706,12 +706,13 @@ class _LinkAttachedSensorMixin(BuildableMixin):
         raise NotImplementedError
 
 
-class OffsettableSensorMixin:
+class OffsettableSensorMixin(BuildableMixin):
     """
     Sensor mixin for sensors mounted on their link at a fixed pose, adjustable after build through
     ``set_{pos,quat}_offset``.
     """
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
