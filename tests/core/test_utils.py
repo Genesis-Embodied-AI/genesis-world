@@ -459,6 +459,12 @@ def test_geom_tensor_identity(batch_shape, tol):
     R_true = Rotation.from_rotvec([0.0, 0.0, -3.0]).as_matrix()
     assert_allclose(gu.axis_angle_to_R(np.array([0.0, 0.0, 1.0], dtype=gs.np_float), -3), R_true, tol=tol)
 
+    trans = np.random.randn(*batch_shape, 3).astype(gs.np_float)
+    T = gu.trans_R_to_T(trans, gu.rotvec_to_R(rotvec.astype(gs.np_float)))
+    T_inv_true = np.linalg.inv(T)
+    assert_allclose(gu.inv_T(T), T_inv_true, tol=tol)
+    assert_allclose(gu.inv_T(torch.as_tensor(T, dtype=gs.tc_float, device=gs.device)), T_inv_true, tol=tol)
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
