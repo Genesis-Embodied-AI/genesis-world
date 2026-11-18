@@ -1115,6 +1115,11 @@ class RenderContext:
         for record in records:
             for shape in record.views_shapes[view]:
                 if isinstance(shape, Points) and shape.is_surface and reconstruct_surfaces:
+                    # Reconstruction runs on the host per environment, so a surface no view draws is skipped. A shape
+                    # stating no reads is drawn by every read (see 'Shape.reads').
+                    reads = shape.reads
+                    if reads is not None and not (reads.debug if view == DEBUG else reads.normal).any():
+                        continue
                     reconstructed = record.reconstructed.get(shape)
                     if reconstructed is None:
                         reconstructed = record.reconstructed[shape] = record.scoped_context.reconstruct(shape)
@@ -1143,13 +1148,10 @@ class RenderContext:
             reconstructed from particles and the detection of torn meshes included. A shape spans its own environments
             (see 'Shape.envs_idx'), a renderer reading the rows of the environments it draws. Defaults to None.
         debug : bool
-            False returns the entities as the scene looks, which the structure of their material decides (see
-            ``Material.structure``), every part of each shape being drawn. True returns them as the debug views show
-            them: each entity in its debug representation (see ``EntityVisOptions.debug_vis_mode``), the collision
-            geometry of a rigid entity, the particles of a particle-based one, the tetrahedra of an FEM one, or as it
-            looks, as its scoped context or else the render context asks (see 'set_debug'). Every shape some part of
-            which may take part in the debug views is then returned, whatever the debug state, its reads telling which
-            of its parts are drawn (see 'Shape.reads').
+            False returns the entities as the scene looks (see ``Material.structure``). True returns them as the debug
+            views show them, each in its debug representation (see ``EntityVisOptions.debug_vis_mode``) or as it looks
+            (see 'set_debug'). Every shape that may take part in the debug views is then returned, its reads telling
+            which parts are drawn (see 'Shape.reads'), but a surface reconstructed from particles only while drawn.
         reconstruct_surfaces : bool, optional
             False for a consumer reconstructing the surfaces of the entities itself: wherever a surface reconstructed
             from the particles of an entity would be returned (an amorphous entity, or a torn body in the environments

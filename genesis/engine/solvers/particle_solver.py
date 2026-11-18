@@ -453,14 +453,27 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
         return select_view_shapes((*self._shapes, *self._surfaces_points), view)
 
     def reconstruct(self, points: Points) -> tuple[DynamicMesh, ...]:
-        particles_pos = tensor_to_array(points.pos)
-        particles_is_active = tensor_to_array(points.is_active, dtype=np.bool_)
+        solver = self.owner
+        # The particles the boundary clamps onto one of its edges or corners crowd along a line or onto a single point,
+        # all neighbours of each other, which makes the time and memory of a reconstruction grow with the square of
+        # their number. They are left out, the particles resting against a single wall staying in.
+        boundary = torch.as_tensor(
+            np.stack((solver.boundary_lower, solver.boundary_upper)), dtype=gs.tc_float, device=gs.device
+        )
+        particles_n_clamped_axes = (
+            torch.isclose(points.pos[..., None, :], boundary, rtol=gs.EPS, atol=gs.EPS).any(dim=-2).sum(dim=-1)
+        )
+        particles_is_kept = torch.logical_and(points.is_active, particles_n_clamped_axes < 2)
+        # The particles kept in every environment are selected on the device and copied at once, then split per
+        # environment on the host, which spares a synchronization and a copy per environment.
+        particles_pos = tensor_to_array(points.pos[particles_is_kept])
+        envs_n_kept = tensor_to_array(particles_is_kept.sum(dim=-1))
         meshes = []
-        for i_r in range(len(points.envs_idx)):
+        for i_r, positions in enumerate(np.split(particles_pos, np.cumsum(envs_n_kept)[:-1])):
             mesh = pu.particles_to_mesh(
-                positions=particles_pos[i_r][particles_is_active[i_r]],
-                radius=self.owner.particle_radius,
-                backend=self.owner.options.vis.recon_backend,
+                positions=positions,
+                radius=solver.particle_radius,
+                backend=solver.options.vis.recon_backend,
             )
             env_idx = points.envs_idx[i_r : i_r + 1]
             # The surface is reconstructed on the host, where the renderers drawing it read its vertices, so that its

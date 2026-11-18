@@ -958,8 +958,8 @@ def kernel_get_terrain_height(
             and col <= col_max + 1
         )
         if is_valid:
-            row = qd.min(qd.max(row, 0.0), qd.cast(row_max, gs.qd_float))
-            col = qd.min(qd.max(col, 0.0), qd.cast(col_max, gs.qd_float))
+            row = qd.math.clamp(row, 0.0, qd.cast(row_max, gs.qd_float))
+            col = qd.math.clamp(col, 0.0, qd.cast(col_max, gs.qd_float))
             i_row = qd.min(qd.cast(qd.floor(row), gs.qd_int), row_max - 1)
             i_col = qd.min(qd.cast(qd.floor(col), gs.qd_int), col_max - 1)
             frac_row = row - i_row
