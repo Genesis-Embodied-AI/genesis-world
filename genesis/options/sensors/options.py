@@ -162,24 +162,24 @@ class OffsettableSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMix
     euler_offset: Vec3FType = (0.0, 0.0, 0.0)
 
 
-class RigidSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMixin[SensorT]):
+class _RigidOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
+    def _validate(self, sim: "Simulator"):
+        from genesis.engine.entities import RigidEntity
+
+        super()._validate(sim)
+        if self.entity_idx >= 0 and not isinstance(sim.entities[self.entity_idx], RigidEntity):
+            gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
+
+
+class RigidSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMixin[SensorT], _RigidOptionsMixin[SensorT]):
     """
     Options for sensors mounted on one link of a RigidEntity (e.g. contact, contact force, IMU, tactile).
 
     Any sensor whose output depends on physics quantities (contact pairs, friction, inertial dynamics) belongs here.
     """
 
-    def _validate(self, sim: "Simulator"):
-        from genesis.engine.entities import RigidEntity
 
-        super()._validate(sim)
-        if self.entity_idx >= 0:
-            entity = sim.entities[self.entity_idx]
-            if not isinstance(entity, RigidEntity):
-                gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
-
-
-class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
+class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](_RigidOptionsMixin[SensorT]):
     """
     Options for a sensor that measures nothing without a RigidEntity.
 
@@ -189,13 +189,9 @@ class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
     """
 
     def _validate(self, sim: "Simulator"):
-        from genesis.engine.entities import RigidEntity
-
         super()._validate(sim)
         if self.entity_idx < 0:
             gs.raise_exception(f"{type(self).__name__} requires entity_idx >= 0, got {self.entity_idx}.")
-        if not isinstance(sim.entities[self.entity_idx], RigidEntity):
-            gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
 
 
 class ContactFilterOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[SensorT]):
