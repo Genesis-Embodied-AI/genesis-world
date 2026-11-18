@@ -1,0 +1,19 @@
+genesis/engine/sensors/base_sensor.py
+  s_f488fa7d2d33a0::t_83f60a71cdbc5a 709,715
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ef198daa2912d001601da996c495531a47e90869",
+  "prompts": {},
+  "sessions": {
+    "s_f488fa7d2d33a0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "90f17f1f-5870-4ca0-996f-34ad987064de",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
