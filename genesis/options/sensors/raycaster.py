@@ -205,23 +205,25 @@ class DepthCameraPattern(RaycastPattern):
     3. Provide fov_vertical only (fx computed to maintain aspect ratio)
     4. Provide both fov_horizontal and fov_vertical
 
-    A focal length given directly takes priority over its field of view. If cx or cy are not provided, they default to
-    the image center.
+    A focal length given directly takes priority over its field of view. A focal length that is neither given nor set by
+    its field of view equals the other one, so that the pixels are square. If cx or cy are not provided, they default
+    to the image center.
 
     Parameters
     ----------
     res: tuple[int, int]
         The resolution of the camera, specified as a tuple (width, height).
     fx : float | None
-        Focal length in x direction in pixels. Computed from fov_horizontal if None.
+        Focal length in x direction in pixels. Computed from fov_horizontal if None, or else equal to fy.
     fy : float | None
-        Focal length in y direction in pixels. Computed from fov_vertical if None.
+        Focal length in y direction in pixels. Computed from fov_vertical if None, or else equal to fx.
     cx : float | None
         Principal point x coordinate in pixels. Defaults to image center if None.
     cy : float | None
         Principal point y coordinate in pixels. Defaults to image center if None.
     fov_horizontal : float | None
-        Horizontal field of view in degrees. Used to compute fx if fx is None. Defaults to 90.0 if fov_vertical is None.
+        Horizontal field of view in degrees. Used to compute fx if fx is None. Defaults to 90.0 if no other intrinsic
+        sets a focal length.
     fov_vertical : float | None
         Vertical field of view in degrees. Used to compute fy if fy is None.
     """
@@ -241,23 +243,16 @@ class DepthCameraPattern(RaycastPattern):
         if self.width <= 0 or self.height <= 0:
             gs.raise_exception(f"[{type(self).__name__}] Image dimensions must be positive. Got: {res}")
 
-        if fov_horizontal is None and fov_vertical is None:
+        if fx is None and fy is None and fov_horizontal is None and fov_vertical is None:
             fov_horizontal = 90.0
-        if fx is None or fy is None:
-            # Calculate focal length
-            if fov_horizontal is not None and fov_vertical is None:
-                fh_rad = math.radians(fov_horizontal)
-                fv_rad = 2.0 * math.atan((self.height / self.width) * math.tan(fh_rad / 2.0))
-            elif fov_vertical is not None and fov_horizontal is None:
-                fv_rad = math.radians(fov_vertical)
-                fh_rad = 2.0 * math.atan((self.width / self.height) * math.tan(fv_rad / 2.0))
-            else:
-                fh_rad = math.radians(fov_horizontal)
-                fv_rad = math.radians(fov_vertical)
-            if fx is None:
-                fx = self.width / (2.0 * math.tan(fh_rad / 2.0))
-            if fy is None:
-                fy = self.height / (2.0 * math.tan(fv_rad / 2.0))
+        if fx is None and fov_horizontal is not None:
+            fx = self.width / (2.0 * math.tan(math.radians(fov_horizontal) / 2.0))
+        if fy is None and fov_vertical is not None:
+            fy = self.height / (2.0 * math.tan(math.radians(fov_vertical) / 2.0))
+        if fx is None:
+            fx = fy
+        if fy is None:
+            fy = fx
         if cx is None:
             cx = self.width * 0.5
         if cy is None:
