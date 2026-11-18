@@ -424,30 +424,7 @@ class BatchTexture(Texture):
         self.textures.extend(other.textures)
 
 
-class _ImagelessTexture(Texture):
-    """A texture holding no image at declaration, which the checks and simplifications of static textures keep as is."""
-
-    def check_dim(self, dim: int) -> Texture | None:
-        return None
-
-    def check_simplify(self) -> Self:
-        return self
-
-    def apply_cutoff(self, cutoff: float) -> None:
-        pass
-
-    @computed_field
-    @cached_property
-    def is_black(self) -> bool:
-        return False
-
-    @computed_field
-    @cached_property
-    def requires_uv(self) -> bool:
-        return True
-
-
-class DynamicTexture(_ImagelessTexture):
+class DynamicTexture(Texture):
     """
     A texture whose image changes while the simulation runs, such as a screen or an indicator light.
 
@@ -493,3 +470,23 @@ class DynamicTexture(_ImagelessTexture):
     is_batched: StrictBool = False
     # The texture the asset gives the map, which the entity resolves as it is added, None where it gives none
     _asset_texture: "ColorTexture | ImageTexture | None" = PrivateAttr(default=None)
+
+    # A dynamic texture holds no image at declaration, which the checks and simplifications of textures keep as is
+    def check_dim(self, dim: int) -> Texture | None:
+        return None
+
+    def check_simplify(self) -> Self:
+        return self
+
+    def apply_cutoff(self, cutoff: float) -> None:
+        pass
+
+    @computed_field
+    @cached_property
+    def is_black(self) -> bool:
+        return False
+
+    @computed_field
+    @cached_property
+    def requires_uv(self) -> bool:
+        return True
