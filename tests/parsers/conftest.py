@@ -413,7 +413,6 @@ def build_mjcf_scene(xml_path: str, scale: float):
 def build_usd_scene(
     usd_file: str,
     scale: float,
-    vis_mode: str = "collision",
     is_stage: bool = True,
     fixed: bool | None = None,
     show_viewer: bool = False,
@@ -440,7 +439,6 @@ def build_usd_scene(
         material=gs.materials.Rigid(
             rho=1000.0,
         ),
-        vis_mode=vis_mode,
     )
 
     # A stage is read as authored rather than through baked assets an earlier run left on disk

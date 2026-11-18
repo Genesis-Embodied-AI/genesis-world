@@ -1037,7 +1037,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
             is_debug = render_context.get_debug(entity)
             if is_debug is None:
                 is_debug = self.scene.sim.render_context.debug
-            has_debug = is_rigid and entity.surface.debug_vis_mode is not None and entity.n_geoms > 0
+            has_debug = is_rigid and entity.spec.vis.debug_vis_mode is not None and entity.n_geoms > 0
             if imgui.begin_combo(f"View##view_{entity_idx}", "debug" if is_debug else "as it looks"):
                 for label, is_label_debug in (("as it looks", False), ("debug", True)):
                     is_disabled = is_label_debug and not has_debug

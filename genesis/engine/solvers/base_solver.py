@@ -723,6 +723,9 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
                 ),
             }
         self.render_context = self._sim.render_context.register(self, is_empty=not self.is_active)
+        for entity in self._entities:
+            if entity.spec.vis.debug is not None:
+                self.render_context.set_debug(entity, entity.spec.vis.debug)
 
     def destroy(self) -> None:
         for entity in self._entities:

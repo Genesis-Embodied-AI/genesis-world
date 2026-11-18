@@ -91,15 +91,8 @@ class Surface(Options):
     vis_mode : str | None, optional
         Deprecated: the material decides how the entity is drawn outside of the debug view, as a mesh ('visual') or as
         the surface reconstructed from its particles ('recon'). This field accepts that value, or a debug
-        representation of the entity (see ``debug_vis_mode``), which then shows the entity in every view, debug or
-        not. Use ``debug_vis_mode`` with ``VisOptions(debug=True)`` instead.
-    debug_vis_mode : str | None, optional
-        How the entity is drawn in the debug view of the scene (see ``VisOptions.debug``), showing what the simulation
-        sees: 'collision' (the collision geoms of a rigid entity) or 'sdf' (the surface of the signed distance field of
-        its collision geoms, valid when the physics of the scene loads these fields), 'particle' (the particles of an
-        entity of the MPM, SPH or PBD solver), 'tet' (the surface of the tetrahedra of an FEM entity). None takes the
-        first of these the kind of entity accepts. A kinematic entity has no debug representation, which the debug view
-        leaves out, and refuses this field. Defaults to None.
+        representation of the entity (see ``gs.options.EntityVisOptions``), which then shows the entity in every view,
+        debug or not. Set the ``vis`` options of the entity spec instead.
     smooth : bool, optional
         Whether to smooth face normals by interpolating vertex normals.
     double_sided : bool | None, optional
@@ -130,7 +123,6 @@ class Surface(Options):
     ior: float | None = None
     default_roughness: UnitInterval = 1.0
     vis_mode: Literal["visual", "collision", "particle", "sdf", "recon"] | None = None
-    debug_vis_mode: Literal["collision", "particle", "sdf", "tet"] | None = None
     smooth: StrictBool = True
     double_sided: StrictBool | None = None
     cutoff: float = 180.0

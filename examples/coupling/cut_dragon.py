@@ -20,9 +20,9 @@ def main():
             enable_CPIC=True,
             lower_bound=(-1.0, -1.0, -0.01),
             upper_bound=(1.0, 1.0, 2.0),
-        ),
-        vis_options=gs.options.VisOptions(
-            visualize_mpm_boundary=True,
+            vis=gs.options.ParticleVisOptions(
+                boundary=True,
+            ),
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.2, 0.9, 3.5),
@@ -51,18 +51,22 @@ def main():
         surface=gs.surfaces.Iron(),
     )
     dragon = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/dragon/dragon.obj",
-            scale=0.007,
-            euler=(0, 0, 90),
-            pos=(0.3, -0.0, 1.3),
-        ),
-        material=gs.materials.MPM.Elastic(
-            sampler="pbs-64",
-        ),
-        surface=gs.surfaces.Rough(
-            color=(0.6, 1.0, 0.8, 1.0),
-            vis_mode="particle",
+        spec=gs.entities.MPM(
+            morph=gs.morphs.Mesh(
+                file="meshes/dragon/dragon.obj",
+                scale=0.007,
+                euler=(0, 0, 90),
+                pos=(0.3, -0.0, 1.3),
+            ),
+            material=gs.materials.MPM.Elastic(
+                sampler="pbs-64",
+            ),
+            surface=gs.surfaces.Rough(
+                color=(0.6, 1.0, 0.8, 1.0),
+            ),
+            vis=gs.options.EntityVisOptions(
+                debug=True,
+            ),
         ),
     )
     scene.build(n_envs=0)

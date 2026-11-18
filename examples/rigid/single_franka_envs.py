@@ -16,9 +16,13 @@ def main():
     gs.init(backend=gs.gpu if args.gpu else gs.cpu)
 
     scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            vis=gs.options.RigidVisOptions(
+                link_frames=True,
+            ),
+        ),
         vis_options=gs.options.VisOptions(
             show_world_frame=True,
-            show_link_frame=True,
             plane_reflection=True,
             split_envs=args.sep,
             rendered_envs_idx=list(range(args.num_envs)),

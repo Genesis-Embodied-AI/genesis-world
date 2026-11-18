@@ -430,22 +430,24 @@ class Scene(BuildableMixin, RBC):
         if surface.double_sided is None:
             surface.double_sided = isinstance(material, (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth))
 
-        # The material decides how the entity is drawn (see 'Material.structure'). The debug representation of the
-        # entity resolves here (see 'Spec._check_surface'), the parts of a hybrid entity resolving their own. A
-        # deprecated 'vis_mode' naming a debug representation stays on the surface, the scoped contexts showing the
-        # entity in that representation in the scene as it looks too, and is cleared otherwise.
+        # The material decides how the entity is drawn (see 'Material.structure'). How the debug view draws the entity
+        # resolves here on a copy of its vis options (see 'Spec._check_vis'), the parts of a hybrid entity resolving
+        # their own. A deprecated 'vis_mode' naming a debug representation stays on the surface, the scoped contexts
+        # showing the entity in that representation in the scene as it looks too, and is cleared otherwise.
+        vis = gs.options.EntityVisOptions() if spec.vis is None else spec.vis.model_copy()
         if surface.vis_mode is not None:
             if surface.vis_mode in spec._debug_vis_modes:
                 # The default debug representation of the entity needs no 'debug_vis_mode'
-                migration = "Enable"
+                vis_repr = "debug=True"
                 if surface.vis_mode != spec._debug_vis_modes[0]:
-                    migration = f"Set 'debug_vis_mode=\"{surface.vis_mode}\"' on the surface instead, and enable"
+                    vis_repr = f'debug=True, debug_vis_mode="{surface.vis_mode}"'
                 warn_once(
                     self,
-                    f"'vis_mode=\"{surface.vis_mode}\"' is deprecated. {migration} the debug view with "
-                    "'gs.options.VisOptions(debug=True)', which the interactive viewer and the debug cameras show.",
+                    f"'vis_mode=\"{surface.vis_mode}\"' is deprecated. Set "
+                    f"'vis=gs.options.EntityVisOptions({vis_repr})' on the entity spec instead, which the interactive "
+                    "viewer and the debug cameras show.",
                 )
-                surface.debug_vis_mode = surface.vis_mode
+                vis.debug_vis_mode = surface.vis_mode
             else:
                 warn_once(
                     self,
@@ -453,8 +455,9 @@ class Scene(BuildableMixin, RBC):
                     "an entity is drawn.",
                 )
                 surface.vis_mode = None
-        if not isinstance(spec, gs.entities.Hybrid) and surface.debug_vis_mode is None and spec._debug_vis_modes:
-            surface.debug_vis_mode = spec._debug_vis_modes[0]
+        if not isinstance(spec, gs.entities.Hybrid) and vis.debug_vis_mode is None and spec._debug_vis_modes:
+            vis.debug_vis_mode = spec._debug_vis_modes[0]
+        spec = spec._frozen_copy(update={"vis": vis})
 
         return self._sim.add_entity(surface, spec)
 

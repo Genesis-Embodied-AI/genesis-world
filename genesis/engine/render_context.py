@@ -560,7 +560,7 @@ class ScopedRenderContext(Generic[OwnerT]):
     """
 
     debug_vis_modes: ClassVar[tuple[str, ...]] = ()
-    """The debug representations the scoped context draws its entities in (see ``Surface.debug_vis_mode``)."""
+    """The debug representations the scoped context draws its entities in (see ``EntityVisOptions.debug_vis_mode``)."""
 
     stale_on: ClassVar[frozenset[StateChange]] = frozenset((StateChange.GEOMETRY,))
     """The changes of state of a source that make the shapes and markers stale, which the next read refreshes. A step
@@ -697,7 +697,7 @@ class ScopedRenderContext(Generic[OwnerT]):
         The shapes keep their identity: their parts state what they draw (see 'Shape.roles'), from which the render
         context writes the reads holding each part (see 'Shape.reads').
         """
-        if debug is not None and entity.surface.debug_vis_mode is None:
+        if debug is not None and entity.spec.vis.debug_vis_mode is None:
             gs.raise_exception(f"Entity '{entity.name}' has no debug representation.")
         if debug is None:
             self._entities_debug.pop(entity.idx, None)
@@ -1145,11 +1145,11 @@ class RenderContext:
         debug : bool
             False returns the entities as the scene looks, which the structure of their material decides (see
             ``Material.structure``), every part of each shape being drawn. True returns them as the debug views show
-            them: each entity in its debug representation (see ``Surface.debug_vis_mode``), the collision geometry of a
-            rigid entity, the particles of a particle-based one, the tetrahedra of an FEM one, or as it looks, as its
-            scoped context or else the render context asks (see 'set_debug'). Every shape some part of which may take
-            part in the debug views is then returned, whatever the debug state, its reads telling which of its parts are
-            drawn (see 'Shape.reads').
+            them: each entity in its debug representation (see ``EntityVisOptions.debug_vis_mode``), the collision
+            geometry of a rigid entity, the particles of a particle-based one, the tetrahedra of an FEM one, or as it
+            looks, as its scoped context or else the render context asks (see 'set_debug'). Every shape some part of
+            which may take part in the debug views is then returned, whatever the debug state, its reads telling which
+            of its parts are drawn (see 'Shape.reads').
         reconstruct_surfaces : bool, optional
             False for a consumer reconstructing the surfaces of the entities itself: wherever a surface reconstructed
             from the particles of an entity would be returned (an amorphous entity, or a torn body in the environments

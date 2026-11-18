@@ -111,16 +111,20 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
         ),
     )
     liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.65),
-            size=(0.4, 0.4, 0.4),
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="random",
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.4, 0.8, 1.0),
-            vis_mode="particle",
+        spec=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.65),
+                size=(0.4, 0.4, 0.4),
+            ),
+            material=gs.materials.SPH.Liquid(
+                sampler="random",
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.4, 0.8, 1.0),
+            ),
+            vis=gs.options.EntityVisOptions(
+                debug=True,
+            ),
         ),
     )
     scene.build(n_envs=4, env_spacing=(2.0, 2.0))
@@ -224,7 +228,6 @@ def test_deformable_uv_textures(renderer_type, renderer, show_viewer, png_snapsh
         ),
         material=gs.materials.PBD.Cloth(),
         surface=gs.surfaces.Default(
-            vis_mode="visual",
             diffuse_texture=gs.textures.ImageTexture(
                 image_path="textures/checker.png",
             ),
@@ -243,7 +246,6 @@ def test_deformable_uv_textures(renderer_type, renderer, show_viewer, png_snapsh
             nu=0.4,
         ),
         surface=gs.surfaces.Default(
-            vis_mode="visual",
             diffuse_texture=gs.textures.ImageTexture(
                 image_path="textures/checker.png",
             ),

@@ -28,7 +28,6 @@ scene = gs.Scene(
     ),
     vis_options=gs.options.VisOptions(
         show_world_frame=True,
-        visualize_mpm_boundary=False,
     ),
     viewer_options=gs.options.ViewerOptions(
         camera_pos=(1.5, 1.3, 0.5),

@@ -1450,9 +1450,13 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
     BLUR_OFFSCREEN = 3
 
     scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            vis=gs.options.RigidVisOptions(
+                link_frames=True,
+            ),
+        ),
         vis_options=gs.options.VisOptions(
             show_world_frame=True,
-            show_link_frame=True,
             # Disable shadows systematically for Rasterizer because they are forcibly disabled on CPU backend anyway
             shadow=False,
             split_envs=True,

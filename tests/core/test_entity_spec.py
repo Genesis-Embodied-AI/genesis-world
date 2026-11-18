@@ -315,7 +315,7 @@ def test_entity_spec(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_free_
         gs.Scene().add_entity(gs.morphs.Sphere(), material=gs.materials.FEM.Elastic(), visualize_contact=True)
 
     with pytest.raises(gs.GenesisException, match="in the debug view as one of"):
-        gs.entities.SPH(morph=gs.morphs.Sphere(), surface=gs.surfaces.Default(debug_vis_mode="collision"))
+        gs.entities.SPH(morph=gs.morphs.Sphere(), vis=gs.options.EntityVisOptions(debug_vis_mode="collision"))
     # Only the user places the vertices of a rigid or kinematic entity, a solver placing the others
     fem_vertices_spec = gs.entities.FEM(morph=gs.morphs.Sphere(), material=gs.materials.FEM.Elastic())
     with pytest.raises(gs.GenesisException, match="cannot show DynamicVertices"):

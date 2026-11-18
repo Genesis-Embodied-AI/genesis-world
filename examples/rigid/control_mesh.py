@@ -21,8 +21,10 @@ def main():
             dt=0.01,
             gravity=(0, 0, 0),
         ),
-        vis_options=gs.options.VisOptions(
-            show_link_frame=True,
+        rigid_options=gs.options.RigidOptions(
+            vis=gs.options.RigidVisOptions(
+                link_frames=True,
+            ),
         ),
         viewer_options=viewer_options,
         show_viewer=args.vis,

@@ -271,6 +271,9 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
             integrator=gs.integrator.Euler,
             max_dynamic_constraints=8,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(3.0, -5.0, 1.85),
             camera_lookat=(3.0, 0.0, 0.5),
@@ -288,7 +291,6 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
                 offset_euler=(90.0, 0.0, 0.0),
                 fixed=True,
             ),
-            vis_mode="collision",
         )
         for x in (0.0, 1.0, 2.0, 3.0)
     )
@@ -298,7 +300,6 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
                 size=(0.1, 0.1, 0.02),
                 pos=(x, 0.0, NUT_Z),
             ),
-            vis_mode="collision",
         )
         for x in (0.0, 1.0, 2.0, 3.0)
     )
@@ -309,14 +310,12 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
             pos=(4.0, 0.0, 0.5 * POST_HEIGHT),
             fixed=True,
         ),
-        vis_mode="collision",
     )
     nut_resting = scene.add_entity(
         gs.morphs.Box(
             size=(0.1, 0.1, 0.02),
             pos=(4.0, 0.0, POST_HEIGHT + 0.015),
         ),
-        vis_mode="collision",
     )
     # The spindle swings, carrying a free nut and a nut sharing its kinematic tree, which slides and turns on it
     # through two joints.
@@ -325,7 +324,6 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
             file=swinging_spindle,
             pos=(6.0, 0.0, 0.0),
         ),
-        vis_mode="collision",
     )
     scene.build(n_envs=2, env_spacing=(0.0, 1.5))
 

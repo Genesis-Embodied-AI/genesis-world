@@ -134,6 +134,28 @@ class AmbientLight(Options):
     intensity: float
 
 
+class EntityVisOptions(Options):
+    """
+    How the debug view of the scene draws an entity (see ``VisOptions.debug``), set as the ``vis`` of its entity spec.
+
+    Parameters
+    ----------
+    debug : bool | None, optional
+        Whether the interactive viewer and the debug cameras show the entity in its debug representation, whatever
+        ``VisOptions.debug`` asks for the other entities, or as it looks if False. None follows ``VisOptions.debug``.
+        Set it to inspect a few entities while the rest of the scene keeps its looks. Defaults to None.
+    debug_vis_mode : str | None, optional
+        The debug representation of the entity, showing what the simulation sees: 'collision' (the collision geoms of a
+        rigid entity) or 'sdf' (the surface of the signed distance field of its collision geoms, valid when the physics
+        of the scene loads these fields), 'particle' (the particles of an entity of the MPM, SPH or PBD solver), 'tet'
+        (the surface of the tetrahedra of an FEM entity). None takes the first of these the kind of entity accepts.
+        Defaults to None.
+    """
+
+    debug: StrictBool | None = None
+    debug_vis_mode: Literal["collision", "particle", "sdf", "tet"] | None = None
+
+
 class VisOptions(Options):
     """
     This configures visualization-related properties that are independent of the viewer or camera.
@@ -143,7 +165,7 @@ class VisOptions(Options):
     debug : bool
         Whether the interactive viewer and the debug cameras (see the ``debug`` argument of ``scene.add_camera``) show
         the scene as the simulation sees it rather than as it looks, which the "Debug View" control of the interactive
-        viewer toggles for both. Each entity then takes its debug representation (see ``Surface.debug_vis_mode``): the
+        viewer toggles for both. Each entity then takes its debug representation (see ``EntityVisOptions``): the
         collision geometry of a rigid entity, the particles of a particle-based one, the tetrahedra of an FEM one. A
         scene whose other cameras show it as it looks holds both representations, at the cost of the memory and the draw
         calls of both. Defaults to False.

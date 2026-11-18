@@ -487,13 +487,15 @@ def test_mouse_interaction_plugin(
         morph=gs.morphs.Plane(),
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, BOX_LENGTH / 2),
-            size=(BOX_LENGTH, BOX_LENGTH, BOX_LENGTH),
-        ),
-        material=gs.materials.Rigid(
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, BOX_LENGTH / 2),
+                size=(BOX_LENGTH, BOX_LENGTH, BOX_LENGTH),
+            ),
+            material=gs.materials.Rigid(
+                rho=MASS / (BOX_LENGTH**3),
+            ),
             use_visual_raycasting=True,
-            rho=MASS / (BOX_LENGTH**3),
         ),
     )
     # One lane stacks a collision-only box under a visual-only one, so the two cast modes land on different entities.
@@ -506,27 +508,28 @@ def test_mouse_interaction_plugin(
         ),
     )
     target = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, STACK_LANE_Y, TARGET_Z),
-            size=(TARGET_SIZE,) * 3,
-            fixed=True,
-            collision=False,
-        ),
-        material=gs.materials.Rigid(
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.0, STACK_LANE_Y, TARGET_Z),
+                size=(TARGET_SIZE,) * 3,
+                fixed=True,
+                collision=False,
+            ),
             use_visual_raycasting=True,
         ),
     )
     # A kinematic entity carries visual meshes only, in a separate solver from the rigid entities above.
     kinematic = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, KINEMATIC_LANE_Y, BOX_LENGTH / 2),
-            size=(BOX_LENGTH,) * 3,
-        ),
-        material=gs.materials.Kinematic(
+        spec=gs.entities.Kinematic(
+            morph=gs.morphs.Box(
+                pos=(0.0, KINEMATIC_LANE_Y, BOX_LENGTH / 2),
+                size=(BOX_LENGTH,) * 3,
+            ),
+            material=gs.materials.Kinematic(),
             use_visual_raycasting=True,
         ),
     )
-    # Without the opt-in material, an entity stays unpickable.
+    # Without the opt-in, an entity stays unpickable.
     scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.0, OPTOUT_LANE_Y, TARGET_Z),

@@ -18,6 +18,9 @@ def main():
         rigid_options=gs.options.RigidOptions(
             box_box_detection=True,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         show_viewer=args.vis,
     )
     plane = scene.add_entity(
@@ -45,7 +48,6 @@ def main():
         gs.morphs.MJCF(
             file="xml/franka_emika_panda/panda.xml",
         ),
-        vis_mode="collision",
     )
     scene.build()
 

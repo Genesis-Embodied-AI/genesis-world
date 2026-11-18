@@ -120,6 +120,9 @@ def test_urdf_parsing(show_viewer, tol):
     DOOR_JOINT_DAMPING = 1.5
 
     scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         show_viewer=show_viewer,
         show_FPS=False,
     )
@@ -136,7 +139,6 @@ def test_urdf_parsing(show_viewer, tol):
                 pos=(0.0, (i - 1.5) * POS_OFFSET, 0.0),
                 quat=tuple(WOLRD_QUAT / np.linalg.norm(WOLRD_QUAT)),
             ),
-            vis_mode="collision",
         )
         entities[(fixed, merge_fixed_links)] = entity
     scene.build()
@@ -685,6 +687,11 @@ def test_urdf_capsule(tmp_path, show_viewer, tol):
             """
         )
 
+    vis_options = (
+        gs.options.VisOptions(
+            debug=True,
+        ),
+    )
     scene = gs.Scene(show_viewer=show_viewer)
     scene.add_entity(gs.morphs.Plane())
     robot = scene.add_entity(
@@ -692,7 +699,6 @@ def test_urdf_capsule(tmp_path, show_viewer, tol):
             file=urdf_path,
             pos=(0.0, 0.0, 0.3),
         ),
-        vis_mode="collision",
     )
     scene.build()
 
@@ -1119,6 +1125,9 @@ def test_robot_scale_and_dofs_armature(xml_path, monkeypatch, tol):
 @pytest.mark.required
 def test_mesh_primitive_COM(show_viewer):
     scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         profiling_options=gs.options.ProfilingOptions(
             show_FPS=False,
         ),
@@ -1132,7 +1141,6 @@ def test_mesh_primitive_COM(show_viewer):
             file="meshes/bunny.obj",
             pos=(-1.0, -1.0, 0.55),
         ),
-        vis_mode="collision",
         visualize_contact=True,
     )
     cube = scene.add_entity(
@@ -1140,7 +1148,6 @@ def test_mesh_primitive_COM(show_viewer):
             size=(0.5, 0.5, 0.5),
             pos=(1.0, 1.0, 0.55),
         ),
-        vis_mode="collision",
         visualize_contact=True,
     )
     twin = scene.add_entity(
@@ -1191,6 +1198,9 @@ def test_align_mesh(show_viewer, tol):
         sim_options=gs.options.SimOptions(
             dt=0.01,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.8, 0.8, 1.6),
             camera_lookat=(0.0, 0.0, 0.0),
@@ -1209,7 +1219,6 @@ def test_align_mesh(show_viewer, tol):
         material=gs.materials.Rigid(
             rho=1000.0,
         ),
-        vis_mode="collision",
         visualize_contact=True,
     )
     ghost_mango = scene.add_entity(
@@ -1320,6 +1329,9 @@ def test_align_urdf(show_viewer, tol):
         sim_options=gs.options.SimOptions(
             dt=0.01,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.8, 0.8, 0.6),
             camera_lookat=(-0.3, 0.0, 0.0),
@@ -1334,7 +1346,6 @@ def test_align_urdf(show_viewer, tol):
     )
     fork = scene.add_entity(
         fork_morph,
-        vis_mode="collision",
         visualize_contact=True,
     )
     ghost_fork = scene.add_entity(
@@ -1393,6 +1404,9 @@ def test_align_preserves_link_local_frames(aligned_link_frame_urdfs, show_viewer
     TORQUE = (0.3, 0.8, -0.5)
     OFFSET_EULER = (20.0, 35.0, 50.0)
     scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.0, -4.0, 2.0),
             camera_lookat=(1.0, 0.0, 0.5),
@@ -1407,7 +1421,6 @@ def test_align_preserves_link_local_frames(aligned_link_frame_urdfs, show_viewer
             align=True,
             merge_fixed_links=False,
         ),
-        vis_mode="collision",
     )
     entity_unaligned = scene.add_entity(
         morph=gs.morphs.URDF(
@@ -1417,7 +1430,6 @@ def test_align_preserves_link_local_frames(aligned_link_frame_urdfs, show_viewer
             align=False,
             merge_fixed_links=False,
         ),
-        vis_mode="collision",
     )
     entity_heterogeneous_aligned = scene.add_entity(
         morph=tuple(
@@ -1430,7 +1442,6 @@ def test_align_preserves_link_local_frames(aligned_link_frame_urdfs, show_viewer
             )
             for file in aligned_link_frame_urdfs
         ),
-        vis_mode="collision",
     )
     # The unaligned twin of each aligned entity pins the authored behavior that alignment must preserve.
     entity_heterogeneous_unaligned = scene.add_entity(
@@ -1444,7 +1455,6 @@ def test_align_preserves_link_local_frames(aligned_link_frame_urdfs, show_viewer
             )
             for file in aligned_link_frame_urdfs
         ),
-        vis_mode="collision",
     )
     # A heterogeneous entity needs one environment per morph variant.
     scene.build(n_envs=2)
@@ -2026,6 +2036,9 @@ def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypat
             enable_neutral_collision=True,
             enable_adjacent_collision=False,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0, -3.5, 2.5),
             camera_lookat=(0.0, 0.0, 0.5),
@@ -2041,7 +2054,6 @@ def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypat
             merge_fixed_links=False,
             fixed=True,
         ),
-        vis_mode="collision",
     )
     hand = scene.add_entity(
         gs.morphs.URDF(
@@ -2051,7 +2063,6 @@ def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypat
             merge_fixed_links=merge_fixed_links,
             batch_fixed_verts=is_fixed,
         ),
-        vis_mode="collision",
     )
     ghost_mount = scene.add_entity(
         morph=gs.morphs.Box(

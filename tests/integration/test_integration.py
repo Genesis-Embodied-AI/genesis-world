@@ -47,6 +47,9 @@ def test_pick_and_place(mode, show_viewer):
             integrator=integrator,
             box_box_detection=True,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         show_viewer=show_viewer,
         show_FPS=False,
     )
@@ -77,7 +80,6 @@ def test_pick_and_place(mode, show_viewer):
             file="xml/franka_emika_panda/panda.xml",
         ),
         visualize_contact=True,
-        vis_mode="collision",
     )
     scene.build()
 

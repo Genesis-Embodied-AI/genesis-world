@@ -103,7 +103,6 @@ def test_cloth_attach_fixed_point(n_envs, material_type, show_viewer, tol):
         material=material_type(),
         surface=gs.surfaces.Default(
             color=(1.0, 1.0, 0.2, 1.0),
-            vis_mode="visual",
         ),
     )
     cloth_2 = scene.add_entity(
@@ -115,7 +114,6 @@ def test_cloth_attach_fixed_point(n_envs, material_type, show_viewer, tol):
         material=material_type(),
         surface=gs.surfaces.Default(
             color=(1.0, 1.0, 0.2, 1.0),
-            vis_mode="visual",
         ),
     )
     scene.build(n_envs=n_envs)
