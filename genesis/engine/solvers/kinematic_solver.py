@@ -944,7 +944,9 @@ class KinematicSolver(Solver):
         positions[:, dofs_idx] = position
         is_dof_set = torch.zeros((self.n_dofs,), dtype=gs.tc_bool, device=gs.device)
         is_dof_set[dofs_idx] = True
-        kernel_set_dofs_position(is_dof_set, envs_idx, positions, self.dyn_info, self.rigid_info, self.rigid_config)
+        kernel_set_dofs_position(
+            is_dof_set, envs_idx, positions, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
+        )
 
     def get_terrain_height(self, positions, link_idx, envs_idx=None):
         terrain = self._links[link_idx].entity

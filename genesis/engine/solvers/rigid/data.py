@@ -230,7 +230,8 @@ class DofsState(Data, kind=DataKind.DERIVED, shape=(DOFS, ENVS)):
     ctrl_vel: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
     ctrl_mode: qd.Tensor = field(int, kind=DataKind.STATE)
     is_hibernated: qd.Tensor = field(int, kind=DataKind.STATE)
-    # The integral term of the position or velocity controller, a force (see func_ctrl_force_int_next)
+    # The integral term of the position or velocity controller, a force (see func_ctrl_force_int_next). A write of the
+    # pose of a link restarts it for the dofs of the link, since the error accumulated before the jump is meaningless.
     ctrl_force_int: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
     ctrl_force_int_next: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True)
 

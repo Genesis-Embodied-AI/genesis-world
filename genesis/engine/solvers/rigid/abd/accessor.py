@@ -54,6 +54,9 @@ def kernel_set_links_pos(
                 dyn_state.fixed_roots.pos[i_fr, i_b][j] = pos[i_b_, i_l_, j]
         else:
             q_start = dyn_info.links.q_start[I_l]
+            # See ctrl_force_int in rigid/data.py
+            for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
+                dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0
             for j in qd.static(range(3)):
                 rigid_info.qpos[q_start + j, i_b] = pos[i_b_, i_l_, j]
 
@@ -222,6 +225,9 @@ def kernel_set_links_quat(
                 dyn_state.fixed_roots.quat[i_fr, i_b][j] = quat[i_b_, i_l_, j]
         else:
             q_start = dyn_info.links.q_start[I_l]
+            # See ctrl_force_int in rigid/data.py
+            for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
+                dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0
             for j in qd.static(range(4)):
                 rigid_info.qpos[q_start + j + 3, i_b] = quat[i_b_, i_l_, j]
 
@@ -712,12 +718,27 @@ def kernel_set_dofs_zero_velocity(
 
 
 @qd.kernel(fastcache=True)
-def kernel_clear_dofs_ctrl_force_int(
-    dofs_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), dyn_state: DynState, rigid_config: qd.template()
+def kernel_clear_qs_ctrl_force_int(
+    is_q_set: qd.types.ndarray(),
+    is_env_set: qd.types.ndarray(),
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
 ):
+    """Restart the integral term of the controller of the dofs of each link whose configuration is set."""
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_state.dofs.vel))):
-        dyn_state.dofs.ctrl_force_int[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
+    for i_l, i_b in qd.ndrange(
+        dyn_info.links.q_start.shape[0], is_env_set.shape[0], axes=qd.static(eoa(dyn_state.dofs.ctrl_force_int))
+    ):
+        if is_env_set[i_b]:
+            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+            has_q_set = False
+            for i_q in range(dyn_info.links.q_start[I_l], dyn_info.links.q_end[I_l]):
+                if is_q_set[i_q]:
+                    has_q_set = True
+            if has_q_set:
+                for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
+                    dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0
 
 
 @qd.kernel(fastcache=True)
@@ -725,6 +746,7 @@ def kernel_set_dofs_position(
     is_dof_set: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     position: qd.types.ndarray(),
+    dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -748,6 +770,8 @@ def kernel_set_dofs_position(
         for i_d in range(dof_start, dof_end):
             if is_dof_set[i_d]:
                 has_dof_set = True
+                # See ctrl_force_int in rigid/data.py
+                dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0
         if has_dof_set:
             q_start = dyn_info.links.q_start[I_l]
             i_j = dyn_info.links.joint_start[I_l]
