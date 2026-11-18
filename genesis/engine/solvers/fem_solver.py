@@ -1311,7 +1311,7 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
     def build(self) -> None:
         solver = self.owner
         self.textures = DynamicTextures(
-            [(vgeom, vgeom.surface) for entity in solver.entities for vgeom in entity.vgeoms], solver.n_envs
+            [(vgeom, entity, vgeom.surface) for entity in solver.entities for vgeom in entity.vgeoms], solver.n_envs
         )
         # Every mesh views the simulated vertices of the whole solver, so that a renderer reads them once for all
         verts_pos = ArrayRef(solver.fem_state.vertices.pos)

@@ -814,18 +814,21 @@ class DynamicTextures:
     Each mesh whose surface fills its diffuse or its emissive map with a dynamic texture holds one TextureVariants per
     such map, whose images are the variants declared then the texture the asset gives the map (see 'set_texture').
     `meshes_surface` holds each mesh, the object it stands for (a visual geom, or an entity drawn as a single mesh),
-    with its surface, and `n_envs` is the number of parallel environments of the scene. Every environment shows the
-    first variant at build and after a reset.
+    with its entity and its surface, and `n_envs` is the number of parallel environments of the scene. Every
+    environment shows the first variant at build and after a reset.
     """
 
-    def __init__(self, meshes_surface: "Iterable[tuple[object, Surface]]", n_envs: int) -> None:
+    def __init__(self, meshes_surface: "Iterable[tuple[object, Entity, Surface]]", n_envs: int) -> None:
         self._n_envs = n_envs
         n_envs_ = max(n_envs, 1)
         # The dynamic textures of each mesh showing some, and the declaration of each texture
         self._meshes_textures: dict[object, tuple[TextureVariants, ...]] = {}
         self._textures_options: dict[TextureVariants, DynamicTexture] = {}
+        self._meshes_entity: dict[object, "Entity"] = {}
+        # The entities whose dynamic textures were set since the build, which a file exporting the scene leaves out
+        self.entities_written: set["Entity"] = set()
         meshes_options = []
-        for mesh, surface in meshes_surface:
+        for mesh, entity, surface in meshes_surface:
             fields = dict(surface)
             mesh_options = tuple(
                 (map_type, fields[name])
@@ -837,6 +840,7 @@ class DynamicTextures:
             )
             if mesh_options:
                 meshes_options.append((mesh, mesh_options))
+                self._meshes_entity[mesh] = entity
         # The variant each environment shows of every texture, one row per texture, so that a reset writes them at once
         n_textures = sum(len(mesh_options) for _, mesh_options in meshes_options)
         self._variants_idx = torch.zeros((n_textures, n_envs_), dtype=gs.tc_int, device=gs.device)
@@ -918,6 +922,7 @@ class DynamicTextures:
             variants_idx = np.array(get_variants_idx(options.variants, variant))
             variants_idx[variants_idx == ASSET_VARIANT_IDX] = len(options.variants)
             assign_indexed_tensor(texture_variants.variants_idx, mask, variants_idx.tolist())
+            self.entities_written.add(self._meshes_entity[mesh])
             return
         if isinstance(texture, (ColorTexture, ImageTexture)):
             texture = mu.texture_to_rgba(texture, options.resolution, texture_variants.map_type)
@@ -957,6 +962,7 @@ class DynamicTextures:
             image = torch.cat((image, image.new_full((*image.shape[:-1], 1), alpha)), dim=-1)
         assign_indexed_tensor(texture_variants.batched, mask, image)
         assign_indexed_tensor(texture_variants.variants_idx, mask, -1)
+        self.entities_written.add(self._meshes_entity[mesh])
         for subscriber in texture_variants.subscribers:
             subscriber.notify(StateChange.VISUAL, envs_idx)
 
@@ -1166,6 +1172,16 @@ class RenderContext:
             solver.subscribe(Subscriber(to=frozenset(StateChange), callback=functools.partial(on_change, solver)))
         self._make_pending()
         self._refresh(self._envs_idx, self._records, is_markers=False, view=NORMAL)
+
+    @property
+    def entities_texture_written(self) -> set["Entity"]:
+        """The entities whose dynamic textures were set since the build (see 'DynamicTextures')."""
+        return {
+            entity
+            for record in self._records
+            if record.scoped_context.textures is not None
+            for entity in record.scoped_context.textures.entities_written
+        }
 
     @property
     def debug(self) -> bool:

@@ -1695,8 +1695,9 @@ class Scene(BuildableMixin, RBC):
             for entity in self.entities
             if isinstance(entity, KinematicEntity) and entity._is_vverts_overridden
         )
+        entities_texture_written = self.sim.render_context.entities_texture_written
         omitted_kinds.update(
-            f"'{entity.name}' dynamic textures" for entity in self.entities if entity._is_texture_written
+            f"'{entity.name}' dynamic textures" for entity in self.entities if entity in entities_texture_written
         )
         for kinds, report, ending in (
             (omitted_kinds, gs.logger.warning, "is exported without it, so a scene loaded from the file holds none."),

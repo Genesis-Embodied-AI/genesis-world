@@ -792,7 +792,6 @@ class RigidVisGeom(BuildableMixin, RBC):
             map with one. Defaults to None.
         """
         self._solver.render_context.set_texture(self, texture, envs_idx, variant, texture_map_type)
-        self._entity._is_texture_written = True
 
     @gs.assert_built
     def get_texture(

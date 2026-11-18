@@ -261,7 +261,7 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
             zip(self._skinned_entities, (np.cumsum(entities_n_vverts) - entities_n_vverts).tolist())
         )
         self.textures = DynamicTextures(
-            [(entity, entity.vmesh.surface) for entity in self._skinned_entities], solver.n_envs
+            [(entity, entity, entity.vmesh.surface) for entity in self._skinned_entities], solver.n_envs
         )
         self._tearable_entities = [
             entity for entity in self._skinned_entities if entity.material.structure == STRUCTURE.TEARABLE

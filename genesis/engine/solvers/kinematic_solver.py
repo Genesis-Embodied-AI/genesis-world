@@ -1452,7 +1452,9 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
 
     def build(self) -> None:
         solver = self.owner
-        self.textures = DynamicTextures([(vgeom, vgeom.surface) for vgeom in solver.vgeoms], solver.n_envs)
+        self.textures = DynamicTextures(
+            [(vgeom, vgeom.entity, vgeom.surface) for vgeom in solver.vgeoms], solver.n_envs
+        )
         # The visual geoms take a slot each, those posed by their link first, so that their poses form one contiguous
         # block, the visual geoms of the entities a deprecated 'vis_mode' shows in their debug representation after the
         # others, so that the block of the scene as it looks leaves them out, then those showing DynamicVertices, which

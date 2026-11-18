@@ -82,7 +82,6 @@ class FEMVisGeom(BuildableMixin, RBC):
         in some environments, giving both raising (see ``RigidVisGeom.set_texture``).
         """
         self._entity.solver.render_context.set_texture(self, texture, envs_idx, variant, texture_map_type)
-        self._entity._is_texture_written = True
 
     @gs.assert_built
     def get_texture(

@@ -224,7 +224,6 @@ class PBDTetEntity(PBDBaseEntity):
         The visual mesh is the single visual geom of the entity (see ``RigidVisGeom.set_texture``).
         """
         self._solver.render_context.set_texture(self, texture, envs_idx, variant, texture_map_type)
-        self._is_texture_written = True
 
     @gs.assert_built
     def get_texture(
