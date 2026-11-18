@@ -1,0 +1,30 @@
+genesis/engine/solvers/kinematic_solver.py
+  s_8d59a9e0041e31::t_a925b9769cbf72 1855
+  s_8d59a9e0041e31::t_afbc09ac2f70fa 26
+genesis/engine/scene.py
+  s_8d59a9e0041e31::t_a925b9769cbf72 1695,1697-1698
+  s_8d59a9e0041e31::t_c2d4335e0594ba 35
+genesis/engine/render_context.py
+  s_8d59a9e0041e31::t_c2d4335e0594ba 775-776,778-779
+  s_8d59a9e0041e31::t_a925b9769cbf72 4,613-614,616,724,797-805,893,930,1008,1279
+genesis/utils/mesh.py
+  s_8d59a9e0041e31::t_a925b9769cbf72 314
+tests/rigid/test_serialization.py
+  s_8d59a9e0041e31::t_57529babf1d3e6 488-495
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6e9141b10cf9db760f025516afc2692183b4cf90",
+  "prompts": {},
+  "sessions": {
+    "s_8d59a9e0041e31": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "884f5d67-9ff4-41ac-845d-dbfc3ffc3a6f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
