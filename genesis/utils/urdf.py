@@ -314,6 +314,8 @@ def parse_urdf(morph, surface):
                 link_g_infos.append(g_info)
 
     #########################  non-base joints and links #########################
+    joints_name_negative_effort = []
+    joints_name_zero_effort = []
     for joint in robot.joints:
         idx = link_name_to_idx[joint.child]
         l_info = l_infos[idx]
@@ -421,7 +423,26 @@ def parse_urdf(morph, surface):
 
         j_info["dofs_force_range"] = np.tile([-np.inf, np.inf], (j_info["n_dofs"], 1))
         if joint.limit is not None and joint.limit.effort is not None:
-            j_info["dofs_force_range"] = np.tile([-joint.limit.effort, joint.limit.effort], (j_info["n_dofs"], 1))
+            effort = joint.limit.effort
+            if effort < 0.0:
+                joints_name_negative_effort.append(joint.name)
+                effort = -effort
+            if effort > 0.0:
+                j_info["dofs_force_range"] = np.tile([-effort, effort], (j_info["n_dofs"], 1))
+            else:
+                joints_name_zero_effort.append(joint.name)
+
+    if joints_name_negative_effort:
+        gs.logger.warning(
+            f"(URDF) Joints {joints_name_negative_effort} have negative effort. Using their absolute values."
+        )
+    # A zero effort is read as unbounded like MuJoCo and Isaac Sim, rather than as unactuated like the ROS stack and
+    # Drake, since several CAD exporters write effort="0" for every joint whose effort the user left empty.
+    if joints_name_zero_effort:
+        gs.logger.info(
+            f'(URDF) Joints {joints_name_zero_effort} have effort="0", so their actuation force is unbounded. Call '
+            "'set_dofs_force_range' with a zero range to make them unactuated."
+        )
 
     # Apply scaling factor
     for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
