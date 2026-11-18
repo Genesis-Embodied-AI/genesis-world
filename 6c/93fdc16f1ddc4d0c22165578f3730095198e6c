@@ -1,0 +1,37 @@
+genesis/constants.py
+  s_30743dd4e1d4b2::t_c0632daa758478 191-210
+  s_30743dd4e1d4b2::t_f39e81c02d28bc 190,211-215
+examples/sensors/lidar_teleop.py
+  s_30743dd4e1d4b2::t_23b1924d8b570f 31-33
+  s_30743dd4e1d4b2::t_bd3cd35ca54b13 29-30,34-35,110
+genesis/engine/sensors/raycaster.py
+  s_30743dd4e1d4b2::t_f39e81c02d28bc 199-207,272-274,277-278
+  s_30743dd4e1d4b2::t_e5b02c281cbc96 11,109-110,159,161,279-284,324
+genesis/options/sensors/options.py
+  s_30743dd4e1d4b2::t_f39e81c02d28bc 638,660
+  s_30743dd4e1d4b2::t_c0632daa758478 639-641
+  s_30743dd4e1d4b2::t_f2b5704e82e27a 642-645,661,674
+genesis/__init__.py
+  s_30743dd4e1d4b2::t_f39e81c02d28bc 530
+tests/sensors/test_raycaster.py
+  s_30743dd4e1d4b2::t_23b1924d8b570f 634-636,638-649
+  s_30743dd4e1d4b2::t_001675eab2f095 8,569-574,576-587,589-592,594,596-597,599-604,606,609-623,625-631,633,650-657
+genesis/utils/raycast_qd.py
+  s_30743dd4e1d4b2::t_022631843b31ac 78,319
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6c93fdc16f1ddc4d0c22165578f3730095198e6c",
+  "prompts": {},
+  "sessions": {
+    "s_30743dd4e1d4b2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcbc5529-4957-4e0d-8c5f-2573abbad53d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
