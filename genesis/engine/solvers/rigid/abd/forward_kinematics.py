@@ -508,11 +508,15 @@ def func_forward_kinematics_link(
             # uninitialized memory (NaN gradients on qpos) otherwise.
             quat = W(next_I, quat, dyn_state.links.quat_bw, BW)
 
-    # Skip link pose update for fixed root links to let users manually overwrite them
+    # The pose of a fixed root link is state, which the setters write (see FixedRootsState in rigid/data.py)
     I_jf = (i_l, 0 if qd.static(not BW) else n_joints, i_b)
-    if not (i_p == -1 and dyn_info.links.is_fixed[I_l]):
+    i_fr = dyn_info.links.fixed_root_idx[I_l]
+    if i_fr == -1:
         dyn_state.links.pos[i_l, i_b] = R(I_jf, pos, dyn_state.links.pos_bw, BW)
         dyn_state.links.quat[i_l, i_b] = R(I_jf, quat, dyn_state.links.quat_bw, BW)
+    else:
+        dyn_state.links.pos[i_l, i_b] = dyn_state.fixed_roots.pos[i_fr, i_b]
+        dyn_state.links.quat[i_l, i_b] = dyn_state.fixed_roots.quat[i_fr, i_b]
 
 
 @qd.func

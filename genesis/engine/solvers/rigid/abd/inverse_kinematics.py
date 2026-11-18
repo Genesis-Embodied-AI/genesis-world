@@ -209,10 +209,11 @@ def func_forward_kinematics_scratch(
                 else:
                     pos = pos + joints_xaxis[i_j - joint_offset, i_col_out] * q_delta
 
-        # Fixed root links keep their live pose, exactly like the solver FK (users may overwrite them manually).
-        if dyn_info.links.parent_idx[I_l] == -1 and dyn_info.links.is_fixed[I_l]:
-            pos = dyn_state.links.pos[i_l, i_b]
-            quat = dyn_state.links.quat[i_l, i_b]
+        # See func_forward_kinematics_link
+        i_fr = dyn_info.links.fixed_root_idx[I_l]
+        if i_fr != -1:
+            pos = dyn_state.fixed_roots.pos[i_fr, i_b]
+            quat = dyn_state.fixed_roots.quat[i_fr, i_b]
         links_pos[i_l - link_offset, i_col_out] = pos
         links_quat[i_l - link_offset, i_col_out] = quat
 

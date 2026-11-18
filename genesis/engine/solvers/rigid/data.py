@@ -30,6 +30,7 @@ LINKS = Size("links")
 JOINTS = Size("joints")
 GEOMS = Size("geoms")
 ROOTS = Size("roots")
+FIXED_ROOTS = Size("fixed_roots")
 TREES = Size("trees")
 # The links of every tree level by level, and the children of every link (see trees_levels_links_idx in RigidInfo)
 TREES_LEVELS_LINKS = Size("trees_levels_links")
@@ -238,6 +239,8 @@ class LinksInfo(Data, kind=DataKind.INFO, shape=(LINKS, LINKS_INFO_ENVS)):
     quat: qd.Tensor = field((float, 4))
     invweight: qd.Tensor = field((float, 2))
     is_fixed: qd.Tensor = field(bool)
+    # The slot of a fixed root link in FixedRootsState, -1 for every other link
+    fixed_root_idx: qd.Tensor = field(int)
     inertial_pos: qd.Tensor = field((float, 3))
     inertial_quat: qd.Tensor = field((float, 4))
     inertial_i: qd.Tensor = field((float, (3, 3)))
@@ -262,10 +265,8 @@ class LinksState(Data, kind=DataKind.DERIVED, shape=(LINKS, ENVS)):
     crb_mass: qd.Tensor = field(float, grad=True)
     cdd_vel: qd.Tensor = field((float, 3), grad=True)
     cdd_ang: qd.Tensor = field((float, 3), grad=True)
-    # The pose of a fixed root link is state, which forward kinematics leaves as set (see
-    # func_forward_kinematics_link_bw), the poses of the other links being recomputed from the positions of the dofs.
-    pos: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
-    quat: qd.Tensor = field((float, 4), kind=DataKind.STATE, grad=True)
+    pos: qd.Tensor = field((float, 3), grad=True)
+    quat: qd.Tensor = field((float, 4), grad=True)
     pos_bw: qd.Tensor = field((float, 3), shape=(LINKS, LINK_BW_SLOTS, ENVS), grad=True)
     quat_bw: qd.Tensor = field((float, 4), shape=(LINKS, LINK_BW_SLOTS, ENVS), grad=True)
     i_pos: qd.Tensor = field((float, 3), grad=True)
@@ -427,6 +428,13 @@ class EntitiesInfo(Data, kind=DataKind.INFO, shape=(ENTITIES,)):
     gravity_compensation: qd.Tensor = field(float)
 
 
+class FixedRootsState(Data, kind=DataKind.STATE, shape=(FIXED_ROOTS, ENVS)):
+    """The pose of each fixed root link in each environment, which forward kinematics copies into its link."""
+
+    pos: qd.Tensor = field((float, 3), grad=True)
+    quat: qd.Tensor = field((float, 4), grad=True)
+
+
 class EntitiesState(Data, kind=DataKind.STATE, shape=(ENTITIES, ENVS)):
     """The hibernation flag of each entity of the rigid solver in each environment."""
 
@@ -457,6 +465,7 @@ class DynState(Data):
     geoms: GeomsState = field(labels=DYNAMICS)
     free_verts: VertsState = field(shape=(FREE_VERTS, ENVS), labels=DYNAMICS)
     fixed_verts: VertsState = field(shape=(FIXED_VERTS,), labels=DYNAMICS)
+    fixed_roots: FixedRootsState
 
 
 class RigidConfig(Config):
@@ -605,6 +614,7 @@ class RigidData(Data):
             links=solver.n_links_,
             joints=solver.n_joints_,
             roots=solver.n_roots_,
+            fixed_roots=solver.n_fixed_roots_,
             trees=solver.n_trees_,
             entities=solver.n_entities_,
             dofs_info_envs=solver.n_envs_ if options.batch_dofs_info else (),

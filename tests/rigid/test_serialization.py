@@ -618,7 +618,7 @@ def test_export_rejects_unsupported_physics(checkpoint_scene, tmp_path):
 @pytest.mark.parametrize("n_envs", [0, 2])
 @pytest.mark.parametrize("requires_grad", [False, True])
 def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_viewer):
-    ARRAYS_NAMES = ("rigid_info.qpos", "dyn_state.dofs.vel", "dyn_state.links.pos")
+    ARRAYS_NAMES = ("rigid_info.qpos", "dyn_state.dofs.vel", "dyn_state.fixed_roots.pos")
     scene = checkpoint_scene
     box, arm, ghost = scene.entities[1], scene.entities[2], scene.entities[4]
     with pytest.raises(gs.GenesisException):
@@ -654,6 +654,7 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
     for _ in range(10):
         scene.step()
     landing_state = scene.rigid_solver.get_state()
+    landing_links_pos, landing_links_quat = scene.rigid_solver.get_links_pos(), scene.rigid_solver.get_links_quat()
     landing_ghost_pos = ghost.get_links_pos()
     landing_contacts = box.get_contacts()
 
@@ -673,10 +674,12 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
         "rigid_info.qpos",
         "dyn_state.dofs.vel",
         "dyn_state.dofs.acc",
-        "dyn_state.links.pos",
-        "dyn_state.links.quat",
+        "dyn_state.fixed_roots.pos",
+        "dyn_state.fixed_roots.quat",
     ):
         assert_equal(resumed_state.arrays[name], landing_state.arrays[name])
+    assert_equal(twin_scene.rigid_solver.get_links_pos(), landing_links_pos)
+    assert_equal(twin_scene.rigid_solver.get_links_quat(), landing_links_quat)
     assert_equal(twin_scene.entities[4].get_links_pos(), landing_ghost_pos)
     assert_equal(twin_scene.entities[1].get_contacts()["force_a"], landing_contacts["force_a"])
 
@@ -687,6 +690,7 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
     reloaded_state = scene.rigid_solver.get_state()
     for name in ARRAYS_NAMES:
         assert_equal(reloaded_state.arrays[name], landing_state.arrays[name])
+    assert_equal(scene.rigid_solver.get_links_pos(), landing_links_pos)
     assert_equal(ghost.get_links_pos(), landing_ghost_pos)
     assert_equal(box.get_contacts()["force_a"], landing_contacts["force_a"])
 
@@ -775,7 +779,7 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
     scene.register_pre_step_callback(lambda: is_paused)
     # A frame is the state a step starts from, so the record of frame i is read right before step i. A model parameter
     # changed by a setter halfway is recorded with the frames from there on.
-    states, ghosts_pos, forces, times, kps = [], [], [], [], []
+    states, links_poses, ghosts_pos, forces, times, kps = [], [], [], [], [], []
     for i_step in range(N_STEPS):
         steps_count[0] = i_step
         if i_step == VETO_STEP:
@@ -786,6 +790,7 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         if i_step == N_STEPS // 2:
             arm.set_dofs_kp(2.0 * arm.get_dofs_kp())
         states.append(scene.rigid_solver.get_state())
+        links_poses.append((scene.rigid_solver.get_links_pos(), scene.rigid_solver.get_links_quat()))
         kps.append(arm.get_dofs_kp())
         ghosts_pos.append(ghost.get_links_pos())
         forces.append(box.get_contacts()["force_a"])
@@ -823,7 +828,9 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
             )
             # The first step has no previous one to measure its period from
             assert np.isnan(timings["period"]) == (index == 1)
-    for index, (state, ghost_pos, force, time, kp) in enumerate(zip(states, ghosts_pos, forces, times, kps)):
+    for index, (state, (links_pos, links_quat), ghost_pos, force, time, kp) in enumerate(
+        zip(states, links_poses, ghosts_pos, forces, times, kps)
+    ):
         # An exact frame puts back everything a step reads or writes, so the scene stands exactly where it stood
         exact_trajectory.seek(index)
         replayed_state = replay_scene.rigid_solver.get_state()
@@ -831,10 +838,12 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
             "rigid_info.qpos",
             "dyn_state.dofs.vel",
             "dyn_state.dofs.acc",
-            "dyn_state.links.pos",
-            "dyn_state.links.quat",
+            "dyn_state.fixed_roots.pos",
+            "dyn_state.fixed_roots.quat",
         ):
             assert_equal(replayed_state.arrays[name], state.arrays[name])
+        assert_equal(replay_scene.rigid_solver.get_links_pos(), links_pos)
+        assert_equal(replay_scene.rigid_solver.get_links_quat(), links_quat)
         assert_equal(replay_scene.entities[4].get_links_pos(), ghost_pos)
         assert_equal(replay_scene.entities[1].get_contacts()["force_a"], force)
         assert_equal(replay_scene.get_time(), time)
@@ -848,8 +857,8 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         replayed_state = replay_scene.rigid_solver.get_state()
         for name in ("rigid_info.qpos", "dyn_state.dofs.vel", "dyn_state.dofs.acc"):
             assert_equal(replayed_state.arrays[name], state.arrays[name])
-        for name in ("dyn_state.links.pos", "dyn_state.links.quat"):
-            assert_allclose(replayed_state.arrays[name], state.arrays[name], tol=tol)
+        assert_allclose(replay_scene.rigid_solver.get_links_pos(), links_pos, tol=tol)
+        assert_allclose(replay_scene.rigid_solver.get_links_quat(), links_quat, tol=tol)
         assert_allclose(replay_scene.entities[4].get_links_pos(), ghost_pos, tol=tol)
         assert_equal(replay_scene.entities[2].get_dofs_kp(), kp)
 
@@ -939,7 +948,7 @@ def test_trajectory_replay_across_backends(n_envs, checkpoint_scene, load_trajec
         trajectory.seek(index)
         frame = trajectory.frame(index)
         state = replay_scene.rigid_solver.get_state()
-        for name in ("rigid_info.qpos", "dyn_state.dofs.vel", "dyn_state.links.pos"):
+        for name in ("rigid_info.qpos", "dyn_state.dofs.vel", "dyn_state.fixed_roots.pos"):
             assert_equal(state.arrays[name], frame[f"RigidSolver.{name}"])
         # This log comes from a CPU fp32 run. One step after a seek, on the current backend and precision, matches the
         # next recorded frame within the suite's tolerance.

@@ -48,8 +48,12 @@ def kernel_set_links_pos(
         i_l = links_idx[i_l_]
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
 
-        if dyn_info.links.parent_idx[I_l] == -1 and dyn_info.links.is_fixed[I_l]:
+        # The link takes the pose of a fixed root at once, as forward kinematics would, for a setter leaving forward
+        # kinematics to the next step, whose update of the cartesian space skips the fixed links.
+        i_fr = dyn_info.links.fixed_root_idx[I_l]
+        if i_fr != -1:
             for j in qd.static(range(3)):
+                dyn_state.fixed_roots.pos[i_fr, i_b][j] = pos[i_b_, i_l_, j]
                 dyn_state.links.pos[i_l, i_b][j] = pos[i_b_, i_l_, j]
         else:
             q_start = dyn_info.links.q_start[I_l]
@@ -215,8 +219,11 @@ def kernel_set_links_quat(
         i_l = links_idx[i_l_]
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
 
-        if dyn_info.links.parent_idx[I_l] == -1 and dyn_info.links.is_fixed[I_l]:
+        # See kernel_set_links_pos
+        i_fr = dyn_info.links.fixed_root_idx[I_l]
+        if i_fr != -1:
             for j in qd.static(range(4)):
+                dyn_state.fixed_roots.quat[i_fr, i_b][j] = quat[i_b_, i_l_, j]
                 dyn_state.links.quat[i_l, i_b][j] = quat[i_b_, i_l_, j]
         else:
             q_start = dyn_info.links.q_start[I_l]

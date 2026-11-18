@@ -344,6 +344,7 @@ def kernel_init_link_fields(
     links_geom_start: qd.types.ndarray(),
     links_geom_end: qd.types.ndarray(),
     links_is_fixed: qd.types.ndarray(),
+    links_fixed_root_idx: qd.types.ndarray(),
     links_pos: qd.types.ndarray(),
     links_quat: qd.types.ndarray(),
     dyn_state: DynState,
@@ -367,6 +368,7 @@ def kernel_init_link_fields(
         dyn_info.links.joint_end[I_l] = links_joint_end[i_l]
         dyn_info.links.n_dofs[I_l] = links_dof_end[i_l] - links_dof_start[i_l]
         dyn_info.links.is_fixed[I_l] = links_is_fixed[i_l]
+        dyn_info.links.fixed_root_idx[I_l] = links_fixed_root_idx[i_l]
         dyn_info.links.entity_idx[I_l] = links_entity_idx[i_l]
         dyn_info.links.geom_start[I_l] = links_geom_start[i_l]
         dyn_info.links.geom_end[I_l] = links_geom_end[i_l]
@@ -378,16 +380,13 @@ def kernel_init_link_fields(
             dyn_info.links.pos[I_l][j] = links_pos[i_l, j]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_l, i_b in qd.ndrange(n_links, _B, axes=qd.static(eoa(dyn_state.links.quat))):
-        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-
-        # Update state for root fixed link. Their state will not be updated in forward kinematics later but can be manually changed by user.
-        if dyn_info.links.parent_idx[I_l] == -1 and dyn_info.links.is_fixed[I_l]:
+    for i_l, i_b in qd.ndrange(n_links, _B, axes=qd.static(eoa(dyn_state.fixed_roots.quat))):
+        i_fr = links_fixed_root_idx[i_l]
+        if i_fr != -1:
             for j in qd.static(range(4)):
-                dyn_state.links.quat[i_l, i_b][j] = links_quat[i_l, j]
-
+                dyn_state.fixed_roots.quat[i_fr, i_b][j] = links_quat[i_l, j]
             for j in qd.static(range(3)):
-                dyn_state.links.pos[i_l, i_b][j] = links_pos[i_l, j]
+                dyn_state.fixed_roots.pos[i_fr, i_b][j] = links_pos[i_l, j]
 
     if qd.static(rigid_config.use_hibernation):
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
