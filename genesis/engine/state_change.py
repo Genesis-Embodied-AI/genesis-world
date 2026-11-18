@@ -130,12 +130,29 @@ def mutates(
     is_recorded = StateChange.MODEL not in triggered
 
     def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
-        signature = inspect.signature(method)
+        # The position after 'self' and the default of the arguments a notification reads, which a call fetches from its
+        # arguments directly, a binding of the whole signature costing more than the notification itself.
+        arguments_position_default = {
+            parameter.name: (
+                i if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD) else None,
+                None if parameter.default is parameter.empty else parameter.default,
+            )
+            for i, parameter in enumerate(tuple(inspect.signature(method).parameters.values())[1:])
+            if parameter.name in ("envs_idx", links)
+        }
 
-        def resolve_mutated_links_idx(self: "Solver", bound_arguments) -> np.ndarray | None:
+        def get_argument(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            if name in kwargs:
+                return kwargs[name]
+            position, default = arguments_position_default.get(name, (None, None))
+            return args[position] if position is not None and position < len(args) else default
+
+        def resolve_mutated_links_idx(
+            self: "Solver", args: tuple[Any, ...], kwargs: dict[str, Any]
+        ) -> np.ndarray | None:
             if links is None or self._links_parent_idx is None:
                 return None
-            indices = bound_arguments.get(links)
+            indices = get_argument(links, args, kwargs)
             # The links holding each degree of freedom or configuration entry, None for indices of links
             indices_link_idx = self._indices_link_idx.get(links)
             if indices is None:
@@ -154,20 +171,19 @@ def mutates(
         def run_notifying(self: "Solver", *args: Any, **kwargs: Any) -> Any:
             if not triggered or not self._subscribers:
                 return method(self, *args, **kwargs)
-            bound_arguments = signature.bind(self, *args, **kwargs).arguments
-            mutated_links_idx = None
-            if triggered & self._links_watched_changes:
-                mutated_links_idx = resolve_mutated_links_idx(self, bound_arguments)
+            is_reach_resolved = bool(triggered & self._links_watched_changes)
             if self._is_mutating:
                 # Nested tagged call: record the changes and mutated links, let the outermost call do the single
                 # notification.
                 self._mutation_changes |= triggered
                 if self._mutation_links_idx_list is not None:
+                    mutated_links_idx = resolve_mutated_links_idx(self, args, kwargs) if is_reach_resolved else None
                     if mutated_links_idx is None:
                         self._mutation_links_idx_list = None
                     else:
                         self._mutation_links_idx_list.append(mutated_links_idx)
                 return method(self, *args, **kwargs)
+            mutated_links_idx = resolve_mutated_links_idx(self, args, kwargs) if is_reach_resolved else None
             self._is_mutating = True
             self._mutation_changes = set(triggered)
             self._mutation_links_idx_list = None if mutated_links_idx is None else [mutated_links_idx]
@@ -175,7 +191,7 @@ def mutates(
                 result = method(self, *args, **kwargs)
             finally:
                 self._is_mutating = False
-            envs_idx = bound_arguments.get("envs_idx")
+            envs_idx = get_argument("envs_idx", args, kwargs)
             links_idx = None
             if self._mutation_links_idx_list is not None:
                 links_idx = np.concatenate(self._mutation_links_idx_list)
