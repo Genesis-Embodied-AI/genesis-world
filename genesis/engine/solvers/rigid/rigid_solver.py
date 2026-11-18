@@ -1660,6 +1660,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # Every adjoint the backward pass writes accumulates through 'atomic_add', so a pass starts from zeros
         if self._requires_grad:
             qd_zero_grad(self.dyn_state.links)
+            qd_zero_grad(self.dyn_state.fixed_roots)
             qd_zero_grad(self.dyn_state.dofs)
             qd_zero_grad(self.dyn_state.joints)
             qd_zero_grad(self.rigid_info)
@@ -1797,12 +1798,15 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # hibernated entities, which is required whenever hibernation is enabled.
         if gs.use_zerocopy and not relative and isinstance(links_idx, int) and not self._use_hibernation:
             link = self.links[links_idx]
-            if link.is_fixed:
-                data = qd_to_torch(self.dyn_state.links.pos, transpose=True, copy=False)
-                target = data[:, links_idx]
+            # See kernel_set_links_pos
+            i_fr = self._links_fixed_root_idx[links_idx]
+            if i_fr >= 0:
+                fixed_roots_pos = qd_to_torch(self.dyn_state.fixed_roots.pos, transpose=True, copy=False)
+                links_pos = qd_to_torch(self.dyn_state.links.pos, transpose=True, copy=False)
+                targets = (fixed_roots_pos[:, i_fr], links_pos[:, links_idx])
             else:
-                data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
-                target = data[:, link.q_start : link.q_start + 3]
+                qpos = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
+                targets = (qpos[:, link.q_start : link.q_start + 3],)
             # Fixed links with at least one geom and non-batched vertices cannot take env-specific positions
             if link.is_fixed and link.geoms and not link.entity._batch_fixed_verts:
                 pos = torch.as_tensor(pos, dtype=gs.tc_float, device=gs.device)
@@ -1816,7 +1820,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                         "setting morph option 'batch_fixed_verts=True'."
                     )
             mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
-            assign_indexed_tensor(target, mask, pos)
+            for target in targets:
+                assign_indexed_tensor(target, mask, pos)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -1923,12 +1928,15 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # hibernated entities, which is required whenever hibernation is enabled.
         if gs.use_zerocopy and not relative and isinstance(links_idx, int) and not self._use_hibernation:
             link = self.links[links_idx]
-            if link.is_fixed:
-                data = qd_to_torch(self.dyn_state.links.quat, transpose=True, copy=False)
-                target = data[:, links_idx]
+            # See kernel_set_links_pos
+            i_fr = self._links_fixed_root_idx[links_idx]
+            if i_fr >= 0:
+                fixed_roots_quat = qd_to_torch(self.dyn_state.fixed_roots.quat, transpose=True, copy=False)
+                links_quat = qd_to_torch(self.dyn_state.links.quat, transpose=True, copy=False)
+                targets = (fixed_roots_quat[:, i_fr], links_quat[:, links_idx])
             else:
-                data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
-                target = data[:, link.q_start + 3 : link.q_start + 7]
+                qpos = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
+                targets = (qpos[:, link.q_start + 3 : link.q_start + 7],)
             # Fixed links with at least one geom and non-batched vertices cannot take env-specific orientations
             if link.is_fixed and link.geoms and not link.entity._batch_fixed_verts:
                 quat = torch.as_tensor(quat, dtype=gs.tc_float, device=gs.device)
@@ -1941,7 +1949,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                         "Impossible to set env-specific quat for fixed links with at least one geometry."
                     )
             mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
-            assign_indexed_tensor(target, mask, quat)
+            for target in targets:
+                assign_indexed_tensor(target, mask, quat)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:

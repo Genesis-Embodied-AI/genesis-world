@@ -13,6 +13,7 @@ from .utils import assert_grad_matches_fd, make_diff_scene_pair
     "model_name",
     [
         "grad_free",
+        "grad_fixed_base",
         "grad_revolute",
         "grad_prismatic",
         pytest.param("grad_spherical", marks=pytest.mark.required),
@@ -42,6 +43,7 @@ def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
     # force->position is only checked on cartpole, where its sensitivity clears the finite-difference floor.
     checks_by_joint = {
         "grad_free": ((("pos", "pos", 10), ("quat", "quat", 11), ("vel", "pos", 12), ("vel", "quat", 13)), 1, 2),
+        "grad_fixed_base": ((("vel", "pos", 230), ("pos", "pos", 231)), 221, 222),
         "grad_revolute": ((("vel", "quat", 31), ("force", "quat", 32)), 21, 22),
         "grad_prismatic": ((("vel", "pos", 50),), 41, 0),
         "grad_spherical": ((("vel", "quat", 71), ("force", "quat", 72)), 61, 62),
@@ -59,6 +61,7 @@ def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
     # Per-topology tolerances (fp64, fp32), pinned to the measured finite-difference floors
     fp64_tol, fp32_tol = {
         "grad_free": (2e-10, 5e-5),
+        "grad_fixed_base": (1e-10, 2e-5),
         "grad_revolute": (1e-10, 5e-7),
         "grad_prismatic": (1e-10, 5e-6),
         "grad_spherical": (1e-10, 1e-6),

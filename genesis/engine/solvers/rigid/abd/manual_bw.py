@@ -221,13 +221,22 @@ def func_forward_kinematics_link_bw(
                 + parent_quat_grad_from_quat[j]
             )
 
-    # The forward skips writing fixed root links' pose so users can overwrite it (see func_forward_kinematics_link):
-    # their pose is persistent input state, so its grad keeps accumulating across substeps and is left unconsumed here.
-    if not (i_parent == -1 and dyn_info.links.is_fixed[I_l]):
+    # The forward copies the pose of a fixed root link from its state (see func_forward_kinematics_link), which is
+    # persistent across substeps, so its grad keeps accumulating there.
+    i_fr = dyn_info.links.fixed_root_idx[I_l]
+    if i_fr != -1:
         for j in qd.static(range(3)):
-            dyn_state.links.pos.grad[i_l, i_b][j] = 0.0
+            dyn_state.fixed_roots.pos.grad[i_fr, i_b][j] = (
+                dyn_state.fixed_roots.pos.grad[i_fr, i_b][j] + dyn_state.links.pos.grad[i_l, i_b][j]
+            )
         for j in qd.static(range(4)):
-            dyn_state.links.quat.grad[i_l, i_b][j] = 0.0
+            dyn_state.fixed_roots.quat.grad[i_fr, i_b][j] = (
+                dyn_state.fixed_roots.quat.grad[i_fr, i_b][j] + dyn_state.links.quat.grad[i_l, i_b][j]
+            )
+    for j in qd.static(range(3)):
+        dyn_state.links.pos.grad[i_l, i_b][j] = 0.0
+    for j in qd.static(range(4)):
+        dyn_state.links.quat.grad[i_l, i_b][j] = 0.0
 
 
 @qd.kernel(fastcache=True)

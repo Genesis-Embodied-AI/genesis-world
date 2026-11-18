@@ -351,6 +351,13 @@ class KinematicSolver(Solver):
         # own when its parent is static or absent. The parents precede the children.
         self._n_roots = len({link.root_idx for link in self.links})
         self.n_roots_ = max(1, self._n_roots)
+        # The pose of a fixed root link is state, held apart from the poses forward kinematics derives (see
+        # FixedRootsState in rigid/data.py).
+        links_is_fixed_root = np.array([link.parent_idx == -1 and link.is_fixed for link in self.links], dtype=bool)
+        self._links_fixed_root_idx = np.where(
+            links_is_fixed_root, np.cumsum(links_is_fixed_root, dtype=gs.np_int) - 1, -1
+        )
+        self.n_fixed_roots_ = max(1, np.count_nonzero(links_is_fixed_root))
         links_is_static = np.ones(self.n_links, dtype=bool)
         links_tree_root_idx = np.full(self.n_links, -1, dtype=gs.np_int)
         for link in self.links:
@@ -615,6 +622,7 @@ class KinematicSolver(Solver):
                 np.array([link.geom_start for link in links], dtype=gs.np_int),
                 np.array([link.geom_end for link in links], dtype=gs.np_int),
                 np.array([link.is_fixed for link in links], dtype=gs.np_bool),
+                self._links_fixed_root_idx,
                 np.array([link.desc.pos for link in links], dtype=gs.np_float),
                 np.array([link.desc.quat for link in links], dtype=gs.np_float),
                 self.dyn_state,
@@ -735,16 +743,12 @@ class KinematicSolver(Solver):
         for (field, _), dofs_value in zip(dofs_fields, dofs_values):
             field.from_numpy(dofs_value)
 
-        # The state of a fixed root link is set at init alone (see kernel_init_link_fields), so it takes the frame of
-        # the variant its environment carries too
-        fixed_roots_idx = [entity.link_start for entity in entities if entity.base_link.is_fixed]
-        if fixed_roots_idx:
-            links_state_pos = qd_to_numpy(self.dyn_state.links.pos, transpose=False, copy=True)
-            links_state_quat = qd_to_numpy(self.dyn_state.links.quat, transpose=False, copy=True)
-            links_state_pos[fixed_roots_idx] = links_pos[fixed_roots_idx]
-            links_state_quat[fixed_roots_idx] = links_quat[fixed_roots_idx]
-            self.dyn_state.links.pos.from_numpy(links_state_pos)
-            self.dyn_state.links.quat.from_numpy(links_state_quat)
+        # The pose of a fixed root link starts at the frame of the variant its environment carries (see
+        # kernel_init_link_fields).
+        links_is_fixed_root = self._links_fixed_root_idx >= 0
+        if links_is_fixed_root.any():
+            self.dyn_state.fixed_roots.pos.from_numpy(links_pos[links_is_fixed_root])
+            self.dyn_state.fixed_roots.quat.from_numpy(links_quat[links_is_fixed_root])
 
     def _dispatch_heterogeneous_vgeoms(self):
         """Mark the environments holding each visual geom of a heterogeneous variant."""
@@ -796,8 +800,9 @@ class KinematicSolver(Solver):
     # ------------------------------------------------------------------------------------
 
     def get_state(self) -> SolverCheckpoint:
-        # The poses of the links a state holds are those its configuration implies, which the step loop leaves one
-        # integration behind whenever it defers the refresh that follows it
+        # A restored state runs forward kinematics (see 'set_state'), so a state is captured with the poses of the links
+        # its configuration implies, which the step loop leaves one integration behind whenever it defers the refresh
+        # that follows it.
         self.update_forward_pos()
         return super().get_state()
 
