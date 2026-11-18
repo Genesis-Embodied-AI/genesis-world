@@ -172,33 +172,44 @@ def test_reset_control(n_envs, robot_path):
             file=robot_path,
         )
     )
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(0.0, 1.0, 1.0),
+        )
+    )
     scene.build(n_envs=n_envs)
     robot.set_dofs_ki(1000.0)
+    box.set_dofs_ki(1000.0)
     # Offsets and target velocity small enough that the actuators stay inside their force range, where the integral
     # term shows
     qpos = 0.01 * np.random.rand(robot.n_dofs)
     robot.set_dofs_position(qpos)
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
     robot.control_dofs_velocity(0.01, dofs_idx_local=[6])
+    box.control_dofs_position((0.0, 1.0, 1.01, 0.0, 0.0, 0.0))
     scene.step()
     old_control_force = robot.get_dofs_control_force()
+    old_box_control_force = box.get_dofs_control_force()
     for _ in range(5):
         scene.step()
     late_control_force = robot.get_dofs_control_force()
 
-    # The integral term restarts from zero on reset, and on a pose jump that zeroes the velocity, so the
-    # first step after either reproduces the first step above. An environment left alone keeps its integral term.
+    # The integral term restarts from zero on reset and on any write of the pose, so the first step after either
+    # reproduces the first step above. An environment left alone keeps its integral term.
     envs_idx = [0] if n_envs > 0 else None
     scene.reset()
     robot.set_dofs_position(qpos, zero_velocity=False)
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
     robot.control_dofs_velocity(0.01, dofs_idx_local=[6])
+    box.control_dofs_position((0.0, 1.0, 1.01, 0.0, 0.0, 0.0))
     for _ in range(5):
         scene.step()
     scene.reset(envs_idx=envs_idx)
     robot.set_dofs_position(qpos, envs_idx=envs_idx, zero_velocity=False)
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
     robot.control_dofs_velocity(0.01, dofs_idx_local=[6])
+    box.control_dofs_position((0.0, 1.0, 1.01, 0.0, 0.0, 0.0))
     scene.step()
     control_force = robot.get_dofs_control_force()
     assert_allclose(control_force[envs_idx], old_control_force[envs_idx], tol=gs.EPS)
@@ -206,9 +217,13 @@ def test_reset_control(n_envs, robot_path):
         assert_allclose(control_force[1], late_control_force[1], tol=gs.EPS)
     for _ in range(5):
         scene.step()
-    robot.set_dofs_position(qpos, envs_idx=envs_idx)
+    robot.set_qpos(qpos, envs_idx=envs_idx, zero_velocity=False)
+    robot.set_dofs_velocity(0.0, envs_idx=envs_idx)
+    box.set_pos((0.0, 1.0, 1.0), envs_idx=envs_idx, zero_velocity=False)
+    box.set_dofs_velocity(0.0, envs_idx=envs_idx)
     scene.step()
     assert_allclose(robot.get_dofs_control_force()[envs_idx], old_control_force[envs_idx], tol=gs.EPS)
+    assert_allclose(box.get_dofs_control_force()[envs_idx], old_box_control_force[envs_idx], tol=gs.EPS)
 
     scene.reset()
     scene.step()

@@ -65,7 +65,7 @@ from ..kinematic_solver import (
 )
 from .abd.accessor import (
     ConstraintType,
-    kernel_clear_dofs_ctrl_force_int,
+    kernel_clear_qs_ctrl_force_int,
     kernel_control_dofs_force,
     kernel_control_dofs_position,
     kernel_control_dofs_position_velocity,
@@ -1822,6 +1822,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
             for target in targets:
                 assign_indexed_tensor(target, mask, pos)
+            if not link.is_fixed:
+                # See ctrl_force_int in rigid/data.py
+                ctrl_force_int = qd_to_torch(self.dyn_state.dofs.ctrl_force_int, transpose=True, copy=False)
+                assign_indexed_tensor(ctrl_force_int[:, link.dof_start : link.dof_end], mask, value=0.0)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -1951,6 +1955,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
             for target in targets:
                 assign_indexed_tensor(target, mask, quat)
+            if not link.is_fixed:
+                # See ctrl_force_int in rigid/data.py
+                ctrl_force_int = qd_to_torch(self.dyn_state.dofs.ctrl_force_int, transpose=True, copy=False)
+                assign_indexed_tensor(ctrl_force_int[:, link.dof_start : link.dof_end], mask, value=0.0)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -2246,6 +2254,13 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 )
 
             kernel_set_qpos(qs_idx, envs_idx, qpos, self.rigid_info, self.rigid_config)
+
+        # See ctrl_force_int in rigid/data.py
+        is_q_set = torch.zeros((self.n_qs_,), dtype=gs.tc_bool, device=gs.device)
+        is_q_set[indices_to_mask(qs_idx)] = True
+        is_env_set = torch.zeros((self.n_envs_,), dtype=gs.tc_bool, device=gs.device)
+        is_env_set[indices_to_mask(envs_idx)] = True
+        kernel_clear_qs_ctrl_force_int(is_q_set, is_env_set, self.dyn_state, self.dyn_info, self.rigid_config)
         self.clear_errno(envs_idx)
 
         if not skip_forward:
@@ -2463,7 +2478,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         positions[:, dofs_idx] = position
         is_dof_set = torch.zeros((self.n_dofs,), dtype=gs.tc_bool, device=gs.device)
         is_dof_set[dofs_idx] = True
-        kernel_set_dofs_position(is_dof_set, envs_idx, positions, self.dyn_info, self.rigid_info, self.rigid_config)
+        kernel_set_dofs_position(
+            is_dof_set, envs_idx, positions, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
+        )
 
         self.clear_errno(envs_idx)
 
@@ -2490,24 +2507,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     @mutates(StateChange.DYNAMICS, links="dofs_idx")
     def set_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None, *, skip_forward=False):
-        # Zeroing the velocity marks a jump of the pose, such as the reset of an episode, which restarts the integral term
-        # of the controller (see func_ctrl_force_int_next)
-        if velocity is None and gs.use_zerocopy:
-            mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
-            ctrl_force_int = qd_to_torch(self.dyn_state.dofs.ctrl_force_int, transpose=True, copy=False)
-            assign_indexed_tensor(ctrl_force_int, mask, value=0.0)
-        is_force_int_cleared_by_kernel = velocity is None and not gs.use_zerocopy
         # Wake the owning entities before delegating to the base setter, which re-sanitizes and applies the write.
-        if self._use_hibernation or is_force_int_cleared_by_kernel:
-            _, sanitized_dofs_idx, sanitized_envs_idx = self._sanitize_io_variables(
+        if self._use_hibernation:
+            _, wake_dofs_idx, wake_envs_idx = self._sanitize_io_variables(
                 velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
             )
-            if self._use_hibernation:
-                self._wake_dofs(sanitized_dofs_idx, sanitized_envs_idx)
-            if is_force_int_cleared_by_kernel:
-                kernel_clear_dofs_ctrl_force_int(
-                    sanitized_dofs_idx, sanitized_envs_idx, self.dyn_state, self.rigid_config
-                )
+            self._wake_dofs(wake_dofs_idx, wake_envs_idx)
         super().set_dofs_velocity(velocity, dofs_idx, envs_idx, skip_forward=skip_forward)
 
     @mutates()

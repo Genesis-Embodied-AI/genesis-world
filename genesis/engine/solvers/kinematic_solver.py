@@ -1027,7 +1027,9 @@ class KinematicSolver(Solver):
         positions[:, dofs_idx] = position
         is_dof_set = torch.zeros((self.n_dofs,), dtype=gs.tc_bool, device=gs.device)
         is_dof_set[dofs_idx] = True
-        kernel_set_dofs_position(is_dof_set, envs_idx, positions, self.dyn_info, self.rigid_info, self.rigid_config)
+        kernel_set_dofs_position(
+            is_dof_set, envs_idx, positions, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
+        )
 
         kernel_forward_kinematics(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         self._is_forward_pos_updated = True
