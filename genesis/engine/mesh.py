@@ -921,8 +921,9 @@ class Mesh(RBC, serialization.SerializationMixin):
             uvs=None if raw["uvs"] is None else loading.array(raw["uvs"]),
             # The metadata says what was already done to the geometry, so it is handed back rather than acted on again
             metadata=loading.value(raw["metadata"], Any),
+            # A file written before meshes carried the textures of their asset holds none
             asset_textures=None
-            if raw["asset_textures"] is None
+            if raw.get("asset_textures") is None
             else mu.AssetTextures(*(loading.value(texture, Texture | None) for texture in raw["asset_textures"])),
         )
         # Construction derives the visual from the surface and the uvs unless the mesh states vertex colours, which are

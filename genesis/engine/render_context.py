@@ -804,6 +804,8 @@ def get_variants_idx(variants: tuple | dict, value: "str | int | Sequence[str | 
         elif not 0 <= variant < len(variants):
             gs.raise_exception(f"Variant {variant} is out of range for {len(variants)} variants.")
         variants_idx.append(variant)
+    if not variants_idx:
+        gs.raise_exception("No variant given.")
     return variants_idx if len(variants_idx) > 1 else variants_idx[0]
 
 

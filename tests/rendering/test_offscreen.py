@@ -379,6 +379,8 @@ def test_dynamic_texture(tmp_path, base_plus_emissive_glb, show_viewer, png_snap
         screen_vgeom.set_texture(variant="green")
     with pytest.raises(gs.GenesisException, match="integer position"):
         screen_vgeom.set_texture(variant=0.5)
+    with pytest.raises(gs.GenesisException, match="No variant given"):
+        screen_vgeom.set_texture(variant=[])
     with pytest.raises(gs.GenesisException, match="2 dims"):
         screen_vgeom.set_texture(np.zeros((16, 16)))
     with pytest.raises(gs.GenesisException, match="batched variant"):
