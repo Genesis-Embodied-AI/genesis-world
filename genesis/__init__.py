@@ -56,7 +56,7 @@ debug: bool | None = None
 EPS: float | None = None
 SEED: int | None = None
 # Dtypes bound by 'init' from its precision and backend.
-# FIXME: The quadrants stub types a scalar dtype call as returning None, so these are Any until the stub is fixed.
+# FIXME: quadrants#1123 The quadrants stub types a scalar dtype call as returning None, so these are Any for now.
 qd_float: Any
 qd_int: Any
 qd_bool: Any
