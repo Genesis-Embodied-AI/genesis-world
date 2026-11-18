@@ -967,7 +967,9 @@ class DynamicTextures:
         texture_variants = self._get_texture(mesh, map_type)
         mask = self._get_envs_mask(envs_idx)
         variants_idx = texture_variants.variants_idx[mask]
-        images = texture_variants.variants[variants_idx.clamp(min=0)]
+        # Indexing by a 1-d selection copies the images, where a scene without parallel environments gives a scalar
+        images = texture_variants.variants[variants_idx.clamp(min=0).reshape(-1)]
+        images = images.reshape(*variants_idx.shape, *images.shape[1:])
         if texture_variants.batched is not None:
             images = torch.where((variants_idx < 0)[..., None, None, None], texture_variants.batched[mask], images)
         return images

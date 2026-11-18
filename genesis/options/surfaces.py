@@ -184,9 +184,13 @@ class Surface(Options):
     def _check_dynamic_textures(self) -> Self:
         fields = dict(self)
         for name, value in fields.items():
-            if isinstance(value, DynamicTexture) and name not in ("diffuse_texture", "emissive_texture"):
+            if isinstance(value, DynamicTexture) and (
+                name not in ("diffuse_texture", "emissive_texture")
+                or (value is not self.texture and value is not self.emission)
+            ):
                 gs.raise_exception(
-                    f"A dynamic texture fills 'diffuse_texture' or 'emissive_texture' alone, got '{name}'."
+                    f"A dynamic texture fills 'diffuse_texture' or 'emissive_texture' alone, and only where the "
+                    f"surface draws its color or its emission, got '{name}' on {type(self).__name__}."
                 )
         # The image of a dynamic texture holds its own opacity
         if isinstance(fields[self._color_target], DynamicTexture) and fields.get("opacity_texture") is not None:

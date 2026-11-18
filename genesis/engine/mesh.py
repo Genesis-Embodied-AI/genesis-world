@@ -19,6 +19,7 @@ import genesis.utils.particle as pu
 import genesis.utils.point_cloud as pc
 from genesis.constants import GLTF_FORMATS, MESH_FORMATS
 from genesis.options.surfaces import Surface
+from genesis.options.textures import Texture
 from genesis.repr_base import RBC
 from genesis.typing import Matrix3x3Type, Vec3FType
 from genesis.utils import serialization
@@ -722,6 +723,9 @@ class Mesh(RBC, serialization.SerializationMixin):
                 asset_texture, (gs.textures.ColorTexture, gs.textures.ImageTexture)
             ):
                 continue
+            # A surface drawing its color in the emissive map holds one texture for both, resolved by the color pass
+            if texture._asset_texture is not None:
+                continue
             is_named = isinstance(texture.variants, dict)
             variants = tuple(texture.variants.values()) if is_named else texture.variants
             variants = tuple(asset_texture if variant is None else variant for variant in variants)
@@ -889,11 +893,18 @@ class Mesh(RBC, serialization.SerializationMixin):
         A mesh is written this way rather than through its fields because construction convexifies, decimates and
         rescales it: what a file carries is the geometry as it now stands, so reading one back processes nothing.
         """
+        # The textures of the asset are written for a dynamic texture alone, which shows them whatever its variants
+        asset_textures = None
+        if self._asset_textures is not None and any(
+            isinstance(texture, gs.textures.DynamicTexture) for texture in (self.surface.texture, self.surface.emission)
+        ):
+            asset_textures = [exporting.value(texture, Texture | None) for texture in self._asset_textures]
         return {
             "geometry": _exported_geometry(self.trimesh, exporting),
             "uvs": None if self.uvs is None else exporting.array(self.uvs),
             "surface": exporting.value(self.surface, Surface),
             "metadata": exporting.value(self.metadata, Any),
+            "asset_textures": asset_textures,
         }
 
     @classmethod
@@ -910,6 +921,9 @@ class Mesh(RBC, serialization.SerializationMixin):
             uvs=None if raw["uvs"] is None else loading.array(raw["uvs"]),
             # The metadata says what was already done to the geometry, so it is handed back rather than acted on again
             metadata=loading.value(raw["metadata"], Any),
+            asset_textures=None
+            if raw["asset_textures"] is None
+            else mu.AssetTextures(*(loading.value(texture, Texture | None) for texture in raw["asset_textures"])),
         )
         # Construction derives the visual from the surface and the uvs unless the mesh states vertex colours, which are
         # the only visual a file carries (see '_exported_geometry'), so a textured mesh gets its visual back this way.

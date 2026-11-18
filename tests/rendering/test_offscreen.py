@@ -207,7 +207,7 @@ def test_emissive_composites(base_plus_emissive_glb, show_viewer, renderer):
 
 
 @pytest.mark.required
-def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
+def test_dynamic_texture(tmp_path, base_plus_emissive_glb, show_viewer, png_snapshot):
     # The camera sensor renders through a rasterizer of its own, which reads the dynamic textures apart from the camera.
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
@@ -290,6 +290,19 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
         ),
         surface=gs.surfaces.Rough(),
     )
+    # An asset giving a color and an emission, out of view, on a surface drawing its color in the emissive map
+    glow = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=base_plus_emissive_glb,
+            pos=(0.0, 20.0, 0.0),
+            fixed=True,
+        ),
+        surface=gs.surfaces.Emission(
+            emissive_texture=gs.textures.DynamicTexture(
+                resolution=(4, 4),
+            ),
+        ),
+    )
     camera = scene.add_camera(
         pos=(0.0, 0.0, 4.0),
         lookat=(0.0, 0.0, 0.0),
@@ -325,6 +338,12 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
     assert_allclose(colors[:, 1], colors[:, 3], atol=5.0)
     lamp_initial = colors[:, 2]
     assert (lamp_initial[:, [0, 2]] > 40.0).all() and (lamp_initial[:, 1] < 30.0).all()
+    # A variant left to None and the texture of the asset both show the color the asset gives, red, over its emission
+    (glow_vgeom,) = glow.vgeoms
+    glow_variant = glow_vgeom.get_texture()
+    glow_vgeom.set_texture()
+    assert_equal(glow_vgeom.get_texture(), glow_variant)
+    assert (glow_variant[..., 0] > 0.5).all() and (glow_variant[..., 1:3] < 0.1).all()
 
     # A variant shown by name in one environment, one image per environment written into the batched variant, and a
     # color shared by every one. The images as drawn are those of the shown variant, in the format of the map.
@@ -392,6 +411,12 @@ def test_dynamic_texture(tmp_path, show_viewer, png_snapshot):
         reference.vgeoms[0].get_texture()
     with pytest.raises(gs.GenesisException, match="diffuse_texture"):
         gs.surfaces.Default(roughness_texture=gs.textures.DynamicTexture(resolution=(4, 4)))
+    with pytest.raises(gs.GenesisException, match="Glass"):
+        gs.surfaces.Glass(diffuse_texture=gs.textures.DynamicTexture(resolution=(4, 4)))
+    with pytest.raises(gs.GenesisException, match="not both"):
+        label_vgeom.set_texture(np.zeros((8, 8, 3)), variant=0)
+    with pytest.raises(gs.GenesisException, match="RGB or RGBA"):
+        label_vgeom.set_texture(np.zeros((8, 8, 2)))
     with pytest.raises(gs.GenesisException, match="texture coordinates"):
         gs.Scene().add_entity(
             morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)),
@@ -577,6 +602,12 @@ def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer
     colors = np.einsum("hwc,ebhw->ebc", rgb, deformable_masks / deformable_npixel)
     is_high = np.array([[False, False, True], [True, False, False]])[:n_envs_]
     assert (colors[:, is_high] > 150.0).all() and (colors[:, ~is_high] < 30.0).all()
+    # The images returned are a copy, which writing into leaves the variants as they are
+    cube_texture = cube.get_texture()
+    cube_texture.zero_()
+    assert_equal(
+        cube.get_texture()[..., 0, 0, :], variants_color[[1, 0][:n_envs_]] if n_envs > 0 else variants_color[1]
+    )
 
 
 @pytest.mark.required

@@ -288,12 +288,18 @@ def test_export_and_load_rigid(
             pos=(80.0, 80.0, 1.0),
         ),
     )
-    # A GLTF file is Y-up, so a Z-up claim on it is held as a compensating offset orientation
-    scene.add_entity(
+    # A GLTF file is Y-up, so a Z-up claim on it is held as a compensating offset orientation. Its surface holds a
+    # dynamic texture showing the textures of the asset.
+    gltf_camera = scene.add_entity(
         morph=gs.morphs.Mesh(
             pos=(90.0, 90.0, 1.0),
             file="meshes/camera/camera.glb",
             file_meshes_are_zup=True,
+        ),
+        surface=gs.surfaces.Default(
+            diffuse_texture=gs.textures.DynamicTexture(
+                resolution=(4, 4),
+            ),
         ),
     )
     # The same document given inline rather than as a model built in memory
@@ -381,6 +387,11 @@ def test_export_and_load_rigid(
     assert_equal(restored_texture.variants[0].color, anchored_texture.variants[0].color)
     assert_equal(restored_texture.variants[1].image_array, anchored_texture.variants[1].image_array)
     assert restored_texture.is_batched
+    # The textures of the asset travel with the meshes showing a dynamic texture
+    for vgeom, restored_vgeom in zip(gltf_camera.vgeoms, restored.entities[gltf_camera.idx].vgeoms):
+        vgeom.set_texture()
+        restored_vgeom.set_texture()
+        assert_equal(restored_vgeom.get_texture(), vgeom.get_texture())
     # A morph names the asset it was created from, since the description stands for what was parsed out of it
     assert restored.entities[15].morph.file == "two_link.urdf.xacro"
     # A mesh states the asset it was read from by name, wherever that asset stood
