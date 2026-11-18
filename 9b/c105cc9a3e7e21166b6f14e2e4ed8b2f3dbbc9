@@ -1,0 +1,21 @@
+genesis/utils/urdf.py
+  s_746184ad26bf2e::t_0768a9c51e129a 433
+  s_746184ad26bf2e::t_22f01a26f4fee6 436
+  s_746184ad26bf2e::t_9402641c6000b3 437
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9bc105cc9a3e7e21166b6f14e2e4ed8b2f3dbbc9",
+  "prompts": {},
+  "sessions": {
+    "s_746184ad26bf2e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9cdd4abc-4283-423d-82c2-a443cbcaec71",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
