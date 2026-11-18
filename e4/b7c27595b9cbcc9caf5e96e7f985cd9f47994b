@@ -1,0 +1,32 @@
+genesis/engine/entities/rigid_entity/rigid_geom.py
+  s_8d59a9e0041e31::t_21e6e2e3e6b616 778
+  s_8d59a9e0041e31::t_7d05c4a11e75a6 769-770,780-791
+  s_8d59a9e0041e31::t_1979f46706ff63 750
+genesis/engine/entities/fem_entity.py
+  s_8d59a9e0041e31::t_7d05c4a11e75a6 55-74,84-91,93-96,620-639
+  s_8d59a9e0041e31::t_1979f46706ff63 54,618
+  s_8d59a9e0041e31::t_21e6e2e3e6b616 83
+genesis/engine/entities/pbd_entity.py
+  s_8d59a9e0041e31::t_1979f46706ff63 202
+  s_8d59a9e0041e31::t_7d05c4a11e75a6 205-223,234-247
+  s_8d59a9e0041e31::t_21e6e2e3e6b616 204,231-233
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_8d59a9e0041e31::t_7d05c4a11e75a6 1255-1274
+  s_8d59a9e0041e31::t_1979f46706ff63 1253
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e4b7c27595b9cbcc9caf5e96e7f985cd9f47994b",
+  "prompts": {},
+  "sessions": {
+    "s_8d59a9e0041e31": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "884f5d67-9ff4-41ac-845d-dbfc3ffc3a6f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
