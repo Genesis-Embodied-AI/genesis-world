@@ -12,7 +12,7 @@ from genesis.utils.cache import OwnedCache, get_hashkey
 
 from .misc import FoamOptions
 from .options import Options
-from .textures import BatchTexture, ColorTexture, ImageTexture, Texture
+from .textures import BatchTexture, ColorTexture, DynamicTexture, ImageTexture, StaticTexture, Texture
 
 MetalType = Literal["aluminium", "gold", "copper", "brass", "iron", "titanium", "vanadium", "lithium"]
 
@@ -180,6 +180,35 @@ class Surface(Options):
 
         return data
 
+    @model_validator(mode="after")
+    def _check_dynamic_textures(self) -> Self:
+        fields = dict(self)
+        for name, value in fields.items():
+            if isinstance(value, DynamicTexture) and (
+                name not in ("diffuse_texture", "emissive_texture")
+                or (value is not self.texture and value is not self.emission)
+            ):
+                gs.raise_exception(
+                    f"A dynamic texture fills 'diffuse_texture' or 'emissive_texture' alone, and only where the "
+                    f"surface draws its color or its emission, got '{name}' on {type(self).__name__}."
+                )
+        # A dynamic texture fills one map, both maps being drawn from it otherwise
+        if isinstance(fields.get("diffuse_texture"), DynamicTexture) and fields.get("diffuse_texture") is fields.get(
+            "emissive_texture"
+        ):
+            gs.raise_exception("A dynamic texture fills one map of a surface. Declare one for each map instead.")
+        # The image of a dynamic texture drawn as the color, the emission standing for it over a black base color, holds
+        # its own opacity.
+        if isinstance(self.get_rgba(), DynamicTexture) and fields.get("opacity_texture") is not None:
+            gs.raise_exception("A dynamic texture holds its own opacity, so 'opacity_texture' cannot be given with it.")
+        textures = [value for value in fields.values() if isinstance(value, Texture)]
+        # A batch texture is drawn by the batch renderer alone, which draws no dynamic texture
+        if any(isinstance(texture, BatchTexture) for texture in textures) and any(
+            isinstance(texture, DynamicTexture) for texture in textures
+        ):
+            gs.raise_exception("A batch texture cannot be given with a dynamic texture on one surface.")
+        return self
+
     @property
     def texture(self) -> Texture | None:
         raise NotImplementedError
@@ -197,6 +226,12 @@ class Surface(Options):
         return False
 
     def get_rgba(self, batch: bool = False) -> BatchTexture | Texture:
+        """Return the color and opacity of the surface as one RGBA texture, the one the renderers draw.
+
+        A batch texture gives its first entry, or a ``gs.textures.BatchTexture`` of its entries under 'batch', as the
+        batch renderer draws them. A dynamic texture drawn as the color is returned as is, its images holding their own
+        opacity.
+        """
         return _make_rgba(_resolve_albedo(self.texture, self.emission), None, batch)
 
     def update_texture(
@@ -248,14 +283,17 @@ class Surface(Options):
     def _extract_opacity_from(
         texture: Texture | None, emissive: Texture | None, opacity: Texture | None
     ) -> Texture | None:
-        if texture is not None:
+        if isinstance(texture, StaticTexture):
             tex = texture.check_dim(3)
             if opacity is None and tex is not None:
                 opacity = tex
-        if emissive is not None:
+        if isinstance(emissive, StaticTexture):
             tex = emissive.check_dim(3)
             if opacity is None and tex is not None:
                 opacity = tex
+        # The image of a dynamic texture holds its own opacity, so the alpha of the emission is dropped
+        if isinstance(texture, DynamicTexture):
+            return None
         return opacity
 
 
@@ -288,12 +326,17 @@ def _resolve_albedo(base_texture: Texture | None, emissive_texture: Texture | No
         if is_base_batched and len(resolved) == len(base_batch) and all(r is b for r, b in zip(resolved, base_batch)):
             return base_texture
         return BatchTexture(textures=resolved)
-    if base_texture is not None and not base_texture.is_black:
+    # A dynamic texture holds no image to tell whether it is black, so that it stands as the albedo whatever it shows
+    if base_texture is not None and not (isinstance(base_texture, StaticTexture) and base_texture.is_black):
         return base_texture
     return emissive_texture if emissive_texture is not None else base_texture
 
 
 def _make_rgba(color_texture: Texture | None, opacity_texture: Texture | None, batch: bool) -> "BatchTexture | Texture":
+    # The image of a dynamic texture is written at runtime and holds its own opacity
+    if isinstance(color_texture, DynamicTexture):
+        return color_texture
+
     input_textures = [texture for texture in (color_texture, opacity_texture) if texture is not None]
     # TODO: Identical pixels loaded from distinct files are not shared, since 'image_path' is part of the key. Sharing
     # them requires texture-specific hashing, which 'get_hashkey' leaves out to stay generic.
@@ -416,9 +459,9 @@ class Glass(Surface):
     @model_validator(mode="after")
     def _post_init(self) -> Self:
         # Truncate specular/emissive textures to 3 channels (discard alpha for Glass which has no opacity_texture)
-        if self.specular_texture is not None:
+        if isinstance(self.specular_texture, StaticTexture):
             self.specular_texture.check_dim(3)
-        if self.emissive_texture is not None:
+        if isinstance(self.emissive_texture, StaticTexture):
             self.emissive_texture.check_dim(3)
         if self.specular_texture is not None and self.transmission_texture is None:
             self.transmission_texture = self.specular_texture
@@ -782,7 +825,7 @@ class Emission(Surface):
 
     @model_validator(mode="after")
     def _post_init(self) -> Self:
-        if self.emissive_texture is not None:
+        if isinstance(self.emissive_texture, StaticTexture):
             self.emissive_texture.check_dim(3)
         return self
 

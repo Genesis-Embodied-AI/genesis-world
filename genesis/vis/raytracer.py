@@ -275,6 +275,8 @@ class Raytracer(BuildableMixin):
     def get_texture(self, texture):
         if texture is None:
             return None
+        if isinstance(texture, gs.textures.DynamicTexture):
+            gs.raise_exception("Raytracer draws no 'gs.textures.DynamicTexture'.")
 
         if isinstance(texture, gs.textures.ColorTexture):
             return LuisaRenderPy.ColorTexture(color=texture.color)

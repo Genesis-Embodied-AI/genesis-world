@@ -301,6 +301,9 @@ class UsdContext:
     def apply_surface(self, geom_prim: Usd.Prim, surface: gs.surfaces.Surface):
         """
         Apply material properties from USD to a Genesis surface object.
+
+        The textures the material gives the maps a dynamic texture may fill come along, for the mesh to resolve the
+        variants left to None of the dynamic textures of the surface (see 'AssetTextures').
         """
         geom_path = str(geom_prim.GetPath())
         applied_surface = surface.model_copy()
@@ -310,6 +313,11 @@ class UsdContext:
             surface_dict, uv_name = self._material_properties.get(surface_id, ({}, "st"))
             # accepted keys: color_texture, opacity_texture, roughness_texture, metallic_texture, normal_texture, emissive_texture, ior
             applied_surface.update_texture(**surface_dict)
+            asset_textures = mu.AssetTextures(
+                color=surface_dict.get("color_texture"),
+                emission=surface_dict.get("emissive_texture"),
+                opacity=surface_dict.get("opacity_texture"),
+            )
             if surface_id in self._bake_material_paths:
                 bake_success = True if surface_dict else False
                 if not bake_success:
@@ -319,8 +327,9 @@ class UsdContext:
         else:
             uv_name, surface_id = "st", None
             bake_success = None
+            asset_textures = None
 
-        return applied_surface, uv_name, surface_id, bake_success
+        return applied_surface, uv_name, surface_id, bake_success, asset_textures
 
     def find_all_rigid_entities(self) -> list[Usd.Prim]:
         """

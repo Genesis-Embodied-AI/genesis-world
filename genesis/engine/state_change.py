@@ -30,7 +30,8 @@ class StateChange(enum.Enum):
     surface (link poses, qpos, vertices). DYNAMICS is the velocity state. MODEL is what every later step reads besides
     the state: the model parameters (mass, inertia, friction, gains, limits, gravity) and the constraints attached to
     the state (particle and vertex constraints). VISUAL is the appearance alone, which the physics never reads, such as
-    the visual vertices of a visual geom: the render context reports it, never a solver.
+    the visual vertices of a visual geom or the variant each environment shows of a dynamic texture: the render context
+    reports it, never a solver.
     """
 
     GEOMETRY = enum.auto()
@@ -40,10 +41,10 @@ class StateChange(enum.Enum):
 
 
 class Subscriber:
-    """A unique handle for the solver state changes whose category is in `to`.
+    """A unique handle for the state changes whose category is in `to`.
 
-    A consumer constructs a Subscriber and registers it with a solver via Solver.subscribe. The mode is fixed at
-    construction by whether a callback is given:
+    A consumer constructs a Subscriber and passes it to the 'subscribe' method of whatever it follows the changes of.
+    The mode is fixed at construction by whether a callback is given:
       - eager (callback given): each matching change immediately calls callback(change, envs_idx);
       - lazy (no callback): matching changes accumulate into `pending` until the owner calls clear() - e.g. a sensor
         that rebuilds a cache on its next update rather than on every set_pos.
@@ -63,15 +64,26 @@ class Subscriber:
         self.callback = callback
         self.links_filter = links_filter
         self._pending: set[StateChange] = set()
+        # The environments of the pending changes of each category (see 'get_pending_envs_idx')
+        self._pending_envs_idx: dict[StateChange, object] = {}
 
     @property
     def pending(self) -> frozenset[StateChange]:
         """Categories accumulated since the last clear() (always empty in eager mode)."""
         return frozenset(self._pending)
 
+    def get_pending_envs_idx(self, change: StateChange) -> object:
+        """Return the environments of the pending changes of a category, as the single notification of it gave them.
+
+        None stands for every environment, which several notifications with different environments also give, so that
+        what a lazy subscriber holds stays bounded however long it goes without a clear().
+        """
+        return self._pending_envs_idx.get(change)
+
     def clear(self):
         """Drop the accumulated changes, once they have been handled."""
         self._pending.clear()
+        self._pending_envs_idx.clear()
 
     def notify(self, change: StateChange, envs_idx=None):
         """Notify the subscriber of a change in some environments.
@@ -89,6 +101,10 @@ class Subscriber:
         if change not in self.to:
             return
         if self.callback is None:
+            if change not in self._pending:
+                self._pending_envs_idx[change] = envs_idx
+            elif self._pending_envs_idx[change] is not envs_idx:
+                self._pending_envs_idx[change] = None
             self._pending.add(change)
         else:
             self.callback(change, envs_idx)

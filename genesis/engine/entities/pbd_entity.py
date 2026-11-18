@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -10,11 +11,13 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
+from genesis.constants import TEXTURE_MAP_TYPE
 from genesis.engine.entities.particle_entity import ParticleEntity
 from genesis.options.surfaces import Surface
 from genesis.typing import IndexType
 
 if TYPE_CHECKING:
+    from genesis.engine.render_context import TextureValueType
     from genesis.engine.scene import Scene
     from genesis.engine.solvers.pbd_solver import PBDSolver
 
@@ -186,6 +189,63 @@ class PBDTetEntity(PBDBaseEntity):
 
         self._mesh = self._vmesh.copy()
         self._mesh.remesh(edge_len_abs=self.particle_size, fix=isinstance(self, PBD3DEntity))
+
+    @gs.assert_built
+    def set_texture(
+        self,
+        texture: "TextureValueType | None" = None,
+        envs_idx: IndexType | None = None,
+        *,
+        variant: "int | str | Sequence[int | str] | None" = None,
+        texture_map_type: TEXTURE_MAP_TYPE | None = None,
+    ) -> None:
+        """Show a variant of a dynamic texture in some environments, or write its batched variant there and show it.
+
+        The texture is that of the visual mesh of the entity.
+        The pixels `texture` given, the batched variant takes them and shows them. Otherwise the variant `variant` is
+        shown, the texture the asset gives the map if None, whatever the variants. Giving both raises.
+
+        Parameters
+        ----------
+        texture : None | array_like | gs.textures.ColorTexture | gs.textures.ImageTexture
+            The pixels of the batched variant: an RGB or RGBA image of shape (height, width, channels) for every
+            selected environment or (len(envs_idx), height, width, channels) for one each, broadcast to the resolution
+            of the texture, or a color or an image texture resized to it. An integer image holds values up to 255 and a
+            float one values up to 1.0, clamped to [0, 1] in the diffuse map and to nonnegative values in the emissive
+            map, whose emission may exceed 1. Defaults to None.
+        envs_idx : None | int | array_like, optional
+            The environments to set. If None, every environment is set. Defaults to None.
+        variant : None | int | str | sequence of int or str, optional
+            A variant, by position or by name, for every selected environment or one per selected environment, None for
+            the texture the asset gives the map. Defaults to None.
+        texture_map_type : gs.TEXTURE_MAP_TYPE | None, optional
+            The map whose dynamic texture to set, which may be None when the surface fills a single map with one.
+            Defaults to None.
+        """
+        self._solver.render_context.set_texture(self, texture, envs_idx, variant, texture_map_type)
+
+    @gs.assert_built
+    def get_texture(
+        self, envs_idx: IndexType | None = None, *, texture_map_type: TEXTURE_MAP_TYPE | None = None
+    ) -> torch.Tensor:
+        """Return a copy of the image a dynamic texture shows in each environment, as drawn.
+
+        The texture is that of the visual mesh of the entity.
+
+        Parameters
+        ----------
+        envs_idx : None | int | array_like, optional
+            The environments to read. If None, every environment is read. Defaults to None.
+        texture_map_type : gs.TEXTURE_MAP_TYPE | None, optional
+            The map whose dynamic texture to read, which may be None when the surface fills a single map with one.
+            Defaults to None.
+
+        Returns
+        -------
+        torch.Tensor
+            The RGBA images, 8-bit sRGB values for the diffuse map and 16-bit linear values for the emissive map.
+        """
+        return self._solver.render_context.get_texture(self, envs_idx, texture_map_type)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

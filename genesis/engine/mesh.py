@@ -19,6 +19,7 @@ import genesis.utils.particle as pu
 import genesis.utils.point_cloud as pc
 from genesis.constants import GLTF_FORMATS, MESH_FORMATS
 from genesis.options.surfaces import Surface
+from genesis.options.textures import Texture
 from genesis.repr_base import RBC
 from genesis.typing import Matrix3x3Type, Vec3FType
 from genesis.utils import serialization
@@ -134,6 +135,9 @@ class Mesh(RBC, serialization.SerializationMixin):
         the original geometry if necessary. 8 does what needs to be done at all costs. Default to 0.
     metadata : dict
         The metadata of the mesh.
+    asset_textures : AssetTextures | None
+        The textures the asset gives the maps of the mesh, which the variants left to None of the dynamic textures of
+        its surface show, at construction and whenever a surface is set. None for a mesh made without an asset.
     """
 
     def __init__(
@@ -148,10 +152,12 @@ class Mesh(RBC, serialization.SerializationMixin):
         decimate_aggressiveness=0,
         metadata=None,
         is_mesh_zup: bool = True,
+        asset_textures: mu.AssetTextures | None = None,
     ):
         self._uid = gs.UID()
         self._mesh = mesh  # .copy() FIXME: For some reason forcing copy is causing some tests to fails...
         self._surface: Surface | None = None
+        self._asset_textures = asset_textures
         if uvs is not None:
             uvs = uvs.astype(gs.np_float, copy=False)
         self._uvs = uvs
@@ -429,6 +435,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             surface=self._surface.model_copy(),
             uvs=self._uvs.copy() if self._uvs is not None else None,
             metadata=self._metadata.copy(),
+            asset_textures=self._asset_textures,
         )
 
     @classmethod
@@ -444,6 +451,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         surface=None,
         is_mesh_zup=True,
         share_arrays=False,
+        asset_textures: mu.AssetTextures | None = None,
     ):
         """
         Create a genesis.Mesh from a trimesh.Trimesh object.
@@ -452,6 +460,9 @@ class Mesh(RBC, serialization.SerializationMixin):
         its own, so that the meshes built from one trimesh share its geometry. Sharing requires that nothing writes into
         those arrays in place, which holds for a trimesh that Genesis alone holds, transforms replacing the arrays they
         change.
+
+        'asset_textures' are the textures the asset gives the maps of the mesh (see 'Mesh'), or else those the visual
+        of the trimesh gives.
         """
         if surface is None:
             surface = gs.surfaces.Default()
@@ -552,6 +563,8 @@ class Mesh(RBC, serialization.SerializationMixin):
                         texture.image_array.flags.writeable = False
             color_texture, opacity_texture = color_textures
             roughness_texture = mu.create_texture(None, roughness_factor, "linear")
+            if asset_textures is None:
+                asset_textures = mu.AssetTextures(color=color_texture, emission=None, opacity=opacity_texture)
 
             surface.update_texture(
                 color_texture=color_texture,
@@ -573,6 +586,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             decimate_aggressiveness=decimate_aggressiveness,
             metadata=metadata,
             is_mesh_zup=is_mesh_zup,
+            asset_textures=asset_textures,
         )
         if color_textures_key is not None:
             _COLOR_TEXTURES_CACHE.own(gs_mesh, color_textures_key, color_textures)
@@ -580,10 +594,21 @@ class Mesh(RBC, serialization.SerializationMixin):
 
     @classmethod
     def from_attrs(
-        cls, verts, faces, normals=None, surface=None, uvs=None, scale=None, metadata=None, is_mesh_zup=True
+        cls,
+        verts,
+        faces,
+        normals=None,
+        surface=None,
+        uvs=None,
+        scale=None,
+        metadata=None,
+        is_mesh_zup=True,
+        asset_textures: mu.AssetTextures | None = None,
     ):
         """
         Create a genesis.Mesh from mesh attributes including vertices, faces, and normals.
+
+        'asset_textures' are the textures the asset gives the maps of the mesh (see 'Mesh').
         """
         if surface is None:
             surface = gs.surfaces.Default()
@@ -607,6 +632,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             scale=scale,
             metadata=metadata,
             is_mesh_zup=is_mesh_zup,
+            asset_textures=asset_textures,
         )
 
     @classmethod
@@ -660,9 +686,12 @@ class Mesh(RBC, serialization.SerializationMixin):
         """Replace the surface of the mesh, the textures the given surface leaves unset keeping their current images.
 
         Every other field takes the value of the given surface, its defaults included, so a surface of another type
-        renders as that type does. A mesh being made takes the surface as given, and keeps the visual of its asset.
+        renders as that type does. The variants of a dynamic texture of the given surface left to None show the
+        textures the asset gives the mesh. A mesh being made takes the surface as given, and keeps the visual of its
+        asset.
         """
-        if self._surface is None:
+        is_replaced = self._surface is not None
+        if not is_replaced:
             # The meshes of an asset share its surface, so that the images of its textures are held once
             self._surface = surface
         else:
@@ -682,7 +711,11 @@ class Mesh(RBC, serialization.SerializationMixin):
                 ):
                     fields[name] = value
             self._surface = type(surface)(**fields).model_copy(update=shortcuts)
-            self.update_trimesh_visual()
+        if self._uvs is None and any(
+            isinstance(texture, gs.textures.DynamicTexture)
+            for texture in (self._surface.texture, self._surface.emission)
+        ):
+            gs.raise_exception("A dynamic texture requires a mesh with texture coordinates, which this mesh lacks.")
         if self._surface.requires_uv and self._uvs is None:
             if "mesh_path" in self._metadata:
                 gs.logger.warning(
@@ -690,6 +723,8 @@ class Mesh(RBC, serialization.SerializationMixin):
                 )
             else:
                 gs.logger.warning("Texture given but asset missing uv info (or failed to load).")
+        if is_replaced:
+            self.update_trimesh_visual()
 
     def update_trimesh_visual(self):
         """
@@ -804,6 +839,14 @@ class Mesh(RBC, serialization.SerializationMixin):
         return self._surface
 
     @property
+    def asset_textures(self) -> "mu.AssetTextures | None":
+        """The textures the asset gives the maps of the mesh, which the variants of a dynamic texture left to None show.
+
+        None for a mesh of no asset.
+        """
+        return self._asset_textures
+
+    @property
     def uvs(self) -> "np.typing.NDArray | None":
         """The uvs of the mesh, None when its surface samples no texture."""
         # The asset uvs stay held, since a surface sampling a texture may replace the current one (see 'set_surface')
@@ -829,11 +872,18 @@ class Mesh(RBC, serialization.SerializationMixin):
         A mesh is written this way rather than through its fields because construction convexifies, decimates and
         rescales it: what a file carries is the geometry as it now stands, so reading one back processes nothing.
         """
+        # The textures of the asset are written for a dynamic texture alone, which shows them whatever its variants
+        asset_textures = None
+        if self._asset_textures is not None and any(
+            isinstance(texture, gs.textures.DynamicTexture) for texture in (self.surface.texture, self.surface.emission)
+        ):
+            asset_textures = [exporting.value(texture, Texture | None) for texture in self._asset_textures]
         return {
             "geometry": _exported_geometry(self.trimesh, exporting),
             "uvs": None if self.uvs is None else exporting.array(self.uvs),
             "surface": exporting.value(self.surface, Surface),
             "metadata": exporting.value(self.metadata, Any),
+            "asset_textures": asset_textures,
         }
 
     @classmethod
@@ -850,6 +900,10 @@ class Mesh(RBC, serialization.SerializationMixin):
             uvs=None if raw["uvs"] is None else loading.array(raw["uvs"]),
             # The metadata says what was already done to the geometry, so it is handed back rather than acted on again
             metadata=loading.value(raw["metadata"], Any),
+            # A file written before meshes carried the textures of their asset holds none
+            asset_textures=None
+            if raw.get("asset_textures") is None
+            else mu.AssetTextures(*(loading.value(texture, Texture | None) for texture in raw["asset_textures"])),
         )
         # Construction derives the visual from the surface and the uvs unless the mesh states vertex colours, which are
         # the only visual a file carries (see '_exported_geometry'), so a textured mesh gets its visual back this way.

@@ -4,6 +4,7 @@ import os
 import weakref
 from functools import lru_cache, wraps
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -18,6 +19,7 @@ import trimesh
 from PIL import Image
 
 import genesis as gs
+from genesis.constants import TEXTURE_MAP_TYPE
 
 from . import geom as gu
 from .cache import (
@@ -302,9 +304,24 @@ def get_wall_thickness(verts: np.ndarray, faces: np.ndarray, quantile: float, we
     return wall_thickness
 
 
+class AssetTextures(NamedTuple):
+    """The textures an asset gives the maps of a mesh that a dynamic texture may fill, None where it gives none.
+
+    The variants of a dynamic texture left to None resolve to them (see ``gs.textures.DynamicTexture``).
+    """
+
+    color: "gs.textures.Texture | None"
+    """The texture of the map the surface draws its color with, diffuse or emissive depending on the surface."""
+    emission: "gs.textures.Texture | None"
+    """The texture of the emissive map."""
+    opacity: "gs.textures.Texture | None" = None
+    """The opacity the asset gives its color, split off the alpha of the texture of 'color'."""
+
+
 class MeshInfo:
     def __init__(self):
         self.surface = None
+        self.asset_textures = None
         self.metadata = {}
         self.verts = []
         self.faces = []
@@ -312,9 +329,10 @@ class MeshInfo:
         self.uvs = []
         self.n_points = 0
 
-    def set_property(self, surface=None, metadata=None):
+    def set_property(self, surface=None, metadata=None, asset_textures: AssetTextures | None = None):
         self.surface = surface
         self.metadata = metadata
+        self.asset_textures = asset_textures
 
     def append(self, verts, faces, normals, uvs):
         faces += self.n_points
@@ -345,6 +363,7 @@ class MeshInfo:
             scale=scale,
             metadata=self.metadata,
             is_mesh_zup=is_mesh_zup,
+            asset_textures=self.asset_textures,
         )
 
 
@@ -447,6 +466,73 @@ def compute_sdf_data(mesh, res):
 _TEXTURE_MATERIALS_CACHE = OwnedCache()
 
 
+def texture_to_rgba(
+    texture: "gs.textures.ColorTexture | gs.textures.ImageTexture",
+    resolution: tuple[int, int],
+    texture_map_type: TEXTURE_MAP_TYPE = TEXTURE_MAP_TYPE.DIFFUSE,
+    *,
+    as_base_color: bool = True,
+    opacity: "gs.textures.ColorTexture | gs.textures.ImageTexture | None" = None,
+) -> np.ndarray:
+    """Return a texture as an RGBA image, in the format of a dynamic texture in a map.
+
+    The diffuse map holds sRGB uint8 values and the emissive map linear float16 values (see
+    ``gs.textures.DynamicTexture``). An image is resized to 'resolution', given as (width, height), and converted from
+    its own encoding. A color is sRGB where the surface draws the texture as its base color ('as_base_color') and linear
+    where it draws it as its emission, as for a static texture. A gray or gray-alpha color spans the three color
+    channels, as an image of one or two channels does. An 'opacity' texture gives the alpha in place of that of the
+    texture, as the opacity of a surface does.
+    """
+    width, height = resolution
+    if isinstance(texture, gs.textures.ImageTexture):
+        if texture.image_array is None:
+            gs.raise_exception(f"A dynamic texture takes no HDR image, got '{texture.image_path}'.")
+        image = texture.image_array
+        if image.ndim == 3 and image.shape[-1] == 1:
+            image = image[..., 0]
+        rgba = np.asarray(Image.fromarray(image).convert("RGBA").resize(resolution, Image.Resampling.BILINEAR))
+        rgba, color, is_srgb = color_u8_to_f32(rgba), texture.image_color, texture.encoding == "srgb"
+    else:
+        # The color goes through the transfer function below as the pixels of an image do, the factor staying neutral
+        color = texture.color
+        rgb = color[:3] if len(color) >= 3 else color[:1] * 3
+        alpha = color[-1] if len(color) in (2, 4) else 1.0
+        rgba = np.broadcast_to(np.array((*rgb, alpha), dtype=gs.np_float), (height, width, 4)).copy()
+        color, is_srgb = (1.0, 1.0, 1.0, 1.0), as_base_color
+    # sRGB transfer function of IEC 61966-2-1, between the encoded values and the linear ones
+    if texture_map_type == TEXTURE_MAP_TYPE.EMISSIVE and is_srgb:
+        rgb = rgba[..., :3]
+        rgba[..., :3] = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    elif texture_map_type == TEXTURE_MAP_TYPE.DIFFUSE and not is_srgb:
+        rgb = rgba[..., :3]
+        rgba[..., :3] = np.where(rgb <= 0.0031308, rgb * 12.92, 1.055 * rgb ** (1.0 / 2.4) - 0.055)
+    factor = np.ones(4)
+    factor[:3] = color[:3] if len(color) >= 3 else color[:1]
+    if len(color) in (2, 4):
+        factor[3] = color[-1]
+    rgba = rgba * factor
+    if opacity is not None:
+        rgba[..., 3] = texture_to_rgba(opacity, resolution, TEXTURE_MAP_TYPE.EMISSIVE, as_base_color=False)[..., 0]
+    if texture_map_type == TEXTURE_MAP_TYPE.EMISSIVE:
+        return rgba.astype(np.float16)
+    # 8-bit values wrap around out of range, where a color beyond [0, 1] clamps as the pixels written do
+    return color_f32_to_u8(np.clip(rgba, 0.0, 1.0))
+
+
+def _get_seed_image(texture: "gs.textures.Texture | None") -> np.ndarray | None:
+    """Return the image a mesh visual is seeded with for a dynamic texture, its first variant declared or white.
+
+    Any other texture gives None.
+
+    The rasterizer draws the images of the dynamic texture in its place (see 'RasterizerContext._bind_textures').
+    """
+    if isinstance(texture, gs.textures.DynamicTexture):
+        variants = texture.variants.values() if isinstance(texture.variants, dict) else texture.variants
+        seed = next((variant for variant in variants if variant is not None), gs.textures.ColorTexture())
+        return texture_to_rgba(texture=seed, resolution=texture.resolution)
+    return None
+
+
 def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     texture = surface.get_rgba()
 
@@ -466,8 +552,20 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     base = surface.texture
     emission = surface.emission
     emissive_kwargs = {}
-    if emission is not None and base is not None and base is not emission and not base.is_black:
-        if (
+    if (
+        emission is not None
+        and base is not None
+        and base is not emission
+        and not (isinstance(base, gs.textures.StaticTexture) and base.is_black)
+    ):
+        # The rasterizer binds the images of a dynamic texture in place of the texture this one seeds, which samples
+        # uvs as an image emission does
+        emission_seed = _get_seed_image(emission) if flipped_uvs is not None else None
+        if emission_seed is not None:
+            emissive_kwargs = dict(
+                emissiveTexture=Image.fromarray(emission_seed[..., :3]), emissiveFactor=(1.0, 1.0, 1.0)
+            )
+        elif (
             isinstance(emission, gs.textures.ImageTexture)
             and emission.image_array is not None
             and flipped_uvs is not None
@@ -478,7 +576,21 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
         elif isinstance(emission, gs.textures.ColorTexture):
             emissive_kwargs = dict(emissiveFactor=emission.color)
 
-    if isinstance(texture, gs.textures.ImageTexture):
+    texture_seed = _get_seed_image(texture)
+    if texture_seed is not None:
+        if flipped_uvs is not None:
+            # The images of a dynamic texture may turn transparent, which the blending of a PBR material follows
+            material = trimesh.visual.material.PBRMaterial(
+                baseColorTexture=Image.fromarray(texture_seed), baseColorFactor=(255, 255, 255, 255), **emissive_kwargs
+            )
+            visual = trimesh.visual.TextureVisuals(uv=flipped_uvs, material=material)
+        else:
+            # A mesh without uvs drawn with the surface, such as the debug representation of a deformable entity, takes
+            # the mean color of the image, as for an image texture.
+            visual = trimesh.visual.ColorVisuals(
+                vertex_colors=np.tile(texture_seed.mean(axis=(0, 1)) / 255.0, [n_verts, 1])
+            )
+    elif isinstance(texture, gs.textures.ImageTexture):
         if flipped_uvs is not None:
             assert texture.image_array.dtype == np.uint8
             material = _TEXTURE_MATERIALS_CACHE.get(

@@ -54,6 +54,8 @@ class GenesisGeomRetriever(BuildableMixin):
         self.geometries = [
             geometry for batch in self.rigid_solver.render_context.get_shapes() for geometry in batch.geometries
         ]
+        if any(geometry.textures for geometry in self.geometries):
+            gs.raise_exception("BatchRenderer draws no 'gs.textures.DynamicTexture'.")
         self.n_vgeoms = len(self.geometries)
         level = SEGMENTATION_LEVELS.index(self.seg_level)
         self.geom_idxc = torch.tensor(

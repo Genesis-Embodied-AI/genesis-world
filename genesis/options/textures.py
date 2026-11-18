@@ -6,11 +6,17 @@ from typing import Annotated, Literal, cast
 import numpy as np
 
 from PIL import Image
-from pydantic import BeforeValidator, Field, computed_field, model_validator
+from pydantic import BeforeValidator, Field, StrictBool, computed_field, model_validator
 
 import genesis as gs
 import genesis.utils.mesh as mu
-from genesis.typing import LaxFArrayType, LaxUnitIntervalArrayType, NDArrayType, UnitIntervalArrayType
+from genesis.typing import (
+    LaxFArrayType,
+    LaxUnitIntervalArrayType,
+    NDArrayType,
+    PositiveVec2IType,
+    UnitIntervalArrayType,
+)
 from genesis.utils.serialization import Exporting, Loading, SerializationMixin
 
 from .options import Options
@@ -38,10 +44,24 @@ class Texture(Options):
     def __init__(self, **data):
         super().__init__(**data)
 
-    def check_dim(self, dim: int) -> "Texture | None":
+    @cached_property
+    def requires_uv(self) -> bool:
         raise NotImplementedError
 
-    def check_simplify(self) -> "Texture":
+
+class StaticTexture(Texture):
+    """
+    Base class for the textures holding their image at declaration, which a surface splits and simplifies as it is set.
+
+    Note
+    ----
+    This class should *not* be instantiated directly.
+    """
+
+    def check_dim(self, dim: int) -> "StaticTexture | None":
+        raise NotImplementedError
+
+    def check_simplify(self) -> "StaticTexture":
         raise NotImplementedError
 
     def apply_cutoff(self, cutoff: float) -> None:
@@ -51,12 +71,8 @@ class Texture(Options):
     def is_black(self) -> bool:
         raise NotImplementedError
 
-    @cached_property
-    def requires_uv(self) -> bool:
-        raise NotImplementedError
 
-
-class ColorTexture(Texture):
+class ColorTexture(StaticTexture):
     """
     A texture that consists of a single color.
 
@@ -95,7 +111,7 @@ class ColorTexture(Texture):
         return False
 
 
-class ImageTexture(Texture, SerializationMixin):
+class ImageTexture(StaticTexture, SerializationMixin):
     """
     A texture with a texture map (image).
 
@@ -139,6 +155,9 @@ class ImageTexture(Texture, SerializationMixin):
     @model_validator(mode="before")
     @classmethod
     def _validate_and_load(cls, data: dict) -> dict:
+        # A texture instance validated against this class, as a union of texture types does, is not raw input
+        if not isinstance(data, dict):
+            return data
         image_path, image_array = data.get("image_path"), data.get("image_array")
 
         if not ((image_path is not None) ^ (image_array is not None)):
@@ -287,9 +306,12 @@ class ImageTexture(Texture, SerializationMixin):
         )
 
 
-class BatchTexture(Texture):
+class BatchTexture(StaticTexture):
     """
     A batch of textures for batch rendering.
+
+    This class is deprecated, and will give way to ``gs.textures.DynamicTexture`` with one variant per environment once
+    the batch renderer draws it.
 
     Parameters
     ----------
@@ -297,7 +319,7 @@ class BatchTexture(Texture):
         List of textures.
     """
 
-    textures: Annotated[list[Texture | None], BeforeValidator(list)] = Field(default_factory=list)
+    textures: Annotated[list[StaticTexture | None], BeforeValidator(list)] = Field(default_factory=list)
 
     @staticmethod
     def from_images(
@@ -413,3 +435,43 @@ class BatchTexture(Texture):
 
     def merge(self, other: "BatchTexture") -> None:
         self.textures.extend(other.textures)
+
+
+class DynamicTexture(Texture):
+    """
+    A texture whose image changes while the simulation runs, such as a screen or an indicator light.
+
+    It fills the diffuse or the emissive map of a surface whose mesh has texture coordinates, on a rigid, kinematic,
+    FEM, or PBD cloth or elastic entity. Each environment shows one of the variants, or its own image written with
+    ``set_texture``. Every environment shows the first variant at build and after a reset, and saved states and scene
+    files keep the declaration alone. Only the rasterizer draws it.
+
+    The diffuse map holds 8-bit sRGB images whose alpha is the opacity. The emissive map holds 16-bit linear images, at
+    twice the memory, so that an emission may exceed 1.
+
+    Parameters
+    ----------
+    resolution : tuple[int, int]
+        The resolution of every image, as (width, height) in pixels. A larger image costs more memory and more time per
+        written image, while showing a variant costs nothing.
+    variants : tuple[ColorTexture | ImageTexture | None, ...] | dict[str, ...], optional
+        The images an environment switches between, each a color or an image resized to 'resolution', or None for the
+        texture the asset gives the map, an asset giving none refusing it. A mapping names them, so that they are shown
+        by name too. Each costs the memory of one image per visual geom. Default is the texture of the asset.
+    is_batched : bool, optional
+        Whether each environment holds an image of its own that ``set_texture`` writes pixels into, at the memory of one
+        image per environment and per visual geom. Leave it off for a texture that only switches between its variants.
+        Default is False.
+    """
+
+    resolution: PositiveVec2IType
+    variants: (
+        Annotated[tuple[ColorTexture | ImageTexture | None, ...], Field(min_length=1, strict=False)]
+        | Annotated[dict[str, ColorTexture | ImageTexture | None], Field(min_length=1)]
+    ) = (None,)
+    is_batched: StrictBool = False
+
+    @computed_field
+    @cached_property
+    def requires_uv(self) -> bool:
+        return True

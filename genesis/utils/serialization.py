@@ -298,7 +298,7 @@ def declared_schema(expect: dict) -> dict:
 def _surface_textures(surface: Options) -> Iterable[tuple[str, "gs.textures.ImageTexture"]]:
     """Yield every image texture a surface holds, under the name of the field it stands in.
 
-    A batch texture holds textures of its own, so a batch created from images yields each of them.
+    A batch texture and a dynamic texture hold textures of their own, so each image among them is yielded too.
     """
     textures = [(name, value) for name, value in dict(surface).items() if isinstance(value, gs.textures.Texture)]
     while textures:
@@ -307,6 +307,9 @@ def _surface_textures(surface: Options) -> Iterable[tuple[str, "gs.textures.Imag
             yield name, texture
         elif isinstance(texture, gs.textures.BatchTexture):
             textures.extend((name, held) for held in texture.textures if held is not None)
+        elif isinstance(texture, gs.textures.DynamicTexture):
+            variants = texture.variants.values() if isinstance(texture.variants, dict) else texture.variants
+            textures.extend((name, variant) for variant in variants if variant is not None)
 
 
 def pixel_less_textures(surface: Options) -> tuple[str, ...]:
