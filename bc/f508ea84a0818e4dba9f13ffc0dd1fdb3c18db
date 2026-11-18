@@ -1,0 +1,24 @@
+genesis/utils/video_encoder.py
+  s_1eb4103db5e662::t_07d329d6cc27ad 90-91,135-136,213-217,235-238,257-265
+  s_1eb4103db5e662::t_88de27f8a8fcf3 266
+genesis/ext/pyrender/viewer.py
+  s_1eb4103db5e662::t_004822d586669e 621,626,628,640,693-694,860
+tests/core/test_recorders.py
+  s_1eb4103db5e662::t_d9ab66c4edc869 440-448,459,463-471
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bcf508ea84a0818e4dba9f13ffc0dd1fdb3c18db",
+  "prompts": {},
+  "sessions": {
+    "s_1eb4103db5e662": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0ee06b63-8e4a-490c-8c7d-a643fdc86b80",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
