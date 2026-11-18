@@ -231,6 +231,18 @@ def test_reset_control(n_envs, robot_path):
     assert old_control_force.abs().max() > gs.EPS
     assert_allclose(new_control_force, 0, tol=gs.EPS)
 
+    # Writing one dof of a free joint restarts the integral term of every dof of its link, as writing its whole pose does
+    if n_envs > 0:
+        box.control_dofs_position((0.01, 1.0, 1.01, 0.01, 0.0, 0.0))
+        for _ in range(5):
+            scene.step()
+        box_dofs_pos = box.get_dofs_position()
+        box.set_dofs_position(box_dofs_pos[0, 2:3], dofs_idx_local=[2], envs_idx=[0], zero_velocity=False)
+        box.set_pos(box.get_pos()[1], envs_idx=[1], zero_velocity=False)
+        scene.step()
+        box_control_force = box.get_dofs_control_force()
+        assert_allclose(box_control_force[0], box_control_force[1], tol=gs.EPS)
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs, substeps", [(0, 5), (2, 1)])
