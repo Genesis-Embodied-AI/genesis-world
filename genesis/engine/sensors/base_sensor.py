@@ -708,8 +708,7 @@ class _LinkAttachedSensorMixin(BuildableMixin):
 
 class OffsettableSensorMixin(BuildableMixin):
     """
-    Sensor mixin for sensors mounted on their link at a fixed pose, adjustable after build through
-    ``set_{pos,quat}_offset``.
+    Mixin for sensors mounted on their link at a fixed pose, adjustable after build through ``set_{pos,quat}_offset``.
     """
 
     @gs.assert_unbuilt
