@@ -14,6 +14,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.gltf as gltf_utils
 import genesis.utils.mesh as mu
+from genesis.engine.render_context import DynamicMesh
 
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
@@ -966,6 +967,13 @@ def test_surface_reconstruction(recon_backend, show_viewer):
     liquids_n_pixels = np.array([(seg == seg_idx[liquid.idx]).sum() for liquid in liquids])
     assert (liquids_n_pixels > 0).all()
     assert_allclose(liquids_n_pixels[1], liquids_n_pixels[0], rtol=0.15)
+
+    # The debug views draw the liquids as particles while in debug, the surfaces being reconstructed only while drawn
+    render_context = scene.sim.render_context
+    for debug in (True, False):
+        render_context.set_debug(debug)
+        liquids_surfaces = [shape for shape in render_context.get_shapes(debug=True) if isinstance(shape, DynamicMesh)]
+        assert len(liquids_surfaces) == (0 if debug else len(liquids))
 
 
 # ==================== Mesh Processing/Caching Tests ====================
