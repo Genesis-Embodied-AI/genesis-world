@@ -314,7 +314,8 @@ def parse_urdf(morph, surface):
                 link_g_infos.append(g_info)
 
     #########################  non-base joints and links #########################
-    joints_name_unactuated = []
+    joints_name_negative_effort = []
+    joints_name_zero_effort = []
     for joint in robot.joints:
         idx = link_name_to_idx[joint.child]
         l_info = l_infos[idx]
@@ -424,17 +425,23 @@ def parse_urdf(morph, surface):
         if joint.limit is not None and joint.limit.effort is not None:
             effort = joint.limit.effort
             if effort < 0.0:
-                gs.logger.warning(f"(URDF) Joint '{joint.name}' has negative effort. Using its absolute value.")
+                joints_name_negative_effort.append(joint.name)
                 effort = -effort
-            if effort < gs.EPS:
-                joints_name_unactuated.append(joint.name)
-            j_info["dofs_force_range"] = np.tile([-effort, effort], (j_info["n_dofs"], 1))
+            if effort > 0.0:
+                j_info["dofs_force_range"] = np.tile([-effort, effort], (j_info["n_dofs"], 1))
+            else:
+                joints_name_zero_effort.append(joint.name)
 
-    # Note that we follow the URDF spec, which reads zero effort as unactuated. MuJoCo and Isaac leave it unbounded.
-    if joints_name_unactuated:
+    if joints_name_negative_effort:
+        gs.logger.warning(
+            f"(URDF) Joints {joints_name_negative_effort} have negative effort. Using their absolute values."
+        )
+    # A zero effort is read as unbounded like MuJoCo and Isaac Sim, rather than as unactuated like the ROS stack and
+    # Drake, since several CAD exporters write effort="0" for every joint whose effort the user left empty.
+    if joints_name_zero_effort:
         gs.logger.info(
-            f'(URDF) Joints {joints_name_unactuated} have effort="0", so they will do nothing when controlled unless '
-            "'set_dofs_force_range' is called."
+            f'(URDF) Joints {joints_name_zero_effort} have effort="0", so their actuation force is unbounded. Call '
+            "'set_dofs_force_range' with a zero range to make them unactuated."
         )
 
     # Apply scaling factor

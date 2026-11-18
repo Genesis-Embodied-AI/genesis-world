@@ -725,7 +725,7 @@ def test_urdf_capsule(tmp_path, show_viewer, tol):
 @pytest.mark.parametrize("joint_damping, joint_friction", [(1.0, 2.0), (1.0, None), (None, 2.0)])
 def test_urdf_joint_dynamics(joint_damping, joint_friction, model_name, xml_path):
     # A <dynamics> tag authoring only one of damping/friction leaves the other at zero. A <limit> tag authoring no
-    # effort leaves the force unbounded, a zero effort bounds it to zero, and a negative effort by its absolute value.
+    # or a zero effort leaves the force unbounded, and a negative effort bounds it by its absolute value.
     scene = gs.Scene()
     robot = scene.add_entity(
         gs.morphs.URDF(
@@ -744,7 +744,7 @@ def test_urdf_joint_dynamics(joint_damping, joint_friction, model_name, xml_path
     if model_name == "pendulum_with_joint_dynamics":
         joints_effort = {"PendulumJoint_0": 100.0}
     else:
-        joints_effort = {"PendulumJoint_0": np.inf, "PendulumJoint_1": 0.0, "PendulumJoint_2": 50.0}
+        joints_effort = {"PendulumJoint_0": np.inf, "PendulumJoint_1": np.inf, "PendulumJoint_2": 50.0}
     for joint_name, effort in joints_effort.items():
         lower, upper = robot.get_dofs_force_range(dofs_idx_local=robot.get_joint(joint_name).dofs_idx_local)
         assert_allclose(lower, -effort, tol=gs.EPS)
