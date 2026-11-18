@@ -1,0 +1,23 @@
+tests/rigid/test_asset_loading.py
+  s_9cee80d2cb3203::t_9db7c35fde3c74 728,747
+genesis/utils/urdf.py
+  s_9cee80d2cb3203::t_0dc7e4fe5a1f12 317,428,430,435,439-440
+  s_9cee80d2cb3203::t_eac7038a38c431 436-438
+  s_9cee80d2cb3203::t_9db7c35fde3c74 318,431-433,441,443-444
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d55bed115a1aadb5585521d14ba960cff109a24e",
+  "prompts": {},
+  "sessions": {
+    "s_9cee80d2cb3203": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "25f58d39-85b5-46a2-a112-53fdfdb4fc9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
