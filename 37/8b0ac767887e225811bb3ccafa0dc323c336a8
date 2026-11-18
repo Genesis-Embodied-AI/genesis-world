@@ -1,0 +1,20 @@
+.github/workflows/production.yml
+  s_59c3427832144d::t_31a60f59bd4d51 68
+  s_59c3427832144d::t_8c3a8a3e6867b7 8,10,66-67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "378b0ac767887e225811bb3ccafa0dc323c336a8",
+  "prompts": {},
+  "sessions": {
+    "s_59c3427832144d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6505ce98-eef3-4b6b-8376-0493cb09323b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
