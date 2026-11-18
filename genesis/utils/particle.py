@@ -449,17 +449,10 @@ def particles_to_mesh(positions, radius, backend):
             iso_surface_threshold=0.6,
             mesh_smoothing_weights=True,
             mesh_smoothing_iters=int(args_dict.get("smooth", 25)),
-            normals_smoothing_iters=10,
             mesh_cleanup=True,
-            compute_normals=True,
             multi_threading=True,
         )
-        mesh = trimesh.Trimesh(
-            vertices=mesh_with_data.mesh.vertices,
-            faces=mesh_with_data.mesh.triangles,
-            face_normals=mesh_with_data.point_attributes["normals"],
-            process=False,
-        )
+        mesh = trimesh.Trimesh(mesh_with_data.mesh.vertices, mesh_with_data.mesh.triangles, process=False)
         gs.logger.debug(f"[splashsurf]: reconstruct vertices: {mesh.vertices.shape}, {mesh.faces.shape}")
         return mesh
     else:
