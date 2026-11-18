@@ -150,8 +150,7 @@ def test_export_and_load_rigid(
             pos=(0.0, 0.5, 0.5),
         ),
     )
-    # A link whose frame is anchored on the geometry it holds, given a pose offset as well. Its surface holds a dynamic
-    # texture, whose declaration travels.
+    # A link whose frame is anchored on the geometry it holds, given a pose offset as well
     anchored = scene.add_entity(
         morph=gs.morphs.Mesh(
             file="meshes/duck.obj",

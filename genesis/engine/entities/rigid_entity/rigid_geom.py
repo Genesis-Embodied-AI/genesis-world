@@ -740,25 +740,6 @@ class RigidVisGeom(BuildableMixin, RBC):
         tensor = self._solver.render_context.get_vverts((self,), envs_idx)
         return tensor[0] if self._solver.n_envs == 0 else tensor
 
-    @overload
-    def set_texture(
-        self,
-        texture: "TextureValueType",
-        envs_idx: "IndexType | None" = None,
-        *,
-        texture_map_type: TEXTURE_MAP_TYPE | None = None,
-    ) -> None: ...
-
-    @overload
-    def set_texture(
-        self,
-        texture: None = None,
-        envs_idx: "IndexType | None" = None,
-        *,
-        variant: "int | str | Sequence[int | str] | None" = None,
-        texture_map_type: TEXTURE_MAP_TYPE | None = None,
-    ) -> None: ...
-
     @gs.assert_built
     def set_texture(
         self,

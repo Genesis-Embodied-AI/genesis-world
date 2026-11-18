@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -49,25 +49,6 @@ class FEMVisGeom(BuildableMixin, RBC):
 
     def _destroy(self) -> None:
         self._is_built = False
-
-    @overload
-    def set_texture(
-        self,
-        texture: "TextureValueType",
-        envs_idx: "IndexType | None" = None,
-        *,
-        texture_map_type: TEXTURE_MAP_TYPE | None = None,
-    ) -> None: ...
-
-    @overload
-    def set_texture(
-        self,
-        texture: None = None,
-        envs_idx: "IndexType | None" = None,
-        *,
-        variant: "int | str | Sequence[int | str] | None" = None,
-        texture_map_type: TEXTURE_MAP_TYPE | None = None,
-    ) -> None: ...
 
     @gs.assert_built
     def set_texture(
@@ -655,25 +636,6 @@ class FEMEntity(Entity):
         """
         elements_idx = self._get_global_idx(None, self.n_elements, self._el_start, unsafe=True)
         return self._solver.get_elements_el2v(elements_idx) - self._v_start
-
-    @overload
-    def set_texture(
-        self,
-        texture: "TextureValueType",
-        envs_idx: "IndexType | None" = None,
-        *,
-        texture_map_type: TEXTURE_MAP_TYPE | None = None,
-    ) -> None: ...
-
-    @overload
-    def set_texture(
-        self,
-        texture: None = None,
-        envs_idx: "IndexType | None" = None,
-        *,
-        variant: "int | str | Sequence[int | str] | None" = None,
-        texture_map_type: TEXTURE_MAP_TYPE | None = None,
-    ) -> None: ...
 
     @gs.assert_built
     def set_texture(

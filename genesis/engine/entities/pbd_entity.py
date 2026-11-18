@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -189,25 +189,6 @@ class PBDTetEntity(PBDBaseEntity):
 
         self._mesh = self._vmesh.copy()
         self._mesh.remesh(edge_len_abs=self.particle_size, fix=isinstance(self, PBD3DEntity))
-
-    @overload
-    def set_texture(
-        self,
-        texture: "TextureValueType",
-        envs_idx: IndexType | None = None,
-        *,
-        texture_map_type: TEXTURE_MAP_TYPE | None = None,
-    ) -> None: ...
-
-    @overload
-    def set_texture(
-        self,
-        texture: None = None,
-        envs_idx: IndexType | None = None,
-        *,
-        variant: "int | str | Sequence[int | str] | None" = None,
-        texture_map_type: TEXTURE_MAP_TYPE | None = None,
-    ) -> None: ...
 
     @gs.assert_built
     def set_texture(
