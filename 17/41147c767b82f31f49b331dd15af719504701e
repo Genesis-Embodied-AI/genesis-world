@@ -1,0 +1,27 @@
+genesis/engine/solvers/kinematic_solver.py
+  s_8d59a9e0041e31::t_34f240bbbe63f5 1763,1774,1855
+genesis/engine/solvers/rigid/rigid_solver.py
+  s_8d59a9e0041e31::t_34f240bbbe63f5 3652
+genesis/engine/scene.py
+  s_8d59a9e0041e31::t_34f240bbbe63f5 1625,2215,2288
+genesis/engine/simulator.py
+  s_8d59a9e0041e31::t_34f240bbbe63f5 398
+genesis/engine/render_context.py
+  s_8d59a9e0041e31::t_34f240bbbe63f5 724,744,779,1298,1300,1304-1306,1308,1311,1316,1320-1327,1333-1338,1340,1347,1353,1365-1366
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1741147c767b82f31f49b331dd15af719504701e",
+  "prompts": {},
+  "sessions": {
+    "s_8d59a9e0041e31": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "884f5d67-9ff4-41ac-845d-dbfc3ffc3a6f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
