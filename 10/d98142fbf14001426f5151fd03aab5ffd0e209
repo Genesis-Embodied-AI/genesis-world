@@ -1,0 +1,31 @@
+genesis/engine/solvers/particle_solver.py
+  s_8d59a9e0041e31::t_076924cccfe9a6 264-265
+genesis/engine/solvers/kinematic_solver.py
+  s_8d59a9e0041e31::t_076924cccfe9a6 1456
+genesis/engine/mesh.py
+  s_8d59a9e0041e31::t_06e65797e24869 841-847
+  s_8d59a9e0041e31::t_7e0864b38e6664 848
+genesis/options/textures.py
+  s_8d59a9e0041e31::t_06e65797e24869 9,454
+genesis/engine/solvers/fem_solver.py
+  s_8d59a9e0041e31::t_076924cccfe9a6 1314-1319
+genesis/engine/render_context.py
+  s_8d59a9e0041e31::t_c3e174f7bc8cf1 813-817,820-822,828-829,834,837,845,847-848,850,852,854-866,868,877-878,882-883,939,942-943,1008
+  s_8d59a9e0041e31::t_234f85845a01c9 264
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "10d98142fbf14001426f5151fd03aab5ffd0e209",
+  "prompts": {},
+  "sessions": {
+    "s_8d59a9e0041e31": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "884f5d67-9ff4-41ac-845d-dbfc3ffc3a6f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
