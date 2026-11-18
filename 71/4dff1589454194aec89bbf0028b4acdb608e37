@@ -1,0 +1,20 @@
+genesis/engine/render_context.py
+  s_8d59a9e0041e31::t_3a2971bfabb932 35-37,42-44,712,818-823,827,832,836,891-892,895,917,923-924,928-929,999,1001
+  s_8d59a9e0041e31::t_766486a6620fe2 718,723,815,831,839-840,842,850-852,854,858,860,887,893,896,941,950,996,1002
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "714dff1589454194aec89bbf0028b4acdb608e37",
+  "prompts": {},
+  "sessions": {
+    "s_8d59a9e0041e31": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "884f5d67-9ff4-41ac-845d-dbfc3ffc3a6f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
