@@ -1,0 +1,19 @@
+genesis/utils/raycast_qd.py
+  s_f488fa7d2d33a0::t_2fc3470c4b6155 350-351,386-388,391,394
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b5cf24b5ab96e967a5e1a0574651d77467685dde",
+  "prompts": {},
+  "sessions": {
+    "s_f488fa7d2d33a0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "90f17f1f-5870-4ca0-996f-34ad987064de",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
