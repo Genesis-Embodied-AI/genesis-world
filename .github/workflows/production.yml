@@ -5,7 +5,9 @@ on:
   push:
     branches:
       - main
+  # A draft pull request starts no run. Marking it ready for review does.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
   # Repositories that Genesis depends on validate their changes by calling this workflow from one started by the
@@ -60,6 +62,9 @@ defaults:
 jobs:
   setup:
     name: production-setup
+
+    # Every other job follows this one through 'needs', so a draft pull request skips them all.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
 
     runs-on: ubuntu-24.04
 
