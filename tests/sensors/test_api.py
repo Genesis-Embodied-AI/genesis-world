@@ -249,10 +249,10 @@ def test_pipeline_contract(tol):
         (5.0, 0.0, 1.0, 0.0),  # physics imperfection compounds through transform recurrence
         (5.0, 5.0, 1.0, 100.0),  # all four together
     ]
-    P = np.array([row[0] for row in paths], dtype=np.float32)
-    M = np.array([row[1] for row in paths], dtype=np.float32)
-    A = np.array([row[2] for row in paths], dtype=np.float32)
-    H = np.array([row[3] for row in paths], dtype=np.float32)
+    P = np.array([row[0] for row in paths])
+    M = np.array([row[1] for row in paths])
+    A = np.array([row[2] for row in paths])
+    H = np.array([row[3] for row in paths])
 
     # Companion simple sensor for the ring-allocation paths. No knobs, no overrides beyond raw write - the read
     # just echoes the shared per-class step counter.
@@ -320,15 +320,15 @@ def test_pipeline_contract(tol):
     # A jittered read past its delay lands one slot late with probability 1/2. Over this many reads, a seed under which
     # no read is late, which the check of the jitter below rejects, has a probability below 1e-8.
     n_steps = 32
-    gt_observed = np.zeros((n_steps, len(paths)), dtype=np.float32)
-    measured_observed = np.zeros((n_steps, len(paths)), dtype=np.float32)
-    baseline_observed = np.zeros((n_steps, 3), dtype=np.float32)
-    history_observed = np.zeros((n_steps, HISTORY_LEN), dtype=np.float32)
-    delay_observed = np.zeros(n_steps, dtype=np.float32)
-    both_observed = np.zeros((n_steps, HISTORY_LEN), dtype=np.float32)
-    jitter_observed = np.zeros(n_steps, dtype=np.float32)
-    late_jitter_observed = np.zeros(n_steps, dtype=np.float32)
-    substep_delay_observed = np.zeros(n_steps, dtype=np.float32)
+    gt_observed = np.zeros((n_steps, len(paths)))
+    measured_observed = np.zeros((n_steps, len(paths)))
+    baseline_observed = np.zeros((n_steps, 3))
+    history_observed = np.zeros((n_steps, HISTORY_LEN))
+    delay_observed = np.zeros(n_steps)
+    both_observed = np.zeros((n_steps, HISTORY_LEN))
+    jitter_observed = np.zeros(n_steps)
+    late_jitter_observed = np.zeros(n_steps)
+    substep_delay_observed = np.zeros(n_steps)
     for i in range(n_steps):
         scene.step()
         gt_observed[i] = tensor_to_array(sensor.read_ground_truth()).reshape(-1)
@@ -348,8 +348,8 @@ def test_pipeline_contract(tol):
     # Measured:   meas[k] = m[k] + H                             (working buffer adds H; no compounding into m)
     gt_expected = np.zeros_like(gt_observed)
     measured_expected = np.zeros_like(measured_observed)
-    gt_prev = np.zeros(len(paths), dtype=np.float32)
-    m_prev = np.zeros(len(paths), dtype=np.float32)
+    gt_prev = np.zeros(len(paths))
+    m_prev = np.zeros(len(paths))
     for k in range(1, n_steps + 1):
         gt_k = k + A * gt_prev
         m_k = (k + P + M) + A * m_prev
@@ -366,10 +366,10 @@ def test_pipeline_contract(tol):
     # additional delay shift. A sensor that configures both `delay > 0` and `history_length > 0` therefore sees
     # undelayed history alongside a delayed non-history read; this matches the implementation and is what the
     # combined test asserts.
-    raw = np.arange(1, n_steps + 1, dtype=np.float32)
+    raw = np.arange(1, n_steps + 1)
     expected_baseline = raw
     expected_delay = np.where(raw - DELAY_STEPS >= 1, raw - DELAY_STEPS, 0.0)
-    expected_history = np.zeros((n_steps, HISTORY_LEN), dtype=np.float32)
+    expected_history = np.zeros((n_steps, HISTORY_LEN))
     for k in range(1, n_steps + 1):
         for h in range(HISTORY_LEN):
             past_step = k - h
