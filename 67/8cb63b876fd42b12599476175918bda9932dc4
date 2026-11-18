@@ -1,0 +1,23 @@
+tests/parsers/test_mesh.py
+  s_8d59a9e0041e31::t_aced5e61e79f4a 669,671,675-676
+.github/contributing/ARCHITECTURE.md
+  s_8d59a9e0041e31::t_aced5e61e79f4a 122,124
+genesis/utils/gltf.py
+  s_8d59a9e0041e31::t_aced5e61e79f4a 478
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "678cb63b876fd42b12599476175918bda9932dc4",
+  "prompts": {},
+  "sessions": {
+    "s_8d59a9e0041e31": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "884f5d67-9ff4-41ac-845d-dbfc3ffc3a6f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
