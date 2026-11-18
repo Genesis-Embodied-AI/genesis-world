@@ -2473,7 +2473,10 @@ class RigidEntity(KinematicEntity):
         """
         Set the entity's dofs' integral gains for the position and velocity controllers. Zero by default.
 
-        The integral term restarts from zero on `scene.reset`, on any write of the pose of the dof (`set_pos`,
+        The integral term is the gain times the time integral of the error, a force. Under position control it
+        integrates the position error, so the gain is a force per unit of position and time (N/(m*s), or N*m/(rad*s) for
+        a rotational dof). Under velocity control it integrates the velocity error, so the gain is a stiffness (N/m, or
+        N*m/rad). The integral term restarts from zero on `scene.reset`, on any write of the pose of the dof (`set_pos`,
         `set_quat`, `set_qpos`, `set_dofs_position`), and on any step taken under force control or with a zero gain. It
         carries over a switch between position and velocity control.
 
