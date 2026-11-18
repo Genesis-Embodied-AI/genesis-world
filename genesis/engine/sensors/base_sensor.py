@@ -16,7 +16,7 @@ from genesis.engine.solvers.rigid.data import LinksState
 from genesis.engine.state_change import StateChange
 from genesis.repr_base import RBC
 from genesis.typing import NumArrayType, NumericType
-from genesis.utils.geom import euler_to_quat
+from genesis.utils.geom import euler_to_quat, transform_by_trans_quat, transform_quat_by_quat
 from genesis.utils.misc import (
     BuildableMixin,
     broadcast_tensor,
@@ -726,6 +726,21 @@ class OffsettableSensorMixin(BuildableMixin):
             expand=(batch_size, 1, 4),
             dim=1,
         )
+
+    def _get_world_pose(self, envs_idx: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the world position and orientation of the sensor in the given environments.
+
+        A static sensor sits at its mounting offsets from the world frame.
+        """
+        sensor_envs_idx = self._sanitize_envs_idx(envs_idx)
+        pos = self._shared_metadata.offsets_pos[sensor_envs_idx, self._idx]
+        quat = self._shared_metadata.offsets_quat[sensor_envs_idx, self._idx]
+        if self._link is not None:
+            link_pos = self._link.get_pos(envs_idx, relative=False)
+            link_quat = self._link.get_quat(envs_idx, relative=False)
+            pos = transform_by_trans_quat(pos, link_pos, link_quat)
+            quat = transform_quat_by_quat(quat, link_quat)
+        return pos, quat
 
     @gs.assert_built
     def set_pos_offset(self, pos_offset, envs_idx=None):

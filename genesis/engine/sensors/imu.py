@@ -231,13 +231,8 @@ class IMUSensor(
                 (options.debug_acc_color, options.debug_gyro_color, options.debug_mag_color), dtype=gs.tc_float
             )
             markers = (Arrows(pos, torch.zeros_like(pos), radius, colors),)
-        link_pos = self._link.get_pos(envs_idx, relative=False)
-        link_quat = self._link.get_quat(envs_idx, relative=False)
-        # The offsets hold a row in a scene without parallel environments too
-        sensor_envs_idx = self._sanitize_envs_idx(envs_idx)
-        offset_pos = self._shared_metadata.offsets_pos[sensor_envs_idx, self._idx]
-        offset_quat = self._shared_metadata.offsets_quat[sensor_envs_idx, self._idx]
-        pos = link_pos + gu.transform_by_quat(offset_pos, link_quat)
+        # The readings are stated in the frame of the sensor
+        sensor_pos, sensor_quat = self._get_world_pose(envs_idx)
 
         data = self.read(envs_idx)
         vecs = torch.stack(
@@ -248,9 +243,7 @@ class IMUSensor(
             ),
             dim=-2,
         )
-        # The readings are stated in the frame of the sensor
-        sensor_quat = gu.transform_quat_by_quat(offset_quat, link_quat)
         arrows_pos, arrows_vec = markers[0].pos, markers[0].vec
-        arrows_pos[envs_idx] = pos[..., None, :]
+        arrows_pos[envs_idx] = sensor_pos[..., None, :]
         arrows_vec[envs_idx] = gu.transform_by_quat(vecs, sensor_quat[..., None, :])
         return markers

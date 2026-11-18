@@ -273,15 +273,7 @@ class RaycasterSensor(
                 Points(torch.zeros_like(pos), radius, self._options.debug_ray_hit_color),
             )
         data = self.read(envs_idx)
-        # A static sensor sits at its mounting offsets in world frame
-        offsets_envs_idx = slice(None) if envs_idx is None else envs_idx
-        sensor_pos = self._shared_metadata.offsets_pos[offsets_envs_idx, self._idx]
-        sensor_quat = self._shared_metadata.offsets_quat[offsets_envs_idx, self._idx]
-        if self._link is not None:
-            link_pos = self._link.get_pos(envs_idx, relative=False)
-            link_quat = self._link.get_quat(envs_idx, relative=False)
-            sensor_pos = transform_by_trans_quat(sensor_pos, link_pos, link_quat)
-            sensor_quat = transform_quat_by_quat(sensor_quat, link_quat)
+        sensor_pos, sensor_quat = self._get_world_pose(envs_idx)
         sensor_pos, sensor_quat = sensor_pos[..., None, :], sensor_quat[..., None, :]
         if self._options.return_points:
             points = data.points.reshape((*sensor_pos.shape[:-2], -1, 3))
