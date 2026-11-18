@@ -1,7 +1,7 @@
 from typing import Any, Literal
 
 import numpy as np
-from pydantic import PrivateAttr, StrictBool, model_validator
+from pydantic import Field, PrivateAttr, StrictBool, field_validator, model_validator
 
 import genesis as gs
 from genesis.typing import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, Vec3FType
@@ -407,6 +407,101 @@ class GravityMixin(Options):
     gravity: Vec3FType | None = None
 
 
+class KinematicVisOptions(Options):
+    """
+    Options configuring the markers of the kinematic solver, which the interactive viewer and the debug cameras draw.
+
+    Parameters
+    ----------
+    link_frames : bool, optional
+        Whether to draw the frame of each link. Many frames clutter the view of an articulated robot. Defaults to False.
+    link_frame_size : float, optional
+        The length of the axes of the frames of the links, in meters. Longer axes stay legible from afar but hide the
+        links of a small robot. Defaults to 0.2.
+    """
+
+    link_frames: StrictBool = False
+    link_frame_size: PositiveFloat = 0.2
+
+
+class RigidVisOptions(KinematicVisOptions):
+    """
+    Options configuring the markers of the rigid solver, which the interactive viewer and the debug cameras draw.
+
+    Parameters
+    ----------
+    link_frames : bool, optional
+        See ``KinematicVisOptions``.
+    link_frame_size : float, optional
+        See ``KinematicVisOptions``.
+    constraints : bool, optional
+        Whether to draw the equality constraints between links and joints, as a line joining the two points each one
+        binds (the anchors of a connect constraint, the origins of the links or of the joints otherwise). Their poses
+        are read back at each frame drawn. Defaults to False.
+    contact_force_scale : float, optional
+        The length of the arrow of a contact force per newton, in meters, e.g. the arrow of a 10 N force is 0.1 m long
+        at 0.01 (see ``gs.options.Geom.visualize_contact``). A larger scale shows small forces at the cost of long
+        arrows crossing the scene under heavy loads. Defaults to 0.01.
+    """
+
+    constraints: StrictBool = False
+    contact_force_scale: PositiveFloat = 0.01
+
+
+class ParticleVisOptions(Options):
+    """
+    Options configuring how the entities of a particle solver (MPM, SPH or PBD) are drawn.
+
+    Parameters
+    ----------
+    boundary : bool, optional
+        Whether to draw the edges of the box confining the particles as a marker, which the interactive viewer and the
+        debug cameras draw. The box of a large domain clutters the view, and its thin edges render unevenly from one
+        renderer to the next. Defaults to False.
+    recon_backend : str, optional
+        How the surface of the entities whose material draws one is reconstructed from their particles. 'splashsurf'
+        extracts a smooth surface from the density of the particles, but requires all of them to share the same radius.
+        'levelset' wraps the union of the spheres of the particles, which supports a radius per particle at the cost of
+        a bumpier surface. 'openvdb' is a deprecated alias of 'levelset'. Defaults to 'splashsurf'.
+    n_support_neighbors : int, optional
+        The number of particles whose positions place each vertex of a visual mesh skinned on the particles of an MPM
+        or PBD entity. More neighbors deform the mesh more smoothly, at the cost of the memory and of the time of
+        skinning it at each frame drawn. Defaults to 12.
+    """
+
+    boundary: StrictBool = False
+    recon_backend: Literal["splashsurf", "levelset"] = "splashsurf"
+    n_support_neighbors: PositiveInt = 12
+
+    @field_validator("recon_backend", mode="before")
+    @classmethod
+    def _rename_openvdb_backend(cls, value: Any) -> Any:
+        if value == "openvdb":
+            gs.logger.warning("Surface reconstruction backend 'openvdb' is deprecated. Use 'levelset' instead.")
+            return "levelset"
+        return value
+
+
+class PBDVisOptions(ParticleVisOptions):
+    """
+    Options configuring how the entities of the PBD solver are drawn.
+
+    Parameters
+    ----------
+    boundary : bool, optional
+        See ``ParticleVisOptions``.
+    recon_backend : str, optional
+        See ``ParticleVisOptions``.
+    n_support_neighbors : int, optional
+        See ``ParticleVisOptions``.
+    constraints : bool, optional
+        Whether to draw the particles fixed in place or to a rigid link as markers, which the interactive viewer and
+        the debug cameras draw. Their state is read back at each frame drawn. Defaults to False.
+    """
+
+    constraints: StrictBool = False
+
+
 class KinematicOptions(Options):
     """
     Options configuring the KinematicSolver (visualization-only solver).
@@ -424,12 +519,15 @@ class KinematicOptions(Options):
     IK_max_targets : int, optional
         Maximum number of IK targets. Increasing this doesn't affect IK solving speed, but will increase memory usage.
         Defaults to 6.
+    vis : gs.options.KinematicVisOptions, optional
+        The markers the solver draws (see ``gs.options.KinematicVisOptions``).
     """
 
     batch_links_info: StrictBool = False
     batch_joints_info: StrictBool = False
     batch_dofs_info: StrictBool = False
     IK_max_targets: PositiveInt = 6
+    vis: KinematicVisOptions = Field(default_factory=KinematicVisOptions)
 
 
 class RigidOptions(GravityMixin, TimeBasedMixin):
@@ -586,6 +684,8 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         Broadphase traversal strategy. ``SAP`` (sweep-and-prune) or ``ALL_VS_ALL`` (parallel pair iteration). Defaults
         to ``None`` (auto: ``SAP`` on CPU or with heterogeneous entities, ``ALL_VS_ALL`` on GPU otherwise). See
         ``gs.broadphase_traversal`` for details on each strategy.
+    vis : gs.options.RigidVisOptions, optional
+        The markers the solver draws (see ``gs.options.RigidVisOptions``).
 
     Warning
     -------
@@ -645,6 +745,8 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
     # broadphase configuration
     broadphase_traversal: gs.broadphase_traversal | None = None
 
+    vis: RigidVisOptions = Field(default_factory=RigidVisOptions)
+
     def __init__(self, *, contact_resolve_time: float | None = None, use_contact_island: bool | None = None, **data):
         super().__init__(**data)
         if contact_resolve_time is not None:
@@ -696,6 +798,8 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
         This option is deprecated.
     leaf_block_size : int, optional
         This option is deprecated.
+    vis : gs.options.ParticleVisOptions, optional
+        How the entities of the solver are drawn and the markers it draws (see ``gs.options.ParticleVisOptions``).
     """
 
     particle_size: PositiveFloat | None = None  # in meters. Will be computed automatically if it's None.
@@ -705,6 +809,7 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
     # These will later be converted to discrete grid bound. The actual grid boundary could be slightly tighter.
     lower_bound: Vec3FType = (-1.0, -1.0, 0.0)
     upper_bound: Vec3FType = (1.0, 1.0, 1.0)
+    vis: ParticleVisOptions = Field(default_factory=ParticleVisOptions)
 
     def __init__(self, *, use_sparse_grid: bool = False, leaf_block_size: int = 8, **data):
         super().__init__(**data)
@@ -762,6 +867,8 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
         Maximum number of iterations for the divergence solver. Defaults to 100.
     max_density_solver_iterations : int, optional
         Maximum number of iterations for the density solver. Defaults to 100.
+    vis : gs.options.ParticleVisOptions, optional
+        How the entities of the solver are drawn and the markers it draws (see ``gs.options.ParticleVisOptions``).
     """
 
     particle_size: PositiveFloat = 0.02
@@ -778,6 +885,8 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
     max_density_error_percent: PositiveFloat = 0.01
     max_divergence_solver_iterations: PositiveInt = 100
     max_density_solver_iterations: PositiveInt = 100
+
+    vis: ParticleVisOptions = Field(default_factory=ParticleVisOptions)
 
     _support_radius: float = PrivateAttr(default=0.0)
     _hash_grid_res: np.ndarray = PrivateAttr(default=None)
@@ -839,6 +948,8 @@ class PBDOptions(GravityMixin, TimeBasedMixin):
         Lower bound of the simulation domain. Defaults to (-100.0, -100.0, 0.0).
     upper_bound : tuple, shape (3,), optional
         Upper bound of the simulation domain. Defaults to (100.0, 100.0, 100.0).
+    vis : gs.options.PBDVisOptions, optional
+        How the entities of the solver are drawn and the markers it draws (see ``gs.options.PBDVisOptions``).
     """
 
     # constraints solving iterations
@@ -857,6 +968,8 @@ class PBDOptions(GravityMixin, TimeBasedMixin):
 
     lower_bound: Vec3FType = (-100.0, -100.0, 0.0)
     upper_bound: Vec3FType = (100.0, 100.0, 100.0)
+
+    vis: PBDVisOptions = Field(default_factory=PBDVisOptions)
 
     _hash_grid_res: np.ndarray = PrivateAttr(default=None)
 
@@ -885,6 +998,20 @@ class PBDOptions(GravityMixin, TimeBasedMixin):
             self._hash_grid_res = np.minimum(max_hash_grid_res, 150).astype(int).tolist()
         else:
             self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(int).tolist()
+
+
+class FEMVisOptions(Options):
+    """
+    Options configuring the markers of the FEM solver, which the interactive viewer and the debug cameras draw.
+
+    Parameters
+    ----------
+    constraints : bool, optional
+        Whether to draw the vertex constraints, as a point at each constrained vertex and a line to its target. Their
+        state is read back at each frame drawn. Defaults to False.
+    """
+
+    constraints: StrictBool = False
 
 
 class FEMOptions(GravityMixin, TimeBasedMixin):
@@ -939,6 +1066,8 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
         vertices that the vertex options of the entities fix. Constraining one past it raises. A larger value lets more
         vertices be pinned, at the cost of 56 bytes of memory per slot and per environment in single precision, 100 in
         double precision. Defaults to 64.
+    vis : gs.options.FEMVisOptions, optional
+        The markers the solver draws (see ``gs.options.FEMVisOptions``).
     """
 
     damping: NonNegativeFloat = 0.0
@@ -953,3 +1082,4 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
     damping_alpha: NonNegativeFloat = 0.5
     damping_beta: NonNegativeFloat = 5e-4
     max_vertex_constraints: NonNegativeInt = 64
+    vis: FEMVisOptions = Field(default_factory=FEMVisOptions)

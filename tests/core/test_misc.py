@@ -534,6 +534,13 @@ def test_solver_state_change_subscribers(show_viewer, two_link_fixed_urdf):
             pos=(0.0, 0.0, 0.5),
         ),
     )
+    floating_tower = scene.add_entity(
+        gs.morphs.URDF(
+            file=two_link_fixed_urdf,
+            pos=(4.0, 0.0, 1.0),
+            merge_fixed_links=False,
+        )
+    )
     scene.build(n_envs=2)
 
     solver = scene.rigid_solver
@@ -627,6 +634,17 @@ def test_solver_state_change_subscribers(show_viewer, two_link_fixed_urdf):
     assert child_watcher.pending == frozenset()
     tower.set_pos((2.0, 1.0, 0.0))
     assert child_watcher.pending == frozenset({StateChange.GEOMETRY})
+
+    # A configuration setter reaches the links holding the configuration entries it writes and their kinematic
+    # subtrees: writing the configuration of the floating tower wakes a watcher of its fixed child link, while writing
+    # that of the cube leaves it silent.
+    floating_child = next(link for link in floating_tower.links if link.name == "child")
+    floating_watcher = Subscriber(to=frozenset({StateChange.GEOMETRY}), links_filter=[floating_child.idx])
+    solver.subscribe(floating_watcher)
+    cube.set_qpos([[0.0, 0.0, 12.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 13.0, 1.0, 0.0, 0.0, 0.0]])
+    assert floating_watcher.pending == frozenset()
+    floating_tower.set_qpos([[4.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0], [4.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0]])
+    assert floating_watcher.pending == frozenset({StateChange.GEOMETRY})
 
     # A whole-state restore may move any link, so the unbounded reach always passes the filter.
     scene.reset()

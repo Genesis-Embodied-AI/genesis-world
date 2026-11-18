@@ -10,7 +10,6 @@ from genesis.utils.misc import with_lock
 from genesis.vis.viewer_plugins.plugins import DefaultControlsPlugin
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.rigid_entity import KinematicEntity
     from genesis.engine.scene import Scene
     from genesis.options.sensors.options import SensorOptions
 
@@ -148,10 +147,6 @@ class InteractiveScene:
     def _lock(self):
         return self.scene.viewer.lock
 
-    @property
-    def _ctx(self):
-        return self.scene.viewer.context
-
     def reset(self):
         """Queue a reset of the wrapped scene to its initial state.
 
@@ -161,28 +156,17 @@ class InteractiveScene:
         self._reset_pending = True
 
     @with_lock
-    def set_entity_vis_mode(self, entity: "KinematicEntity", mode: str):
-        """Switch entity rendering between ``"visual"`` and ``"collision"``."""
-        if not isinstance(entity.surface, gs.surfaces.Surface):
-            return
-        old_mode = entity.surface.vis_mode
-        if old_mode == mode:
-            return
+    def set_debug_view(self, debug: bool) -> None:
+        """Switch the viewer and the debug cameras between the debug representation of the entities and their looks.
 
-        ctx = self._ctx
-        solver = entity.solver
+        The initial state is ``VisOptions.debug``.
 
-        old_geoms = entity.vgeoms if old_mode == "visual" else entity.geoms
-        for geom in old_geoms:
-            ctx.remove_rigid_node(geom)
-
-        entity.surface.vis_mode = mode
-
-        is_visual = mode == "visual"
-        geoms = entity.vgeoms if is_visual else entity.geoms
-        geoms_T = ctx.rigid_geoms_T(solver, is_visual)
-        for geom in geoms:
-            ctx.add_geom_node(geom, geoms_T)
+        Parameters
+        ----------
+        debug : bool
+            Whether each entity is shown in its debug representation, or as it looks.
+        """
+        self.scene.sim.render_context.set_debug(debug)
 
     def rebuild(
         self,
@@ -226,9 +210,12 @@ class InteractiveScene:
         self._rebuild_pending = True
 
     def _apply_rebuild(self) -> None:
-        """Reconstruct the wrapped scene in place from the stored setup, on the stepping thread. Preserves the
-        viewer window, re-registers the pre-step callback, re-attaches non-default plugins and restores the
-        camera pose."""
+        """Reconstruct the wrapped scene in place from the stored setup, on the stepping thread.
+
+        The viewer window, the pre-step callback, the non-default plugins, the camera pose and the view state set at
+        runtime (the global debug switch, whether the link frames are drawn and their size) survive the rebuild. The
+        debug representation each entity asked for starts over with the rebuilt entities.
+        """
         scene = self._scene
         cam_pose = None
         plugins_to_reattach: list = []
@@ -243,6 +230,11 @@ class InteractiveScene:
             plugins_to_reattach = [p for p in viewer.plugins if not isinstance(p, DefaultControlsPlugin)]
             # Preserve the live window/GL context so the rebuild does not close and reopen it.
             pyrender_window = viewer._pyrender_viewer
+
+        is_debug = scene.sim.render_context.debug
+        is_link_frames_shown = scene.visualizer.link_frames
+        solvers = (scene.sim.kinematic_solver, scene.sim.rigid_solver)
+        links_frame_size = [solver.render_context.link_frame_size if solver.is_active else None for solver in solvers]
 
         # The scene options take part in resolving a description, so new ones leave none of the previous ones valid
         entities_desc = {} if self._has_new_scene_kwargs else {entity.name: entity.desc for entity in scene.entities}
@@ -297,6 +289,13 @@ class InteractiveScene:
                 if pyrender_window is not None and scene.viewer is not None:
                     scene.viewer._pyrender_viewer = pyrender_window
                 scene.build(**self._build_kwargs)
+                scene.sim.render_context.set_debug(is_debug)
+                scene.visualizer.set_link_frames(is_link_frames_shown)
+                for solver, link_frame_size in zip(
+                    (scene.sim.kinematic_solver, scene.sim.rigid_solver), links_frame_size
+                ):
+                    if solver.is_active and link_frame_size is not None:
+                        solver.render_context.set_link_frame_size(link_frame_size)
             finally:
                 if was_owned_cache_release_enabled:
                     enable_owned_cache_release()

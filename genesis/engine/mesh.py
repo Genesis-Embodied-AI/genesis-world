@@ -151,7 +151,7 @@ class Mesh(RBC, serialization.SerializationMixin):
     ):
         self._uid = gs.UID()
         self._mesh = mesh  # .copy() FIXME: For some reason forcing copy is causing some tests to fails...
-        self._surface = surface
+        self._surface: Surface | None = None
         if uvs is not None:
             uvs = uvs.astype(gs.np_float, copy=False)
         self._uvs = uvs
@@ -177,16 +177,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             assert scale.ndim == 1 and scale.size in (1, 3)
             self._mesh.apply_scale(scale)
 
-        if self._surface.requires_uv:  # check uvs here
-            if self._uvs is None:
-                if "mesh_path" in self._metadata:
-                    gs.logger.warning(
-                        f"Texture given but asset missing uv info (or failed to load): {self._metadata['mesh_path']}"
-                    )
-                else:
-                    gs.logger.warning("Texture given but asset missing uv info (or failed to load).")
-        else:
-            self._uvs = None
+        self.set_surface(surface)
 
         if convexify:
             self.convexify()
@@ -665,6 +656,41 @@ class Mesh(RBC, serialization.SerializationMixin):
         self._surface.update_texture(color_texture=color_texture, opacity_texture=opacity_texture, force=True)
         self.update_trimesh_visual()
 
+    def set_surface(self, surface: Surface) -> None:
+        """Replace the surface of the mesh, the textures the given surface leaves unset keeping their current images.
+
+        Every other field takes the value of the given surface, its defaults included, so a surface of another type
+        renders as that type does. A mesh being made takes the surface as given, and keeps the visual of its asset.
+        """
+        if self._surface is None:
+            # The meshes of an asset share its surface, so that the images of its textures are held once
+            self._surface = surface
+        else:
+            surface_fields = type(surface).model_fields
+            # The shortcut fields, which the surface holds resolved into its textures, are set apart from them, since
+            # the validation refuses both.
+            fields, shortcuts = {}, {}
+            for name, value in surface:
+                if name in surface.model_fields_set:
+                    (shortcuts if surface_fields[name].exclude else fields)[name] = value
+            for name, value in self._surface:
+                if (
+                    name in surface_fields
+                    and name not in fields
+                    and not surface_fields[name].exclude
+                    and isinstance(value, gs.textures.Texture)
+                ):
+                    fields[name] = value
+            self._surface = type(surface)(**fields).model_copy(update=shortcuts)
+            self.update_trimesh_visual()
+        if self._surface.requires_uv and self._uvs is None:
+            if "mesh_path" in self._metadata:
+                gs.logger.warning(
+                    f"Texture given but asset missing uv info (or failed to load): {self._metadata['mesh_path']}"
+                )
+            else:
+                gs.logger.warning("Texture given but asset missing uv info (or failed to load).")
+
     def update_trimesh_visual(self):
         """
         Update the trimesh obj's visual attributes using its surface and uvs.
@@ -778,11 +804,10 @@ class Mesh(RBC, serialization.SerializationMixin):
         return self._surface
 
     @property
-    def uvs(self):
-        """
-        UVs of the mesh.
-        """
-        return self._uvs
+    def uvs(self) -> "np.typing.NDArray | None":
+        """The uvs of the mesh, None when its surface samples no texture."""
+        # The asset uvs stay held, since a surface sampling a texture may replace the current one (see 'set_surface')
+        return self._uvs if self._surface.requires_uv else None
 
     @property
     def area(self):

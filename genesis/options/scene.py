@@ -1,5 +1,7 @@
 """Every option a scene is created with, gathered as one object."""
 
+import numpy as np
+
 from pydantic import Field, model_validator
 
 import genesis as gs
@@ -59,6 +61,35 @@ class SceneOptions(Options):
         return values
 
     def model_post_init(self, context) -> None:
+        # The deprecated visualization options stand for those of the solvers, an explicit conflicting value raising
+        vis = self.vis
+        conflicts = []
+        for solver_options, updates in (
+            (self.kinematic, dict(link_frames=vis.show_link_frame, link_frame_size=vis.link_frame_size)),
+            (
+                self.rigid,
+                dict(
+                    link_frames=vis.show_link_frame,
+                    link_frame_size=vis.link_frame_size,
+                    contact_force_scale=vis.contact_force_scale,
+                ),
+            ),
+            (self.mpm, dict(boundary=vis.visualize_mpm_boundary, n_support_neighbors=vis.n_support_neighbors)),
+            (self.sph, dict(boundary=vis.visualize_sph_boundary)),
+            (self.pbd, dict(boundary=vis.visualize_pbd_boundary, n_support_neighbors=vis.n_support_neighbors)),
+        ):
+            updates = {name: value for name, value in updates.items() if value is not None}
+            values_set = solver_options.vis.model_dump(include=updates.keys() & solver_options.vis.model_fields_set)
+            for name, value in values_set.items():
+                if not np.isclose(value, updates[name], rtol=0.0, atol=gs.EPS):
+                    conflicts.append(f"'{type(solver_options.vis).__name__}.{name}'")
+            solver_options.vis = solver_options.vis.model_copy(update=updates)
+        if conflicts:
+            gs.raise_exception(
+                f"Conflicting values set for {', '.join(conflicts)} and their deprecated counterpart of VisOptions. "
+                "Set the solver options alone."
+            )
+
         # Validate rigid_options against sim_options
         if self.rigid.box_box_detection is None:
             self.rigid.box_box_detection = not self.sim.requires_grad

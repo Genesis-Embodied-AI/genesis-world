@@ -235,16 +235,20 @@ def test_export_and_load_rigid(
     hdr_path = tmp_path / "sky.hdr"
     hdr_path.touch()
     stretched = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=Path(get_assets_dir()) / "meshes" / "sphere.obj",
-            scale=(0.05, 0.1, 0.15),
-            pos=(60.0, 60.0, 1.0),
-            enable_custom_vverts=True,
-        ),
-        surface=gs.surfaces.Default(
-            normal_texture=gs.textures.ImageTexture(
-                image_path=str(hdr_path),
-                encoding="linear",
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=Path(get_assets_dir()) / "meshes" / "sphere.obj",
+                scale=(0.05, 0.1, 0.15),
+                pos=(60.0, 60.0, 1.0),
+            ),
+            surface=gs.surfaces.Default(
+                normal_texture=gs.textures.ImageTexture(
+                    image_path=str(hdr_path),
+                    encoding="linear",
+                ),
+            ),
+            dynamic_vertices=gs.surfaces.DynamicVertices(
+                is_batched=True,
             ),
         ),
     )
@@ -301,7 +305,7 @@ def test_export_and_load_rigid(
     # the same.
     anchored_pos = anchored.get_pos()
     anchored_quat = anchored.get_quat()
-    stretched.set_vverts(stretched.get_vverts() + 0.01)
+    stretched.set_vverts(stretched.vgeoms[0].init_vverts + 0.01)
     for _ in range(20):
         scene.step()
 

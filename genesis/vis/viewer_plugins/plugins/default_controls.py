@@ -84,11 +84,13 @@ class DefaultControlsPlugin(ViewerPlugin):
             self.viewer.set_message_text("World Frame Off")
 
     def _toggle_link_frame(self):
-        if not self.viewer.gs_context.link_frame_shown:
-            self.viewer.gs_context.on_link_frame()
+        # The frames of every kinematic and rigid entity are drawn unless all of them already are
+        visualizer = self.scene.visualizer
+        if not visualizer.link_frames:
+            visualizer.set_link_frames(link_frames=True)
             self.viewer.set_message_text("Link Frame On")
         else:
-            self.viewer.gs_context.off_link_frame()
+            visualizer.set_link_frames(link_frames=False)
             self.viewer.set_message_text("Link Frame Off")
 
     def _toggle_camera_frustum(self):

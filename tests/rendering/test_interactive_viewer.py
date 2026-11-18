@@ -393,6 +393,20 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
         frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)]
     assert len(frames) == 2
 
+    # The frames of the links show once toggled on, and leave once toggled off
+    rgbs = []
+    for n_releases in (3, 4, 5):
+        if n_releases > 3:
+            pyrender_viewer.dispatch_event("on_key_release", Key.L, 0)
+            wait_for_viewer_events(pyrender_viewer, lambda: n_key_releases == n_releases)
+        rgb, *_ = pyrender_viewer.render_offscreen(
+            pyrender_viewer._camera_node, pyrender_viewer._renderer, rgb=True, depth=False, seg=False, normal=False
+        )
+        rgbs.append(rgb)
+    rgb_frames_off, rgb_frames_on, rgb_frames_toggled_off = rgbs
+    assert (rgb_frames_on != rgb_frames_off).any()
+    assert_equal(rgb_frames_toggled_off, rgb_frames_off)
+
     # Skip the rest of the test if necessary.
     # Similarly, 'glBlitFramebuffer(..., GL_DEPTH_BUFFER_BIT, GL_NEAREST)' involved in offscreen rendering of depth map
     # with interactive viewer enabled takes ages on old CPU-based Mesa rendering driver (~15000s).

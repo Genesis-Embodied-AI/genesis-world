@@ -10,13 +10,20 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.bvh import func_bvh_traverse
+from genesis.engine.render_context import Lines, Points, Shape
 from genesis.engine.solvers.rigid.data import DynState
 from genesis.options.sensors import SurfaceDistanceProbe as SurfaceDistanceProbeOptions
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
-from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
+from genesis.utils.misc import concat_with_tensor, make_tensor_field
 from genesis.utils.raycast_qd import closest_point_on_triangle, func_sphere_intersects_aabb
 
-from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
+from .base_sensor import (
+    RigidSensorMetadataMixin,
+    RigidSensorMixin,
+    SimpleSensor,
+    SimpleSensorMetadata,
+    func_sensor_link_pose,
+)
 from .probe import ProbeSensorMetadataMixin, ProbeSensorMixin, func_noised_probe_radius, get_measured_bufs
 from .tactile_shared import (
     BVHMetadata,
@@ -27,9 +34,7 @@ from .tactile_shared import (
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
-    from genesis.ext.pyrender.mesh import Mesh
     from genesis.utils.ring_buffer import TensorRingBuffer
-    from genesis.vis.rasterizer_context import RasterizerContext
 
     from .sensor_manager import SensorManager
 
@@ -164,11 +169,8 @@ def _kernel_surface_distance_probe_bvh(
     for i_p, i_b in qd.ndrange(probe_positions_local.shape[0], output_gt.shape[-1]):
         i_s = probe_sensor_idx[i_p]
         sensor_link_idx = links_idx[i_s]
-        probe_world = gu.qd_transform_by_trans_quat(
-            func_vec3_at(i_p, probe_positions_local),
-            dyn_state.links.pos[sensor_link_idx, i_b],
-            dyn_state.links.quat[sensor_link_idx, i_b],
-        )
+        link_pos, link_quat = func_sensor_link_pose(sensor_link_idx, i_b, dyn_state.links)
+        probe_world = gu.qd_transform_by_trans_quat(func_vec3_at(i_p, probe_positions_local), link_pos, link_quat)
 
         radius_gt = probe_radii[i_p]
         radius_m = radius_gt
@@ -340,38 +342,22 @@ class SurfaceDistanceProbeSensor(
             ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
         measured.copy_(measured_cols_b.T)
 
-    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
-        """Make the probes, their nearest surface points and the lines joining them, for the first rendered env."""
-        if 0 not in envs_idx:
-            return []
-        env_idx = context.rendered_envs_idx[0] if self._manager.n_envs > 0 else None
-
-        # Single env: drop the leading env axis to a bare (3,) / (4,); squeeze(0) leaves an unbatched vector untouched.
-        link_pos = self._link.get_pos(env_idx, relative=False).squeeze(0)
-        link_quat = self._link.get_quat(env_idx, relative=False).squeeze(0)
-        probe_world = tensor_to_array(
-            gu.transform_by_trans_quat(self._probe_local_pos.reshape(-1, 3), link_pos, link_quat)
-        ).reshape(-1, 3)
-        points = tensor_to_array(self.nearest_points[env_idx]).reshape(-1, 3)
-
-        rgb = tuple(float(c) for c in self._options.debug_probe_color)
-        line_color = (*rgb, 1.0)
-        nodes = self._draw_probe_spheres(context, probe_world, rgb)
-        nodes.append(
-            context.make_debug_spheres(
-                poss=points, radius=float(self._options.debug_probe_center_radius), color=line_color
-            )
-        )
-        for i in range(len(probe_world)):
-            nodes.append(
-                context.make_debug_line(
-                    probe_world[i],
-                    points[i],
-                    radius=float(self._options.debug_probe_center_radius) / 4.0,
-                    color=line_color,
-                )
-            )
-        return [(None, node, None) for node in nodes]
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
+        # The probes, their nearest surface points and the lines joining them
+        probes_markers = self._update_probes_markers(markers[:-2], envs_idx, is_contact=None)
+        if markers:
+            nearest_marker, lines_marker = markers[-2:]
+        else:
+            radius = self._options.debug_probe_center_radius
+            color = (*self._options.debug_probe_color, 1.0)
+            pos = torch.zeros_like(probes_markers[0].pos)
+            nearest_marker = Points(pos, radius, color)
+            lines_marker = Lines(probes_markers[0].pos, pos, radius=radius / 4.0, color=color)
+        nearest_pos = nearest_marker.pos
+        nearest_pos[envs_idx] = self._shared_metadata.nearest_positions_measured[
+            self._sanitize_envs_idx(envs_idx), self._nearest_points_slice
+        ]
+        return (*probes_markers, nearest_marker, lines_marker)
 
     @property
     def nearest_points(self) -> torch.Tensor:

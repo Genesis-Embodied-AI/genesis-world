@@ -51,6 +51,8 @@ class Rasterizer(BuildableMixin, RBC):
             ),
         )
         self._camera_targets[camera.uid] = pyrender.Renderer(camera.res[0], camera.res[1], self._context.jit)
+        # A camera sensor shows the scene as it looks, without markers
+        self._context.add_view(camera, is_debug=isinstance(camera, Camera) and camera.debug)
 
     def update_camera(self, camera):
         self._camera_nodes[camera.uid].camera.yfov = np.deg2rad(camera.fov)
@@ -60,6 +62,7 @@ class Rasterizer(BuildableMixin, RBC):
     def remove_camera(self, camera):
         self._context.remove_node(self._camera_nodes[camera.uid])
         del self._camera_nodes[camera.uid]
+        self._context.remove_view(camera)
         if self._offscreen:
             self._camera_targets[camera.uid].delete()
         else:
@@ -77,7 +80,7 @@ class Rasterizer(BuildableMixin, RBC):
         self.update_camera(camera)
 
         rgb_arr, depth_arr, seg_idxc_arr, normal_arr = None, None, None, None
-        skip_markers = not camera.debug if isinstance(camera, Camera) else True
+        debug_view = isinstance(camera, Camera) and camera.debug
         split_envs = split_envs or env_idx is not None
         if self._offscreen:
             # Set the context
@@ -96,8 +99,8 @@ class Rasterizer(BuildableMixin, RBC):
                         depth=depth,
                         plane_reflection=rgb and self._context.plane_reflection,
                         shadow=rgb and self._context.shadow,
-                        skip_markers=skip_markers,
                         env_idx=env_idx,
+                        debug_view=debug_view,
                     )
 
                 if segmentation:
@@ -112,8 +115,8 @@ class Rasterizer(BuildableMixin, RBC):
                         depth=False,
                         plane_reflection=False,
                         shadow=False,
-                        skip_markers=skip_markers,
                         env_idx=env_idx,
+                        debug_view=debug_view,
                     )
             finally:
                 # Unset the context
@@ -128,9 +131,9 @@ class Rasterizer(BuildableMixin, RBC):
                     depth=depth,
                     normal=normal,
                     seg=False,
-                    skip_markers=skip_markers,
                     split_envs=split_envs,
                     env_idx=env_idx,
+                    debug_view=debug_view,
                 )
 
             if segmentation:
@@ -141,9 +144,9 @@ class Rasterizer(BuildableMixin, RBC):
                     depth=False,
                     normal=False,
                     seg=True,
-                    skip_markers=skip_markers,
                     split_envs=split_envs,
                     env_idx=env_idx,
+                    debug_view=debug_view,
                 )
 
         if segmentation:

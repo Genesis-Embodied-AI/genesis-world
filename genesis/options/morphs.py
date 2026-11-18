@@ -124,7 +124,6 @@ class Morph(Options):
     offset_quat: UnitVec4FType | None = None
     visualization: StrictBool = True
     collision: StrictBool = True
-    enable_custom_vverts: StrictBool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -495,9 +494,6 @@ class Plane(Primitive):
         if not fixed:
             gs.raise_exception("Plane `fixed` must be True.")
         super().__init__(fixed=True, **data)
-
-        if self.enable_custom_vverts:
-            gs.raise_exception("`enable_custom_vverts` must be False for `Plane`.")
 
 
 ############################ Mesh ############################

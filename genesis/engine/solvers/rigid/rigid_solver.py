@@ -13,11 +13,28 @@ from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.entities.rigid_entity import RigidGeom
 from genesis.engine.entities.rigid_entity.description import RigidEntityDescription, _balanced_variant_mapping
 from genesis.engine.entities.rigid_entity.rigid_equality import RigidEquality
+from genesis.engine.render_context import (
+    CONSTRAINT_COLOR,
+    CONSTRAINT_LINE_RADIUS,
+    CONSTRAINT_POINT_RADIUS,
+    DEBUG,
+    NORMAL,
+    ArrayRef,
+    Arrows,
+    Floor,
+    Lines,
+    MeshGeometry,
+    Points,
+    ScopedRenderContext,
+    Shape,
+    ShapeRoles,
+    StaticMeshBatch,
+)
 from genesis.engine.solvers.rigid.collider.data import ColliderState
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
 from genesis.engine.solvers.rigid.constraint.solver import cholesky_tile_size_for
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidConfig, RigidData, RigidErrorCode, RigidInfo
-from genesis.engine.state_change import MutatedLinks, StateChange, mutates
+from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
@@ -39,7 +56,13 @@ from genesis.utils.misc import (
 )
 
 from ..base_solver import GravityMixin, TimeBasedMixin
-from ..kinematic_solver import KinematicSolver, _fill_base_link_geom_offsets, _offset_world_shift, _select_links_offset
+from ..kinematic_solver import (
+    KinematicScopedRenderContext,
+    KinematicSolver,
+    _fill_base_link_geom_offsets,
+    _offset_world_shift,
+    _select_links_offset,
+)
 from .abd.accessor import (
     ConstraintType,
     kernel_control_dofs_force,
@@ -75,7 +98,6 @@ from .abd.accessor import (
     kernel_set_links_quat,
     kernel_set_qpos,
     kernel_set_sol_params,
-    kernel_update_drone_propeller_vgeoms,
     kernel_wake_up_entities_by_dofs,
     kernel_wake_up_entities_by_links,
     kernel_wake_up_entities_by_qs,
@@ -138,6 +160,7 @@ from .constraint.solver import (
     func_resolve_post,
     func_solve_body,
 )
+from .render import VARIANTS, RigidRenderGeoms
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
@@ -1062,11 +1085,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def _dispatch_heterogeneous_vgeoms(self):
         """
-        Dispatch per-environment geom/vgeom ranges and inertial properties for heterogeneous links.
+        Dispatch per-environment geom ranges and inertial properties for heterogeneous links.
 
-        Extends the base class (which handles vgeom-only dispatch) to also dispatch collision geom
+        Extends the base class (which marks the environments holding each vgeom) to also dispatch collision geom
         ranges and per-variant inertial properties, which the description of each variant states.
         """
+        super()._dispatch_heterogeneous_vgeoms()
         for link in self.links:
             if link._variant_vgeom_ranges is None:
                 continue
@@ -1077,8 +1101,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # Build per-env arrays from link's variant data
             geom_starts = np.array([link._variant_geom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
             geom_ends = np.array([link._variant_geom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
-            vgeom_starts = np.array([link._variant_vgeom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
-            vgeom_ends = np.array([link._variant_vgeom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
 
             # Build per-env inertial arrays from the description of the link in each variant, its own coming first
             variants_desc = [link.desc, *(variant.links[link.idx_local] for variant in link.entity.desc.variants[1:])]
@@ -1093,8 +1115,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 link.idx,
                 geom_starts,
                 geom_ends,
-                vgeom_starts,
-                vgeom_ends,
                 links_inertial_mass,
                 links_inertial_pos,
                 links_inertial_quat,
@@ -1108,12 +1128,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 active_envs_mask = (geom_starts <= geom.idx) & (geom.idx < geom_ends)
                 geom.active_envs_mask = torch.tensor(active_envs_mask, device=gs.device)
                 (geom.active_envs_idx,) = np.where(active_envs_mask)
-
-            # Set active_envs on vgeoms
-            for vgeom in link.vgeoms:
-                active_envs_mask = (vgeom_starts <= vgeom.idx) & (vgeom.idx < vgeom_ends)
-                vgeom.active_envs_mask = torch.tensor(active_envs_mask, device=gs.device)
-                (vgeom.active_envs_idx,) = np.where(active_envs_mask)
 
     def _init_link_fields(self):
         # The base initialization ends by dispatching each heterogeneous variant's inertial per environment, which
@@ -2183,7 +2197,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             friction_ratio = friction_ratio[None]
         kernel_set_geoms_friction_ratio(geoms_idx, envs_idx, friction_ratio, self.dyn_state, self.rigid_config)
 
-    @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
+    @mutates(StateChange.GEOMETRY, links="qs_idx")
     def set_qpos(
         self,
         qpos: torch.Tensor | FArrayType,
@@ -2415,7 +2429,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def set_dofs_limit(self, lower, upper, dofs_idx=None, envs_idx=None):
         self._set_dofs_info([lower, upper], dofs_idx, "limit", envs_idx)
 
-    @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
+    @mutates(StateChange.GEOMETRY, links="dofs_idx")
     def set_dofs_position(self, position, dofs_idx=None, envs_idx=None):
         self.constraint_solver.reset(envs_idx)
 
@@ -2457,7 +2471,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.rigid_config,
             )
 
-    @mutates(StateChange.DYNAMICS, links=MutatedLinks.ARTICULATED)
+    @mutates(StateChange.DYNAMICS, links="dofs_idx")
     def set_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None, *, skip_forward=False):
         # Wake the owning entities before delegating to the base setter, which re-sanitizes and applies the write.
         if self._use_hibernation:
@@ -3234,17 +3248,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         kernel_clear_external_force(self.dyn_state, self.rigid_config)
 
-    def update_drone_propeller_vgeoms(self, propellers_vgeom_idxs, propellers_revs, propellers_spin):
-        kernel_update_drone_propeller_vgeoms(
-            propellers_vgeom_idxs,
-            propellers_revs,
-            propellers_spin,
-            self.dyn_state,
-            self.dyn_info,
-            self.rigid_info,
-            self.rigid_config,
-        )
-
     @mutates(differentiable=False)
     def set_drone_rpm(self, propellers_link_idx, kf, km, propellers_rpm, propellers_spin, invert):
         # The backward pass of a step stops at the speed of the propellers, an input without gradient
@@ -3453,3 +3456,285 @@ def kernel_substep_post(
             dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, noslip, errno
         )
     func_step_2(dyn_state, dyn_info, rigid_info, rigid_config, errno)
+
+
+# The colors of the arrows of the force and of the normal of a contact
+CONTACT_FORCE_COLOR = (0.0, 0.9, 0.8, 1.0)
+CONTACT_NORMAL_COLOR = (0.9, 0.0, 0.8, 1.0)
+
+
+class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext[RigidSolver]):
+    """The visual meshes of a rigid solver (see KinematicScopedRenderContext), its markers, and its collision geoms.
+
+    The collision geoms of the entities are their debug representation, their mesh or the surface of their signed
+    distance field (SDF). The markers are the frames of the links, the equality constraints and the arrows of the force
+    and of the normal of the contacts of the geoms showing them, as the options of the solver and of its geoms ask.
+    """
+
+    debug_vis_modes = ("collision", "sdf")
+    # The equality constraints added at runtime are part of the model
+    stale_on = frozenset((StateChange.GEOMETRY, StateChange.MODEL))
+
+    def _get_geoms_batch(
+        self, debug_vis_mode: str, geometries: tuple[MeshGeometry, ...], is_looks: bool, geom_start: int = 0
+    ) -> StaticMeshBatch:
+        # Every batch of the collision geoms views the poses of the geoms from the geom 'geom_start' on, and draws the
+        # debug representation 'debug_vis_mode' of the entities asking for it, plus the entities as they look when
+        # 'is_looks' holds.
+        geoms_cols = slice(geom_start, geom_start + len(geometries))
+        geoms = self.owner.dyn_state.geoms
+        entities = [geom.entity for geom in self.owner.geoms[geoms_cols]]
+        return StaticMeshBatch(
+            geometries,
+            ArrayRef(geoms.pos, geoms_cols),
+            ArrayRef(geoms.quat, geoms_cols),
+            is_active=ArrayRef(self._geoms.is_active, geoms_cols) if self._has_geoms_variants else None,
+            aabb_min=ArrayRef(geoms.aabb_min, geoms_cols),
+            aabb_max=ArrayRef(geoms.aabb_max, geoms_cols),
+            roles=ShapeRoles.of(
+                [entity.idx for entity in entities],
+                is_looks=is_looks,
+                is_debug=[not is_looks and entity.surface.debug_vis_mode == debug_vis_mode for entity in entities],
+            ),
+            _views=frozenset() if is_looks else frozenset((debug_vis_mode,)),
+        )
+
+    def build(self) -> None:
+        """Build the data of the visual geoms, of the collision geoms and of the markers, and the shapes of the visual
+        geoms and of the collision geoms.
+
+        The collision geoms make one batch per debug representation: their mesh, and the surface of their SDF, made at
+        the first read asking for it (see 'update_shapes'). The debug read holds in each the geoms of the entities
+        taking its representation (see 'Shape.reads').
+        """
+        solver = self.owner
+        # Whether each collision geom shows its contacts, the last entry standing for no geom, for a solver some geoms
+        # of which show them.
+        self._geoms_is_contact_shown: torch.Tensor | None = None
+        if any(geom.desc.visualize_contact for geom in solver.geoms):
+            self._geoms_is_contact_shown = torch.tensor(
+                [geom.desc.visualize_contact for geom in solver.geoms] + [False], dtype=torch.bool, device=gs.device
+            )
+        # The size of each link, which scales the arrows of its contacts, computed once they are first drawn
+        self._links_init_aabb_size: torch.Tensor | None = None
+        # The collision geoms as drawn
+        self._geoms_collision: list[MeshGeometry] = []
+        # The representations whose read makes the surfaces of the SDF of the collision geoms, until one is read: the
+        # SDF of every geom, the debug views of entities asking for their SDF, and the scene as it looks for entities a
+        # deprecated 'vis_mode' shows as such.
+        self._sdf_views: set[str] = set()
+        if solver.n_geoms > 0:
+            self._sdf_views.add("sdf")
+            if any(geom.entity.surface.debug_vis_mode == "sdf" for geom in solver.geoms):
+                self._sdf_views.add(DEBUG)
+            if any(entity.surface.vis_mode == "sdf" and entity.n_geoms > 0 for entity in solver.entities):
+                self._sdf_views.add(NORMAL)
+        self._has_geoms_variants = any(geom.active_envs_mask is not None for geom in solver.geoms)
+        self._geoms = RigidRenderGeoms(
+            sizes=dict(geoms=solver.n_geoms, envs=solver.n_envs_), unused={VARIANTS: not self._has_geoms_variants}
+        )
+        if self._has_geoms_variants:
+            geoms_is_active = np.ones((solver.n_geoms, solver.n_envs_), dtype=gs.np_bool)
+            for geom in solver.geoms:
+                if geom.active_envs_mask is not None:
+                    geoms_is_active[geom.idx] = tensor_to_array(geom.active_envs_mask)
+            self._geoms.is_active.from_numpy(geoms_is_active)
+        # The links bound by the equality constraints of the model, their anchors on them, and their markers
+        self._constraints_links_idx: torch.Tensor | None = None
+        self._constraints_anchors: torch.Tensor | None = None
+        self._constraints_markers: tuple[Lines, Points] | tuple[()] = ()
+        # The marker of each constraint added at runtime, by the links it binds, kept while the constraint is removed
+        self._dynamic_constraints_marker: dict[tuple[int, int], Lines] = {}
+        super().build()
+        if solver.n_geoms > 0:
+            dyn_info = solver.dyn_info
+            for geom in solver.geoms:
+                entity = geom.entity
+                # The collision mesh of a geom is drawn flat and single-sided, in the color of its surface
+                surface_flat = geom.surface.model_copy(update=dict(smooth=False, double_sided=False))
+                morph = entity.main_morph
+                verts_cols = slice(geom.vert_start, geom.vert_end)
+                self._geoms_collision.append(
+                    MeshGeometry(
+                        surface_flat,
+                        visual=geom.trimesh.visual,
+                        seg_keys=geom.seg_keys,
+                        floor=Floor(morph.normal, morph.plane_size) if isinstance(morph, gs.morphs.Plane) else None,
+                        verts_ref=ArrayRef(dyn_info.verts.init_pos, verts_cols),
+                        normals_ref=ArrayRef(dyn_info.verts.init_normal, verts_cols),
+                        faces_ref=ArrayRef(dyn_info.faces.verts_idx, slice(geom.face_start, geom.face_end)),
+                    )
+                )
+            self._shapes += (self._get_geoms_batch("collision", tuple(self._geoms_collision), is_looks=False),)
+            # The scene as it looks shows the collision geoms of the entities a deprecated 'vis_mode' asks for
+            for entity in solver.entities:
+                if entity.surface.vis_mode == "collision" and entity.n_geoms > 0:
+                    geometries = tuple(self._geoms_collision[entity.geom_start : entity.geom_end])
+                    self._shapes += (
+                        self._get_geoms_batch("collision", geometries, is_looks=True, geom_start=entity.geom_start),
+                    )
+        if solver.options.vis.constraints and solver.n_equalities > 0:
+            # The anchors of a connect constraint on its two links, the origins of the links bound by the others
+            links_idx = np.empty((2, solver.n_equalities), dtype=gs.np_int)
+            anchors = np.zeros((2, solver.n_equalities, 3), dtype=gs.np_float)
+            for i_eq, equality in enumerate(solver.equalities):
+                objs_idx = (equality.eq_obj1id, equality.eq_obj2id)
+                if equality.type == gs.EQUALITY_TYPE.JOINT:
+                    # A joint fixed to a constant binds its link alone
+                    objs_idx = tuple(solver.joints[i_j if i_j >= 0 else objs_idx[0]].link.idx for i_j in objs_idx)
+                links_idx[:, i_eq] = objs_idx
+                if equality.type == gs.EQUALITY_TYPE.CONNECT:
+                    anchors[:, i_eq] = np.reshape(equality.eq_data[:6], (2, 3))
+            self._constraints_links_idx = torch.as_tensor(links_idx, dtype=gs.tc_int, device=gs.device)
+            self._constraints_anchors = torch.as_tensor(anchors, dtype=gs.tc_float, device=gs.device)
+            # The lines join the two ends of each constraint, which the points mark
+            ends = torch.zeros((solver.n_envs_, 2, solver.n_equalities, 3), dtype=gs.tc_float, device=gs.device)
+            self._constraints_markers = (
+                Lines(ends[:, 0], ends[:, 1], CONSTRAINT_LINE_RADIUS, CONSTRAINT_COLOR),
+                Points(ends.reshape((solver.n_envs_, -1, 3)), CONSTRAINT_POINT_RADIUS, CONSTRAINT_COLOR),
+            )
+
+    def update_shapes(self, envs_idx: torch.Tensor | None, view: str) -> tuple[Shape, ...]:
+        """Refresh the shapes of the visual geoms and of the collision geoms, and return those of a representation.
+
+        The batches of the surfaces of the SDF of the collision geoms are made at the first read asking for one, the
+        surfaces being extracted from the grids of the geoms.
+        """
+        solver = self.owner
+        if view in self._sdf_views:
+            self._sdf_views.clear()
+            geoms_sdf = []
+            for geom in solver.geoms:
+                mesh = geom.sdf_trimesh
+                geometry = self._geoms_collision[geom.idx]
+                # A geom whose SDF has no surface, such as a plane, is drawn with its collision mesh
+                if len(mesh.faces) > 0:
+                    geometry = MeshGeometry(
+                        geom.surface,
+                        seg_keys=geometry.seg_keys,
+                        floor=geometry.floor,
+                        verts_ref=ArrayRef(mesh.vertices),
+                        normals_ref=ArrayRef(mesh.vertex_normals),
+                        faces_ref=ArrayRef(mesh.faces),
+                    )
+                geoms_sdf.append(geometry)
+            self._shapes += (self._get_geoms_batch("sdf", tuple(geoms_sdf), is_looks=False),)
+            for entity in solver.entities:
+                if entity.surface.vis_mode == "sdf" and entity.n_geoms > 0:
+                    geometries = tuple(geoms_sdf[entity.geom_start : entity.geom_end])
+                    self._shapes += (
+                        self._get_geoms_batch("sdf", geometries, is_looks=True, geom_start=entity.geom_start),
+                    )
+        return super().update_shapes(envs_idx, view)
+
+    def get_visualize_contact(self, entity: RigidEntity) -> bool:
+        """Whether the contacts of an entity are drawn (see the ``visualize_contact`` of its entity spec)."""
+        is_shown = self._geoms_is_contact_shown
+        return is_shown is not None and bool(is_shown[entity.geom_start : entity.geom_end].any())
+
+    def set_visualize_contact(self, entity: RigidEntity, visualize_contact: bool) -> None:
+        """Draw the contacts of an entity of the solver, or stop drawing them.
+
+        Parameters
+        ----------
+        entity : RigidEntity
+            The entity.
+        visualize_contact : bool
+            Whether the contacts are drawn (see the ``visualize_contact`` of its entity spec).
+        """
+        if self._geoms_is_contact_shown is None:
+            self._geoms_is_contact_shown = torch.zeros(self.owner.n_geoms + 1, dtype=torch.bool, device=gs.device)
+        is_shown = self._geoms_is_contact_shown
+        is_shown[entity.geom_start : entity.geom_end] = visualize_contact
+        # The contacts are read back only while some geom shows them
+        if not is_shown.any():
+            self._geoms_is_contact_shown = None
+        self._context.invalidate((self,))
+
+    def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:
+        """Return the constraints, the frames of the links and the arrows of the contacts.
+
+        Each constraint added at runtime is a line joining the origins of the links it binds, alive while the
+        constraint exists in some environment and of zero length in the others. The arrows of the contacts are those
+        the latest step computed, wrong once the state, the dynamics or the model changes until the next step (see
+        'Shape.stale_on').
+        """
+        # The contacts of the geoms showing none, and the padding of the environments holding fewer contacts, are
+        # arrows of zero length.
+        link_frames = super().update_markers(envs_idx)
+        solver = self.owner
+        n_envs = len(envs_idx)
+        markers: list = []
+        if solver.options.vis.constraints:
+            links_pos = qd_to_torch(solver.dyn_state.links.pos, envs_idx, transpose=True)
+            if self._constraints_markers:
+                links_quat = qd_to_torch(solver.dyn_state.links.quat, envs_idx, transpose=True)
+                anchors = self._constraints_anchors.expand((n_envs, 2, solver.n_equalities, 3))
+                links_idx = self._constraints_links_idx
+                ends = gu.transform_by_trans_quat(anchors, links_pos[:, links_idx], links_quat[:, links_idx])
+                # The points view the ends of the lines
+                ends_pos = self._constraints_markers[1].pos
+                ends_pos[envs_idx] = ends.reshape((n_envs, -1, 3))
+                markers += self._constraints_markers
+            markers += link_frames
+            if solver.options.max_dynamic_constraints > 0:
+                equalities = solver.get_equality_constraints()
+                objs_idx = torch.stack((equalities["obj_a"], equalities["obj_b"]), dim=-1)
+                objs_idx = objs_idx[envs_idx, solver.n_equalities :]
+                for link_a, link_b in np.unique(tensor_to_array(objs_idx[(objs_idx >= 0).all(dim=-1)]), axis=0):
+                    marker = self._dynamic_constraints_marker.get((link_a, link_b))
+                    if marker is None:
+                        ends = torch.zeros((solver.n_envs_, 1, 3), dtype=gs.tc_float, device=gs.device)
+                        marker = Lines(ends, ends.clone(), CONSTRAINT_LINE_RADIUS, CONSTRAINT_COLOR)
+                        self._dynamic_constraints_marker[(link_a, link_b)] = marker
+                    is_bound = (objs_idx == torch.tensor((link_a, link_b), device=gs.device)).all(dim=-1).any(dim=-1)
+                    marker.start[envs_idx, 0] = links_pos[:, link_a]
+                    marker.end[envs_idx, 0] = torch.where(is_bound[:, None], links_pos[:, link_b], links_pos[:, link_a])
+                    markers.append(marker)
+        else:
+            markers += link_frames
+        if self._geoms_is_contact_shown is None:
+            return tuple(markers)
+
+        if self._links_init_aabb_size is None:
+            # The arrows scale with the size of the link rather than of the contacting geom, so that they stay legible
+            # on links made of many small convex pieces. The box of each geom is in its own frame, so its corners are
+            # placed on the link first. The last entry stands for no link.
+            geoms_aabb = qd_to_numpy(solver.rigid_info.geoms_init_AABB)
+            links_init_aabb_size = np.zeros(solver.n_links + 1, dtype=gs.np_float)
+            for link in solver.links:
+                if link.n_geoms > 0:
+                    corners = np.concatenate(
+                        [
+                            gu.transform_by_trans_quat(geoms_aabb[geom.idx], geom.init_pos, geom.init_quat)
+                            for geom in link.geoms
+                        ]
+                    )
+                    links_init_aabb_size[link.idx] = np.linalg.norm(corners.max(axis=0) - corners.min(axis=0))
+            self._links_init_aabb_size = torch.as_tensor(links_init_aabb_size, dtype=gs.tc_float, device=gs.device)
+        contacts = solver.collider.get_contacts(as_tensor=True, to_torch=True)
+        if solver.n_envs == 0:
+            contacts = {key: value[None] for key, value in contacts.items()}
+        if contacts["geom_a"].shape[1] == 0:
+            return tuple(markers)
+        contacts = {key: value[envs_idx] for key, value in contacts.items()}
+        arrows_scale = torch.minimum(
+            self._links_init_aabb_size[contacts["link_a"]], self._links_init_aabb_size[contacts["link_b"]]
+        )
+        radius = torch.clamp(arrows_scale * 0.04, max=0.005)
+        normals = contacts["normal"] * arrows_scale[..., None]
+        forces = contacts["force"] * solver.options.vis.contact_force_scale
+        arrows_force, arrows_normal = [], []
+        for geoms_idx, sign in ((contacts["geom_a"], -1.0), (contacts["geom_b"], 1.0)):
+            is_shown = self._geoms_is_contact_shown[geoms_idx][..., None]
+            arrows_force.append(torch.where(is_shown, sign * forces, 0.0))
+            arrows_normal.append(torch.where(is_shown, -sign * normals, 0.0))
+        arrows_pos = torch.cat((contacts["position"], contacts["position"]), dim=1)
+        arrows_radius = torch.cat((radius, radius), dim=1)
+        # The contacts the latest step computed no longer hold once the state, the dynamics or the model changes
+        stale_on = frozenset((StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL))
+        contacts_markers = tuple(
+            Arrows(arrows_pos, torch.cat(arrows_vec, dim=1), arrows_radius, color, envs_idx=envs_idx, stale_on=stale_on)
+            for arrows_vec, color in ((arrows_force, CONTACT_FORCE_COLOR), (arrows_normal, CONTACT_NORMAL_COLOR))
+        )
+        return (*markers, *contacts_markers)

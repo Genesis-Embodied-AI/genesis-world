@@ -20,6 +20,7 @@ from quadrants.algorithms import sort_scratch_slots
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.utils.cache import OwnedCache
 from genesis.utils.data import Config, Data, DataKind, Size, field
 from genesis.utils.misc import get_gpu_core_count, qd_to_numpy
 
@@ -721,6 +722,42 @@ def build_packed_instances(
     packed_instances.instances_tree_idx.from_numpy(np.array(instances_tree_idx, dtype=gs.np_int))
     packed_instances.instances_leaf_base.from_numpy(np.array(instances_leaf_base, dtype=gs.np_int))
     return packed_instances
+
+
+_MESHES_TREES_CACHE = OwnedCache()
+
+
+def get_meshes_trees(
+    owner: object, verts: qd.Tensor, faces: qd.Tensor, faces_range: tuple[tuple[int, int], ...]
+) -> PackedInstances:
+    """Return the trees of the faces of meshes, in the frame of each, built once and shared by every user of the same
+    meshes of an owner.
+
+    The meshes of identical faces share one tree.
+
+    Parameters
+    ----------
+    owner : object
+        The owner of the meshes, as long as which the trees live.
+    verts : qd.Tensor
+        The vertices of the meshes.
+    faces : qd.Tensor
+        The triangles of the meshes, as indices of `verts`.
+    faces_range : tuple[tuple[int, int], ...]
+        The range of `faces` holding the triangles of each mesh, empty for a mesh without face.
+    """
+
+    def compute() -> PackedInstances:
+        verts_pos = qd_to_numpy(verts, transpose=True)
+        faces_verts_idx = qd_to_numpy(faces, transpose=True)
+        meshes_aabb_min, meshes_aabb_max = [], []
+        for i_f_start, i_f_end in faces_range:
+            tris = verts_pos[faces_verts_idx[i_f_start:i_f_end]]
+            meshes_aabb_min.append(tris.min(axis=1))
+            meshes_aabb_max.append(tris.max(axis=1))
+        return build_packed_instances([i_f_start for i_f_start, _ in faces_range], meshes_aabb_min, meshes_aabb_max)
+
+    return _MESHES_TREES_CACHE.get(owner, (faces, faces_range), compute)
 
 
 @qd.kernel(fastcache=True)

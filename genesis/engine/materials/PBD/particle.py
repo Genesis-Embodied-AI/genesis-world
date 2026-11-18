@@ -1,5 +1,6 @@
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
+from genesis.constants import STRUCTURE
 from genesis.typing import PositiveFloat
 
 from .base import Base
@@ -28,6 +29,8 @@ class Particle(Base["PBDFreeParticleEntity"]):
         cost of a slower first sampling of each shape, cached afterwards. 'regular' places them on a grid, which leaves
         the surface stair-stepped. 'random' draws them uniformly, which leaves local density fluctuations.
     """
+
+    structure: ClassVar[STRUCTURE] = STRUCTURE.AMORPHOUS
 
     rho: PositiveFloat = 1000.0
     sampler: SamplerType = "pbs"

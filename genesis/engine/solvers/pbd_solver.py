@@ -3,6 +3,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
+import torch
 
 import quadrants as qd
 
@@ -11,7 +12,7 @@ import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
 from genesis.engine.entities.pbd_entity import PBDTetEntity
-from genesis.engine.materials import PBD
+from genesis.engine.render_context import CONSTRAINT_COLOR, ArrayRef, Points, ScopedRenderContext, Shape
 from genesis.engine.state_change import StateChange, mutates
 from genesis.options.solvers import PBDOptions
 from genesis.options.surfaces import Surface
@@ -20,22 +21,24 @@ from genesis.utils.geom import (
     PARTICLES,
     SpatialHashGrid,
     func_hash_cell_to_slot,
-    func_hash_grid_to_slot,
     func_hash_n_cells,
     func_hash_pos_to_grid,
     func_hash_sort_particles,
     func_hash_wrap_cell,
     hash_grid_sizes,
 )
+from genesis.utils.misc import qd_to_torch
 
-from .base_solver import VFACES, VVERTS, SimulatorState
-from .particle_solver import ParticleSolver
+from .base_solver import SimulatorState
+from .particle_solver import ParticleScopedRenderContext, ParticleSolver
 
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import EntityDescription
-    from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
+
+# The scale of the size of the markers of the fixed particles, larger than the particles to stand out of them
+FIXED_PARTICLE_SIZE_SCALE = 1.5
 
 EDGES = Size("edges")
 INNER_EDGES = Size("inner_edges")
@@ -132,8 +135,7 @@ class PBDInfo(Data, kind=DataKind.CONSTANT):
     The smoothing kernels of the density and viscosity constraints take the distances between particles divided by
     `dist_scale`, which gives them a support radius of one, and `poly6_coef` and `spiky_coef` normalize them.
     `lambda_eps` regularizes the Lagrange multiplier of the density constraint, and `s_corr_delta_q` and `s_corr_k`
-    shape its artificial pressure. `vvert_uvs` and `vfaces_vverts_idx` are the texture coordinates (UVs) of the visual
-    vertices and the visual vertices of the faces.
+    shape its artificial pressure.
     """
 
     particles: PBDParticlesInfo
@@ -141,8 +143,6 @@ class PBDInfo(Data, kind=DataKind.CONSTANT):
     inner_edges: PBDInnerEdgesInfo
     elems: PBDElemsInfo
     boundary: CubeBoundary
-    vverts_uvs: qd.Tensor = field((float, 2), shape=(VVERTS,))
-    vfaces_vverts_idx: qd.Tensor = field((int, 3), shape=(VFACES,))
     gravity: qd.Tensor = field((float, 3), shape=(ENVS,), kind=DataKind.INFO)
     substep_dt: qd.Tensor = field(float, shape=())
     substep_dt_sq: qd.Tensor = field(float, shape=())
@@ -239,14 +239,7 @@ class PBDSolver(ParticleSolver):
                 EPS=gs.EPS,
             )
         self.pbd_info = PBDInfo(
-            sizes=dict(
-                sizes,
-                edges=self._n_edges,
-                inner_edges=self._n_inner_edges,
-                elems=self._n_elems,
-                vverts=self._n_vverts,
-                vfaces=self._n_vfaces,
-            ),
+            sizes=dict(sizes, edges=self._n_edges, inner_edges=self._n_inner_edges, elems=self._n_elems),
             values=info_values,
             unused=is_unused,
         )
@@ -261,7 +254,6 @@ class PBDSolver(ParticleSolver):
         self._particles_vel = self.pbd_state.particles.vel
         self._particles_is_active = self.pbd_state.particles.is_active
         self._particles_mass = self.pbd_info.particles.mass
-        self._build_render(has_vverts=True)
 
         if self.is_active:
             for entity in self._entities:
@@ -270,14 +262,6 @@ class PBDSolver(ParticleSolver):
         self._build_gravity(self.pbd_info.gravity)
 
         self._is_built = True
-
-    def add_uvs_and_faces(self, vvert_start: int, vface_start: int, uvs: np.ndarray, faces: np.ndarray) -> None:
-        """
-        Add the render texture coordinates (UVs) and faces of an entity.
-
-        An empty `uvs` leaves the slice of the entity in the UV buffer zeroed.
-        """
-        kernel_add_uvs_and_faces(vvert_start, vface_start, uvs, faces, self.pbd_info)
 
     def add_particles(
         self,
@@ -379,8 +363,6 @@ class PBDSolver(ParticleSolver):
                 particle_start=self.n_particles,
                 edge_start=self.n_edges,
                 inner_edge_start=self.n_inner_edges,
-                vvert_start=self.n_vverts,
-                vface_start=self.n_vfaces,
                 spec=spec,
             )
         elif isinstance(spec.material, gs.materials.PBD.Elastic):
@@ -393,8 +375,6 @@ class PBDSolver(ParticleSolver):
                 particle_start=self.n_particles,
                 edge_start=self.n_edges,
                 elem_start=self.n_elems,
-                vvert_start=self.n_vverts,
-                vface_start=self.n_vfaces,
                 spec=spec,
             )
         elif isinstance(spec.material, gs.materials.PBD.Liquid):
@@ -422,8 +402,6 @@ class PBDSolver(ParticleSolver):
 
         self._entities.append(entity)
         self._n_particles += entity.n_particles
-        self._n_vverts += entity.n_vverts
-        self._n_vfaces += entity.n_vfaces
         if isinstance(entity, PBDTetEntity):
             self._n_edges += entity.n_edges
         if isinstance(entity, PBD2DEntity):
@@ -469,23 +447,6 @@ class PBDSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
-
-    def get_state_render(self):
-        """
-        Get visual vertex positions, texture coordinates (UVs), and face indices for rendering.
-
-        Returns
-        -------
-        tuple
-            (vverts_pos, vverts_uvs, vfaces_indices) - vertex positions, UV coords, and triangle indices
-        """
-        if not self.is_active or self._n_vverts == 0:
-            return None, None, None
-
-        # Make sure render fields are up to date
-        self.update_render_fields()
-
-        return self.vverts_render.pos, self.pbd_info.vverts_uvs, self.pbd_info.vfaces_vverts_idx
 
     @gs.assert_built
     @mutates(StateChange.DYNAMICS, differentiable=False)
@@ -1021,20 +982,6 @@ def kernel_compute_velocity(pbd_state: PBDState, pbd_info: PBDInfo):
 
 
 @qd.kernel(fastcache=True)
-def kernel_add_uvs_and_faces(
-    vvert_start: int,
-    vface_start: int,
-    uvs: qd.types.ndarray(element_dim=1),
-    faces: qd.types.ndarray(element_dim=1),
-    pbd_info: PBDInfo,
-):
-    for i_vv_ in range(uvs.shape[0]):
-        pbd_info.vverts_uvs[i_vv_ + vvert_start] = uvs[i_vv_]
-    for i_vf_ in range(faces.shape[0]):
-        pbd_info.vfaces_vverts_idx[i_vf_ + vface_start] = faces[i_vf_] + vvert_start
-
-
-@qd.kernel(fastcache=True)
 def kernel_add_particles(
     particle_start: int,
     is_active: bool,
@@ -1139,3 +1086,34 @@ def kernel_set_particles_free(
         i_p = particles_idx[i_b_, i_p_]
         i_b = envs_idx[i_b_]
         pbd_state.particles.is_free[i_p, i_b] = is_free
+
+
+class PBDScopedRenderContext(ParticleScopedRenderContext, ScopedRenderContext[PBDSolver]):
+    """The particles of the PBD solver as drawn (see 'ParticleScopedRenderContext'), and the marker of its fixed
+    particles, as its visual options ask."""
+
+    # Fixing and releasing particles changes the dynamics of the solver
+    stale_on = frozenset((StateChange.GEOMETRY, StateChange.DYNAMICS))
+
+    def build(self) -> None:
+        super().build()
+        solver = self.owner
+        # The marker of the fixed particles, drawn at every particle and shown at those fixed
+        self._fixed_particles: Points | None = None
+        if solver.options.vis.constraints:
+            self._fixed_particles = Points(
+                ArrayRef(solver._particles_pos),
+                radius=solver.particle_radius * FIXED_PARTICLE_SIZE_SCALE,
+                color=CONSTRAINT_COLOR,
+                is_active=torch.zeros((solver.n_envs_, solver.n_particles), dtype=gs.tc_bool, device=gs.device),
+            )
+
+    def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:
+        solver = self.owner
+        boundary = super().update_markers(envs_idx)
+        if self._fixed_particles is None:
+            return boundary
+        is_free = qd_to_torch(solver.pbd_state.particles.is_free, envs_idx, transpose=True)
+        fixed_is_active = self._fixed_particles.is_active
+        fixed_is_active[envs_idx] = torch.logical_not(is_free)
+        return (self._fixed_particles, *boundary)

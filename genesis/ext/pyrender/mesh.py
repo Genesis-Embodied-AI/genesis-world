@@ -9,7 +9,7 @@ import copy
 import numpy as np
 import trimesh
 
-from .constants import GLTF
+from .constants import GLTF, ViewFlags
 from .material import MetallicRoughnessMaterial
 from .primitive import Primitive
 
@@ -27,14 +27,26 @@ class Mesh(object):
         Array of weights to be applied to the Morph Targets.
     is_visible : bool
         If False, the mesh will not be rendered.
+    views : int
+        The views drawing the mesh, a bitwise or of :class:`.ViewFlags`: those that show the scene as it looks, the
+        debug views, or both.
     """
 
-    def __init__(self, primitives, name=None, weights=None, is_visible=True, is_marker=False):
+    def __init__(
+        self,
+        primitives,
+        name=None,
+        weights=None,
+        is_visible=True,
+        is_marker=False,
+        views=ViewFlags.NORMAL | ViewFlags.DEBUG,
+    ):
         self.primitives = primitives
         self.name = name
         self.weights = weights
         self.is_visible = is_visible
         self.is_marker = is_marker
+        self.views = views
 
         self._bounds = None
 
@@ -95,7 +107,17 @@ class Mesh(object):
         return False
 
     @staticmethod
-    def from_points(points, name=None, colors=None, normals=None, is_visible=True, poses=None, is_marker=False):
+    def from_points(
+        points,
+        name=None,
+        colors=None,
+        normals=None,
+        is_visible=True,
+        poses=None,
+        is_marker=False,
+        views=ViewFlags.NORMAL | ViewFlags.DEBUG,
+        envs=None,
+    ):
         """Create a Mesh from a set of points.
 
         Parameters
@@ -112,15 +134,22 @@ class Mesh(object):
             If False, the points will not be rendered.
         poses : (x,4,4)
             Array of 4x4 transformation matrices for instancing this object.
+        is_marker : bool
+            Whether the points are a marker.
+        views : int
+            The views drawing the points (see :class:`Mesh`).
+        envs : int or (n_envs,) bool, optional
+            The environments the instances belong to (see :class:`.Primitive`).
 
         Returns
         -------
         mesh : :class:`Mesh`
             The created mesh.
         """
-        primitive = Primitive(positions=points, normals=normals, color_0=colors, mode=GLTF.POINTS, poses=poses)
-        mesh = Mesh(primitives=[primitive], name=name, is_visible=is_visible, is_marker=is_marker)
-        return mesh
+        primitive = Primitive(
+            positions=points, normals=normals, color_0=colors, mode=GLTF.POINTS, poses=poses, envs=envs
+        )
+        return Mesh(primitives=[primitive], name=name, is_visible=is_visible, is_marker=is_marker, views=views)
 
     @staticmethod
     def from_trimesh(
@@ -129,6 +158,7 @@ class Mesh(object):
         material=None,
         is_visible=True,
         is_marker=False,
+        views=ViewFlags.NORMAL | ViewFlags.DEBUG,
         poses=None,
         wireframe=False,
         smooth=False,
@@ -150,6 +180,8 @@ class Mesh(object):
             will be used.
         is_visible : bool
             If `False`, the mesh will not be rendered.
+        views : int
+            The views drawing the mesh (see :class:`Mesh`).
         poses : (n,4,4) float
             Array of 4x4 transformation matrices for instancing this object.
         wireframe : bool
@@ -226,7 +258,7 @@ class Mesh(object):
                 )
             )
 
-        return Mesh(primitives=primitives, name=name, is_visible=is_visible, is_marker=is_marker)
+        return Mesh(primitives=primitives, name=name, is_visible=is_visible, is_marker=is_marker, views=views)
 
     @staticmethod
     def _get_trimesh_props(mesh, smooth=False, material=None):

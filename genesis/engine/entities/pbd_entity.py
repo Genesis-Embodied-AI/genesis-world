@@ -24,17 +24,6 @@ class PBDBaseEntity(ParticleEntity):
     Base class for PBD entity.
     """
 
-    def _add_to_solver(self):
-        super()._add_to_solver()
-
-        # Get UVs from vmesh (may be None if no texture)
-        uvs = self._vmesh.uvs if self._vmesh is not None else None
-        if uvs is None or len(uvs) != self.n_vverts:
-            # No UVs available, pass empty array (kernel will skip copy)
-            uvs = np.zeros((0, 2), dtype=gs.np_float)
-
-        self._solver.add_uvs_and_faces(self._vvert_start, self._vface_start, uvs, self._vfaces)
-
     @gs.assert_built
     def fix_particles_to_link(self, link_idx, particles_idx_local=None, envs_idx=None):
         """
@@ -127,10 +116,6 @@ class PBDTetEntity(PBDBaseEntity):
         Starting index of this entity's particles in the global particle buffer.
     edge_start : int
         Starting index of this entity's edges in the global edge buffer.
-    vvert_start : int
-        Starting index of this entity's visual vertices.
-    vface_start : int
-        Starting index of this entity's visual faces.
     """
 
     def __init__(
@@ -142,8 +127,6 @@ class PBDTetEntity(PBDBaseEntity):
         idx: int,
         particle_start: int,
         edge_start: int,
-        vvert_start: int,
-        vface_start: int,
         spec: "gs.entities.PBD",
     ) -> None:
         super().__init__(
@@ -153,8 +136,6 @@ class PBDTetEntity(PBDBaseEntity):
             particle_size,
             idx,
             particle_start,
-            vvert_start=vvert_start,
-            vface_start=vface_start,
             spec=spec,
         )
         self._edge_start = edge_start
@@ -251,10 +232,6 @@ class PBD2DEntity(PBDTetEntity):
         Starting index of this entity's edges in the global edge buffer.
     inner_edge_start: int
         Starting index of this entity's inner edges in the global buffer.
-    vvert_start : int
-        Starting index of this entity's visual vertices.
-    vface_start : int
-        Starting index of this entity's visual faces.
     """
 
     def __init__(
@@ -267,8 +244,6 @@ class PBD2DEntity(PBDTetEntity):
         particle_start: int,
         edge_start: int,
         inner_edge_start: int,
-        vvert_start: int,
-        vface_start: int,
         spec: "gs.entities.PBD",
     ) -> None:
         super().__init__(
@@ -279,8 +254,6 @@ class PBD2DEntity(PBDTetEntity):
             idx,
             particle_start,
             edge_start,
-            vvert_start,
-            vface_start,
             spec=spec,
         )
 
@@ -360,10 +333,6 @@ class PBD3DEntity(PBDTetEntity):
         Starting index of this entity's edges in the global edge buffer.
     elem_start: int
         Starting index of this entity's element in the global buffer.
-    vvert_start : int
-        Starting index of this entity's visual vertices.
-    vface_start : int
-        Starting index of this entity's visual faces.
     """
 
     def __init__(
@@ -376,8 +345,6 @@ class PBD3DEntity(PBDTetEntity):
         particle_start: int,
         edge_start: int,
         elem_start: int,
-        vvert_start: int,
-        vface_start: int,
         spec: "gs.entities.PBD",
     ) -> None:
         super().__init__(
@@ -388,8 +355,6 @@ class PBD3DEntity(PBDTetEntity):
             idx,
             particle_start,
             edge_start,
-            vvert_start,
-            vface_start,
             spec=spec,
         )
 

@@ -274,8 +274,8 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
 def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
     # Two depth cameras, one per entity:
     #   - cam_kin -> KinematicEntity sphere. When use_visual_raycasting=True the depth camera reads the entity's
-    #     visual mesh (including set_vverts overrides, which survive step() until set_vverts(None) hands control
-    #     back to FK). When False the kinematic entity is completely ignored by the raycaster.
+    #     visual mesh (including the vertices set_vverts writes, which survive step() until set_vverts shows the mesh
+    #     of the asset again). When False the kinematic entity is completely ignored by the raycaster.
     #   - cam_rigid -> RigidEntity whose visual mesh (sphere radius 0.2) is intentionally different from its collision
     #     mesh (capsule radius 0.05). With use_visual_raycasting=True the depth must match the visual sphere.
     urdf_path = tmp_path / "vis_diff.urdf"
@@ -310,15 +310,19 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
     )
     plane = scene.add_entity(gs.morphs.Plane())
     kin_sphere = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.2,
-            pos=(0.0, 0.0, 0.5),
-            fixed=True,
-            enable_custom_vverts=True,
-        ),
-        material=gs.materials.Kinematic(
-            use_visual_raycasting=kin_raycastable,
+        spec=gs.entities.Kinematic(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.2,
+                pos=(0.0, 0.0, 0.5),
+                fixed=True,
+            ),
+            material=gs.materials.Kinematic(
+                use_visual_raycasting=kin_raycastable,
+            ),
+            dynamic_vertices=gs.surfaces.DynamicVertices(
+                is_batched=True,
+            ),
         ),
     )
     scene.add_entity(
@@ -374,24 +378,24 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
     assert_allclose(cam_kin.read_image()[..., 15, 20], kin_at_origin, tol=1e-2)
     assert_allclose(cam_rigid.read_image()[..., 15, 20], 0.8, tol=1e-2)
 
-    # Scale the kinematic sphere by 2x around its center via per-vertex set_vverts. The new radius is 0.4, so the
-    # closest point becomes x=-0.4 and the depth at the center pixel drops to 0.6. Scaling perturbs each vvert by a
-    # different amount, so only the correct vvert-to-state mapping yields 0.6. cam_rigid is unaffected.
-    fk_vverts = tensor_to_array(kin_sphere.get_vverts())
-    center = np.array([0.0, 0.0, 0.5], dtype=np.float32)
-    kin_sphere.set_vverts((fk_vverts - center) * 2.0 + center)
+    # Scale the kinematic sphere by 2x around its center via per-vertex set_vverts, in the frame of its visual geom. The
+    # new radius is 0.4, so the closest point becomes x=-0.4 and the depth at the center pixel drops to 0.6. Scaling
+    # perturbs each vvert by a different amount, so only the correct vvert-to-state mapping yields 0.6, while cam_rigid
+    # stays put.
+    vverts_local = tensor_to_array(kin_sphere.get_vverts()) - np.array([0.0, 0.0, 0.5])
+    kin_sphere.set_vverts(vverts_local * 2.0)
     scene.step()
     assert_allclose(cam_kin.read_image()[..., 15, 20], kin_scaled, tol=1e-2)
     assert_allclose(cam_rigid.read_image()[..., 15, 20], 0.8, tol=1e-2)
 
     # Push the kinematic sphere far away. cam_kin should report no_hit_value at the center pixel; cam_rigid still sees
     # the rigid visual sphere.
-    kin_sphere.set_vverts((100.0, 100.0, 100.0))
+    kin_sphere.set_vverts(np.full(vverts_local.shape, 100.0))
     scene.step()
     assert_allclose(cam_kin.read_image()[..., 15, 20], NO_HIT, tol=gs.EPS)
     assert_allclose(cam_rigid.read_image()[..., 15, 20], 0.8, tol=1e-2)
 
-    # Restoring FK control returns the original hit distance on cam_kin; cam_rigid stays put.
+    # Showing the mesh of the asset again returns the original hit distance on cam_kin; cam_rigid stays put.
     kin_sphere.set_vverts(None)
     scene.step()
     assert_allclose(cam_kin.read_image()[..., 15, 20], kin_at_origin, tol=1e-2)

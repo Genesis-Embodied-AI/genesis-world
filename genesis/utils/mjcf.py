@@ -751,7 +751,6 @@ def parse_geoms(mj, scale, surface, xml_path):
     links_g_info = [[] for _ in range(mj.nbody)]
 
     # Loop over all geometries sequentially
-    is_any_col = False
     for i_g in range(mj.ngeom):
         if mj.geom_bodyid[i_g] < 0:
             continue
@@ -759,20 +758,9 @@ def parse_geoms(mj, scale, surface, xml_path):
         # Parse a given geometry as its collision and visual geometries
         g_infos = parse_geom(mj, i_g, scale, surface, xml_path)
 
-        # Ignore world when looking for collision geometries
-        if mj.geom_bodyid[i_g] == 0:
-            is_any_col |= any(g_info["contype"] or g_info["conaffinity"] for g_info in g_infos)
-
         # Assign geoms to link
         link_idx = mj.geom_bodyid[i_g]
         links_g_info[link_idx] += g_infos
-
-    # Inform the user that collision geometries are not displayed by default
-    if is_any_col and surface.vis_mode != "collision":
-        gs.logger.info(
-            "Collision meshes are not visualized by default. To visualize them, please use `vis_mode='collision'` "
-            "when calling `scene.add_entity`."
-        )
 
     return links_g_info
 

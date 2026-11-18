@@ -8,7 +8,13 @@ import genesis as gs
 from genesis.ext.pyrender.camera import OrthographicCamera
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, with_lock
 from genesis.utils.raycast import Ray, RayHit
-from genesis.utils.raycast_qd import RaycastResult, RaycastTarget, get_raycast_targets, kernel_cast_ray
+from genesis.utils.raycast_qd import (
+    RaycastResult,
+    RaycastTarget,
+    RaycastWorldTarget,
+    get_raycast_targets,
+    kernel_cast_ray,
+)
 
 from .base import ViewerPlugin
 
@@ -35,30 +41,26 @@ class Raycaster:
         Scene whose geometry the rays are cast against.
     use_visual_geom : bool, optional
         Cast against the visual meshes of both the rigid and the kinematic solver, restricted to the entities opting
-        in through `material.use_visual_raycasting` - the same opt-in the raycaster sensors use, so the two describe
-        the same pickable geometry. `RayHit.geom` is then a `RigidVisGeom`. See `RaycasterViewerPlugin` for the
+        in through `use_visual_raycasting` of their entity spec - the same opt-in the raycaster sensors use, so the two
+        describe the same pickable geometry. `RayHit.geom` is then a `RigidVisGeom`. See `RaycasterViewerPlugin` for the
         tradeoff this carries for the user. Default is False.
     """
 
     def __init__(self, scene: "Scene", use_visual_geom: bool = False):
         self.scene = scene
         self._envs_offset = torch.as_tensor(scene.envs_offset, dtype=gs.tc_float, device=gs.device)
-        self.targets: list[RaycastTarget] = []
+        self.targets: list[RaycastTarget | RaycastWorldTarget] = []
         self._lock = Lock()
 
-        n_envs_max = scene.sim.n_envs_
-        # Visual meshes exist on both solvers, while collision geometry is the rigid solver's alone.
+        # The targets record their hits in one result, which the viewer reads after each of them. Visual meshes exist on
+        # both solvers, while collision geometry is the rigid solver's alone.
+        hits = RaycastResult(sizes=dict(envs=scene.sim.n_envs_))
         solvers = (scene.sim.rigid_solver, scene.sim.kinematic_solver) if use_visual_geom else (scene.sim.rigid_solver,)
-        for solver in solvers:
-            if solver.is_active:
-                # The targets of a solver record their hits in one result, which the viewer reads after each of them
-                hits = RaycastResult(sizes=dict(envs=n_envs_max))
-                self.targets.extend(get_raycast_targets(solver, use_visual_geom, hits))
+        scoped_contexts = tuple(solver.render_context for solver in solvers)
+        self.targets.extend(get_raycast_targets(scene.sim.render_context, scoped_contexts, use_visual_geom, hits))
 
         if not self.targets:
-            what = (
-                "visual mesh opting in through material.use_visual_raycasting" if use_visual_geom else "collision face"
-            )
+            what = "visual mesh opting in through use_visual_raycasting" if use_visual_geom else "collision face"
             gs.logger.warning(f"Scene holds no {what}, viewer raycasting will not work.")
             return
 
@@ -126,8 +128,12 @@ class Raycaster:
             position = position + self.scene.envs_offset[winner]
             # The normal escapes into the returned hit, which outlives the lock, while the next cast rewrites its buffer
             normal = qd_to_numpy(target.hits.normal, row_mask=winner, keepdim=False, transpose=True, copy=True)
-            geoms = target.solver.vgeoms if target.is_visual else target.solver.geoms
-            geom = geoms[geom_idx] if 0 <= geom_idx < len(geoms) else None
+            # The mesh hit names its geom by its segmentation keys (see GeomKey)
+            geom = None
+            if 0 <= geom_idx < len(target.meshes_seg_keys) and target.meshes_seg_keys[geom_idx] is not None:
+                geom_key = target.meshes_seg_keys[geom_idx].geom
+                solver = self.scene.entities[geom_key.entity].solver
+                geom = (solver.vgeoms if target.is_visual else solver.geoms)[geom_key.geom]
 
             closest_hit = RayHit(distance, position, normal, geom, winner if self.scene.n_envs > 0 else None)
         return closest_hit
@@ -143,7 +149,7 @@ class RaycasterViewerPlugin(ViewerPlugin):
         Cast against the visual meshes rather than the collision meshes, so picking follows what is drawn on screen and
         reaches entities carrying visual geometry alone. The cost is re-scanning every visual triangle on each step,
         several times the price of the collision meshes on detailed geometry, and the geometry reported back is the
-        visual one, which the physics ignores. Only entities whose material sets use_visual_raycasting=True are visible
+        visual one, which the physics ignores. Only entities whose spec sets use_visual_raycasting=True are visible
         to the cast. Default is False.
     """
 

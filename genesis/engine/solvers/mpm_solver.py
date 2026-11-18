@@ -13,6 +13,7 @@ import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
+from genesis.engine.render_context import ScopedRenderContext
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.abd.misc import func_add_external_wrench
 from genesis.engine.solvers.rigid.data import GEOMS, GeomsInfo, GeomsState, LinksState, RigidData, RigidInfo
@@ -40,11 +41,10 @@ from genesis.utils.sdf import SDFInfo
 from genesis.utils.simt import requires_deterministic_accumulation
 
 from .base_solver import ErrorCode, kernel_set_actu
-from .particle_solver import ParticleSolver
+from .particle_solver import ParticleScopedRenderContext, ParticleSolver
 
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import EntityDescription
-    from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
 
@@ -456,7 +456,6 @@ Please decrease the simulation timestep or adjust the material parameters."""
         self._particles_vel = self.mpm_state.particles.vel
         self._particles_is_active = self.mpm_state.particles.is_active
         self._particles_mass = self.mpm_info.particles.mass
-        self._build_render(has_vverts=True)
 
         if self.is_active:
             for entity in self._entities:
@@ -499,14 +498,10 @@ Please decrease the simulation timestep or adjust the material parameters."""
             particle_size=self._particle_size,
             idx=idx,
             particle_start=self.n_particles,
-            vvert_start=self.n_vverts,
-            vface_start=self.n_vfaces,
             spec=spec,
         )
         self._entities.append(entity)
         self._n_particles += entity.n_particles
-        self._n_vverts += entity.n_vverts
-        self._n_vfaces += entity.n_vfaces
         return entity
 
     def add_material(self, material: MPM.Base) -> None:
@@ -1753,3 +1748,9 @@ def func_backward_svd(
     u_term = U @ ((F * (ut @ grad_U - grad_U.transpose() @ U)) @ S) @ vt
     v_term = U @ (S @ ((F * (vt @ grad_V - grad_V.transpose() @ V)) @ vt))
     return u_term + v_term + S_term
+
+
+class MPMScopedRenderContext(ParticleScopedRenderContext, ScopedRenderContext[MPMSolver]):
+    """The particles of the MPM solver as drawn (see 'ParticleScopedRenderContext')."""
+
+    boundary_color = (1.0, 1.0, 0.0, 1.0)

@@ -46,6 +46,25 @@ class GEOM_TYPE(IntEnum):
     TERRAIN = 7
 
 
+class STRUCTURE(IntEnum):
+    """How the shape and the connectivity of the entities of a material change (see 'Material.structure').
+
+    It decides how an entity is drawn outside of its debug representation, and whether its visual geoms admit
+    DynamicVertices.
+    """
+
+    # The shape never changes: the visual meshes are posed by the links, and admit DynamicVertices.
+    RIGID = 0
+    # The shape changes and the connectivity never does: a visual mesh moved with the simulated vertices or skinned on
+    # the particles.
+    DEFORMABLE = 1
+    # The connectivity holds until the body tears: a visual mesh skinned on the particles until its edges stretch past
+    # a bound, then the surface reconstructed from the particles in that environment.
+    TEARABLE = 2
+    # No connectivity: the surface reconstructed from the active particles at each refresh
+    AMORPHOUS = 3
+
+
 # joint type in rigid solver, ranked by number of dofs
 class JOINT_TYPE(IntEnum):
     FIXED = 0
