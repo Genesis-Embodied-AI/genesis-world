@@ -1,0 +1,22 @@
+genesis/engine/solvers/rigid/rigid_solver.py
+  s_746184ad26bf2e::t_ab69c8617f2c45 2496,2498-2501
+  s_746184ad26bf2e::t_e9f03c0bea6305 2502-2504
+  s_746184ad26bf2e::t_766c782de3cfa5 321,2335,2491,2493,2497,2505,2507,2510,2533,2554,2577
+  s_746184ad26bf2e::t_05e09c84b611a2 317-320,2336,2492,2494-2495,2506
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "72f31f5995a148c8dba4db7765ddd21b36e4f283",
+  "prompts": {},
+  "sessions": {
+    "s_746184ad26bf2e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9cdd4abc-4283-423d-82c2-a443cbcaec71",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
