@@ -975,6 +975,16 @@ def test_surface_reconstruction(recon_backend, show_viewer):
         liquids_surfaces = [shape for shape in render_context.get_shapes(debug=True) if isinstance(shape, DynamicMesh)]
         assert len(liquids_surfaces) == (0 if debug else len(liquids))
 
+    # Particles that the boundary clamps onto one of its corners pile up there, and are left out of the surfaces
+    for liquid in liquids:
+        particles_pos = liquid.get_particles_pos()
+        particles_pos[:100] = -1000.0
+        liquid.set_particles_pos(particles_pos)
+    scene.step()
+    for shape in render_context.get_shapes(debug=False):
+        if isinstance(shape, DynamicMesh):
+            assert (shape.verts[..., :2] > -1.0).all()
+
 
 # ==================== Mesh Processing/Caching Tests ====================
 
