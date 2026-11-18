@@ -18,6 +18,6 @@ def func_impose_cube_boundary(pos: qd.types.vector(3), vel: qd.types.vector(3), 
     upper = boundary.upper[None]
     is_bouncing = ((pos >= upper) & (vel >= 0)) | ((pos <= lower) & (vel <= 0))
     vel = qd.select(is_bouncing, -boundary.restitution[None] * vel, vel)
-    pos = qd.max(qd.min(pos, upper), lower)
+    pos = qd.math.clamp(pos, lower, upper)
 
     return pos, vel
