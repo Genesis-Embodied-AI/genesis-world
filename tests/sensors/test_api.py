@@ -317,7 +317,9 @@ def test_pipeline_contract(tol):
     with pytest.raises(Exception, match="read delay"):
         s_baseline.set_jitter(DT)
 
-    n_steps = 16
+    # A jittered read past its delay lands one slot late with probability 1/2. Over this many reads, a seed under which
+    # no read is late, which the check of the jitter below rejects, has a probability below 1e-8.
+    n_steps = 32
     gt_observed = np.zeros((n_steps, len(paths)), dtype=np.float32)
     measured_observed = np.zeros((n_steps, len(paths)), dtype=np.float32)
     baseline_observed = np.zeros((n_steps, 3), dtype=np.float32)
