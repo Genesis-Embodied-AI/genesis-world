@@ -1706,15 +1706,11 @@ def func_torque_and_passive_force(
                     err = dyn_state.dofs.ctrl_vel[i_d, i_b] - dyn_state.dofs.vel[i_d, i_b]
                     force_base = -dyn_info.dofs.act_bias[I_d][2] * err
                 elif ctrl_mode == gs.CTRL_MODE.POSITION:
-                    # A local vector takes no runtime index, so the component of the rotation vector is selected.
-                    # The position error is assigned once, since reassigning it in a branch breaks its gradient.
+                    err = dyn_state.dofs.ctrl_pos[i_d, i_b] - dyn_state.dofs.pos[i_d, i_b]
                     i_rot = i_d - dof_start - 3
-                    rotvec_i = qd.select(i_rot == 0, rotvec[0], qd.select(i_rot == 1, rotvec[1], rotvec[2]))
-                    err = qd.select(
-                        joint_type == gs.JOINT_TYPE.FREE and i_rot >= 0,
-                        rotvec_i,
-                        dyn_state.dofs.ctrl_pos[i_d, i_b] - dyn_state.dofs.pos[i_d, i_b],
-                    )
+                    if joint_type == gs.JOINT_TYPE.FREE and i_rot >= 0:
+                        # A local vector takes no runtime index, so the component of the rotation vector is selected
+                        err = qd.select(i_rot == 0, rotvec[0], qd.select(i_rot == 1, rotvec[1], rotvec[2]))
 
                     # Unified formula for GENERAL and POSITION modes, factored for float32 stability.
                     # For PD (act_gain == -act_bias[1], act_bias[0] == 0), the residual terms vanish.
@@ -1726,8 +1722,8 @@ def func_torque_and_passive_force(
                         * (dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.ctrl_vel[i_d, i_b])
                     )
 
-                # The integral term is read through a select, since a plain load of the field yields a wrong gradient
-                # under autodiff
+                # FIXME: quadrants#1124 - a plain load here accumulates the adjoints of the later iterations of the dof
+                # loop under autodiff, so the integral term is read through a select, which costs nothing at runtime.
                 force_int_next = gs.qd_float(0.0)
                 if ctrl_mode == gs.CTRL_MODE.VELOCITY or ctrl_mode == gs.CTRL_MODE.POSITION:
                     force_int = qd.select(ctrl_mode != gs.CTRL_MODE.FORCE, dyn_state.dofs.ctrl_force_int[i_d, i_b], 0.0)
