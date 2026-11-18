@@ -17,6 +17,7 @@ from genesis.utils.video_encoder import VideoEncoder
 
 from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_VIEWER
 from ..utils.assertions import assert_allclose, assert_equal, assert_pixel_match, rgb_array_to_png_bytes
+from ..utils.misc import get_masks_mean_color
 from .conftest import RENDERER_TYPE
 
 
@@ -326,14 +327,11 @@ def test_dynamic_texture(tmp_path, base_plus_emissive_glb, show_viewer, png_snap
     entities = (screen, label, lamp, reference)
     rgb, _, segmentation, _ = camera.render(rgb=True, segmentation=True)
     masks = segmentation[:, None] == np.array([entity.idx + 1 for entity in entities])[:, None, None]
-    masks_npixel = masks.sum(axis=(2, 3), keepdims=True)
-    assert (masks_npixel > 100).all()
-    # The mean color of each entity in each environment is the image weighted by the normalized mask of the entity
-    masks_weight = masks / masks_npixel
+    assert (masks.sum(axis=(2, 3)) > 100).all()
 
     # The variants at build: the first color of the screen, the asset texture of the plane, and no texture, whose black
     # and magenta checkerboard adds red and blue on top of the dark red base.
-    colors = np.einsum("bhwc,behw->bec", rgb, masks_weight)
+    colors = get_masks_mean_color(rgb[:, None], masks)
     assert (colors[:, 0, 2] > 150.0).all() and (colors[:, 0, :2] < 30.0).all()
     assert_allclose(colors[:, 1], colors[:, 3], atol=5.0)
     lamp_initial = colors[:, 2]
@@ -358,7 +356,7 @@ def test_dynamic_texture(tmp_path, base_plus_emissive_glb, show_viewer, png_snap
         assert rgb_array_to_png_bytes(frame) == png_snapshot
     scene.step()
     for rgb in (rgb_switched, tensor_to_array(sensor.read().rgb)):
-        colors = np.einsum("bhwc,behw->bec", rgb, masks_weight)
+        colors = get_masks_mean_color(rgb[:, None], masks)
         assert colors[0, 0, 2] > 100.0 and (colors[0, 0, :2] < 30.0).all()
         assert colors[1, 0, 0] > 100.0 and (colors[1, 0, 1:] < 30.0).all()
         assert colors[0, 1, 1] > 100.0 and colors[0, 1, 0] < 30.0
@@ -369,13 +367,13 @@ def test_dynamic_texture(tmp_path, base_plus_emissive_glb, show_viewer, png_snap
 
     # Integer pixels are clamped to the range of a channel
     lamp_vgeom.set_texture(np.array([[[0, 300, -5]]]))
-    colors = np.einsum("bhwc,behw->bec", camera.render(rgb=True)[0], masks_weight)
+    colors = get_masks_mean_color(camera.render(rgb=True)[0][:, None], masks)
     assert (colors[:, 2, 1] > 100.0).all() and (colors[:, 2, 2] < 30.0).all()
     # The emissive map holds linear values: an sRGB image variant shows as its decoded value written as pixels
     lamp_vgeom.set_texture(variant=1, texture_map_type=gs.TEXTURE_MAP_TYPE.EMISSIVE)
-    colors_variant = np.einsum("bhwc,behw->bec", camera.render(rgb=True)[0], masks_weight)
+    colors_variant = get_masks_mean_color(camera.render(rgb=True)[0][:, None], masks)
     lamp_vgeom.set_texture(np.array([[[0.0, ((128 / 255 + 0.055) / 1.055) ** 2.4, 0.0]]]))
-    colors_drawn = np.einsum("bhwc,behw->bec", camera.render(rgb=True)[0], masks_weight)
+    colors_drawn = get_masks_mean_color(camera.render(rgb=True)[0][:, None], masks)
     assert_allclose(colors_variant[:, 2], colors_drawn[:, 2], atol=2.0)
     with pytest.raises(gs.GenesisException, match="No variant is named"):
         screen_vgeom.set_texture(variant="green")
@@ -426,11 +424,11 @@ def test_dynamic_texture(tmp_path, base_plus_emissive_glb, show_viewer, png_snap
     # A reset of one environment shows the first variants there again, the asset texture of the plane, and a reset of
     # the scene does so in every environment.
     scene.reset(envs_idx=[1])
-    colors = np.einsum("bhwc,behw->bec", camera.render(rgb=True)[0], masks_weight)
+    colors = get_masks_mean_color(camera.render(rgb=True)[0][:, None], masks)
     assert colors[0, 1, 1] > 100.0 and colors[0, 1, 0] < 30.0
     assert_allclose(colors[1, 1], colors[1, 3], atol=5.0)
     scene.reset()
-    colors = np.einsum("bhwc,behw->bec", camera.render(rgb=True)[0], masks_weight)
+    colors = get_masks_mean_color(camera.render(rgb=True)[0][:, None], masks)
     assert (colors[:, 0, 2] > 150.0).all() and (colors[:, 0, :2] < 30.0).all()
     assert_allclose(colors[:, 1], colors[:, 3], atol=5.0)
     assert_allclose(colors[:, 2], lamp_initial, atol=5.0)
@@ -551,16 +549,13 @@ def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer
     masks = (segmentation == np.array([entity.idx + 1 for entity in (screen, tile, lamp)])[:, None, None, None]) & (
         envs_rows_mask[None, :, :, None]
     )
-    masks_npixel = masks.sum(axis=(2, 3), keepdims=True)
-    assert (masks_npixel > 100).all()
-    # The mean color of each entity in each environment is the image weighted by the normalized mask of the entity
-    masks_weight = masks / masks_npixel
+    assert (masks.sum(axis=(2, 3)) > 100).all()
 
     # The batched variant shows its own image in each environment, as the color of the surface or as an emission added
     # on top of the dark red base color. Each emission is one pixel wide, so its rows are no multiple of 4 bytes.
     tile.set_texture(np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 1.0]])[:n_envs_, None, None])
     lamp.set_texture(np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])[:n_envs_, None, None])
-    colors = np.einsum("hwc,ebhw->ebc", camera.render(rgb=True)[0], masks_weight)
+    colors = get_masks_mean_color(camera.render(rgb=True)[0], masks)
     is_high = np.array([[False, True, False], [True, False, True]])[:n_envs_]
     assert (colors[1][is_high] > 150.0).all() and (colors[1][~is_high] < 30.0).all()
     assert (colors[2, :, 0] > 40.0).all()
@@ -572,20 +567,20 @@ def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer
     vgeom.set_texture(variant=[0, 1][:n_envs_])
     variants_color = np.array([[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]])
     assert_equal(vgeom.get_texture()[..., 0, 0, :], variants_color if n_envs > 0 else variants_color[0])
-    colors = np.einsum("hwc,ebhw->ebc", camera.render(rgb=True)[0], masks_weight)
+    colors = get_masks_mean_color(camera.render(rgb=True)[0], masks)
     is_high = np.array([[True, False, False], [False, False, True]])[:n_envs_]
     assert (colors[0][is_high] > 150.0).all() and (colors[0][~is_high] < 30.0).all()
     vgeom.set_texture(np.array([[0.0, 1.0, 0.0], [1.0, 1.0, 0.0]])[:n_envs_, None, None])
-    colors = np.einsum("hwc,ebhw->ebc", camera.render(rgb=True)[0], masks_weight)
+    colors = get_masks_mean_color(camera.render(rgb=True)[0], masks)
     is_high = np.array([[False, True, False], [True, True, False]])[:n_envs_]
     assert (colors[0][is_high] > 150.0).all() and (colors[0][~is_high] < 30.0).all()
     vgeom.set_texture(envs_idx=[n_envs_ - 1] if n_envs > 0 else None, variant=0)
-    colors = np.einsum("hwc,ebhw->ebc", camera.render(rgb=True)[0], masks_weight)
+    colors = get_masks_mean_color(camera.render(rgb=True)[0], masks)
     is_high = np.array([[False, True, False], [True, False, False]] if n_envs > 0 else [[True, False, False]])
     assert (colors[0][is_high] > 150.0).all() and (colors[0][~is_high] < 30.0).all()
     # An image written in the last environment alone leaves the image of the others as it was
     vgeom.set_texture(np.array([[[0.0, 0.0, 1.0]]]), envs_idx=[n_envs_ - 1] if n_envs > 0 else None)
-    colors = np.einsum("hwc,ebhw->ebc", camera.render(rgb=True)[0], masks_weight)
+    colors = get_masks_mean_color(camera.render(rgb=True)[0], masks)
     is_high = np.array([[False, True, False], [False, False, True]] if n_envs > 0 else [[False, False, True]])
     assert (colors[0][is_high] > 150.0).all() and (colors[0][~is_high] < 30.0).all()
 
@@ -596,10 +591,9 @@ def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer
     deformable_masks = (segmentation == np.array([block.idx + 1, cube.idx + 1])[:, None, None, None]) & (
         envs_rows_mask[None, :, :, None]
     )
-    deformable_npixel = deformable_masks.sum(axis=(2, 3), keepdims=True)
-    assert (deformable_npixel > 100).all()
+    assert (deformable_masks.sum(axis=(2, 3)) > 100).all()
     rgb = deformable_camera.render(rgb=True)[0]
-    colors = np.einsum("hwc,ebhw->ebc", rgb, deformable_masks / deformable_npixel)
+    colors = get_masks_mean_color(rgb, deformable_masks)
     is_high = np.array([[False, False, True], [True, False, False]])[:n_envs_]
     assert (colors[:, is_high] > 150.0).all() and (colors[:, ~is_high] < 30.0).all()
     # The images returned are a copy, which writing into leaves the variants as they are
