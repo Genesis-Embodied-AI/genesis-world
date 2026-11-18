@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-  # A draft pull request starts no run. Marking it ready for review does.
+  # A draft pull request runs only when re-run by hand (see the setup job) or once marked ready for review.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches:
@@ -63,8 +63,9 @@ jobs:
   setup:
     name: production-setup
 
-    # Every other job follows this one through 'needs', so a draft pull request skips them all.
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    # Every other job follows this one through 'needs', so a draft pull request skips them all. A re-run keeps the event
+    # of the first attempt, draft included, so its attempt number tells a manual run apart.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft || github.run_attempt > 1
 
     runs-on: ubuntu-24.04
 
