@@ -1,0 +1,21 @@
+genesis/utils/urdf.py
+  s_9cee80d2cb3203::t_9db7c35fde3c74 317,429-432,434-436,438-439
+tests/rigid/test_asset_loading.py
+  s_9cee80d2cb3203::t_9db7c35fde3c74 728,747
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6147cf9355d19ceeb4497cfbabceb487b5117a24",
+  "prompts": {},
+  "sessions": {
+    "s_9cee80d2cb3203": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "25f58d39-85b5-46a2-a112-53fdfdb4fc9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
