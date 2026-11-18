@@ -10,7 +10,6 @@ import numba as nb
 import quadrants as qd
 
 import genesis as gs
-from genesis.constants import TEXTURE_MAP_TYPE
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.force_fields import ForceField, ForceFields
 from genesis.engine.state_change import StateChange, Subscriber, mutates
@@ -50,10 +49,9 @@ from genesis.utils.misc import (
 
 
 if TYPE_CHECKING:
-    from genesis.engine.render_context import ScopedRenderContext, TextureValueType
+    from genesis.engine.render_context import ScopedRenderContext
     from genesis.engine.simulator import Simulator
     from genesis.options import Options
-    from genesis.typing import IndexType
 
 
 # The bits of an errno: those of an int32 without its sign bit, the flags being int32 kernel literals
