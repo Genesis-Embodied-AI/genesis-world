@@ -30,6 +30,12 @@ def test_position_control(show_viewer):
             file="xml/franka_emika_panda/panda.xml",
         ),
     )
+    box = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(0.0, 1.0, 1.0),
+        ),
+    )
     scene.build(n_envs=2, env_spacing=(1.0, 1.0))
 
     MOTORS_POS_TARGET = torch.tensor(
@@ -91,10 +97,15 @@ def test_position_control(show_viewer):
     # the test cannot pass. This is unecessary and not recommended for practical applications.
     # robot.set_dofs_armature(robot.get_dofs_armature(envs_idx=1) + MOTORS_KD * scene.sim.substep_dt, envs_idx=1)
     dofs_armature = scene.rigid_solver.dyn_info.dofs.armature.to_numpy()
-    dofs_armature[:, 1] += tensor_to_array(MOTORS_KD * scene.sim.substep_dt)
+    dofs_armature[robot.dof_start : robot.dof_end, 1] += tensor_to_array(MOTORS_KD * scene.sim.substep_dt)
     scene.rigid_solver.dyn_info.dofs.armature.from_numpy(dofs_armature)
 
+    # The rotation dofs of a free joint follow their own control mode
+    box.control_dofs_position(0.3, dofs_idx_local=[3])
+    box.control_dofs_force([1.0, -1.0], dofs_idx_local=[4, 5])
+
     force_range = qd_to_torch(scene.rigid_solver.dyn_info.dofs.force_range)
+    robot_force_range = force_range[robot.dof_start : robot.dof_end, 1]
     force_int = torch.zeros_like(MOTORS_POS_TARGET)
     for i in range(200):
         if i == 100:
@@ -110,17 +121,18 @@ def test_position_control(show_viewer):
         dofs_torque_base = torch.where(is_vel_ctrl, 0.0, MOTORS_KP * pos_err) + MOTORS_KD * vel_err
         force_int_next = force_int + MOTORS_KI * err * scene.sim._substep_dt
         dofs_torque = dofs_torque_base + force_int_next
-        is_winding_up = ((dofs_torque > force_range[:, 1, 1]) & (err > 0.0)) | (
-            (dofs_torque < force_range[:, 1, 0]) & (err < 0.0)
+        is_winding_up = ((dofs_torque > robot_force_range[:, 1]) & (err > 0.0)) | (
+            (dofs_torque < robot_force_range[:, 0]) & (err < 0.0)
         )
         force_int = torch.where(is_winding_up, force_int, force_int_next)
         dofs_torque = dofs_torque_base + force_int
-        dofs_torque.clamp_(force_range[:, 1, 0], force_range[:, 1, 1])
+        dofs_torque.clamp_(robot_force_range[:, 0], robot_force_range[:, 1])
         robot.control_dofs_force(dofs_torque, envs_idx=1)
         scene.step()
         control_force = robot.get_dofs_control_force()
         assert_allclose(control_force[1], dofs_torque, tol=1e-6)
         assert_allclose(control_force[0], control_force[1], tol=1e-6)
+        assert_allclose(box.get_dofs_control_force()[..., 4:], (1.0, -1.0), tol=gs.EPS)
 
     A = 0.1
     f = 1.0
