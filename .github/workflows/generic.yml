@@ -1,7 +1,9 @@
 name: Generic
 
 on:
+  # A draft pull request runs only when re-run by hand or once marked ready for review (see the production workflow).
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
   release:
@@ -79,7 +81,7 @@ jobs:
       OMNI_KIT_ACCEPT_EULA: "yes"
 
     runs-on: ${{ matrix.OS }}
-    if: github.event_name != 'release'
+    if: github.event_name == 'pull_request' && (!github.event.pull_request.draft || github.run_attempt > 1)
 
     steps:
       - name: Print system information (Windows)
