@@ -430,12 +430,11 @@ def parse_urdf(morph, surface):
                 joints_name_unactuated.append(joint.name)
             j_info["dofs_force_range"] = np.tile([-effort, effort], (j_info["n_dofs"], 1))
 
-    # The URDF spec reads a zero effort as a joint that cannot be actuated, whereas MuJoCo and Isaac Sim leave its force
-    # unbounded. Exporters write it as a placeholder, so the user is told why such a joint ignores control.
+    # Note that we follow the URDF spec, which reads zero effort as unactuated. MuJoCo and Isaac leave it unbounded.
     if joints_name_unactuated:
         gs.logger.info(
-            f'(URDF) Joints {joints_name_unactuated} have effort="0", so they cannot be actuated and ignore control. '
-            "Remove the attribute to leave their force unbounded, or call 'set_dofs_force_range' after loading."
+            f'(URDF) Joints {joints_name_unactuated} have effort="0", so they will do nothing when controlled unless '
+            "'set_dofs_force_range' is called."
         )
 
     # Apply scaling factor
