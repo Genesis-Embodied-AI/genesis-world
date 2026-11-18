@@ -94,6 +94,20 @@ def base_plus_emissive_glb(asset_tmp_path):
 
 
 @pytest.fixture(scope="session")
+def translucent_box_obj(asset_tmp_path):
+    """Path to an OBJ box of side 0.4 whose red texture has an alpha of 128."""
+    rgba = np.zeros((4, 4, 4), dtype=np.uint8)
+    rgba[..., 0] = 255
+    rgba[..., 3] = 128
+    box = trimesh.creation.box(extents=(0.4, 0.4, 0.4))
+    material = trimesh.visual.material.SimpleMaterial(image=Image.fromarray(rgba, "RGBA"))
+    box.visual = trimesh.visual.TextureVisuals(uv=box.vertices[:, :2] + 0.5, material=material)
+    path = asset_tmp_path / "translucent_box.obj"
+    box.export(path)
+    return str(path)
+
+
+@pytest.fixture(scope="session")
 def textured_box_glb(asset_tmp_path):
     """Path to a GLB box of side 0.4 holding texture coordinates."""
     box = trimesh.creation.box(extents=(0.4, 0.4, 0.4))

@@ -332,7 +332,7 @@ def parse_glb_material(glb, material_index, surface, images=None):
         double_sided=double_sided,
     )
 
-    asset_textures = mu.AssetTextures(color=color_texture, emission=emissive_texture)
+    asset_textures = mu.AssetTextures(color=color_texture, emission=emissive_texture, opacity=opacity_texture)
     return material_surface, uvs_used, material.name, asset_textures
 
 
@@ -475,12 +475,7 @@ def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
             group_idx = primitive.material if group_by_material else (i_node, primitive.material)
             mesh_info, first_created = mesh_infos.get(group_idx)
             if first_created:
-                metadata = {
-                    "mesh_path": path,
-                    "name": material_name if group_by_material else mesh_name,
-                    # Index of the material in the file, which renderers loading the file whole use to target it
-                    "material_index": primitive.material,
-                }
+                metadata = {"mesh_path": path, "name": material_name if group_by_material else mesh_name}
                 if not group_by_material:
                     # Record the source mesh node so per-material submeshes can be regrouped into one physical body
                     # (e.g. merged into a single collision geom) while still rendering with their own textures.

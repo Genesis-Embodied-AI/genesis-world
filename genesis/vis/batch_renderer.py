@@ -8,7 +8,6 @@ from genesis.constants import IMAGE_TYPE
 from genesis.engine.render_context import DynamicMesh
 from genesis.repr_base import RBC
 from genesis.utils.misc import BuildableMixin, tensor_to_array
-from genesis.utils.warnings import warn_once
 
 from .camera import Camera
 from .rasterizer_context import SEGMENTATION_LEVELS, SegmentationColorMap
@@ -55,6 +54,8 @@ class GenesisGeomRetriever(BuildableMixin):
         self.geometries = [
             geometry for batch in self.rigid_solver.render_context.get_shapes() for geometry in batch.geometries
         ]
+        if any(geometry.textures for geometry in self.geometries):
+            gs.raise_exception("BatchRenderer draws no 'gs.textures.DynamicTexture'.")
         self.n_vgeoms = len(self.geometries)
         level = SEGMENTATION_LEVELS.index(self.seg_level)
         self.geom_idxc = torch.tensor(
@@ -136,13 +137,7 @@ class GenesisGeomRetriever(BuildableMixin):
 
         for geometry in self.geometries:
             geom_surface = geometry.surface
-            geom_rgba = geom_surface.get_rgba(batch=True)
-            if geometry.textures:
-                warn_once(self, "BatchRenderer draws no dynamic texture: the meshes showing one are drawn without it.")
-            # The color of a surface showing a dynamic texture is the texture alone (see 'Surface.get_rgba')
-            if isinstance(geom_rgba, gs.textures.DynamicTexture):
-                geom_rgba = gs.textures.BatchTexture(textures=[gs.textures.ColorTexture(color=(1.0, 1.0, 1.0, 1.0))])
-            geom_textures = geom_rgba.textures
+            geom_textures = geom_surface.get_rgba(batch=True).textures
 
             geom_texture_indices = []
             for geom_texture in geom_textures:

@@ -12,7 +12,7 @@ from genesis.utils.cache import OwnedCache, get_hashkey
 
 from .misc import FoamOptions
 from .options import Options
-from .textures import BatchTexture, ColorTexture, DynamicTexture, ImageTexture, Texture
+from .textures import BatchTexture, ColorTexture, DynamicTexture, ImageTexture, StaticTexture, Texture
 
 MetalType = Literal["aluminium", "gold", "copper", "brass", "iron", "titanium", "vanadium", "lithium"]
 
@@ -192,11 +192,17 @@ class Surface(Options):
                     f"A dynamic texture fills 'diffuse_texture' or 'emissive_texture' alone, and only where the "
                     f"surface draws its color or its emission, got '{name}' on {type(self).__name__}."
                 )
-        # The image of a dynamic texture holds its own opacity
-        if isinstance(fields[self._color_target], DynamicTexture) and fields.get("opacity_texture") is not None:
+        # A dynamic texture fills one map, both maps being drawn from it otherwise
+        if isinstance(fields.get("diffuse_texture"), DynamicTexture) and fields.get("diffuse_texture") is fields.get(
+            "emissive_texture"
+        ):
+            gs.raise_exception("A dynamic texture fills one map of a surface. Declare one for each map instead.")
+        # The image of a dynamic texture drawn as the color, the emission standing for it over a black base color, holds
+        # its own opacity.
+        if isinstance(self.get_rgba(), DynamicTexture) and fields.get("opacity_texture") is not None:
             gs.raise_exception("A dynamic texture holds its own opacity, so 'opacity_texture' cannot be given with it.")
-        # A batch texture is drawn by the batch renderer alone, which draws no dynamic texture
         textures = [value for value in fields.values() if isinstance(value, Texture)]
+        # A batch texture is drawn by the batch renderer alone, which draws no dynamic texture
         if any(isinstance(texture, BatchTexture) for texture in textures) and any(
             isinstance(texture, DynamicTexture) for texture in textures
         ):
@@ -277,11 +283,11 @@ class Surface(Options):
     def _extract_opacity_from(
         texture: Texture | None, emissive: Texture | None, opacity: Texture | None
     ) -> Texture | None:
-        if texture is not None:
+        if isinstance(texture, StaticTexture):
             tex = texture.check_dim(3)
             if opacity is None and tex is not None:
                 opacity = tex
-        if emissive is not None:
+        if isinstance(emissive, StaticTexture):
             tex = emissive.check_dim(3)
             if opacity is None and tex is not None:
                 opacity = tex
@@ -320,7 +326,8 @@ def _resolve_albedo(base_texture: Texture | None, emissive_texture: Texture | No
         if is_base_batched and len(resolved) == len(base_batch) and all(r is b for r, b in zip(resolved, base_batch)):
             return base_texture
         return BatchTexture(textures=resolved)
-    if base_texture is not None and not base_texture.is_black:
+    # A dynamic texture holds no image to tell whether it is black, so that it stands as the albedo whatever it shows
+    if base_texture is not None and not (isinstance(base_texture, StaticTexture) and base_texture.is_black):
         return base_texture
     return emissive_texture if emissive_texture is not None else base_texture
 
@@ -452,9 +459,9 @@ class Glass(Surface):
     @model_validator(mode="after")
     def _post_init(self) -> Self:
         # Truncate specular/emissive textures to 3 channels (discard alpha for Glass which has no opacity_texture)
-        if self.specular_texture is not None:
+        if isinstance(self.specular_texture, StaticTexture):
             self.specular_texture.check_dim(3)
-        if self.emissive_texture is not None:
+        if isinstance(self.emissive_texture, StaticTexture):
             self.emissive_texture.check_dim(3)
         if self.specular_texture is not None and self.transmission_texture is None:
             self.transmission_texture = self.specular_texture
@@ -818,7 +825,7 @@ class Emission(Surface):
 
     @model_validator(mode="after")
     def _post_init(self) -> Self:
-        if self.emissive_texture is not None:
+        if isinstance(self.emissive_texture, StaticTexture):
             self.emissive_texture.check_dim(3)
         return self
 

@@ -1,12 +1,12 @@
 import os
 from collections.abc import Iterable, Sequence
 from functools import cached_property
-from typing import Annotated, Literal, Self, cast
+from typing import Annotated, Literal, cast
 
 import numpy as np
 
 from PIL import Image
-from pydantic import BeforeValidator, Field, PrivateAttr, StrictBool, computed_field, model_validator
+from pydantic import BeforeValidator, Field, StrictBool, computed_field, model_validator
 
 import genesis as gs
 import genesis.utils.mesh as mu
@@ -44,10 +44,24 @@ class Texture(Options):
     def __init__(self, **data):
         super().__init__(**data)
 
-    def check_dim(self, dim: int) -> "Texture | None":
+    @cached_property
+    def requires_uv(self) -> bool:
         raise NotImplementedError
 
-    def check_simplify(self) -> "Texture":
+
+class StaticTexture(Texture):
+    """
+    Base class for the textures holding their image at declaration, which a surface splits and simplifies as it is set.
+
+    Note
+    ----
+    This class should *not* be instantiated directly.
+    """
+
+    def check_dim(self, dim: int) -> "StaticTexture | None":
+        raise NotImplementedError
+
+    def check_simplify(self) -> "StaticTexture":
         raise NotImplementedError
 
     def apply_cutoff(self, cutoff: float) -> None:
@@ -57,12 +71,8 @@ class Texture(Options):
     def is_black(self) -> bool:
         raise NotImplementedError
 
-    @cached_property
-    def requires_uv(self) -> bool:
-        raise NotImplementedError
 
-
-class ColorTexture(Texture):
+class ColorTexture(StaticTexture):
     """
     A texture that consists of a single color.
 
@@ -101,7 +111,7 @@ class ColorTexture(Texture):
         return False
 
 
-class ImageTexture(Texture, SerializationMixin):
+class ImageTexture(StaticTexture, SerializationMixin):
     """
     A texture with a texture map (image).
 
@@ -296,9 +306,12 @@ class ImageTexture(Texture, SerializationMixin):
         )
 
 
-class BatchTexture(Texture):
+class BatchTexture(StaticTexture):
     """
     A batch of textures for batch rendering.
+
+    This class is deprecated, and will give way to ``gs.textures.DynamicTexture`` with one variant per environment once
+    the batch renderer draws it.
 
     Parameters
     ----------
@@ -306,7 +319,7 @@ class BatchTexture(Texture):
         List of textures.
     """
 
-    textures: Annotated[list[Texture | None], BeforeValidator(list)] = Field(default_factory=list)
+    textures: Annotated[list[StaticTexture | None], BeforeValidator(list)] = Field(default_factory=list)
 
     @staticmethod
     def from_images(
@@ -428,38 +441,27 @@ class DynamicTexture(Texture):
     """
     A texture whose image changes while the simulation runs, such as a screen or an indicator light.
 
-    It fills the diffuse or the emissive map of a surface, and requires a mesh with texture coordinates. Each parallel
-    environment shows one of a fixed set of variants declared here, the texture the asset gives the map, or the batched
-    variant if any, which holds one image per environment written at runtime. Once the scene is built,
-    ``vgeom.set_texture(texture)`` writes the batched variant in the selected environments and shows it, and
-    ``vgeom.set_texture(variant=...)`` shows a variant there by position or by name, the texture the asset gives the
-    map whatever the variants for None, the default. Giving both raises. ``vgeom.get_texture`` returns the images as
-    drawn. The render context holds the image each environment shows and the batched variant: they are appearance and
-    take no part in checkpoints, and a reset shows the first variant again. The rasterizer draws them, while the other
-    renderers warn once and draw the meshes without them. Only the entities of a rigid or
-    deformable structure (rigid, kinematic, FEM, PBD cloth and elastic) show them, the others refusing them.
+    It fills the diffuse or the emissive map of a surface whose mesh has texture coordinates, on a rigid, kinematic,
+    FEM, or PBD cloth or elastic entity. Each environment shows one of the variants, or its own image written with
+    ``set_texture``. Every environment shows the first variant at build and after a reset, and saved states and scene
+    files keep the declaration alone. Only the rasterizer draws it.
 
-    The images are RGBA, in the format the map sets. The diffuse map holds 8-bit sRGB values, the alpha channel standing
-    for the opacity in place of the opacity of the surface. The emissive map holds 16-bit linear values, which let an
-    emission exceed 1 at twice the memory per pixel.
+    The diffuse map holds 8-bit sRGB images whose alpha is the opacity. The emissive map holds 16-bit linear images, at
+    twice the memory, so that an emission may exceed 1.
 
     Parameters
     ----------
     resolution : tuple[int, int]
-        The resolution of every image, as (width, height) in pixels. A renderer uploads the pixels of the batched
-        variant at each write, so a larger image costs more per write, while showing a variant is free.
+        The resolution of every image, as (width, height) in pixels. A larger image costs more memory and more time per
+        written image, while showing a variant costs nothing.
     variants : tuple[ColorTexture | ImageTexture | None, ...] | dict[str, ...], optional
         The images an environment switches between, each a color or an image resized to 'resolution', or None for the
-        texture the asset gives the map, which each visual geom resolves to the texture of its own asset material when
-        the entity is added, a black and magenta checkerboard showing where the asset gives none. A mapping names them,
-        so that they are shown by name as well as by position. Each variant costs the memory of one image per visual
-        geom showing the texture, as does the texture the asset gives the map, held whatever the variants. Every
-        environment shows the first variant at build and after a reset. Default is one variant, the texture the asset
-        gives the map.
+        texture the asset gives the map, an asset giving none refusing it. A mapping names them, so that they are shown
+        by name too. Each costs the memory of one image per visual geom. Default is the texture of the asset.
     is_batched : bool, optional
-        Whether the texture holds a batched variant, one image per environment that ``set_texture`` writes pixels into.
-        It costs the memory of one image per environment and per visual geom showing the texture, which a texture
-        switching between its variants alone saves. Default is False.
+        Whether each environment holds an image of its own that ``set_texture`` writes pixels into, at the memory of one
+        image per environment and per visual geom. Leave it off for a texture that only switches between its variants.
+        Default is False.
     """
 
     resolution: PositiveVec2IType
@@ -468,23 +470,6 @@ class DynamicTexture(Texture):
         | Annotated[dict[str, ColorTexture | ImageTexture | None], Field(min_length=1)]
     ) = (None,)
     is_batched: StrictBool = False
-    # The texture the asset gives the map, which the entity resolves as it is added, None where it gives none
-    _asset_texture: "ColorTexture | ImageTexture | None" = PrivateAttr(default=None)
-
-    # A dynamic texture holds no image at declaration, which the checks and simplifications of textures keep as is
-    def check_dim(self, dim: int) -> Texture | None:
-        return None
-
-    def check_simplify(self) -> Self:
-        return self
-
-    def apply_cutoff(self, cutoff: float) -> None:
-        pass
-
-    @computed_field
-    @cached_property
-    def is_black(self) -> bool:
-        return False
 
     @computed_field
     @cached_property

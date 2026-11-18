@@ -727,8 +727,6 @@ class RigidVisGeom(BuildableMixin, RBC):
         if vverts is not None and variant is not None:
             gs.raise_exception("'set_vverts' takes either the vertices of the batched variant or a variant, not both.")
         self._solver.render_context.set_vverts(self, vverts, envs_idx, variant)
-        # The scene records the entities whose visual vertices were written, which a file exporting it leaves out
-        self._entity._is_vverts_overridden = True
 
     @gs.assert_built
     def get_vverts(self, envs_idx: "IndexType | None" = None) -> torch.Tensor:
@@ -749,8 +747,7 @@ class RigidVisGeom(BuildableMixin, RBC):
         variant: "int | str | Sequence[int | str] | None" = None,
         texture_map_type: TEXTURE_MAP_TYPE | None = None,
     ) -> None:
-        """Write the batched variant of a dynamic texture of this visual geom and show it, or show one of its variants,
-        in some environments.
+        """Show a variant of a dynamic texture in some environments, or write its batched variant there and show it.
 
         The pixels `texture` given, the batched variant takes them and shows them. Otherwise the variant `variant` is
         shown, the texture the asset gives the map if None, whatever the variants. Giving both raises.
@@ -769,22 +766,31 @@ class RigidVisGeom(BuildableMixin, RBC):
             A variant, by position or by name, for every selected environment or one per selected environment, None for
             the texture the asset gives the map. Defaults to None.
         texture_map_type : gs.TEXTURE_MAP_TYPE | None, optional
-            The map whose dynamic texture to set, which may be None when the surface of the visual geom fills a single
-            map with one. Defaults to None.
+            The map whose dynamic texture to set, which may be None when the surface fills a single map with one.
+            Defaults to None.
         """
-        self._solver.render_context.set_texture(self, texture, envs_idx, variant, texture_map_type)
+        self._solver.render_context.set_texture(self.vmesh, texture, envs_idx, variant, texture_map_type)
 
     @gs.assert_built
     def get_texture(
         self, envs_idx: "IndexType | None" = None, *, texture_map_type: TEXTURE_MAP_TYPE | None = None
     ) -> torch.Tensor:
-        """Return a copy of the image a dynamic texture of this visual geom shows in each environment, as drawn.
+        """Return a copy of the image a dynamic texture shows in each environment, as drawn.
 
-        The images are RGBA, in the format of the map (see ``gs.textures.DynamicTexture``). See ``set_texture`` for
-        'texture_map_type'.
+        Parameters
+        ----------
+        envs_idx : None | int | array_like, optional
+            The environments to read. If None, every environment is read. Defaults to None.
+        texture_map_type : gs.TEXTURE_MAP_TYPE | None, optional
+            The map whose dynamic texture to read, which may be None when the surface fills a single map with one.
+            Defaults to None.
+
+        Returns
+        -------
+        torch.Tensor
+            The RGBA images, 8-bit sRGB values for the diffuse map and 16-bit linear values for the emissive map.
         """
-        textures = self._solver.render_context.textures
-        return textures.get_texture(self, envs_idx, texture_map_type)
+        return self._solver.render_context.get_texture(self.vmesh, envs_idx, texture_map_type)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

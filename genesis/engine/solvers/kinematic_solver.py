@@ -23,6 +23,7 @@ from genesis.engine.render_context import (
     MeshGeometry,
     MeshSource,
     PrimitiveAsset,
+    RuntimeAppearance,
     ScopedRenderContext,
     Shape,
     ShapeRoles,
@@ -1452,9 +1453,7 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
 
     def build(self) -> None:
         solver = self.owner
-        self.textures = DynamicTextures(
-            [(vgeom, vgeom.entity, vgeom.surface) for vgeom in solver.vgeoms], solver.n_envs
-        )
+        self.dynamic_textures = DynamicTextures([(vgeom.vmesh, vgeom.entity) for vgeom in solver.vgeoms], solver.n_envs)
         # The visual geoms take a slot each, those posed by their link first, so that their poses form one contiguous
         # block, the visual geoms of the entities a deprecated 'vis_mode' shows in their debug representation after the
         # others, so that the block of the scene as it looks leaves them out, then those showing DynamicVertices, which
@@ -1687,7 +1686,7 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
                             data.vfaces_info.vverts_idx, slice(vface_start, vface_start + vgeom.n_vfaces)
                         ),
                         is_ray_target=is_ray_target,
-                        textures=self.textures.get(vgeom),
+                        textures=self.dynamic_textures.get(vgeom.vmesh),
                     )
                 )
             elif i_s >= self._n_posed_vgeoms and entity.surface.vis_mode is None:
@@ -1703,7 +1702,7 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
                         seg_keys,
                         is_active=None if vgeom.active_envs_mask is None else ArrayRef(data.vgeoms.is_active, i_s),
                         is_ray_target=is_ray_target,
-                        textures=self.textures.get(vgeom),
+                        textures=self.dynamic_textures.get(vgeom.vmesh),
                         roles=ShapeRoles.of(entity.idx, is_looks=True, is_debug=False),
                     )
                 )
@@ -1726,7 +1725,8 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
         self._shapes = tuple(shapes)
 
     def reset(self, envs_idx: torch.Tensor) -> None:
-        """Show the first variant of the DynamicVertices of every visual geom again, and stop the propellers."""
+        """Show the first variant of the dynamic textures and DynamicVertices again, and stop the propellers."""
+        super().reset(envs_idx)
         if self._n_posed_vgeoms < len(self._slots_vgeom):
             kernel_reset_vverts_variant(envs_idx, self._data.dynamic_vverts)
         if self._drones_propeller_start:
@@ -1852,6 +1852,7 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
                 kernel_set_batched_vverts(envs_idx, i_dg, vvert_start, vverts, dynamic_vverts)
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
+        self.entities_written.setdefault(vgeom.entity, set()).add(RuntimeAppearance.VISUAL_VERTICES)
         self._context.invalidate((self,), change=StateChange.VISUAL)
 
     def get_vgeoms_pose(

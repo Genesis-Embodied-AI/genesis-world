@@ -18,7 +18,7 @@ from genesis.engine.render_context import MeshKey, SegmentationKeys
 from genesis.options.patches import resolve_patch_parts
 from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
-from genesis.utils.misc import BuildableMixin, broadcast_tensor, tensor_to_array, unique_rows
+from genesis.utils.misc import broadcast_tensor, tensor_to_array, unique_rows
 
 from .base_entity import Entity
 
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from genesis.typing import IndexType
 
 
-class FEMVisGeom(BuildableMixin, RBC):
+class FEMVisGeom(RBC):
     """A visual geom of a FEM entity, the deformable counterpart of `RigidVisGeom`.
 
     It carries the render mesh drawn by the visualizer, decoupled from the simulation mesh, and 'sim_verts_idx',
@@ -43,14 +43,6 @@ class FEMVisGeom(BuildableMixin, RBC):
         self._vmesh = vmesh
         self._sim_verts_idx = sim_verts_idx
 
-    @gs.assert_unbuilt
-    def _build(self) -> None:
-        self._is_built = True
-
-    def _destroy(self) -> None:
-        self._is_built = False
-
-    @gs.assert_built
     def set_texture(
         self,
         texture: "TextureValueType | None" = None,
@@ -59,21 +51,53 @@ class FEMVisGeom(BuildableMixin, RBC):
         variant: "int | str | Sequence[int | str] | None" = None,
         texture_map_type: TEXTURE_MAP_TYPE | None = None,
     ) -> None:
-        """Write the batched variant of a dynamic texture of this visual geom and show it, or show one of its variants,
-        in some environments, giving both raising (see ``RigidVisGeom.set_texture``).
-        """
-        self._entity.solver.render_context.set_texture(self, texture, envs_idx, variant, texture_map_type)
+        """Show a variant of a dynamic texture in some environments, or write its batched variant there and show it.
 
-    @gs.assert_built
+        The pixels `texture` given, the batched variant takes them and shows them. Otherwise the variant `variant` is
+        shown, the texture the asset gives the map if None, whatever the variants. Giving both raises.
+
+        Parameters
+        ----------
+        texture : None | array_like | gs.textures.ColorTexture | gs.textures.ImageTexture
+            The pixels of the batched variant: an RGB or RGBA image of shape (height, width, channels) for every
+            selected environment or (len(envs_idx), height, width, channels) for one each, broadcast to the resolution
+            of the texture, or a color or an image texture resized to it. An integer image holds values up to 255 and a
+            float one values up to 1.0, clamped to [0, 1] in the diffuse map and to nonnegative values in the emissive
+            map, whose emission may exceed 1. Defaults to None.
+        envs_idx : None | int | array_like, optional
+            The environments to set. If None, every environment is set. Defaults to None.
+        variant : None | int | str | sequence of int or str, optional
+            A variant, by position or by name, for every selected environment or one per selected environment, None for
+            the texture the asset gives the map. Defaults to None.
+        texture_map_type : gs.TEXTURE_MAP_TYPE | None, optional
+            The map whose dynamic texture to set, which may be None when the surface fills a single map with one.
+            Defaults to None.
+        """
+        if not self._entity._is_built:
+            gs.raise_exception("FEMEntity is not built yet.")
+        self._entity.solver.render_context.set_texture(self._vmesh, texture, envs_idx, variant, texture_map_type)
+
     def get_texture(
         self, envs_idx: "IndexType | None" = None, *, texture_map_type: TEXTURE_MAP_TYPE | None = None
     ) -> torch.Tensor:
-        """Return a copy of the image a dynamic texture of this visual geom shows in each environment, as drawn.
+        """Return a copy of the image a dynamic texture shows in each environment, as drawn.
 
-        See ``RigidVisGeom.get_texture``.
+        Parameters
+        ----------
+        envs_idx : None | int | array_like, optional
+            The environments to read. If None, every environment is read. Defaults to None.
+        texture_map_type : gs.TEXTURE_MAP_TYPE | None, optional
+            The map whose dynamic texture to read, which may be None when the surface fills a single map with one.
+            Defaults to None.
+
+        Returns
+        -------
+        torch.Tensor
+            The RGBA images, 8-bit sRGB values for the diffuse map and 16-bit linear values for the emissive map.
         """
-        solver = self._entity.solver
-        return solver.render_context.textures.get_texture(self, envs_idx, texture_map_type)
+        if not self._entity._is_built:
+            gs.raise_exception("FEMEntity is not built yet.")
+        return self._entity.solver.render_context.get_texture(self._vmesh, envs_idx, texture_map_type)
 
     def get_trimesh(self):
         """The underlying `trimesh.Trimesh` of the render mesh."""
@@ -481,8 +505,6 @@ class FEMEntity(Entity):
                 tri2el=self._surface_el_np,
             )
 
-        for vgeom in self._vgeoms:
-            vgeom._build()
         self._is_built = True
 
     # ------------------------------------------------------------------------------------
@@ -584,6 +606,63 @@ class FEMEntity(Entity):
         elements_idx = self._get_global_idx(None, self.n_elements, self._el_start, unsafe=True)
         self._solver.set_elements_muscle_direction(muscle_direction, elements_idx)
 
+    @gs.assert_built
+    def set_texture(
+        self,
+        texture: "TextureValueType | None" = None,
+        envs_idx: "IndexType | None" = None,
+        *,
+        variant: "int | str | Sequence[int | str] | None" = None,
+        texture_map_type: TEXTURE_MAP_TYPE | None = None,
+    ) -> None:
+        """Show a variant of a dynamic texture in some environments, or write its batched variant there and show it.
+
+        The entity stands for its single visual geom showing a dynamic texture.
+        The pixels `texture` given, the batched variant takes them and shows them. Otherwise the variant `variant` is
+        shown, the texture the asset gives the map if None, whatever the variants. Giving both raises.
+
+        Parameters
+        ----------
+        texture : None | array_like | gs.textures.ColorTexture | gs.textures.ImageTexture
+            The pixels of the batched variant: an RGB or RGBA image of shape (height, width, channels) for every
+            selected environment or (len(envs_idx), height, width, channels) for one each, broadcast to the resolution
+            of the texture, or a color or an image texture resized to it. An integer image holds values up to 255 and a
+            float one values up to 1.0, clamped to [0, 1] in the diffuse map and to nonnegative values in the emissive
+            map, whose emission may exceed 1. Defaults to None.
+        envs_idx : None | int | array_like, optional
+            The environments to set. If None, every environment is set. Defaults to None.
+        variant : None | int | str | sequence of int or str, optional
+            A variant, by position or by name, for every selected environment or one per selected environment, None for
+            the texture the asset gives the map. Defaults to None.
+        texture_map_type : gs.TEXTURE_MAP_TYPE | None, optional
+            The map whose dynamic texture to set, which may be None when the surface fills a single map with one.
+            Defaults to None.
+        """
+        self._solver.render_context.set_texture(self, texture, envs_idx, variant, texture_map_type)
+
+    @gs.assert_built
+    def get_texture(
+        self, envs_idx: "IndexType | None" = None, *, texture_map_type: TEXTURE_MAP_TYPE | None = None
+    ) -> torch.Tensor:
+        """Return a copy of the image a dynamic texture shows in each environment, as drawn.
+
+        The entity stands for its single visual geom showing a dynamic texture.
+
+        Parameters
+        ----------
+        envs_idx : None | int | array_like, optional
+            The environments to read. If None, every environment is read. Defaults to None.
+        texture_map_type : gs.TEXTURE_MAP_TYPE | None, optional
+            The map whose dynamic texture to read, which may be None when the surface fills a single map with one.
+            Defaults to None.
+
+        Returns
+        -------
+        torch.Tensor
+            The RGBA images, 8-bit sRGB values for the diffuse map and 16-bit linear values for the emissive map.
+        """
+        return self._solver.render_context.get_texture(self, envs_idx, texture_map_type)
+
     def set_vertex_constraints(
         self, verts_idx_local, target_poss=None, link=None, is_soft_constraint=False, stiffness=0.0, envs_idx=None
     ):
@@ -636,32 +715,6 @@ class FEMEntity(Entity):
         """
         elements_idx = self._get_global_idx(None, self.n_elements, self._el_start, unsafe=True)
         return self._solver.get_elements_el2v(elements_idx) - self._v_start
-
-    @gs.assert_built
-    def set_texture(
-        self,
-        texture: "TextureValueType | None" = None,
-        envs_idx: "IndexType | None" = None,
-        *,
-        variant: "int | str | Sequence[int | str] | None" = None,
-        texture_map_type: TEXTURE_MAP_TYPE | None = None,
-    ) -> None:
-        """Write the batched variant of a dynamic texture of the visual geom of this entity and show it, or show one
-        of its variants, giving both raising.
-
-        The entity holds a single visual geom, whose 'set_texture' this is (see ``RigidVisGeom.set_texture``).
-        """
-        if len(self._vgeoms) != 1:
-            gs.raise_exception(
-                f"'entity.set_texture' requires an entity with a single visual geom, got {len(self._vgeoms)}. Use "
-                "'vgeom.set_texture' of its visual geoms instead."
-            )
-        self._vgeoms[0].set_texture(texture, envs_idx, variant=variant, texture_map_type=texture_map_type)
-
-    def _destroy(self) -> None:
-        for vgeom in self._vgeoms:
-            vgeom._destroy()
-        super()._destroy()
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------

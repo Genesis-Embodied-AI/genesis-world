@@ -222,7 +222,6 @@ class KinematicEntity(Entity):
         self._vface_start = solver.n_vfaces
 
         self._is_attached: bool = False
-        self._is_vverts_overridden: bool = False
 
         self._load_model()
 
@@ -1251,17 +1250,53 @@ class KinematicEntity(Entity):
         variant: "int | str | Sequence[int | str] | None" = None,
         texture_map_type: TEXTURE_MAP_TYPE | None = None,
     ) -> None:
-        """Write the batched variant of a dynamic texture of the visual geom of this entity and show it, or show one
-        of its variants, giving both raising.
+        """Show a variant of a dynamic texture in some environments, or write its batched variant there and show it.
 
-        The entity holds a single visual geom, whose 'set_texture' this is (see ``RigidVisGeom.set_texture``).
+        The entity stands for its single visual geom showing a dynamic texture.
+        The pixels `texture` given, the batched variant takes them and shows them. Otherwise the variant `variant` is
+        shown, the texture the asset gives the map if None, whatever the variants. Giving both raises.
+
+        Parameters
+        ----------
+        texture : None | array_like | gs.textures.ColorTexture | gs.textures.ImageTexture
+            The pixels of the batched variant: an RGB or RGBA image of shape (height, width, channels) for every
+            selected environment or (len(envs_idx), height, width, channels) for one each, broadcast to the resolution
+            of the texture, or a color or an image texture resized to it. An integer image holds values up to 255 and a
+            float one values up to 1.0, clamped to [0, 1] in the diffuse map and to nonnegative values in the emissive
+            map, whose emission may exceed 1. Defaults to None.
+        envs_idx : None | int | array_like, optional
+            The environments to set. If None, every environment is set. Defaults to None.
+        variant : None | int | str | sequence of int or str, optional
+            A variant, by position or by name, for every selected environment or one per selected environment, None for
+            the texture the asset gives the map. Defaults to None.
+        texture_map_type : gs.TEXTURE_MAP_TYPE | None, optional
+            The map whose dynamic texture to set, which may be None when the surface fills a single map with one.
+            Defaults to None.
         """
-        if len(self._vgeoms) != 1:
-            gs.raise_exception(
-                f"'entity.set_texture' requires an entity with a single visual geom, got {len(self._vgeoms)}. Use "
-                "'vgeom.set_texture' of its visual geoms instead."
-            )
-        self._vgeoms[0].set_texture(texture, envs_idx, variant=variant, texture_map_type=texture_map_type)
+        self._solver.render_context.set_texture(self, texture, envs_idx, variant, texture_map_type)
+
+    @gs.assert_built
+    def get_texture(
+        self, envs_idx: "IndexType | None" = None, *, texture_map_type: TEXTURE_MAP_TYPE | None = None
+    ) -> torch.Tensor:
+        """Return a copy of the image a dynamic texture shows in each environment, as drawn.
+
+        The entity stands for its single visual geom showing a dynamic texture.
+
+        Parameters
+        ----------
+        envs_idx : None | int | array_like, optional
+            The environments to read. If None, every environment is read. Defaults to None.
+        texture_map_type : gs.TEXTURE_MAP_TYPE | None, optional
+            The map whose dynamic texture to read, which may be None when the surface fills a single map with one.
+            Defaults to None.
+
+        Returns
+        -------
+        torch.Tensor
+            The RGBA images, 8-bit sRGB values for the diffuse map and 16-bit linear values for the emissive map.
+        """
+        return self._solver.render_context.get_texture(self, envs_idx, texture_map_type)
 
     @gs.assert_built
     def get_vverts(self, envs_idx: "IndexType | None" = None) -> torch.Tensor:

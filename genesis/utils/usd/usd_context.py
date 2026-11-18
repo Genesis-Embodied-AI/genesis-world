@@ -314,7 +314,9 @@ class UsdContext:
             # accepted keys: color_texture, opacity_texture, roughness_texture, metallic_texture, normal_texture, emissive_texture, ior
             applied_surface.update_texture(**surface_dict)
             asset_textures = mu.AssetTextures(
-                color=surface_dict.get("color_texture"), emission=surface_dict.get("emissive_texture")
+                color=surface_dict.get("color_texture"),
+                emission=surface_dict.get("emissive_texture"),
+                opacity=surface_dict.get("opacity_texture"),
             )
             if surface_id in self._bake_material_paths:
                 bake_success = True if surface_dict else False

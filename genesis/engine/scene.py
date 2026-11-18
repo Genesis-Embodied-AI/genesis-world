@@ -32,6 +32,7 @@ from genesis.engine.render_context import (
     MeshGeometry,
     Points,
     RenderContext,
+    RuntimeAppearance,
     ScopedRenderContext,
     Shape,
     StaticMeshBatch,
@@ -1691,13 +1692,10 @@ class Scene(BuildableMixin, RBC):
         # Visual vertices and dynamic textures set at runtime live in the render context, and a file carries what a
         # scene was authored from.
         omitted_kinds.update(
-            f"'{entity.name}' visual vertices"
-            for entity in self.entities
-            if isinstance(entity, KinematicEntity) and entity._is_vverts_overridden
-        )
-        entities_texture_written = self.sim.render_context.entities_texture_written
-        omitted_kinds.update(
-            f"'{entity.name}' dynamic textures" for entity in self.entities if entity in entities_texture_written
+            f"'{entity.name}' {kind.value}"
+            for entity, kinds in self.sim.render_context.get_entities_written().items()
+            for kind in RuntimeAppearance
+            if kind in kinds
         )
         for kinds, report, ending in (
             (omitted_kinds, gs.logger.warning, "is exported without it, so a scene loaded from the file holds none."),

@@ -260,8 +260,8 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
         self._entities_vvert_start = dict(
             zip(self._skinned_entities, (np.cumsum(entities_n_vverts) - entities_n_vverts).tolist())
         )
-        self.textures = DynamicTextures(
-            [(entity, entity, entity.vmesh.surface) for entity in self._skinned_entities], solver.n_envs
+        self.dynamic_textures = DynamicTextures(
+            [(entity.vmesh, entity) for entity in self._skinned_entities], solver.n_envs
         )
         self._tearable_entities = [
             entity for entity in self._skinned_entities if entity.material.structure == STRUCTURE.TEARABLE
@@ -375,7 +375,7 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
                         seg_keys,
                         particles=points,
                         is_active=ArrayRef(self._skinned.entities_is_intact, i_t) if is_tearable else None,
-                        textures=self.textures.get(entity),
+                        textures=self.dynamic_textures.get(entity.vmesh),
                         roles=ShapeRoles.of(entity.idx, is_looks=not is_pinned, is_debug=False),
                     )
                 )
@@ -490,6 +490,7 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
         return tuple(meshes)
 
     def reset(self, envs_idx: torch.Tensor) -> None:
+        super().reset(envs_idx)
         if self._tearable_entities:
             kernel_reset_skinned_tear(envs_idx, self._skinned)
 

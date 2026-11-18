@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 import torch
@@ -26,9 +26,6 @@ from genesis.engine.state_change import StateChange, Subscriber
 from genesis.ext import pyrender
 from genesis.ext.pyrender.jit_render import JITRenderer
 from genesis.utils.misc import BuildableMixin, tensor_to_array
-
-if TYPE_CHECKING:
-    from genesis.options.surfaces import Surface
 
 
 # Magnitude beyond which a transform entry marks a pose that blew up, which the drawn node then stops following
@@ -122,10 +119,6 @@ class TextureBinding(NamedTuple):
     column: int
     """The column of the layers of the primitives the texture fills (see 'Primitive.texture_layers'), 0 for the base
     color and 1 for the emission."""
-    is_written: np.ndarray
-    """Whether the batched variant was written in each environment of the scene since the array was last updated."""
-    subscriber: Subscriber
-    """The subscriber recording the writes of the batched variant into 'is_written' (see 'TextureVariants')."""
 
 
 @dataclass(eq=False)
@@ -391,6 +384,7 @@ class RasterizerContext(BuildableMixin):
                 self._shapes_nodes[shape] = shape_nodes
                 continue
             changes = shape_nodes.subscriber.pending
+            visual_envs_idx = shape_nodes.subscriber.get_pending_envs_idx(StateChange.VISUAL)
             if changes:
                 shape_nodes.subscriber.clear()
             if StateChange.GEOMETRY in changes:
@@ -402,7 +396,11 @@ class RasterizerContext(BuildableMixin):
             if StateChange.VISUAL in changes:
                 self._set_nodes_views(shape, shape_nodes)
                 if shape_nodes.textures:
-                    self._update_textures(shape_nodes)
+                    is_written = np.ones(len(self.rendered_envs_idx), dtype=np.bool_)
+                    if visual_envs_idx is not None and self.sim.n_envs > 0:
+                        envs_written = tensor_to_array(self.sim.sanitize_envs_idx(visual_envs_idx))
+                        is_written = np.isin(self.rendered_envs_idx, envs_written)
+                    self._update_textures(shape_nodes, is_written)
 
     def _remove_nodes(self, shape_nodes: ShapeNodes) -> None:
         for node in shape_nodes.nodes:
@@ -413,8 +411,6 @@ class RasterizerContext(BuildableMixin):
                 if seg_nodes is not None:
                     seg_nodes.remove(node)
         shape_nodes.nodes.clear()
-        for binding in shape_nodes.textures:
-            binding.texture.subscribers.discard(binding.subscriber)
         shape_nodes.textures.clear()
 
     def _remove_shape_nodes(self, shape: Shape) -> None:
@@ -515,8 +511,7 @@ class RasterizerContext(BuildableMixin):
                         continue
                     pose_T = poses_T[:, i_m]
                     floor = geometry.floor
-                    # A floor showing a dynamic texture keeps one instance per environment, each sampling its own image
-                    if floor is not None and envs is not None and envs.all() and not geometry.textures:
+                    if floor is not None and envs is not None and envs.all():
                         if (
                             abs(floor.normal[0]) < gs.EPS
                             and abs(floor.normal[1]) < gs.EPS
@@ -576,7 +571,7 @@ class RasterizerContext(BuildableMixin):
                     ]
                     nodes.append(self._add_node_seg(mesh_node, seg_keys=None if is_marker else geometry.seg_keys))
                     if geometry.textures:
-                        self._bind_textures(shape_nodes, geometry.textures, geometry.surface, mesh_node.primitives[:1])
+                        self._bind_textures(shape_nodes, geometry.textures, mesh_node.primitives[:1])
                     if floor is not None:
                         self.set_reflection_mat(pose_T)
                 n_instances = len(poses_T)
@@ -672,7 +667,7 @@ class RasterizerContext(BuildableMixin):
                     nodes.append(self._add_node_seg(mesh_node, seg_keys=None if is_marker else shape.seg_keys))
                 if shape.textures:
                     primitives = [node.mesh.primitives[0] for node in nodes if node is not None]
-                    self._bind_textures(shape_nodes, shape.textures, shape.surface, primitives)
+                    self._bind_textures(shape_nodes, shape.textures, primitives)
             else:
                 for node, vverts in zip(nodes, verts):
                     if node is not None:
@@ -803,19 +798,16 @@ class RasterizerContext(BuildableMixin):
         self,
         shape_nodes: ShapeNodes,
         textures: tuple[TextureVariants, ...],
-        surface: "Surface",
         primitives: list["pyrender.Primitive"],
     ) -> None:
         """Bind a texture array to the primitives drawing a mesh per dynamic texture of the mesh, recorded in the nodes
         of its shape, and draw the images each rendered environment shows."""
-        rgba = surface.get_rgba()
-        fields = dict(surface)
         n_rendered = len(self.rendered_envs_idx)
         for texture in textures:
             # A dynamic texture is the base color of the material when the surface draws it as its color, and its
             # emissive texture otherwise (see 'surface_uvs_to_trimesh_visual').
             is_diffuse = texture.map_type == TEXTURE_MAP_TYPE.DIFFUSE
-            is_base_color = rgba is fields["diffuse_texture" if is_diffuse else "emissive_texture"]
+            is_base_color = texture.is_base_color
             images = texture.variants
             if texture.batched is not None:
                 images = torch.cat((images, texture.batched[self._rendered_envs_t]))
@@ -833,35 +825,27 @@ class RasterizerContext(BuildableMixin):
                     primitive.material.emissiveTexture = texture_array
                 if primitive.texture_layers is None:
                     primitive.texture_layers = np.zeros((n_rendered, 2), dtype=np.float32)
-            is_written = np.zeros(self.sim.n_envs_, dtype=np.bool_)
-
-            def on_write(change: StateChange, envs_idx: Any, is_written: np.ndarray = is_written) -> None:
-                is_written[tensor_to_array(self.sim.sanitize_envs_idx(envs_idx))] = True
-
-            subscriber = Subscriber(to=frozenset((StateChange.VISUAL,)), callback=on_write)
-            texture.subscribers.add(subscriber)
             column = 0 if is_base_color else 1
-            shape_nodes.textures.append(
-                TextureBinding(texture, texture_array, primitives, column, is_written, subscriber)
-            )
-        self._update_textures(shape_nodes)
+            shape_nodes.textures.append(TextureBinding(texture, texture_array, primitives, column))
+        self._update_textures(shape_nodes, np.zeros(n_rendered, dtype=np.bool_))
 
-    def _update_textures(self, shape_nodes: ShapeNodes) -> None:
+    def _update_textures(self, shape_nodes: ShapeNodes, is_written: np.ndarray) -> None:
         """Set the texture array layer each rendered environment samples for the dynamic textures of a shape.
 
-        The images of the batched variant written in the rendered environments since the last update are uploaded too.
+        'is_written' tells whether a change of appearance wrote each rendered environment, whose image of the batched
+        variant is uploaded again where the environment shows it. Showing a variant uploads nothing.
         """
         for binding in shape_nodes.textures:
             texture = binding.texture
             n_variants = len(texture.variants)
             variants_idx = tensor_to_array(texture.variants_idx[self._rendered_envs_t])
-            envs_layer = np.where(variants_idx < 0, n_variants + np.arange(len(variants_idx)), variants_idx)
-            written_envs_pos = np.flatnonzero(binding.is_written[self.rendered_envs_idx])
-            binding.is_written[:] = False
-            if len(written_envs_pos) > 0:
-                images = texture.batched[self._rendered_envs_t[torch.as_tensor(written_envs_pos, device=gs.device)]]
+            is_batched = variants_idx < 0
+            envs_layer = np.where(is_batched, n_variants + np.arange(len(variants_idx)), variants_idx)
+            batched_envs_pos = np.flatnonzero(is_batched & is_written)
+            if len(batched_envs_pos) > 0:
+                images = texture.batched[self._rendered_envs_t[torch.as_tensor(batched_envs_pos, device=gs.device)]]
                 binding.texture_array.set_layers(
-                    layers_idx=n_variants + written_envs_pos, images=tensor_to_array(images)
+                    layers_idx=n_variants + batched_envs_pos, images=tensor_to_array(images)
                 )
                 self._scene.updated_textures.add(binding.texture_array)
             for primitive in binding.primitives:

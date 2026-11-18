@@ -240,9 +240,7 @@ def main():
                     is_batched=True,
                 ),
             ),
-            material=gs.materials.Rigid(
-                use_visual_raycasting=True,
-            ),
+            use_visual_raycasting=True,
         ),
     )
     # A white board standing behind the duck, its texture coordinates spanning the image once
@@ -266,9 +264,7 @@ def main():
                 ),
                 double_sided=True,
             ),
-            material=gs.materials.Rigid(
-                use_visual_raycasting=True,
-            ),
+            use_visual_raycasting=True,
         ),
     )
     if args.vis:

@@ -485,6 +485,14 @@ def test_export_and_load_rigid(
         assert json.loads(first.read(MANIFEST_NAME)) == json.loads(second.read(MANIFEST_NAME))
         assert first.read(ARRAY_MEMBER) == second.read(ARRAY_MEMBER)
 
+    # A reset of every environment shows the authored appearance again, which a file then carries in full
+    scene.reset()
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        scene.export(tmp_path / f"reset{SCENE_FORMAT}")
+    left_out = " ".join(record.getMessage() for record in caplog.records)
+    assert "visual vertices" not in left_out and "dynamic textures" not in left_out
+
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_export_before_build(n_envs, checkpoint_scene, tmp_path, caplog):
