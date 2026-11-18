@@ -770,9 +770,10 @@ def kernel_set_dofs_position(
         for i_d in range(dof_start, dof_end):
             if is_dof_set[i_d]:
                 has_dof_set = True
-                # See ctrl_force_int in rigid/data.py
-                dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0
         if has_dof_set:
+            # See ctrl_force_int in rigid/data.py
+            for i_d in range(dof_start, dof_end):
+                dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0
             q_start = dyn_info.links.q_start[I_l]
             i_j = dyn_info.links.joint_start[I_l]
             I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
