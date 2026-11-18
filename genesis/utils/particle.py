@@ -1,10 +1,8 @@
-import ctypes
-from multiprocessing import Process, Queue
-
 import numba as nb
 import numpy as np
 
 import igl
+import pysplashsurf
 import trimesh
 from skimage.measure import marching_cubes
 
@@ -12,11 +10,6 @@ import genesis as gs
 
 from . import geom as gu
 from .cache import get_ptc_cache
-
-try:
-    malloc_trim = ctypes.CDLL(ctypes.util.find_library("c")).malloc_trim
-except (AttributeError, TypeError):
-    malloc_trim = None
 
 
 def n_particles_vol(p_size=0.01, volume=1.0):
@@ -399,32 +392,6 @@ def shell_to_particles(p_size=0.01, pos=(0, 0, 0), inner_radius=0.5, outer_radiu
     return positions
 
 
-def _splashsurf_worker(positions, radius, args_dict, result_queue):
-    try:
-        import pysplashsurf
-
-        mesh_with_data, _ = pysplashsurf.reconstruction_pipeline(
-            positions,
-            particle_radius=radius * args_dict.get("rscale", 1.0),
-            smoothing_length=2.0,
-            cube_size=0.8,
-            iso_surface_threshold=0.6,
-            mesh_smoothing_weights=True,
-            mesh_smoothing_iters=int(args_dict.get("smooth", 25)),
-            normals_smoothing_iters=10,
-            mesh_cleanup=True,
-            compute_normals=True,
-            multi_threading=True,
-        )
-        normals = mesh_with_data.point_attributes["normals"]
-        vertices = mesh_with_data.mesh.vertices
-        triangles = mesh_with_data.mesh.triangles
-        result_queue.put_nowait((vertices, triangles, normals))
-    except Exception as e:
-        result_queue.put_nowait(e)
-        raise
-
-
 def particles_to_mesh(positions, radius, backend):
     def parse_args(backend):
         args_dict = dict()
@@ -472,21 +439,27 @@ def particles_to_mesh(positions, radius, backend):
         )
         return trimesh.Trimesh(origin + vertices, faces, process=False)
     elif "splashsurf" in backend:
-        # FIXME: Running in subprocess or manually reclaiming free-ed head memory is necessary to avoid unbounded growth
-        result_queue = Queue()
-        if malloc_trim is not None:
-            _splashsurf_worker(positions, radius, args_dict, result_queue)
-            result = result_queue.get()
-            malloc_trim(0)
-        else:
-            proc = Process(target=_splashsurf_worker, args=(positions, radius, args_dict, result_queue))
-            proc.start()
-            result = result_queue.get()
-            proc.join()
-            if proc.exitcode != 0:
-                gs.raise_exception_from(f"splashsurf subprocess failed with exit code {proc.exitcode}", result)
-        vertices, triangles, normals = result
-        mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, face_normals=normals, process=False)
+        # FIXME: genesis-world#2173 - The memory of the process grows from one reconstruction to the next. See also
+        # genesis-world#1531 (comment 3220880318) on the copies the getters of the mesh make.
+        mesh_with_data, _ = pysplashsurf.reconstruction_pipeline(
+            positions,
+            particle_radius=radius * args_dict.get("rscale", 1.0),
+            smoothing_length=2.0,
+            cube_size=0.8,
+            iso_surface_threshold=0.6,
+            mesh_smoothing_weights=True,
+            mesh_smoothing_iters=int(args_dict.get("smooth", 25)),
+            normals_smoothing_iters=10,
+            mesh_cleanup=True,
+            compute_normals=True,
+            multi_threading=True,
+        )
+        mesh = trimesh.Trimesh(
+            vertices=mesh_with_data.mesh.vertices,
+            faces=mesh_with_data.mesh.triangles,
+            face_normals=mesh_with_data.point_attributes["normals"],
+            process=False,
+        )
         gs.logger.debug(f"[splashsurf]: reconstruct vertices: {mesh.vertices.shape}, {mesh.faces.shape}")
         return mesh
     else:
