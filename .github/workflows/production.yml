@@ -5,7 +5,8 @@ on:
   push:
     branches:
       - main
-  # A draft pull request runs only when re-run by hand (see the setup job) or once marked ready for review.
+  # A draft pull request runs only when re-run, by hand or through a '/ci' comment (see the setup job and the CI Command
+  # workflow), or once marked ready for review.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches:

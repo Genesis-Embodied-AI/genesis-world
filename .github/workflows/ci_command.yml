@@ -1,0 +1,65 @@
+name: CI Command
+
+# A comment starting with '/ci' on a pull request re-runs its workflows that skipped the latest commit for being a
+# draft (see the production workflow). The re-run keeps the event and permissions of the pull request, so this
+# workflow, which runs from the default branch with a write token, never checks out the code of the pull request.
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write
+  issues: write
+  pull-requests: read
+
+jobs:
+  rerun:
+    name: ci-command-rerun
+
+    if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/ci')
+
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Re-run the skipped workflows of the pull request
+        uses: actions/github-script@v8
+        env:
+          WORKFLOW_PATHS: .github/workflows/production.yml .github/workflows/generic.yml
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const comment = context.payload.comment;
+            const react = (content) => github.rest.reactions.createForIssueComment({
+              owner, repo, comment_id: comment.id, content,
+            });
+
+            // The association of a comment misses the members of the organization whose membership is private, so
+            // the permission is asked of the API instead.
+            const { data: access } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner, repo, username: comment.user.login,
+            });
+            if (!['admin', 'write'].includes(access.permission)) {
+              core.notice(`${comment.user.login} has no write access, so the command is ignored.`);
+              await react('-1');
+              return;
+            }
+
+            const { data: pull } = await github.rest.pulls.get({ owner, repo, pull_number: context.issue.number });
+            const paths = process.env.WORKFLOW_PATHS.split(' ');
+            const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+              owner, repo, event: 'pull_request', head_sha: pull.head.sha,
+            });
+            // A commit can have several runs of a workflow, one per event of its pull request. The runs are listed
+            // newest first, and the latest one alone is re-run.
+            const runsLatest = paths.map((path) => runs.find((run) => run.path === path)).filter(Boolean);
+            const runsSkipped = runsLatest.filter((run) => run.conclusion === 'skipped');
+            if (runsSkipped.length === 0) {
+              core.notice(`Commit ${pull.head.sha} has no skipped run of ${paths.join(', ')} to re-run.`);
+              await react('confused');
+              return;
+            }
+            for (const run of runsSkipped) {
+              await github.rest.actions.reRunWorkflow({ owner, repo, run_id: run.id });
+              core.notice(`Re-running ${run.html_url}`);
+            }
+            await react('rocket');
