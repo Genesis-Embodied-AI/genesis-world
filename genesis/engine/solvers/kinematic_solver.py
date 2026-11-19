@@ -1289,6 +1289,9 @@ class KinematicSolver(Solver):
         n_tgts = self._options.IK_max_targets
         if n_links > n_tgts:
             gs.raise_exception(f"Cannot solve for {n_links} targets. Raise 'IK_max_targets' above {n_tgts}.")
+        # Masked axes and targets leave zero rows in the Jacobian, so the normal matrix is singular without damping
+        if damping <= 0.0:
+            gs.raise_exception(f"'damping' must be strictly positive, got {damping}.")
 
         # The scratch of inverse kinematics grows with RigidOptions.IK_max_targets, so it is allocated by the first solve
         # and a scene that never solves inverse kinematics allocates none of it

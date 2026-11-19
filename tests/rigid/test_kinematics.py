@@ -1060,6 +1060,9 @@ def test_kinematics_queries(n_envs, show_viewer, tol):
         entity.set_qpos(qpos)
         assert_allclose(end_effector.get_pos(), target_pos, tol=tol)
 
+    with pytest.raises(gs.GenesisException):
+        franka.inverse_kinematics(link=end_effector, pos=target_pos, damping=0.0)
+
     # Carrying more targets than the error buffer is sized for is rejected, rather than written past.
     n_tgts = franka.solver.options.IK_max_targets
     with pytest.raises(gs.GenesisException):
