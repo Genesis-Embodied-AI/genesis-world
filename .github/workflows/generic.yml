@@ -1,7 +1,7 @@
 name: Generic
 
 on:
-  # A draft pull request runs only when re-run by hand or once marked ready for review (see the production workflow).
+  # A draft pull request is gated as in the production workflow.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches:
