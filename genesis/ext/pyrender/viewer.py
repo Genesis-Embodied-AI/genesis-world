@@ -633,7 +633,11 @@ class Viewer(pyglet.window.Window):
         Starting opens a fresh video writer and marks the window title; stopping closes it and prompts (via
         save_video) for a destination. Both the 'R' keybind and the overlay record button drive this one path."""
         if self.viewer_flags["record"]:
-            self.save_video()
+            # This runs in event handlers, where a failed encoding must not escape the event loop and leave recording on
+            try:
+                self.save_video()
+            except gs.GenesisException as e:
+                gs.logger.warning(f"{e}")
             self.set_caption(self.viewer_flags["window_title"])
         else:
             self._video_recorder = VideoEncoder(
