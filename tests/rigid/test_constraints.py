@@ -506,7 +506,7 @@ def test_dynamic_weld_scene_reset():
 
 
 @pytest.mark.required
-def test_urdf_mimic(show_viewer, tol, scaled_urdf_mimic):
+def test_joint_equality(show_viewer, tol, scaled_urdf_mimic):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             gravity=(0.0, 0.0, 0.0),
