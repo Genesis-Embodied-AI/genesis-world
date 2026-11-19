@@ -1,0 +1,27 @@
+.github/contributing/EXAMPLES.md
+  s_6331e9b5eb051b::t_7c98b6847c1708 55
+examples/README.md
+  s_6331e9b5eb051b::t_2ec843a458ab3e 44,69,122
+examples/deformable/pbd_flags_in_wind.py
+  s_6331e9b5eb051b::t_6cab48af6fb71a 1,3-5,7-10,12,18,20-21,27-28,31,33-40,44-45,47-51,53-56,61-65,67-71,73-110,112-121,129,132,134-137,139-143,145-148,150-157,160-168
+examples/differentiable/rigid_sysid_launch.py
+  s_6331e9b5eb051b::t_9cbd60d0e9b788 1-166
+examples/rigid/rube_goldberg.py
+  s_6331e9b5eb051b::t_831d2f09f1a673 1-326
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5e75c82ffd70479700dad261e64b9f5f8b154874",
+  "prompts": {},
+  "sessions": {
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
