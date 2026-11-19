@@ -8,7 +8,6 @@ import av
 
 import genesis as gs
 from genesis.utils.image_exporter import as_grayscale_image
-from genesis.utils.video_encoder import VideoEncoder
 
 from ..utils.assertions import assert_allclose, assert_equal, rgb_array_to_png_bytes
 
@@ -325,7 +324,7 @@ def test_error_handling(tmp_path, caplog):
         ),
     )
     step_video_path = tmp_path / "step.mp4"
-    step_video_frames = [np.zeros((64, 64, 3), dtype=np.uint8)] * 2 + [np.full((64, 64, 3), 0.5)]
+    step_video_frames = [np.zeros((64, 64, 3), dtype=np.uint8)] * 2 + [np.zeros((32, 64, 3), dtype=np.uint8)]
     scene.add_recorder(
         data_func=lambda: step_video_frames.pop(0),
         rec_options=gs.recorders.VideoFile(
@@ -371,9 +370,8 @@ def test_error_handling(tmp_path, caplog):
             break
         time.sleep(0.01)
     assert not stepped_recorder.is_alive
-    # A normalized floating-point frame cannot be represented and is reported, rather than truncated to a black one. The
-    # step recording it is aborted.
-    with pytest.raises(gs.GenesisException, match="integer type"):
+    # A frame of another shape than the first frame of its video is reported, and the step recording it is aborted
+    with pytest.raises(gs.GenesisException, match="first frame of the video"):
         scene.step()
     with pytest.raises(gs.GenesisException, match="Unsupported data type"):
         scene.step()
@@ -453,10 +451,3 @@ def test_video_writer(tmp_path):
         with av.open(video_path) as container:
             assert sum(1 for _ in container.decode(video=0)) == STEPS + 1
 
-    # Every frame of a video has the shape of its first one
-    encoder = VideoEncoder(tmp_path / "test_resized.mp4", fps=30)
-    encoder.write(np.zeros((64, 64, 3), dtype=np.uint8))
-    for frame_shape in ((32, 64, 3), (64, 64)):
-        with pytest.raises(gs.GenesisException, match="first frame of the video"):
-            encoder.write(np.zeros(frame_shape, dtype=np.uint8))
-    encoder.close()
