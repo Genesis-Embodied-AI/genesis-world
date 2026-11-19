@@ -5,11 +5,8 @@ import dataclasses
 import functools
 import hashlib
 import importlib.metadata
-import json
 import marshal
-import math
 import os
-import struct
 import sys
 import types
 import weakref
@@ -21,7 +18,6 @@ from typing import Any
 import numpy as np
 
 import numba as nb
-import trimesh
 from pydantic import BaseModel
 
 import genesis as gs
@@ -30,8 +26,8 @@ import genesis as gs
 # identical by the on-disk caches. Orders of magnitude below the spacing of genuinely distinct geometry, and orders of
 # magnitude above the last-significant-digit noise separating two exports of the same model.
 MESH_CACHE_MATCH_RTOL = 1e-6
-# Bumped when the layout of a mesh cache entry changes: forces a cache miss on entries of another layout.
-MESH_CACHE_FORMAT_VERSION = 1
+# Bumped when the layout of the entries of the on-disk caches changes: forces a cache miss on entries of another layout.
+CACHE_FORMAT_VERSION = 1
 # Bumped when watertighten output changes for a fixed (mesh, aggressiveness): forces a cache miss on stale entries.
 WT_CACHE_VERSION = 8
 # Bumped when the wall-thickness estimate changes for a fixed mesh and parameters: forces a cache miss on stale entries.
@@ -298,10 +294,10 @@ def _release_collected_owner(cache_ref: weakref.ReferenceType[OwnedCache], owner
 
 
 def get_gsd_path(verts, faces, sdf_res, sdf_cell_size):
-    # The mesh, the resolution and the cell size determine the grid. The schema tag is bumped whenever the layout or the
-    # values of a file change, which forces a cache miss on stale entries.
+    # The mesh, the resolution and the cell size determine the grid. The schema tag is bumped whenever the values of a
+    # file change, which forces a cache miss on stale entries.
     schema = "v5-fast-winding"
-    hashkey = get_hashkey(verts, faces, sdf_res, sdf_cell_size, schema)
+    hashkey = get_hashkey(verts, faces, sdf_res, sdf_cell_size, schema, CACHE_FORMAT_VERSION)
     return os.path.join(get_gsd_cache_dir(), f"{hashkey}.gsd")
 
 
@@ -309,7 +305,14 @@ def get_gnd_path(
     name, subterrain_types, subterrain_size, horizontal_scale, vertical_scale, n_subterrains, subterrain_parameters
 ):
     hashkey = get_hashkey(
-        name, subterrain_types, subterrain_size, horizontal_scale, vertical_scale, n_subterrains, subterrain_parameters
+        name,
+        subterrain_types,
+        subterrain_size,
+        horizontal_scale,
+        vertical_scale,
+        n_subterrains,
+        subterrain_parameters,
+        CACHE_FORMAT_VERSION,
     )
     return os.path.join(get_gnd_cache_dir(), f"{hashkey}.gnd")
 
@@ -485,14 +488,9 @@ class MeshCache:
     key scans its bucket, accepting the first candidate matching within 'MESH_CACHE_MATCH_RTOL'. Both arms compare
     the vertices, so a hit is always verified rather than inferred from a key.
 
-    An entry holds a JSON header describing the payload and the type and shape of its arrays, then the raw bytes of
-    the reference vertices, then those of the arrays of the payload. The scan therefore reads only the header and the
-    vertices of the candidates it rejects. Nothing is pickled, so an entry loads in any environment sharing the cache,
-    whatever its Python, NumPy or optional packages.
-
-    A payload is built from dicts with string keys, lists, tuples, numbers, strings, None, NumPy arrays and
-    'trimesh.Trimesh' meshes. It loads back with its tuples as lists and its NumPy scalars as Python ones, and a mesh
-    loads back from its vertices and faces alone.
+    An entry holds two records (see 'serialization.write_record'), the reference vertices then the payload, so the
+    scan reads only the vertices of the candidates it rejects. Nothing is pickled, so an entry loads in any environment
+    sharing the cache, whatever its Python, NumPy or optional packages. The payload is any value a record holds.
 
     Parameters
     ----------
@@ -511,12 +509,15 @@ class MeshCache:
 
     def __init__(self, cache_dir: str, ext: str, verts: np.ndarray, faces: np.ndarray, *params):
         self._verts = np.ascontiguousarray(verts)
-        bucket_key = get_hashkey(len(self._verts), np.ascontiguousarray(faces), *params, MESH_CACHE_FORMAT_VERSION)
+        bucket_key = get_hashkey(len(self._verts), np.ascontiguousarray(faces), *params, CACHE_FORMAT_VERSION)
         self._bucket_dir = os.path.join(cache_dir, bucket_key)
         self._filename = f"{get_hashkey(self._verts)}.{ext}"
 
     def load(self):
         """Return the payload of the matching entry, or None if this bucket holds none."""
+        # Local import, since the serialization module imports the options, which import this module.
+        from genesis.utils import serialization
+
         if not os.path.isdir(self._bucket_dir):
             return None
         atol = None
@@ -524,12 +525,7 @@ class MeshCache:
         for filename in sorted(os.listdir(self._bucket_dir), key=lambda name: name != self._filename):
             try:
                 with open(os.path.join(self._bucket_dir, filename), "rb") as file:
-                    (header_size,) = struct.unpack("<I", file.read(4))
-                    header = file.read(header_size)
-                    (verts_dtype, verts_shape), *arrays_spec = json.loads(header)["arrays"]
-                    verts_dtype = np.dtype(verts_dtype)
-                    verts_bytes = file.read(math.prod(verts_shape) * verts_dtype.itemsize)
-                    verts_ref = np.frombuffer(verts_bytes, dtype=verts_dtype).reshape(verts_shape)
+                    verts_ref = serialization.read_record(file)
                     # Vertices equal bit for bit, as those of an unchanged asset are, spare the reductions of the
                     # tolerance check, which cost far more than the rest of a load.
                     if not np.array_equal(self._verts, verts_ref):
@@ -538,54 +534,18 @@ class MeshCache:
                             atol = MESH_CACHE_MATCH_RTOL * np.linalg.norm(verts_extent)
                         if verts_ref.shape != self._verts.shape or (np.abs(self._verts - verts_ref) > atol).any():
                             continue
-                    # A bytearray, so that the arrays viewing it are writable.
-                    buffer = bytearray(file.read())
-                arrays, offset = [None] * len(arrays_spec), 0
-                for i in sorted(range(len(arrays_spec)), key=lambda i: -np.dtype(arrays_spec[i][0]).itemsize):
-                    dtype, shape = np.dtype(arrays_spec[i][0]), arrays_spec[i][1]
-                    arrays[i] = np.frombuffer(buffer, dtype=dtype, count=math.prod(shape), offset=offset).reshape(shape)
-                    offset += arrays[i].nbytes
-
-                def decode_leaf(node):
-                    if "__array__" in node:
-                        return arrays[node["__array__"]]
-                    if "__trimesh__" in node:
-                        i_verts = node["__trimesh__"]
-                        return trimesh.Trimesh(arrays[i_verts], arrays[i_verts + 1], process=False)
-                    return node
-
-                return json.loads(header, object_hook=decode_leaf)["payload"]
-            except (EOFError, KeyError, TypeError, ValueError, struct.error, MemoryError):
+                    return serialization.read_record(file)
+            except (ValueError, MemoryError):
                 gs.logger.info("Ignoring corrupted cache.")
         return None
 
     def save(self, payload) -> None:
         """Store the payload as the entry of this mesh. It must not be None, which 'load' reserves for a miss."""
+        # See 'load' for this local import
+        from genesis.utils import serialization
+
         assert payload is not None
-        arrays = []
-
-        def encode_leaf(node):
-            if isinstance(node, trimesh.Trimesh):
-                arrays.extend((node.vertices.view(np.ndarray), node.faces.view(np.ndarray)))
-                return {"__trimesh__": len(arrays) - 2}
-            if isinstance(node, np.ndarray):
-                # An object array holds references, which have no raw bytes to store.
-                assert not node.dtype.hasobject
-                arrays.append(node)
-                return {"__array__": len(arrays) - 1}
-            if isinstance(node, np.generic):
-                return node.item()
-            raise TypeError(f"Mesh cache payloads cannot hold '{type(node).__qualname__}'.")
-
-        payload_json = json.dumps(payload, default=encode_leaf)
-        arrays_spec = [(array.dtype.str, array.shape) for array in (self._verts, *arrays)]
-        header = f'{{"arrays": {json.dumps(arrays_spec)}, "payload": {payload_json}}}'.encode()
         os.makedirs(self._bucket_dir, exist_ok=True)
         with open(os.path.join(self._bucket_dir, self._filename), "wb") as file:
-            file.write(struct.pack("<I", len(header)))
-            file.write(header)
-            file.write(self._verts.data)
-            # Writing the arrays by decreasing item size starts each at a multiple of its own, so that every array
-            # loaded from the buffer is aligned without padding.
-            for array in sorted(arrays, key=lambda array: -array.itemsize):
-                file.write(np.ascontiguousarray(array).data)
+            serialization.write_record(file, self._verts)
+            serialization.write_record(file, payload)

@@ -10,8 +10,10 @@ import dataclasses
 import hashlib
 import io
 import json
+import math
 import os
 import pathlib
+import struct
 import types
 import typing
 import xml.etree.ElementTree as ET
@@ -19,7 +21,7 @@ import zipfile
 from collections.abc import Iterable, Mapping, Sequence, Set
 from enum import IntEnum, StrEnum
 from functools import lru_cache, partial
-from typing import Callable, NamedTuple
+from typing import BinaryIO, Callable, NamedTuple
 
 import numpy as np
 
@@ -675,6 +677,53 @@ def load(path: str | os.PathLike, expect: dict) -> dict:
         return {name: _load_value(manifest["held"][name], annotation, loaded) for name, annotation in expect.items()}
     except (TypeError, KeyError, IndexError, ValueError) as e:
         gs.raise_exception_from(f"'{path}' holds values a Genesis scene is not made of.", e)
+
+
+def write_record(file: BinaryIO, value) -> None:
+    """Write one value to a binary file as a record that 'read_record' loads back, without pickling it.
+
+    A record is the size of a JSON header, the header, then the raw bytes of the arrays the value holds. The header
+    holds the value as a field declared 'Any' exports it, and the type and shape of each array, which is the minimum
+    needed to rebuild the value exactly. The value may nest dicts, lists, tuples, numbers, strings, None, NumPy arrays
+    and every class that says how it travels in a file, such as 'trimesh.Trimesh'. It loads back with its tuples as
+    lists and its NumPy scalars as Python ones. Records follow one another in a file, so a reader may stop after the
+    ones it needs.
+    """
+    exported = Exported(values=[], slots={}, stored=[], classes=set())
+    held = _export_any(value, exported)
+    arrays_spec = [(array.dtype.str, array.shape) for array in exported.values]
+    header = json.dumps({"arrays": arrays_spec, "value": held}).encode()
+    file.write(struct.pack("<I", len(header)))
+    file.write(header)
+    # Writing the arrays by decreasing item size starts each at a multiple of its own, so that every array loaded from
+    # the record is aligned without padding.
+    for array in sorted(exported.values, key=lambda array: -array.itemsize):
+        # An object array holds references, which have no raw bytes to store.
+        assert not array.dtype.hasobject
+        file.write(array.data)
+
+
+def read_record(file: BinaryIO):
+    """Read back the value of the next record of a binary file, as 'write_record' wrote it.
+
+    Raises ValueError if the file holds no such record there, as when it is truncated or was written another way.
+    """
+    try:
+        (header_size,) = struct.unpack("<I", file.read(4))
+        header = json.loads(file.read(header_size))
+        arrays_spec = [(np.dtype(dtype), shape) for dtype, shape in header["arrays"]]
+        # A bytearray, so that the arrays viewing it are writable.
+        buffer = bytearray(sum(math.prod(shape) * dtype.itemsize for dtype, shape in arrays_spec))
+        if file.readinto(buffer) != len(buffer):
+            raise ValueError("The record is truncated.")
+        arrays, offset = [None] * len(arrays_spec), 0
+        for i in sorted(range(len(arrays_spec)), key=lambda i: -arrays_spec[i][0].itemsize):
+            dtype, shape = arrays_spec[i]
+            arrays[i] = np.frombuffer(buffer, dtype=dtype, count=math.prod(shape), offset=offset).reshape(shape)
+            offset += arrays[i].nbytes
+        return _load_any(header["value"], arrays)
+    except (struct.error, KeyError, IndexError, TypeError, gs.GenesisException) as e:
+        raise ValueError("The file holds no record written by 'write_record' here.") from e
 
 
 def _exported_array(value: np.ndarray, exporting: Exporting) -> int:

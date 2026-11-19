@@ -1,7 +1,6 @@
 import functools
 import math
 import os
-import pickle
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
@@ -877,8 +876,8 @@ def _get_sdf_grid(
         gs.logger.debug(f"Preprocessed file (`.gsd`) found in cache: {gsd_path}.")
         try:
             with open(gsd_path, "rb") as file:
-                sdf_grid = pickle.load(file)
-        except (EOFError, ModuleNotFoundError, pickle.UnpicklingError, TypeError, MemoryError):
+                sdf_grid = SDFGrid(*serialization.read_record(file))
+        except (ValueError, MemoryError):
             gs.logger.info("Ignoring corrupted cache.")
 
     if sdf_grid is None:
@@ -947,7 +946,7 @@ def _get_sdf_grid(
         )
         os.makedirs(os.path.dirname(gsd_path), exist_ok=True)
         with open(gsd_path, "wb") as file:
-            pickle.dump(sdf_grid, file)
+            serialization.write_record(file, sdf_grid)
 
     return sdf_grid
 

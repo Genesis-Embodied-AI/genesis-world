@@ -1,16 +1,17 @@
 import math
 import os
-import pickle as pkl
 from pathlib import Path
 
-import fast_simplification
 import numpy as np
+
+import fast_simplification
 import trimesh
 
 import genesis as gs
 from genesis.ext.isaacgym import terrain_utils as isaacgym_terrain_utils
 from genesis.options.morphs import Terrain
 
+from . import serialization
 from .cache import get_gnd_path
 from .mesh import load_trimesh
 from .misc import tensor_to_array
@@ -56,9 +57,9 @@ def parse_terrain(morph: Terrain, surface):
     if heightfield is None and (gnd_file_path is not None and gnd_file_path.exists()):
         gs.logger.debug(f"Pre-genenerated terrain heightmap '{morph.name}' found in cache.")
         try:
-            with open(gnd_file_path, "rb") as fd:
-                heightfield = pkl.load(fd)
-        except (EOFError, ModuleNotFoundError, pkl.UnpicklingError, TypeError, MemoryError):
+            with open(gnd_file_path, "rb") as file:
+                heightfield = serialization.read_record(file)
+        except (ValueError, MemoryError):
             # Do not ignore error in case of corrupted cache, to make sure the user is aware of it
             gs.raise_exception(f"Corrupted cache for terrain heightmap: {gnd_file_path}")
 
@@ -167,7 +168,7 @@ def parse_terrain(morph: Terrain, surface):
         if gnd_file_path is not None:
             os.makedirs(os.path.dirname(gnd_file_path), exist_ok=True)
             with open(gnd_file_path, "wb") as file:
-                pkl.dump(heightfield, file)
+                serialization.write_record(file, heightfield)
 
     need_uvs = getattr(surface, "diffuse_texture", None) is not None
     heightfield = heightfield.astype(gs.np_float)
