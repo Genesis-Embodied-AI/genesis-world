@@ -81,8 +81,7 @@ class EQUALITY_TYPE(IntEnum):
     SCREW = 3
 
 
-# Number of parameters of an equality authored in a model file: two anchors, a relative quaternion and a torque scale, or
-# the five coefficients of a joint polynomial. It is the size of the equality data of MuJoCo before version 3.17.
+# Number of parameters of an equality authored in a model file.
 EQUALITY_DATA_SIZE = 11
 
 
