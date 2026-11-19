@@ -1,0 +1,19 @@
+genesis/constants.py
+  s_7607a55299a130::t_7dae4e2b1b6f36 84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "11a000e4582b2cf050d5526908f90a46c25d29c7",
+  "prompts": {},
+  "sessions": {
+    "s_7607a55299a130": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "03fe3a30-ab75-4677-b07b-fbe6d87dcd19",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
