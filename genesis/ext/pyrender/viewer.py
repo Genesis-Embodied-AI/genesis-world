@@ -618,7 +618,7 @@ class Viewer(pyglet.window.Window):
             to save the video file.
         """
         self._video_recorder.close()
-        if self._video_recorder.is_empty:
+        if self._video_recorder.filename is None:
             return
         if filename is None:
             filename = self._get_save_filename(["mp4"])
@@ -697,7 +697,7 @@ class Viewer(pyglet.window.Window):
                 self._video_recorder.close()
             except gs.GenesisException as e:
                 gs.logger.warning(f"{e}")
-            if not self._video_recorder.is_empty:
+            if self._video_recorder.filename is not None:
                 os.remove(self._video_recorder.filename)
 
         # Force clean-up of OpenGL context data

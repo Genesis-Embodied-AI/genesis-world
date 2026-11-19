@@ -255,13 +255,8 @@ class VideoEncoder:
 
     @property
     def filename(self):
-        """Path of the output video file."""
-        return self._filename
-
-    @property
-    def is_empty(self):
-        """Whether no video file exists, since no frame was written or encoding failed before creating it."""
-        return not self._is_file_created
+        """Path of the output video file, or None if no frame was written or encoding failed before creating it."""
+        return self._filename if self._is_file_created else None
 
     def close(self):
         """
