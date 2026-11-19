@@ -517,7 +517,7 @@ class MeshCache:
         """Return the payload of the matching entry, or None if this bucket holds none."""
         if not os.path.isdir(self._bucket_dir):
             return None
-        atol = MESH_CACHE_MATCH_RTOL * np.linalg.norm(self._verts.max(axis=0) - self._verts.min(axis=0))
+        atol = None
         # Trying the exact key first keeps an unchanged asset from ever paying for the scan.
         for filename in sorted(os.listdir(self._bucket_dir), key=lambda name: name != self._filename):
             try:
@@ -528,8 +528,14 @@ class MeshCache:
                     verts_dtype = np.dtype(verts_dtype)
                     verts_bytes = file.read(math.prod(verts_shape) * verts_dtype.itemsize)
                     verts_ref = np.frombuffer(verts_bytes, dtype=verts_dtype).reshape(verts_shape)
-                    if verts_ref.shape != self._verts.shape or (np.abs(self._verts - verts_ref) > atol).any():
-                        continue
+                    # Vertices equal bit for bit, as those of an unchanged asset are, spare the reductions of the
+                    # tolerance check, which cost far more than the rest of a load.
+                    if not np.array_equal(self._verts, verts_ref):
+                        if atol is None:
+                            verts_extent = self._verts.max(axis=0) - self._verts.min(axis=0)
+                            atol = MESH_CACHE_MATCH_RTOL * np.linalg.norm(verts_extent)
+                        if verts_ref.shape != self._verts.shape or (np.abs(self._verts - verts_ref) > atol).any():
+                            continue
                     # A bytearray, so that the arrays viewing it are writable.
                     buffer = bytearray(file.read())
                 arrays, offset = [None] * len(arrays_spec), 0
