@@ -1543,6 +1543,9 @@ class KinematicEntity(Entity):
             if pos is None and quat is None:
                 gs.raise_exception("At least one of `poss` or `quats` must be provided.")
             link_pos_mask.append(pos is not None)
+            # The mask zeroes the residual by multiplication, which an uninitialized NaN would survive
+            if pos is None:
+                pos = (0.0, 0.0, 0.0)
             poss[i] = broadcast_tensor(pos, gs.tc_float, (len(envs_idx), 3), ("envs_idx", "")).contiguous()
             link_rot_mask.append(quat is not None)
             if quat is None:
