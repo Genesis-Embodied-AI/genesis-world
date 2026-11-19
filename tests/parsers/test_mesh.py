@@ -991,8 +991,7 @@ def test_surface_reconstruction(recon_backend, show_viewer):
 # ==================== Mesh Processing/Caching Tests ====================
 
 
-# FIXME: This test is taking too much time on some platform (~1200s)
-# @pytest.mark.required
+@pytest.mark.required
 def test_convex_decompose_cache(monkeypatch, tmp_path, asset_tmp_path):
     # Counting the decompositions requires an on-disk cache that no earlier run has populated.
     monkeypatch.setenv("GS_CACHE_FILE_PATH", str(tmp_path))
