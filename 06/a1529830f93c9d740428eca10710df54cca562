@@ -1,0 +1,19 @@
+.github/workflows/nyx_plugin.yml
+  s_37344f43121012::t_7365431698b79b 63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "06a1529830f93c9d740428eca10710df54cca562",
+  "prompts": {},
+  "sessions": {
+    "s_37344f43121012": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "84e3f251-d274-49c6-b534-66aca5e93b0e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
