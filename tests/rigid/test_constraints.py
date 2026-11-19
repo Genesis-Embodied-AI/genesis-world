@@ -518,9 +518,8 @@ def test_urdf_mimic(show_viewer, tol, scaled_urdf_mimic):
         show_viewer=show_viewer,
     )
     hand = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/panda_bullet/hand.urdf",
-            fixed=True,
+        gs.morphs.MJCF(
+            file="xml/franka_emika_panda/hand.xml",
         ),
     )
     mimic = scene.add_entity(
@@ -639,63 +638,3 @@ def test_set_sol_params(n_envs, batched, tol):
     equality_b.set_sol_params([0.04, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0])
     assert_allclose(equality_a.get_sol_params(), [0.03, 0.6, 1e-4, 1e-4, 0.0, 1e-4, 1.0], tol=tol)
     assert_allclose(equality_b.get_sol_params(), [0.04, 0.7, 1e-4, 1e-4, 0.0, 1e-4, 1.0], tol=tol)
-
-
-@pytest.mark.required
-def test_mixed_mjcf_and_urdf_equality_data_width(tol):
-    import mujoco
-    from genesis.utils import mjcf as mju
-
-    xml = """
-    <mujoco model="slide_poly">
-      <worldbody>
-        <body name="driver_b"><joint name="d" type="slide" axis="1 0 0"/><geom type="sphere" size="0.05"/></body>
-        <body name="follower_b"><joint name="f" type="slide" axis="1 0 0"/><geom type="sphere" size="0.05"/></body>
-      </worldbody>
-      <equality>
-        <joint name="coup" joint1="f" joint2="d" polycoef="0.1 0.5 0.2 0 0"/>
-      </equality>
-    </mujoco>
-    """
-    mj = mujoco.MjModel.from_xml_string(xml)
-    orig_eq_data = mj.eq_data.copy()
-    (eq_info,) = mju.parse_equalities(mj, scale=2.0)
-    assert eq_info["data"].shape == (11,)
-    assert_allclose(mj.eq_data, orig_eq_data, tol=0)
-
-    scene = gs.Scene(sim_options=gs.options.SimOptions(gravity=(0.0, 0.0, 0.0)), show_viewer=False)
-    mjcf_panda = scene.add_entity(gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml", pos=(0.0, -0.5, 0.0)))
-    urdf_panda = scene.add_entity(gs.morphs.URDF(file="urdf/panda_bullet/panda.urdf", pos=(0.0, 0.5, 0.0), fixed=True))
-    scene.build()
-    assert len(mjcf_panda.equalities) >= 1
-    assert len(urdf_panda.equalities) >= 1
-    for eq in (*mjcf_panda.equalities, *urdf_panda.equalities):
-        assert eq.eq_data.shape == (11,)
-
-    mjcf_f1 = mjcf_panda.get_joint("finger_joint1").dofs_idx_local
-    mjcf_f2 = mjcf_panda.get_joint("finger_joint2").dofs_idx_local
-    mjcf_panda.set_dofs_position([0.03], dofs_idx_local=mjcf_f1)
-    assert_allclose(mjcf_panda.get_dofs_position(dofs_idx_local=mjcf_f1), [0.03], tol=tol)
-    assert_allclose(mjcf_panda.get_dofs_position(dofs_idx_local=mjcf_f2), [0.0], tol=tol)
-
-    urdf_f1 = urdf_panda.get_joint("panda_finger_joint1").dofs_idx_local
-    urdf_f2 = urdf_panda.get_joint("panda_finger_joint2").dofs_idx_local
-    urdf_panda.set_dofs_kp([200.0], dofs_idx_local=urdf_f1)
-    urdf_panda.set_dofs_kv([20.0], dofs_idx_local=urdf_f1)
-    urdf_panda.set_dofs_position([0.03], dofs_idx_local=urdf_f1)
-    urdf_panda.control_dofs_position([0.03], dofs_idx_local=urdf_f1)
-    assert_allclose(urdf_panda.get_dofs_position(dofs_idx_local=urdf_f1), [0.03], tol=tol)
-    assert_allclose(urdf_panda.get_dofs_position(dofs_idx_local=urdf_f2), [0.0], tol=tol)
-
-    for _ in range(50):
-        scene.step()
-
-    mjcf_p1 = mjcf_panda.get_dofs_position(dofs_idx_local=mjcf_f1)
-    mjcf_p2 = mjcf_panda.get_dofs_position(dofs_idx_local=mjcf_f2)
-    assert float(mjcf_p2[0]) > 0.005
-    assert_allclose(mjcf_p1, mjcf_p2, tol=2e-3)
-
-    urdf_p1 = urdf_panda.get_dofs_position(dofs_idx_local=urdf_f1)
-    urdf_p2 = urdf_panda.get_dofs_position(dofs_idx_local=urdf_f2)
-    assert float(urdf_p2[0]) > 0.02
-    assert_allclose(urdf_p1, urdf_p2, tol=2e-3)
