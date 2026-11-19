@@ -1,0 +1,25 @@
+genesis/options/morphs.py
+  s_49f5eb6d6c0fef::t_a3e8085dee177e 1615,1620
+genesis/utils/usd/usd_rigid_entity.py
+  s_49f5eb6d6c0fef::t_b895de5c6b83e5 290,301
+  s_49f5eb6d6c0fef::t_a3e8085dee177e 289
+tests/parsers/conftest.py
+  s_49f5eb6d6c0fef::t_8ad3dbeb4f6f94 1325
+  s_49f5eb6d6c0fef::t_a3e8085dee177e 1326-1327
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b825532e40b10764a6ea449e13f258f11cbfe289",
+  "prompts": {},
+  "sessions": {
+    "s_49f5eb6d6c0fef": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7231eef5-8cd4-422f-b99e-eebfbeb63fc6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
