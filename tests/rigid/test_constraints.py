@@ -663,7 +663,7 @@ def test_mixed_mjcf_and_urdf_equality_data_width(tol):
     assert eq_info["data"].shape == (11,)
     assert_allclose(mj.eq_data, orig_eq_data, tol=0)
 
-    scene = gs.Scene(show_viewer=False, show_FPS=False)
+    scene = gs.Scene(sim_options=gs.options.SimOptions(gravity=(0.0, 0.0, 0.0)), show_viewer=False)
     mjcf_panda = scene.add_entity(gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml", pos=(0.0, -0.5, 0.0)))
     urdf_panda = scene.add_entity(gs.morphs.URDF(file="urdf/panda_bullet/panda.urdf", pos=(0.0, 0.5, 0.0), fixed=True))
     scene.build()
@@ -671,9 +671,31 @@ def test_mixed_mjcf_and_urdf_equality_data_width(tol):
     assert len(urdf_panda.equalities) >= 1
     for eq in (*mjcf_panda.equalities, *urdf_panda.equalities):
         assert eq.eq_data.shape == (11,)
-    scene.step()
-    assert_allclose(
-        mjcf_panda.get_joint("finger_joint1").get_pos(),
-        mjcf_panda.get_joint("finger_joint2").get_pos(),
-        tol=tol,
-    )
+
+    mjcf_f1 = mjcf_panda.get_joint("finger_joint1").dofs_idx_local
+    mjcf_f2 = mjcf_panda.get_joint("finger_joint2").dofs_idx_local
+    mjcf_panda.set_dofs_position([0.03], dofs_idx_local=mjcf_f1)
+    assert_allclose(mjcf_panda.get_dofs_position(dofs_idx_local=mjcf_f1), [0.03], tol=tol)
+    assert_allclose(mjcf_panda.get_dofs_position(dofs_idx_local=mjcf_f2), [0.0], tol=tol)
+
+    urdf_f1 = urdf_panda.get_joint("panda_finger_joint1").dofs_idx_local
+    urdf_f2 = urdf_panda.get_joint("panda_finger_joint2").dofs_idx_local
+    urdf_panda.set_dofs_kp([200.0], dofs_idx_local=urdf_f1)
+    urdf_panda.set_dofs_kv([20.0], dofs_idx_local=urdf_f1)
+    urdf_panda.set_dofs_position([0.03], dofs_idx_local=urdf_f1)
+    urdf_panda.control_dofs_position([0.03], dofs_idx_local=urdf_f1)
+    assert_allclose(urdf_panda.get_dofs_position(dofs_idx_local=urdf_f1), [0.03], tol=tol)
+    assert_allclose(urdf_panda.get_dofs_position(dofs_idx_local=urdf_f2), [0.0], tol=tol)
+
+    for _ in range(50):
+        scene.step()
+
+    mjcf_p1 = mjcf_panda.get_dofs_position(dofs_idx_local=mjcf_f1)
+    mjcf_p2 = mjcf_panda.get_dofs_position(dofs_idx_local=mjcf_f2)
+    assert float(mjcf_p2[0]) > 0.005
+    assert_allclose(mjcf_p1, mjcf_p2, tol=2e-3)
+
+    urdf_p1 = urdf_panda.get_dofs_position(dofs_idx_local=urdf_f1)
+    urdf_p2 = urdf_panda.get_dofs_position(dofs_idx_local=urdf_f2)
+    assert float(urdf_p2[0]) > 0.02
+    assert_allclose(urdf_p1, urdf_p2, tol=2e-3)
