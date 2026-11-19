@@ -516,7 +516,7 @@ def func_forward_kinematics_link(
         dyn_state.links.quat[i_l, i_b] = R(I_jf, quat, dyn_state.links.quat_bw, BW)
     else:
         dyn_state.links.pos[i_l, i_b] = dyn_state.fixed_roots.pos[i_fr, i_b]
-        dyn_state.links.quat[i_l, i_b] = dyn_state.fixed_roots.quat[i_fr, i_b]
+        dyn_state.links.quat[i_l, i_b] = gu.qd_normalize(dyn_state.fixed_roots.quat[i_fr, i_b], rigid_info.EPS[None])
 
 
 @qd.func

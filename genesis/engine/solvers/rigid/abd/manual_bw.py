@@ -58,10 +58,8 @@ def func_forward_kinematics_link_bw(
                     + xanchor_grad[j]
                     + dyn_state.dofs.pos.grad[dof_start + j, i_b]
                 )
-            # The forward normalizes the raw qpos quaternion (quat_ = q / |q|) before writing the link quaternion, so
-            # the gradient must pass through the Jacobian of q / |q|: J^T g = (g - qhat (qhat . g)) / |q|. Copying g
-            # straight into the raw entries leaves a spurious radial component that disagrees with finite differences
-            # even at unit length.
+            # The forward normalizes the raw qpos quaternion before writing the link quaternion, so the gradient passes
+            # through the Jacobian of the normalization, which has no component along the quaternion.
             q_raw = qd.Vector(
                 [
                     rigid_info.qpos[q_start + 3, i_b],
@@ -71,8 +69,7 @@ def func_forward_kinematics_link_bw(
                 ],
                 dt=gs.qd_float,
             )
-            q_norm = q_raw.norm()
-            qhat = q_raw / q_norm
+            qhat = gu.qd_normalize(q_raw, rigid_info.EPS[None])
             g_xyz = qd.Vector(
                 [
                     dyn_state.dofs.pos.grad[dof_start + 3, i_b],
@@ -82,7 +79,7 @@ def func_forward_kinematics_link_bw(
                 dt=gs.qd_float,
             )
             g_quat_eff = g_quat + gu.qd_quat_to_xyz_grad_quat(qhat, rigid_info.EPS[None], g_xyz)
-            g_quat_raw = (g_quat_eff - qhat * qhat.dot(g_quat_eff)) / q_norm
+            g_quat_raw = gu.qd_normalize_grad(q_raw, g_quat_eff, rigid_info.EPS[None])
             for j in qd.static(range(4)):
                 rigid_info.qpos.grad[q_start + 3 + j, i_b] = rigid_info.qpos.grad[q_start + 3 + j, i_b] + g_quat_raw[j]
             for j in qd.static(range(6)):
@@ -221,17 +218,20 @@ def func_forward_kinematics_link_bw(
                 + parent_quat_grad_from_quat[j]
             )
 
-    # The forward copies the pose of a fixed root link from its state (see func_forward_kinematics_link), which is
-    # persistent across substeps, so its grad keeps accumulating there.
+    # The forward copies the pose of a fixed root link from its state, normalizing its quaternion as the one of a free
+    # joint (see func_forward_kinematics_link). The state persists across substeps, so its grad keeps accumulating.
     i_fr = dyn_info.links.fixed_root_idx[I_l]
     if i_fr != -1:
         for j in qd.static(range(3)):
             dyn_state.fixed_roots.pos.grad[i_fr, i_b][j] = (
                 dyn_state.fixed_roots.pos.grad[i_fr, i_b][j] + dyn_state.links.pos.grad[i_l, i_b][j]
             )
+        g_quat_raw = gu.qd_normalize_grad(
+            dyn_state.fixed_roots.quat[i_fr, i_b], dyn_state.links.quat.grad[i_l, i_b], rigid_info.EPS[None]
+        )
         for j in qd.static(range(4)):
             dyn_state.fixed_roots.quat.grad[i_fr, i_b][j] = (
-                dyn_state.fixed_roots.quat.grad[i_fr, i_b][j] + dyn_state.links.quat.grad[i_l, i_b][j]
+                dyn_state.fixed_roots.quat.grad[i_fr, i_b][j] + g_quat_raw[j]
             )
     for j in qd.static(range(3)):
         dyn_state.links.pos.grad[i_l, i_b][j] = 0.0

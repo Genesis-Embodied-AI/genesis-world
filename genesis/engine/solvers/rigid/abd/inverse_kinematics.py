@@ -213,7 +213,7 @@ def func_forward_kinematics_scratch(
         i_fr = dyn_info.links.fixed_root_idx[I_l]
         if i_fr != -1:
             pos = dyn_state.fixed_roots.pos[i_fr, i_b]
-            quat = dyn_state.fixed_roots.quat[i_fr, i_b]
+            quat = gu.qd_normalize(dyn_state.fixed_roots.quat[i_fr, i_b], rigid_info.EPS[None])
         links_pos[i_l - link_offset, i_col_out] = pos
         links_quat[i_l - link_offset, i_col_out] = quat
 

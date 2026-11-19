@@ -490,6 +490,18 @@ def qd_quat_mul_grad_rhs(u, v, out_grad):
 
 
 @qd.func
+def qd_normalize_grad(v, out_grad, eps):
+    """Adjoint of 'qd_normalize(v, eps)' with respect to 'v', given the upstream gradient of its output.
+
+    The output stays on the unit sphere whatever the length of 'v' past 'eps', so the gradient loses its component along
+    'v' and scales with the inverse of its length.
+    """
+    v_norm = qd.max(v.norm(), eps)
+    v_hat = v / v_norm
+    return (out_grad - v_hat * v_hat.dot(out_grad)) / v_norm
+
+
+@qd.func
 def qd_transform_quat_by_quat(v, u):
     """Transforms quat_v by quat_u.
 
