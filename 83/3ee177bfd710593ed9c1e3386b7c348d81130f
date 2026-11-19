@@ -1,0 +1,23 @@
+genesis/utils/terrain.py
+  s_ba6818de79411d::t_b6a7bb5ad8be63 61,171
+genesis/engine/mesh.py
+  s_ba6818de79411d::t_b6a7bb5ad8be63 1,41-43,46,48,50,52,54,882,952
+genesis/utils/serialization.py
+  s_ba6818de79411d::t_b6a7bb5ad8be63 683,687-691,694,707-708,710-711,726
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "833ee177bfd710593ed9c1e3386b7c348d81130f",
+  "prompts": {},
+  "sessions": {
+    "s_ba6818de79411d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7b6882f7-45d2-409b-b6b7-a4f2092c5b57",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
