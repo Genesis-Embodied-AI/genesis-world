@@ -8,8 +8,9 @@ import pytest
 import torch
 
 import genesis as gs
-from genesis.utils.misc import tensor_to_array
+from genesis.engine.render_context import StaticMeshBatch
 from genesis.utils.geom import pos_lookat_up_to_T, trans_quat_to_T, trans_to_T
+from genesis.utils.misc import tensor_to_array
 
 from ..conftest import SKIP_NO_LUISA, SKIP_NO_MADRONA
 from ..utils.assertions import assert_allclose, assert_equal, rgb_array_to_png_bytes
@@ -101,6 +102,7 @@ def test_rasterizer_non_batched(n_envs, show_viewer):
             lookat=(0.0, 0.0, 1.0),
             up=(0.0, 0.0, 1.0),
             fov=45.0,
+            draw_debug=True,
         )
     )
     raster_cam_attached = scene.add_sensor(
@@ -126,6 +128,7 @@ def test_rasterizer_non_batched(n_envs, show_viewer):
             entity_idx=sphere.idx,
             link_idx_local=0,
             offset_T=offset_T,
+            draw_debug=True,
         )
     )
     raster_cam_attached_kin = scene.add_sensor(
@@ -164,27 +167,49 @@ def test_rasterizer_non_batched(n_envs, show_viewer):
     data_env0 = raster_cam0.read(envs_idx=0)
     assert data_env0.rgb.shape == (512, 512, 3)
 
-    def _get_camera_world_pos(sensor):
+    def _get_camera_world_T(sensor):
         renderer = sensor._shared_metadata.renderer
         context = sensor._shared_metadata.context
         node = renderer._camera_nodes[sensor._idx]
         pose = context._scene.get_pose(node)
         if pose.ndim == 3:
             pose = pose[0]
-        return pose[:3, 3].copy()
+        return pose.copy()
 
-    cam_pos_initial = _get_camera_world_pos(raster_cam_attached)
-    cam_pos_initial_offset_T = _get_camera_world_pos(raster_cam_offset_T)
+    # A camera drawing its debug shows its view posed where it renders from: its rays between its clipping planes, as
+    # far from its line of sight as its field of view and aspect ratio make them. The view is translucent, unlike the
+    # sphere at the center of projection.
+    cameras_markers = [
+        marker
+        for marker in scene.sim.render_context.get_markers()
+        if isinstance(marker, StaticMeshBatch) and len(marker) == 2
+    ]
+    assert len(cameras_markers) == 2
+    for sensor, fov, aspect_ratio in ((raster_cam1, 45.0, 1.0), (raster_cam_offset_T, 70.0, 320 / 240)):
+        camera_T = _get_camera_world_T(sensor)
+        markers = min(
+            cameras_markers, key=lambda markers: np.linalg.norm(tensor_to_array(markers.pos[0, 1]) - camera_T[:3, 3])
+        )
+        assert_allclose(tensor_to_array(trans_quat_to_T(markers.pos[0, 1], markers.quat[0, 1])), camera_T, tol=1e-5)
+        view = markers.geometries[1]
+        assert (view.visual.vertex_colors[:, 3] < 255).all()
+        verts = tensor_to_array(view.verts)
+        assert (np.isclose(-verts[:, 2], 0.01, rtol=1e-5) | np.isclose(-verts[:, 2], 100.0, rtol=1e-5)).all()
+        verts_slope = np.abs(verts[:, :2] / verts[:, 2:]).max(axis=0)
+        assert_allclose(verts_slope, np.tan(np.deg2rad(fov / 2)) * np.array((aspect_ratio, 1.0)), tol=1e-5)
+
+    cam_pos_initial = _get_camera_world_T(raster_cam_attached)[:3, 3]
+    cam_pos_initial_offset_T = _get_camera_world_T(raster_cam_offset_T)[:3, 3]
 
     for _ in range(10):  # Test over multiple steps
         scene.step()
 
     raster_cam_attached.read()
-    cam_pos_final = _get_camera_world_pos(raster_cam_attached)
+    cam_pos_final = _get_camera_world_T(raster_cam_attached)[:3, 3]
     cam_move_dist = np.linalg.norm(cam_pos_final - cam_pos_initial)
     assert cam_move_dist > 1e-2
     raster_cam_offset_T.read()
-    cam_pos_final_offset_T = _get_camera_world_pos(raster_cam_offset_T)
+    cam_pos_final_offset_T = _get_camera_world_T(raster_cam_offset_T)[:3, 3]
     cam_move_dist_offset_T = np.linalg.norm(cam_pos_final_offset_T - cam_pos_initial_offset_T)
     assert cam_move_dist_offset_T > 1e-2
     assert_allclose(cam_move_dist_offset_T, cam_move_dist, atol=1e-2)
@@ -409,6 +434,15 @@ def test_batch_renderer(n_envs, png_snapshot):
             offset_T=trans_to_T(np.array([0.0, 0.0, 3.0])),
         )
     )
+    scene.add_sensor(
+        gs.sensors.BatchRendererCameraOptions(
+            res=CAM_RES,
+            fov=70.0,
+            model="fisheye",
+            use_rasterizer=True,
+            draw_debug=True,
+        )
+    )
 
     scene.build(n_envs=n_envs)
 
@@ -420,6 +454,14 @@ def test_batch_renderer(n_envs, png_snapshot):
                 assert rgb_array_to_png_bytes(data.rgb[i]) == png_snapshot
         else:
             assert rgb_array_to_png_bytes(data.rgb) == png_snapshot
+
+    # The view of a rasterized fisheye is the disk inscribed in its image: its rays reach half its field of view in
+    # every direction, between its clipping planes
+    (markers,) = scene.sim.render_context.get_markers()
+    verts = tensor_to_array(markers.geometries[1].verts)
+    assert (np.isclose(-verts[:, 2], 0.01, rtol=1e-5) | np.isclose(-verts[:, 2], 100.0, rtol=1e-5)).all()
+    verts_angle = np.arctan2(np.linalg.norm(verts[:, :2], axis=-1), -verts[:, 2])
+    assert_allclose(verts_angle.max(), np.deg2rad(70.0 / 2), tol=1e-5)
 
 
 @pytest.mark.required
