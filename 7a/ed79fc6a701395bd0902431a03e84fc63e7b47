@@ -1,0 +1,217 @@
+examples/sensors/tactile_sandbox.py
+  s_6331e9b5eb051b::t_d9b7ea95688570 462,472,487-517
+  s_6331e9b5eb051b::t_0998b6effb88ec 2,6-15,283-285,292-293,389-396,411-413,415-423,425,428-430,456-459,463-471,475,477,479,481,484-485
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 253-255
+  s_6331e9b5eb051b::t_c41794da5c3291 486
+examples/rigid/wrecking_ball.py
+  s_6331e9b5eb051b::t_ba3d3886e8a71e 8-9,246-250,268-270
+examples/tutorials/advanced_IK_multilink.py
+  s_6331e9b5eb051b::t_777d2acbfe068e 1,9-12,25
+examples/tutorials/control_your_robot.py
+  s_6331e9b5eb051b::t_f783432aa16784 33-36,52,111-114
+  s_6331e9b5eb051b::t_777d2acbfe068e 1,8-11,23
+examples/sensors/joint_torque_franka.py
+  s_6331e9b5eb051b::t_c559713398eeb7 130
+  s_6331e9b5eb051b::t_bd20e3cbc6681d 13-14,42-44,53-54,114-127,129,153-155
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 33-35
+  s_6331e9b5eb051b::t_fb0916d11a64a7 156
+examples/sensors/camera_as_sensor.py
+  s_6331e9b5eb051b::t_c559713398eeb7 199
+  s_6331e9b5eb051b::t_c09de2b8f64b72 15,25-43,68-70,75,117,120-126,128-129,131-142,144-152,156-160,163-177,180
+  s_6331e9b5eb051b::t_c1f003bafc6f0c 7-9,12-13,16,19,21,44-51,55-67,73-74,76-79,81-82,84-91,93-98,100-108,110-116,118,127,130,161,179,182-187,190-193,197-198,201-204,208-209,211-212,215-216
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 52-54
+  s_6331e9b5eb051b::t_6ddbcecce8b46b 153-155,195,205-207
+  s_6331e9b5eb051b::t_344e00b873a6d5 181
+examples/speed_benchmark/anymal_c.py
+  s_6331e9b5eb051b::t_f2ea7b2d5c0afa 1-2,4,6-7,11-14,16,18-21,24-66,68-98
+  s_6331e9b5eb051b::t_862457d5c8eb12 3,15,22-23
+  s_6331e9b5eb051b::t_c559713398eeb7 17,67
+examples/rigid/heterogeneous_simulation.py
+  s_97d9f72a1a8313::t_d7932bdc6417aa 27-28,36,39,51,54,57,60-61,83-96,98,126,131,142,146-148
+  s_6331e9b5eb051b::t_c559713398eeb7 99
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 47-49
+  s_6331e9b5eb051b::t_833d41d543c720 55-56,149
+examples/locomotion/go2_eval.py
+  s_6331e9b5eb051b::t_2ba3f946fdc206 50
+examples/tutorials/advanced_hybrid_robot.py
+  s_6331e9b5eb051b::t_777d2acbfe068e 1,5,8-10,42
+examples/rigid/torsional_grasp.py
+  s_6331e9b5eb051b::t_8873843e86bc00 8-9,13,57,61-63,70-71,98-110,112,120,126-129
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 53-55
+  s_6331e9b5eb051b::t_c559713398eeb7 113
+examples/rigid/set_phys_attr.py
+  s_6331e9b5eb051b::t_55c23ef2e778d2 137
+examples/deformable/fem_hard_and_soft_constraint.py
+  s_6331e9b5eb051b::t_c559713398eeb7 140
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 30-35
+  s_6331e9b5eb051b::t_0aa123871c7f79 1-7,9,26-29,39-41,55-60,121-135,139,190-193
+  s_6331e9b5eb051b::t_ee3cc3f27f953f 42
+examples/speed_benchmark/franka.py
+  s_6331e9b5eb051b::t_c559713398eeb7 17,65
+  s_6331e9b5eb051b::t_862457d5c8eb12 3,15,22-23
+  s_6331e9b5eb051b::t_f86b2337d1f101 1-2,4,6-7,11-14,16,18-21,24-64,66-81
+examples/tutorials/draw_debug.py
+  s_6331e9b5eb051b::t_3ac029f39d89b1 1,3-4,6,11-14,26
+examples/drone/README.md
+  s_6331e9b5eb051b::t_ee5f68ba2fff76 8-14,21,24,29-30,34,37
+  s_6331e9b5eb051b::t_7ee3a545ca7e8a 100
+  s_6331e9b5eb051b::t_9a2b2919a394c7 99,101
+  s_6331e9b5eb051b::t_696a11c651dfac 26-28
+  s_6331e9b5eb051b::t_426df29093b513 25,38
+examples/rigid/diffik_controller.py
+  s_6331e9b5eb051b::t_1629e349bb35a0 4-6,109-112,116,118,121-122,144-152
+  s_6331e9b5eb051b::t_c559713398eeb7 91
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 29-31
+  s_6331e9b5eb051b::t_6872ce9dd0be26 1-3,7-8,10,15-16,33,38-40,43-44,47-49,79-88,90,102-108,113-115,117,126,129,135,137,140
+  s_6331e9b5eb051b::t_9c4489a26eaca6 153
+examples/tutorials/advanced_muscle.py
+  s_6331e9b5eb051b::t_777d2acbfe068e 1,8-10,41
+  s_6331e9b5eb051b::t_2088a4805ab5fa 3
+  s_6331e9b5eb051b::t_91dfea1e0dea0b 5
+examples/tutorials/pbd_cloth.py
+  s_6331e9b5eb051b::t_777d2acbfe068e 1,6-9,22
+examples/tutorials/parallel_simulation.py
+  s_6331e9b5eb051b::t_48b162b2d7cdbd 1-3,8-11,18-22,28,39-45,61-62,64-67
+examples/rigid/single_franka_batch_render.py
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 30-32
+  s_6331e9b5eb051b::t_383d3cee798ffe 1-6,8-9,39-41,43-46,53,69-78,122-126,132,150-154
+  s_6331e9b5eb051b::t_c559713398eeb7 133
+examples/sensors/lidar_teleop.py
+  s_6331e9b5eb051b::t_e7a85acabfaa57 11,192-193,199,203,207-237
+  s_6331e9b5eb051b::t_970a20fcce1b0f 1-10,12-15,44,52-54,60-61,66,130-134,145-154,182-191,194-198,200-201,204-205
+  s_6331e9b5eb051b::t_49c03d65b61ea4 25,27
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 45-47
+  s_6331e9b5eb051b::t_62eff0bb1500c0 206
+examples/tutorials/mpm.py
+  s_6331e9b5eb051b::t_2088a4805ab5fa 3
+  s_6331e9b5eb051b::t_777d2acbfe068e 1,6-9,29
+  s_6331e9b5eb051b::t_c7f52f9f362a1d 47
+examples/gui/imgui_joint_control.py
+  s_6331e9b5eb051b::t_c559713398eeb7 93
+  s_6331e9b5eb051b::t_4695b18eda7b90 10-12,15-16,19-20,24-27,31-89,91-92,94-95,97-108
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 28-30
+  s_6331e9b5eb051b::t_da67a4ead43355 90,96
+examples/tutorials/sph_liquid.py
+  s_6331e9b5eb051b::t_777d2acbfe068e 1,6-8,29
+examples/rigid/ik_shadow_hand.py
+  s_6331e9b5eb051b::t_8c5db68392f97e 1-12,14,19,25-29,34,45-46,52-65,77-85,88,96-120,126-139,142
+  s_6331e9b5eb051b::t_1629e349bb35a0 122,124-125,146-154
+  s_6331e9b5eb051b::t_38677d617d832b 38-41
+  s_6331e9b5eb051b::t_c559713398eeb7 89
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 30-32
+  s_6331e9b5eb051b::t_efc3c967184a24 42,155
+examples/drone/interactive_drone.py
+  s_6331e9b5eb051b::t_676ace09b72648 3,111-114,128-133,143,148-178,183
+  s_6331e9b5eb051b::t_d83c20421e96fc 4-5,8-9,141-142
+  s_6331e9b5eb051b::t_c559713398eeb7 109
+  s_6331e9b5eb051b::t_c83122c3ad4246 1-2,6-7,10-15,51-52,56-58,61-63,73-74,77-80,92-102,108,117,119-121,124-126,144-145,179-182
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 53-55
+  s_6331e9b5eb051b::t_32a9b609bcb6fc 136-138
+  s_6331e9b5eb051b::t_503751a06d795c 123,127,134-135,139-140
+examples/rigid/multi_gpu.py
+  s_6331e9b5eb051b::t_196eaa886cc518 1-6,24-26,29-30,33-35,49-62,64,68-70,75-76,78
+  s_6331e9b5eb051b::t_00532a19958d25 17-21,74,85,93-96
+  s_6331e9b5eb051b::t_c559713398eeb7 65,77
+  s_6331e9b5eb051b::t_4023b70481d0fd 71
+examples/collision/contype.py
+  s_6331e9b5eb051b::t_b5cbffb2ba205f 9-11,15,33-34,89-102,104,107-111
+  s_6331e9b5eb051b::t_c559713398eeb7 23,105
+  s_6331e9b5eb051b::t_abf8ff8288a7a7 28-30
+examples/usd/kitchen.py
+  s_6331e9b5eb051b::t_8b668f9b9bd984 153-154,156-159
+  s_6331e9b5eb051b::t_8b4404423ac5d1 10,12-14,54-58,66-69,113-120,152,161-162
+  s_6331e9b5eb051b::t_c559713398eeb7 49,155
+examples/drone/fly_route.py
+  s_6331e9b5eb051b::t_23bf68f2e8da19 3-5,17,22-42,59,93-96,104-105,109-111,137,142
+  s_6331e9b5eb051b::t_c96c96a0194aef 97-103,106-108
+  s_6331e9b5eb051b::t_157bd26b225fee 54-55,86-88
+  s_6331e9b5eb051b::t_6f827ecc80e5ca 1,6-9,11-12,14,18-19,46-47,49-51,61-63,65,79-85,91,113-115,117-118,120-128,130-136,138-141
+  s_6331e9b5eb051b::t_c559713398eeb7 48,92
+  s_6331e9b5eb051b::t_0081d0e8baee4b 16,20-21,56,60
+examples/rigid/ddp_multi_gpu.py
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 148-150
+  s_6331e9b5eb051b::t_c559713398eeb7 87
+  s_6331e9b5eb051b::t_a7bbe2cf54c7a0 134-136
+  s_6331e9b5eb051b::t_60e39c3becf6e5 11-13,53-54,57-58,61-63,73-84,86,128-130
+examples/tutorials/IK_motion_planning_grasp.py
+  s_6331e9b5eb051b::t_777d2acbfe068e 1,8-10,23
+  s_6331e9b5eb051b::t_2088a4805ab5fa 3
+  s_6331e9b5eb051b::t_879d2d8447ce7c 5,35-40,42
+examples/sensors/surface_distance_shadowhand.py
+  s_6331e9b5eb051b::t_c559713398eeb7 164
+  s_6331e9b5eb051b::t_57c2953fa07859 2-3,5-11,18,22,54-56,62-63,121-128,132-137,139-140,142,161-163,165-175,177-186
+  s_6331e9b5eb051b::t_a7bbe2cf54c7a0 145
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 43-45
+examples/rigid/grasp_bottle.py
+  s_6331e9b5eb051b::t_c559713398eeb7 80
+  s_6331e9b5eb051b::t_4f499ec16f2126 1-5,7,17-20,25,30-32,34-35,65-77,79,110,114,124,132,145-149
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 21-23
+examples/tutorials/visualization.py
+  s_6331e9b5eb051b::t_48b162b2d7cdbd 43
+  s_6331e9b5eb051b::t_777d2acbfe068e 1,7-10,28
+  s_6331e9b5eb051b::t_2088a4805ab5fa 3-4
+examples/sensors/depth_camera_custom_vverts.py
+  s_6331e9b5eb051b::t_6ddbcecce8b46b 210
+  s_6331e9b5eb051b::t_c559713398eeb7 209
+  s_6331e9b5eb051b::t_394170475e6eba 1-4,7,31-32,41-43,52-53,148-161,208,245
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 27-29
+  s_6331e9b5eb051b::t_53b120e6477ff5 211-233,236,240-244
+examples/usd/import_stage.py
+  s_6331e9b5eb051b::t_d782d4a4777c1c 1-5,14,62-64,67-68,71-73,96-109,111,119-121
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 55-57
+  s_6331e9b5eb051b::t_c559713398eeb7 112
+  s_6331e9b5eb051b::t_aaa1d01ed5a1be 122-123
+examples/viewer_plugin/mouse_interaction.py
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 27-29
+  s_6331e9b5eb051b::t_82fd7002a5e3a2 11-12,126
+  s_6331e9b5eb051b::t_a9ebaf40eb626f 1-6,26,34-36,42-43,46,54,64,75,79,89-98,100-106,117-123,125,127,130-138
+  s_6331e9b5eb051b::t_a7bbe2cf54c7a0 128-129
+  s_6331e9b5eb051b::t_c559713398eeb7 124
+examples/sensors/imu_franka.py
+  s_6331e9b5eb051b::t_71ba3f6ebbeff0 4,141,147-153
+  s_6331e9b5eb051b::t_c559713398eeb7 25,30-32,41-42,108-121,123-124
+  s_6331e9b5eb051b::t_5c840898f0380d 1-3,5-8,154,164-167
+examples/viewer_plugin/keyboard_teleop.py
+  s_6331e9b5eb051b::t_2c7b4b91ce3693 1-2,5-19,22,32-35,39-40,42-44,55-56,62,65,73,75-76,78,81-83,99-106,108,110-113,122-123,128-129,131,134,137-141,184,188-203,206,211-212
+  s_6331e9b5eb051b::t_5f2d47f81b3a53 3-4,143-179,187,207-208
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 36-38
+  s_6331e9b5eb051b::t_74c699333d06f0 204-205
+examples/rigid/merge_entities.py
+  s_6331e9b5eb051b::t_c559713398eeb7 107
+  s_6331e9b5eb051b::t_e527888bfeea94 1-6,8-9,11,31,35-37,43-44,91-104,106,155-166
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 27-29
+examples/tutorials/entity_name.py
+  s_6331e9b5eb051b::t_f23002f6a26c03 12,54-55,68-72
+  s_6331e9b5eb051b::t_a1d84425863313 73
+examples/rendering/render_async.py
+  s_6331e9b5eb051b::t_f24174ec6decdb 15,20,82-83,85
+  s_6331e9b5eb051b::t_c559713398eeb7 80
+  s_6331e9b5eb051b::t_2d92fe5c04794b 1-8,16-19,25-27,31-34,37-39,49-50,53-56,59-60,64-77,79,84,87
+  s_6331e9b5eb051b::t_a64dab73c4ceb9 28-30
+examples/ipc/ipc_robot_cloth_teleop.py
+  s_6331e9b5eb051b::t_a02c1033227d45 3-14,187
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7aed79fc6a701395bd0902431a03e84fc63e7b47",
+  "prompts": {},
+  "sessions": {
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_97d9f72a1a8313": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1e5d1aac-b534-45a8-8bbe-9b1b95becf40",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
