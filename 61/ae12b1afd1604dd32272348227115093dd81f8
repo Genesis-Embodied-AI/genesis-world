@@ -1,0 +1,68 @@
+examples/tutorials/12_sph_liquid.py
+  s_6331e9b5eb051b::t_1f514d4fad28c7 1-55
+examples/tutorials/14_worm.py
+  s_6331e9b5eb051b::t_1f514d4fad28c7 1-100
+examples/tutorials/02_visualization.py
+  s_6331e9b5eb051b::t_945ba777a776d0 6,15-20,39-49,53-55,68,72,75
+  s_6331e9b5eb051b::t_5bf0818fae9c91 61
+  s_6331e9b5eb051b::t_d16d1217053252 62,65,73-74
+  s_6331e9b5eb051b::t_67a01d377fa7c0 64,67
+  s_6331e9b5eb051b::t_bb10fa5ab6da2d 34-37
+  s_6331e9b5eb051b::t_d9b3f1dbd7f7bb 76-78
+examples/tutorials/15_hybrid_robot.py
+  s_6331e9b5eb051b::t_1f514d4fad28c7 1-91
+examples/tutorials/09_ik_multilink.py
+  s_6331e9b5eb051b::t_1f514d4fad28c7 1-84
+examples/tutorials/13_muscle.py
+  s_6331e9b5eb051b::t_1f514d4fad28c7 1-85
+examples/tutorials/16_interactive_debugging.py
+  s_6331e9b5eb051b::t_1f514d4fad28c7 1-18
+examples/tutorials/11_pbd_cloth.py
+  s_6331e9b5eb051b::t_1f514d4fad28c7 1-70
+examples/tutorials/03_control_your_robot.py
+  s_6331e9b5eb051b::t_876e6d6d06a8e1 2,13,16,30-31,36-45,48-50,52-56,58-64,66-67,71-79,81-87
+  s_6331e9b5eb051b::t_d9b3f1dbd7f7bb 19-21
+  s_6331e9b5eb051b::t_ecdfb764d23270 65,68-70
+README.md
+  s_6331e9b5eb051b::t_0a44d392155001 55
+  s_6331e9b5eb051b::t_fe67519a0fe5e6 57,61,91,95,234,241,243,245
+examples/tutorials/05_parallel_simulation.py
+  s_6331e9b5eb051b::t_19ca4aad9002f0 14-16,22,27,35-37,39-43,45,48-50,55-56,58-62,67-69
+  s_6331e9b5eb051b::t_d9b3f1dbd7f7bb 25-26,63-64
+  s_6331e9b5eb051b::t_38bd71c29b7986 38,46,51-53
+examples/tutorials/07_draw_debug.py
+  s_6331e9b5eb051b::t_1f514d4fad28c7 1-77
+examples/tutorials/10_mpm.py
+  s_6331e9b5eb051b::t_1f514d4fad28c7 1-84
+examples/tutorials/08_entity_name.py
+  s_6331e9b5eb051b::t_1f514d4fad28c7 1-76
+examples/README.md
+  s_6331e9b5eb051b::t_5b5b22b3f616c3 24
+  s_6331e9b5eb051b::t_fe67519a0fe5e6 28-37
+  s_6331e9b5eb051b::t_0a44d392155001 23,25-26
+examples/tutorials/04_pick_and_place.py
+  s_6331e9b5eb051b::t_d08597fbb5d4bb 57,60,62-64,77,79-80,82-84,86,88,92-95
+  s_6331e9b5eb051b::t_38f704360c48d9 70,72
+  s_6331e9b5eb051b::t_ecdfb764d23270 54,58-59,61,65-66,68,71
+  s_6331e9b5eb051b::t_d1c1e38f10134b 81
+  s_6331e9b5eb051b::t_78204c9a52cf2a 17-19,27-32,34,36-37,49-50,55-56,67,69,73-76,78,85,87,89-91
+  s_6331e9b5eb051b::t_9a73b5dbe7da14 51-53
+  s_6331e9b5eb051b::t_a7d1a1bea2f8d2 33
+  s_6331e9b5eb051b::t_1f514d4fad28c7 1-16,20-26,35,38-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "61ae12b1afd1604dd32272348227115093dd81f8",
+  "prompts": {},
+  "sessions": {
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
