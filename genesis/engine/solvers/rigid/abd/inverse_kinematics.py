@@ -686,27 +686,25 @@ def func_inverse_kinematics(
                         link_dof_end_local = dyn_info.links.dof_end[I_l] - entity_dof_start
                         if link_dof_start_local <= i_d and i_d < link_dof_end_local:
                             must_resample = True
-                            break
-                    if not must_resample:
-                        continue
 
-                    for i_j in range(dyn_info.links.joint_start[I_l], dyn_info.links.joint_end[I_l]):
-                        I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
-                        i_d = dyn_info.joints.dof_start[I_j]
-                        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+                    if must_resample:
+                        for i_j in range(dyn_info.links.joint_start[I_l], dyn_info.links.joint_end[I_l]):
+                            I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+                            i_d = dyn_info.joints.dof_start[I_j]
+                            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
 
-                        dof_limit = dyn_info.dofs.limit[I_d]
-                        if (
-                            dyn_info.joints.type[I_j] == gs.JOINT_TYPE.REVOLUTE
-                            or dyn_info.joints.type[I_j] == gs.JOINT_TYPE.PRISMATIC
-                        ) and qd_isfinite(dof_limit):
-                            q_start = dyn_info.joints.q_start[I_j]
-                            # Counter-based draw keyed on (env, restart, DOF). A qd.random() per-thread stream
-                            # would order by the parallel schedule, which makes the resampled configuration, and
-                            # thus the returned one, nondeterministic across runs.
-                            fk.qpos[q_start - q_offset, i_b] = dof_limit[0] + gu.qd_hash01(
-                                seed, i_b, i_sample, q_start
-                            ) * (dof_limit[1] - dof_limit[0])
+                            dof_limit = dyn_info.dofs.limit[I_d]
+                            if (
+                                dyn_info.joints.type[I_j] == gs.JOINT_TYPE.REVOLUTE
+                                or dyn_info.joints.type[I_j] == gs.JOINT_TYPE.PRISMATIC
+                            ) and qd_isfinite(dof_limit):
+                                q_start = dyn_info.joints.q_start[I_j]
+                                # Counter-based draw keyed on (env, restart, DOF). A qd.random() per-thread stream
+                                # would order by the parallel schedule, which makes the resampled configuration, and
+                                # thus the returned one, nondeterministic across runs.
+                                fk.qpos[q_start - q_offset, i_b] = dof_limit[0] + gu.qd_hash01(
+                                    seed, i_b, i_sample, q_start
+                                ) * (dof_limit[1] - dof_limit[0])
 
 
 @qd.kernel(fastcache=True)
