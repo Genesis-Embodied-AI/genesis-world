@@ -1,3 +1,4 @@
+import importlib.metadata
 import io
 import os
 from contextlib import nullcontext
@@ -1006,12 +1007,13 @@ def test_convex_decompose_cache(monkeypatch, asset_tmp_path):
 
     monkeypatch.setattr(coacd, "run_coacd", counted_run_coacd)
 
-    # Monkeypatch the convex_decompose function to track the convex decomposition result
-    seen_results = []
+    # Monkeypatch the convex_decompose function to track its inputs and the convex decomposition result
+    seen_args, seen_results = [], []
     real_convex_decompose = mu.convex_decompose
 
     def wrapped_convex_decompose(mesh, opts):
         result = real_convex_decompose(mesh, opts)
+        seen_args.append((mesh, opts))
         seen_results.append(result)
         return result
 
@@ -1056,6 +1058,12 @@ def test_convex_decompose_cache(monkeypatch, asset_tmp_path):
         for part, cached_part in zip(parts, cached_parts):
             assert_allclose(part.vertices, cached_part.vertices * (scale / SCALES[0]), rtol=1e-6)
             assert_equal(part.faces, cached_part.faces)
+
+    # A decomposition computed by another coacd release is never reused.
+    real_version = importlib.metadata.version
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.0.0" if name == "coacd" else real_version(name))
+    real_convex_decompose(*seen_args[0])
+    assert n_coacd_runs == 2
 
 
 # ==================== Decimation Tests ====================
