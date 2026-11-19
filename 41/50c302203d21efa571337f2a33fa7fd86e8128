@@ -1,0 +1,25 @@
+genesis/engine/entities/rigid_entity/inertial.py
+  s_b64e5cb3dc9916::t_a974cb9ab3dba7 129-131,149-150
+tests/rigid/test_asset_loading.py
+  s_b64e5cb3dc9916::t_088b6bb5fcb260 430
+  s_b64e5cb3dc9916::t_e274e3e18decf6 375-385,427-429
+genesis/engine/entities/rigid_entity/description.py
+  s_b64e5cb3dc9916::t_33ddb9481d2899 75-78
+  s_b64e5cb3dc9916::t_a974cb9ab3dba7 776-780
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4150c302203d21efa571337f2a33fa7fd86e8128",
+  "prompts": {},
+  "sessions": {
+    "s_b64e5cb3dc9916": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5cbba10d-905e-4f49-aa41-fabedc688f1a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
