@@ -9,6 +9,10 @@ GLTF_FORMATS = (".glb", ".gltf")
 MESH_FORMATS = (".obj", ".stl", ".dae", *GLTF_FORMATS)
 USD_FORMATS = (".usd", ".usda", ".usdc", ".usdz")
 
+# Number of parameters of an equality authored in a model file: two anchors, a relative quaternion and a torque scale, or
+# the five coefficients of a joint polynomial. It is the size of the equality data of MuJoCo before version 3.17.
+EQUALITY_DATA_SIZE = 11
+
 # dynamic loading
 ACTIVE = 1
 INACTIVE = 0

@@ -9,7 +9,7 @@ import xacro
 
 import genesis as gs
 import genesis.utils.gltf as gltf_utils
-from genesis.constants import GLTF_FORMATS, XACRO_FORMAT
+from genesis.constants import EQUALITY_DATA_SIZE, GLTF_FORMATS, XACRO_FORMAT
 from genesis.ext import urdfpy
 
 from . import geom as gu
@@ -490,7 +490,7 @@ def parse_equalities(robot, morph):
             # eq_data[0:5] stores a0..a4 in q_follower - q_follower0 = sum(a_k * (q_driver - q_driver0)^k).
             # A model scale transforms a_k to s_f * a_k / s_d**k, where s_f and s_d are morph.scale for
             # prismatic coordinates and 1.0 for revolute coordinates.
-            eq_info["data"] = np.zeros([11])
+            eq_info["data"] = np.zeros(EQUALITY_DATA_SIZE)
             eq_info["data"][0] = follower_scale * joint.mimic.offset
             eq_info["data"][1] = follower_scale / driver_scale * joint.mimic.multiplier
 
