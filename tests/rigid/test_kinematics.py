@@ -321,7 +321,8 @@ def test_joint_get_anchor_pos_and_axis(n_envs):
 @pytest.mark.slow("gpu")  # gpu ~250s
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-def test_inverse_kinematics_multilink(show_viewer, tol):
+@pytest.mark.parametrize("model_name", ["pendulum"])
+def test_inverse_kinematics_multilink(xml_path, show_viewer, tol):
     scene = gs.Scene(
         vis_options=gs.options.VisOptions(
             rendered_envs_idx=(1,),
@@ -342,6 +343,13 @@ def test_inverse_kinematics_multilink(show_viewer, tol):
     robot = scene.add_entity(
         morph=gs.morphs.URDF(
             file="urdf/shadow_hand/shadow_hand.urdf",
+        ),
+    )
+    pendulum = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=xml_path,
+            pos=(0.0, -0.5, 0.0),
+            fixed=True,
         ),
     )
     scene.build(n_envs=2)
@@ -371,6 +379,24 @@ def test_inverse_kinematics_multilink(show_viewer, tol):
     assert_allclose(index_finger_distal.get_pos(envs_idx=(1,)), index_finger_pos, tol=tol)
     assert_allclose(middle_finger_distal.get_pos(envs_idx=(1,)), middle_finger_pos, tol=tol)
     assert_allclose(wrist.get_pos(envs_idx=(1,)), wrist_pos, tol=tol)
+
+    # A target given its orientation alone leaves its position free. The point 1 m along the arm only has to turn, so
+    # one damped step about the hinge leaves the residual theta * damping^2 / (1 + damping^2) and nothing else.
+    arm, base = pendulum.get_link("PendulumArm_0"), pendulum.get_link("base")
+    theta, damping = 0.3, 0.01
+    qpos, err = pendulum.inverse_kinematics_multilink(
+        links=(arm, base),
+        poss=(None, base.get_pos()),
+        quats=((np.cos(0.5 * theta), np.sin(0.5 * theta), 0.0, 0.0), None),
+        local_points=((0.0, 0.0, 1.0), None),
+        max_samples=1,
+        max_solver_iters=1,
+        damping=damping,
+        return_error=True,
+    )
+    assert_allclose(qpos, theta / (1.0 + damping**2), tol=tol)
+    assert_allclose(err[:, 0, 3], theta * damping**2 / (1.0 + damping**2), tol=tol)
+    assert_allclose(err[:, 0, 4:], 0.0, tol=tol)
 
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])

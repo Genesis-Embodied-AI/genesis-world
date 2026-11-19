@@ -561,7 +561,8 @@ def func_inverse_kinematics(
                     ee_pos = fk.links_pos[i_l_ee - link_offset, i_b] + gu.qd_transform_by_quat(
                         targets.local_point[i_ee], ee_quat
                     )
-                    # Full single-link Jacobian over the entity DOFs, the axes being masked while stacking below
+                    # Full single-link Jacobian over the entity DOFs, masked while stacking below like the residual.
+                    # A row left unmasked under a zero residual asks the step to hold that coordinate still.
                     func_jacobian_scratch(
                         i_b,
                         i_b,
@@ -578,12 +579,12 @@ def func_inverse_kinematics(
                     for i_d_ in range(n_dofs):
                         i_d = targets.dofs_idx[i_d_]
                         for i_error in qd.static(range(3)):
-                            ik_state.jacobian_stacked[i_ee * 6 + i_error, i_d_, i_b] = (
-                                ik_state.jacobian[i_error, i_d, i_b] * targets.pos_mask[i_error]
-                            )
-                            ik_state.jacobian_stacked[i_ee * 6 + i_error + 3, i_d_, i_b] = (
-                                ik_state.jacobian[i_error + 3, i_d, i_b] * targets.rot_mask[i_error]
-                            )
+                            ik_state.jacobian_stacked[i_ee * 6 + i_error, i_d_, i_b] = ik_state.jacobian[
+                                i_error, i_d, i_b
+                            ] * (targets.pos_mask[i_error] * targets.link_pos_mask[i_ee])
+                            ik_state.jacobian_stacked[i_ee * 6 + i_error + 3, i_d_, i_b] = ik_state.jacobian[
+                                i_error + 3, i_d, i_b
+                            ] * (targets.rot_mask[i_error] * targets.link_rot_mask[i_ee])
 
                 # In-place Cholesky factorization of the damped Gram matrix, forming each entry when it reaches it
                 for i_row in range(n_rows):
