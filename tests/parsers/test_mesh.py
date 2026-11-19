@@ -992,10 +992,10 @@ def test_surface_reconstruction(recon_backend, show_viewer):
 
 
 # FIXME: This test is taking too much time on some platform (~1200s)
-# Counting the decompositions requires a cache that no earlier run has populated.
-@pytest.mark.cache(False)
 # @pytest.mark.required
-def test_convex_decompose_cache(monkeypatch, asset_tmp_path):
+def test_convex_decompose_cache(monkeypatch, tmp_path, asset_tmp_path):
+    # Counting the decompositions requires an on-disk cache that no earlier run has populated.
+    monkeypatch.setenv("GS_CACHE_FILE_PATH", str(tmp_path))
     # A single decomposition must serve every mesh describing the same shape, whatever its placement: rescaled copies,
     # and re-exports of the model whose coordinates differ only in their last significant digits.
     n_coacd_runs = 0
