@@ -450,4 +450,3 @@ def test_video_writer(tmp_path):
         assert video_path.exists(), "Recorded video file should exist"
         with av.open(video_path) as container:
             assert sum(1 for _ in container.decode(video=0)) == STEPS + 1
-
