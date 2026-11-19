@@ -455,6 +455,9 @@ def _parse_link(
             # TODO: Implement target solving in rigid solver. (GetTargetPositionAttr())
             kp = np.asarray(dofs_kp, dtype=gs.np_float)
             kv = np.asarray(dofs_kv, dtype=gs.np_float)
+            if joint_type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.SPHERICAL):
+                # UsdPhysics gives angular drive stiffness and damping per degree, while joint positions are radians.
+                kp, kv = np.rad2deg(kp), np.rad2deg(kv)
             j_info["dofs_act_gain"] = kp
             j_info["dofs_act_bias"] = np.column_stack([np.zeros_like(kp), -kp, -kv])
             j_info["dofs_force_range"] = np.asarray(dofs_force_range, dtype=gs.np_float)
