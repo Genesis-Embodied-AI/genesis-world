@@ -56,32 +56,15 @@ jobs:
             const runsLatest = paths.map((path) => runs.find((run) => run.path === path
               && run.head_branch === pull.head.ref
               && run.head_repository.full_name === pull.head.repo.full_name)).filter(Boolean);
-            // A run from a fork that needs a maintainer's approval waits as 'action_required'. The commenter has write
-            // access, so the command approves it. The approved run is a first attempt, which runs the CI of a ready pull
-            // request and skips a draft one. On a draft, the command waits for it to complete and re-runs it like any
-            // other skipped run.
-            const runsApproved = runsLatest.filter((run) => run.conclusion === 'action_required');
-            const runsDone = await Promise.all(runsLatest.map(async (run) => {
-              if (run.conclusion !== 'action_required') {
-                return run;
-              }
-              await github.rest.actions.approveWorkflowRun({ owner, repo, run_id: run.id });
-              core.notice(`Approved ${run.html_url}`);
-              if (!pull.draft) {
-                return run;
-              }
-              for (let i_poll = 0; i_poll < 60; i_poll++) {
-                await new Promise((resolve) => setTimeout(resolve, 10000));
-                const { data: runPolled } = await github.rest.actions.getWorkflowRun({ owner, repo, run_id: run.id });
-                if (runPolled.status === 'completed') {
-                  return runPolled;
-                }
-              }
-              core.warning(`${run.html_url} did not complete within 10 minutes of its approval.`);
-              return run;
-            }));
-            const runsSkipped = runsDone.filter((run) => run.conclusion === 'skipped');
-            if (runsSkipped.length === 0 && (pull.draft || runsApproved.length === 0)) {
+            // A run from a fork that needs a maintainer's approval waits as 'action_required', and is approved on the
+            // pull request page before '/ci' can re-run it.
+            if (runsLatest.some((run) => run.conclusion === 'action_required')) {
+              core.notice('The workflows of the pull request wait for approval. Approve them, then comment /ci again.');
+              await react('confused');
+              return;
+            }
+            const runsSkipped = runsLatest.filter((run) => run.conclusion === 'skipped');
+            if (runsSkipped.length === 0) {
               core.notice(`Commit ${pull.head.sha} has no skipped run of ${paths.join(', ')} to re-run.`);
               await react('confused');
               return;
