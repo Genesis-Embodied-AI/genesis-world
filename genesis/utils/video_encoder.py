@@ -132,6 +132,7 @@ class VideoEncoder:
         self._buffer = None
         # Shape of the first frame of the video, set by the calling thread so that a mismatch raises there
         self._frame_shape = None
+        self._is_file_created = False
 
         self._queue = queue.Queue(maxsize=ENCODER_QUEUE_SIZE) if is_threaded else None
         self._thread = None
@@ -184,6 +185,7 @@ class VideoEncoder:
 
         os.makedirs(os.path.abspath(os.path.dirname(self._filename)), exist_ok=True)
         self._container = av.open(self._filename, mode="w")
+        self._is_file_created = True
         self._container.metadata["title"] = self._name
 
         # ffmpeg expresses the framerate as a rational, so a fractional rate such as the one induced by a step size
@@ -228,6 +230,7 @@ class VideoEncoder:
         # No encoding thread and no frame storage means a new video, the encoder being reusable once closed
         if self._thread is None and self._buffer is None:
             self._frame_shape = frame.shape
+            self._is_file_created = False
         elif frame.shape != self._frame_shape:
             gs.raise_exception(
                 f"Frame of shape {frame.shape} differs from the shape {self._frame_shape} of the first frame of the video."
@@ -257,8 +260,8 @@ class VideoEncoder:
 
     @property
     def is_empty(self):
-        """Whether no frame was written, in which case the encoder leaves no video file."""
-        return self._frame_shape is None
+        """Whether no video file exists, since no frame was written or encoding failed before creating it."""
+        return not self._is_file_created
 
     def close(self):
         """
