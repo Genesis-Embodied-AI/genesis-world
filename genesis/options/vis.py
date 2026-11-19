@@ -134,6 +134,29 @@ class AmbientLight(Options):
     intensity: float
 
 
+class ThinLens(Options):
+    """
+    The lens of a thin-lens camera, which blurs what lies away from its focus distance (depth of field).
+
+    Parameters
+    ----------
+    aperture : float, optional
+        The f-number of the lens: its focal length over the diameter of its opening. A smaller f-number widens the
+        opening and blurs more what lies away from the focus distance. Defaults to 2.8.
+    focal_len : float, optional
+        The focal length of the lens in meters. At the same f-number, a longer focal length widens the opening and blurs
+        more what lies away from the focus distance, while the field of view of the camera alone sets what it sees.
+        Defaults to 0.05.
+    focus_dist : float | None, optional
+        The distance in meters at which the camera is in focus, that from its position to the point it looks at if None.
+        Defaults to None.
+    """
+
+    aperture: PositiveFloat = 2.8
+    focal_len: PositiveFloat = 0.05
+    focus_dist: PositiveFloat | None = None
+
+
 class EntityVisOptions(Options):
     """
     How the debug view of the scene draws an entity (see ``VisOptions.debug``), set as the ``vis`` of its entity spec.

@@ -103,9 +103,12 @@ class RaytracerCameraOptions(BaseCameraOptions["RaytracerCameraSensor"]):
     denoise : bool
         Whether to apply denoising. Default is False.
     aperture : float
-        Aperture size for thinlens camera (depth of field). Default is 2.8.
+        The f-number of the lens of a thin-lens camera: its focal length over the diameter of its opening. A smaller
+        f-number widens the opening and blurs more what lies away from the focus distance. Default is 2.8.
     focal_len : float
-        Focal length in meters for thinlens camera. Default is 0.05.
+        The focal length of the lens of a thin-lens camera in meters. At the same f-number, a longer focal length
+        widens the opening and blurs more what lies away from the focus distance, while `fov` alone sets what the
+        camera sees. Default is 0.05.
     focus_dist : float
         Focus distance in meters for thinlens camera. Default is 3.0.
     env_surface : gs.surfaces.Surface | None

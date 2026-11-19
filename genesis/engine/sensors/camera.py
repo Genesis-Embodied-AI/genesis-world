@@ -19,7 +19,7 @@ from genesis.options.sensors import (
     RaytracerCameraOptions,
     SensorOptions,
 )
-from genesis.options.vis import VisOptions
+from genesis.options.vis import ThinLens, VisOptions
 from genesis.utils.geom import (
     T_to_quat,
     T_to_trans,
@@ -763,15 +763,21 @@ class RaytracerCameraSensor(
             lookat = transform_by_trans_quat(lookat, link_pos, link_quat)
             up = transform_by_quat(up, link_quat)
 
+        lens = None
+        if self._options.model == "thinlens":
+            lens = ThinLens(
+                aperture=self._options.aperture,
+                focal_len=self._options.focal_len,
+                focus_dist=self._options.focus_dist,
+            )
         self._camera_obj = visualizer.add_camera(
             res=self._options.res,
             pos=pos,
             lookat=lookat,
             up=up,
-            model=self._options.model,
+            model="pinhole",
             fov=self._options.fov,
-            aperture=self._options.aperture,
-            focus_dist=self._options.focus_dist,
+            lens=lens,
             GUI=False,
             spp=self._options.spp,
             denoise=self._options.denoise,

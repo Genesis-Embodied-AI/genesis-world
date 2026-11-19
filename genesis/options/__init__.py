@@ -20,7 +20,7 @@ from .solvers import (
     SimOptions,
     SPHOptions,
 )
-from .vis import EntityVisOptions, ViewerOptions, VisOptions
+from .vis import EntityVisOptions, ThinLens, ViewerOptions, VisOptions
 
 __all__ = [
     "BaseCouplerOptions",
@@ -45,6 +45,7 @@ __all__ = [
     "SceneOptions",
     "SimOptions",
     "SPHOptions",
+    "ThinLens",
     "Vertex",
     "VGeom",
     "ViewerOptions",
