@@ -30,6 +30,8 @@ import genesis as gs
 # identical by the on-disk caches. Orders of magnitude below the spacing of genuinely distinct geometry, and orders of
 # magnitude above the last-significant-digit noise separating two exports of the same model.
 MESH_CACHE_MATCH_RTOL = 1e-6
+# Bumped when the layout of a mesh cache entry changes: forces a cache miss on entries of another layout.
+MESH_CACHE_FORMAT_VERSION = 1
 # Bumped when watertighten output changes for a fixed (mesh, aggressiveness): forces a cache miss on stale entries.
 WT_CACHE_VERSION = 8
 # Bumped when the wall-thickness estimate changes for a fixed mesh and parameters: forces a cache miss on stale entries.
@@ -509,7 +511,7 @@ class MeshCache:
 
     def __init__(self, cache_dir: str, ext: str, verts: np.ndarray, faces: np.ndarray, *params):
         self._verts = np.ascontiguousarray(verts)
-        bucket_key = get_hashkey(len(self._verts), np.ascontiguousarray(faces), *params)
+        bucket_key = get_hashkey(len(self._verts), np.ascontiguousarray(faces), *params, MESH_CACHE_FORMAT_VERSION)
         self._bucket_dir = os.path.join(cache_dir, bucket_key)
         self._filename = f"{get_hashkey(self._verts)}.{ext}"
 
