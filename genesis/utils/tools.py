@@ -5,8 +5,9 @@ import os
 import time
 
 import numpy as np
-import quadrants as qd
 from PIL import Image
+
+import quadrants as qd
 
 import genesis as gs
 from genesis.utils.misc import get_entry_point_name

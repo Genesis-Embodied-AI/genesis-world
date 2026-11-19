@@ -393,7 +393,7 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
     wait_for_viewer_events(pyrender_viewer, lambda: n_key_releases == 4)
     scene.visualizer.update(force=True)
     wait_for_viewer_events(pyrender_viewer, lambda: pyrender_viewer._last_recorded_t == scene.sim.cur_step_global)
-    width, height = pyrender_viewer._viewport_size
+    width, height = pyrender_viewer.viewport_size
     pyrender_viewer.dispatch_event("on_resize", width + 2, height)
     wait_for_viewer_events(pyrender_viewer, lambda: not pyrender_viewer.viewer_flags["record"])
     pyrender_viewer.dispatch_event("on_resize", width, height)
