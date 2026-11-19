@@ -229,13 +229,15 @@ class KinematicEntity(Entity):
         self._load_model()
 
     def _add_heterogeneous_variant(self, link, v_link):
-        """Give a link the geoms one variant describes for it. A kinematic entity holds visual geoms alone.
+        """Give a link the geoms and sites one variant describes for it. A kinematic entity holds visual geoms alone.
 
         RigidEntity overrides to additionally add collision geoms.
         """
         for g_desc in v_link.vgeoms:
             link._add_vgeom(g_desc)
         link._record_variant_vgeom_range(len(v_link.vgeoms))
+        for site, v_s_desc in zip(link.sites, v_link.sites):
+            site._variant_descs.append(v_s_desc)
 
     def _reassign_heterogeneous_indices(self):
         """Reassign vgeom indices for multi-link heterogeneous entities.

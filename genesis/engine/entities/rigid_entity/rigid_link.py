@@ -86,6 +86,8 @@ class KinematicLink(BuildableMixin, RBC):
     def _init_variant_tracking(self):
         """Start tracking heterogeneous variants. Records first variant from current state."""
         self._variant_vgeom_ranges = [(self._vgeom_start, self._vgeom_start + self.n_vgeoms)]
+        for site in self._sites:
+            site._variant_descs = [site.desc]
 
     def _record_variant_vgeom_range(self, n_new_vgeoms):
         """Record a new variant's vgeom range."""

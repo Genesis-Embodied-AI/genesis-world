@@ -571,6 +571,19 @@ class KinematicEntityDescription(EntityDescription):
                                 f"DoF count mismatch for joint '{p_joint.name}': primary has {p_joint.n_dofs}, "
                                 f"variant has {v_j_info['n_dofs']}."
                             )
+                    primary_sites = l_desc.sites
+                    v_s_infos = v_l_info.get("sites", [])
+                    if len(v_s_infos) != len(primary_sites):
+                        gs.raise_exception(
+                            f"Heterogeneous variant link {i_l} ('{l_desc.name}') has {len(v_s_infos)} sites, "
+                            f"but primary has {len(primary_sites)}. All variants must share the site topology of the primary."
+                        )
+                    for p_site, v_s_info in zip(primary_sites, v_s_infos):
+                        if p_site.name != v_s_info["name"]:
+                            gs.raise_exception(
+                                f"Site name mismatch at link {i_l} ('{l_desc.name}'): primary has '{p_site.name}', "
+                                f"variant has '{v_s_info['name']}'. All variants must have the same site names."
+                            )
 
                 # The links a variant excludes from collision are named as the primary names them, links being matched
                 # by their place in the shared kinematic topology
@@ -663,6 +676,11 @@ class KinematicEntityDescription(EntityDescription):
                     g_infos = self._load_primitive(morph, resolution, load_geom_only_for_heterogeneous=True)
                 if morph.fixed != self.spec.morphs[0].fixed:
                     gs.raise_exception("Mixing fixed and non-fixed morphs in heterogeneous entities is not supported.")
+                if any(l_desc.sites for l_desc in self.links):
+                    gs.raise_exception(
+                        "Heterogeneous Mesh/Primitive variants carry no sites, while the primary morph defines sites. "
+                        "All variants must share the site topology of the primary."
+                    )
                 self._resolve_geoms_values(morph, [(self.links[0].name,)], [g_infos], resolution)
                 cg_infos, vg_infos = self._resolve_geoms(morph, g_infos, is_robot=False)
 

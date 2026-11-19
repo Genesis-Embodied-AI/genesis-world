@@ -79,6 +79,24 @@ def _select_links_offset(offset, links_idx, envs_idx):
     return offset[indices_to_mask(envs_idx, links_idx, boolean_mask=False)]
 
 
+def _select_sites_param(param, sites_idx, envs_idx, ndim_links: int):
+    if param.ndim == 2:
+        return param[indices_to_mask(sites_idx, keepdim=True)]
+    selected = param[indices_to_mask(envs_idx, sites_idx, keepdim=True, boolean_mask=False)]
+    return selected[0] if ndim_links == 2 else selected
+
+
+def _conjugate_morph_offset_into_frame(local_pos, local_quat, link_off_pos, link_off_quat, morph):
+    frame_pos, frame_quat = gu.transform_pos_quat_by_trans_quat(local_pos, local_quat, link_off_pos, link_off_quat)
+    offset_frame_pos, offset_frame_quat = gu.transform_pos_quat_by_trans_quat(
+        frame_pos,
+        frame_quat,
+        np.array(morph.offset_pos, dtype=gs.np_float),
+        np.array(morph.offset_quat, dtype=gs.np_float),
+    )
+    return gu.inv_transform_pos_quat_by_trans_quat(offset_frame_pos, offset_frame_quat, frame_pos, frame_quat)
+
+
 def _offset_world_shift(offset_pos, offset_quat, world_quat):
     """World-frame displacement contributed by a body-frame offset position at a given world orientation.
 
@@ -273,8 +291,12 @@ class KinematicSolver(Solver):
         links_offset_quat = np.tile(gu.identity_quat(), (*offset_shape, 1))
         vgeoms_offset_pos = np.zeros((self.n_vgeoms, 3), dtype=gs.np_float)
         vgeoms_offset_quat = np.tile(gu.identity_quat(), (self.n_vgeoms, 1))
-        sites_offset_pos = np.zeros((self.n_sites, 3), dtype=gs.np_float)
-        sites_offset_quat = np.tile(gu.identity_quat(), (self.n_sites, 1))
+        sites_per_env = any(bool(entity._desc.variants) and entity.n_sites > 0 for entity in self._entities)
+        sites_shape = (self.n_envs_, self.n_sites) if sites_per_env else (self.n_sites,)
+        sites_init_pos = np.zeros((*sites_shape, 3), dtype=gs.np_float)
+        sites_init_quat = np.tile(gu.identity_quat(), (*sites_shape, 1))
+        sites_offset_pos = np.zeros((*sites_shape, 3), dtype=gs.np_float)
+        sites_offset_quat = np.tile(gu.identity_quat(), (*sites_shape, 1))
         for entity in self._entities:
             if links_offset_per_env and entity._desc.variants:
                 variant_idx = _balanced_variant_mapping(len(entity._desc.variants), self.n_envs_)
@@ -293,7 +315,41 @@ class KinematicSolver(Solver):
                     links_offset_quat[..., entity._link_start + local_idx, :] = link.desc.offset_quat
                 vgeoms_ranges = None
             _fill_base_link_geom_offsets(vgeoms_offset_pos, vgeoms_offset_quat, entity, entity.vgeoms, vgeoms_ranges)
-            _fill_base_link_geom_offsets(sites_offset_pos, sites_offset_quat, entity, entity.sites, None)
+
+            if entity.n_sites == 0:
+                continue
+            if entity._desc.variants:
+                ent_variant_idx = _balanced_variant_mapping(len(entity._desc.variants), self.n_envs_)
+                for i_v, v_desc in enumerate(entity._desc.variants):
+                    env_mask = ent_variant_idx == i_v
+                    if not env_mask.any():
+                        continue
+                    morph = entity._morph if i_v == 0 else entity._morph_heterogeneous[i_v - 1]
+                    link_off_pos, link_off_quat = v_desc.offset_pos, v_desc.offset_quat
+                    has_base_offset = not (
+                        np.allclose(link_off_pos, 0.0, atol=gs.EPS)
+                        and np.allclose(link_off_quat, gu.identity_quat(), atol=gs.EPS)
+                    )
+                    for site in entity.sites:
+                        s_desc = site._variant_descs[i_v]
+                        sites_init_pos[env_mask, site.idx] = s_desc.pos
+                        sites_init_quat[env_mask, site.idx] = s_desc.quat
+                        if has_base_offset and site.link.idx == entity.base_link_idx:
+                            s_off_pos, s_off_quat = _conjugate_morph_offset_into_frame(
+                                s_desc.pos, s_desc.quat, link_off_pos, link_off_quat, morph
+                            )
+                            sites_offset_pos[env_mask, site.idx] = s_off_pos
+                            sites_offset_quat[env_mask, site.idx] = s_off_quat
+            else:
+                for site in entity.sites:
+                    sites_init_pos[..., site.idx, :] = site.init_pos
+                    sites_init_quat[..., site.idx, :] = site.init_quat
+                ent_off_pos = np.zeros((self.n_sites, 3), dtype=gs.np_float)
+                ent_off_quat = np.tile(gu.identity_quat(), (self.n_sites, 1))
+                _fill_base_link_geom_offsets(ent_off_pos, ent_off_quat, entity, entity.sites, None)
+                sl = slice(entity.site_start, entity.site_end)
+                sites_offset_pos[..., sl, :] = ent_off_pos[sl]
+                sites_offset_quat[..., sl, :] = ent_off_quat[sl]
         # Per-link identity masks gate the relative get/set/backward paths: a relative set on a link whose offset is
         # identity is a plain passthrough, while a non-identity offset rewrites the world position or drops the
         # composition jacobian. Kept as host-side numpy (never used in kernels) so the gates avoid a GPU->host sync.
@@ -321,12 +377,8 @@ class KinematicSolver(Solver):
             self._sites_link_idx = torch.tensor(
                 [site.link.idx for site in self._sites], device=gs.device, dtype=torch.long
             )
-            self._sites_init_pos = torch.from_numpy(
-                np.array([site.init_pos for site in self._sites], dtype=gs.np_float)
-            ).to(device=gs.device, dtype=gs.tc_float)
-            self._sites_init_quat = torch.from_numpy(
-                np.array([site.init_quat for site in self._sites], dtype=gs.np_float)
-            ).to(device=gs.device, dtype=gs.tc_float)
+            self._sites_init_pos = torch.from_numpy(sites_init_pos).to(device=gs.device, dtype=gs.tc_float)
+            self._sites_init_quat = torch.from_numpy(sites_init_quat).to(device=gs.device, dtype=gs.tc_float)
             if not (
                 np.allclose(sites_offset_pos, 0.0, atol=gs.EPS)
                 and np.allclose(gu.quat_to_xyz(sites_offset_quat), 0.0, atol=gs.EPS)
@@ -1198,19 +1250,21 @@ class KinematicSolver(Solver):
         sites_link_idx = self._sites_link_idx[sel]
         links_pos, links_quat = self._read_data((self.dyn_state.links.pos, self.dyn_state.links.quat), envs_idx, None)
         if sites_link_idx.numel() == 0:
-            n_envs_sel = links_pos.shape[0]
-            pos = torch.empty((n_envs_sel, 0, 3), device=gs.device, dtype=gs.tc_float)
-            quat = torch.empty((n_envs_sel, 0, 4), device=gs.device, dtype=gs.tc_float)
+            lead = () if links_pos.ndim == 2 else (links_pos.shape[0],)
+            pos = torch.empty((*lead, 0, 3), device=gs.device, dtype=gs.tc_float)
+            quat = torch.empty((*lead, 0, 4), device=gs.device, dtype=gs.tc_float)
             return pos, quat, sites_link_idx
+        init_pos = _select_sites_param(self._sites_init_pos, sites_idx, envs_idx, links_pos.ndim)
+        init_quat = _select_sites_param(self._sites_init_quat, sites_idx, envs_idx, links_pos.ndim)
         pos, quat = gu.transform_pos_quat_by_trans_quat(
-            self._sites_init_pos[sel],
-            self._sites_init_quat[sel],
-            links_pos[:, sites_link_idx],
-            links_quat[:, sites_link_idx],
+            init_pos,
+            init_quat,
+            links_pos[..., sites_link_idx, :],
+            links_quat[..., sites_link_idx, :],
         )
         if relative and self._sites_offset_pos is not None:
-            offset_pos = self._sites_offset_pos[sel]
-            offset_quat = self._sites_offset_quat[sel]
+            offset_pos = _select_sites_param(self._sites_offset_pos, sites_idx, envs_idx, links_pos.ndim)
+            offset_quat = _select_sites_param(self._sites_offset_quat, sites_idx, envs_idx, links_pos.ndim)
             pos = pos - _offset_world_shift(offset_pos, offset_quat, quat)
             quat = gu.transform_quat_by_quat(gu.inv_quat(offset_quat), quat)
         return pos, quat, sites_link_idx
@@ -1231,7 +1285,9 @@ class KinematicSolver(Solver):
         cd_vel, cd_ang, root_COM = self._read_data(
             (links_state.cd_vel, links_state.cd_ang, links_state.root_COM), envs_idx, None
         )
-        vel = cd_vel[:, sites_link_idx] + cd_ang[:, sites_link_idx].cross(pos - root_COM[:, sites_link_idx], dim=-1)
+        vel = cd_vel[..., sites_link_idx, :] + cd_ang[..., sites_link_idx, :].cross(
+            pos - root_COM[..., sites_link_idx, :], dim=-1
+        )
         return vel[0] if self.n_envs == 0 else vel
 
     def get_links_vel(self, links_idx=None, envs_idx=None, *, relative=False):

@@ -24,6 +24,7 @@ class RigidSite(BuildableMixin, RBC):
 
         self._uid = gs.UID()
         self._idx: int = idx
+        self._variant_descs: list[RigidSiteDescription] | None = None
 
     @gs.assert_unbuilt
     def _build(self) -> None:

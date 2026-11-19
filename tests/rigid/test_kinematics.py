@@ -1228,3 +1228,86 @@ def test_mjcf_sites_forward_kinematics_and_velocity(n_envs, tol):
             vel6 = np.zeros(6)
             mujoco.mj_objectVelocity(mj_model, mj_data, mujoco.mjtObj.mjOBJ_SITE, i_s, vel6, 0)
             assert_allclose(vel_b[i_s], vel6[3:], tol=tol)
+
+
+@pytest.mark.required
+def test_heterogeneous_mjcf_sites_frames_and_offsets(tol):
+    xml_v0 = """
+    <mujoco model="free_body_sites_v0">
+      <worldbody>
+        <body name="base" pos="0 0 0.5">
+          <freejoint name="root"/>
+          <geom type="box" pos="0.1 0.0 0.0" size="0.1 0.05 0.04" density="1000"/>
+          <site name="grip" pos="0.2 0.03 -0.01" euler="0.1 0.2 -0.3" size="0.005"/>
+        </body>
+      </worldbody>
+    </mujoco>
+    """
+    xml_v1 = """
+    <mujoco model="free_body_sites_v1">
+      <worldbody>
+        <body name="base" pos="0 0 0.5">
+          <freejoint name="root"/>
+          <geom type="box" pos="-0.05 0.12 0.02" size="0.08 0.12 0.03" density="1000"/>
+          <site name="grip" pos="-0.15 0.08 0.06" euler="-0.2 0.4 0.1" size="0.005"/>
+        </body>
+      </worldbody>
+    </mujoco>
+    """
+    xml_mismatch = """
+    <mujoco model="free_body_sites_mismatch">
+      <worldbody>
+        <body name="base" pos="0 0 0.5">
+          <freejoint name="root"/>
+          <geom type="box" size="0.1 0.05 0.04"/>
+          <site name="other_name" pos="0 0 0" size="0.005"/>
+        </body>
+      </worldbody>
+    </mujoco>
+    """
+
+    bad_scene = gs.Scene(show_viewer=False)
+    with pytest.raises(gs.GenesisException, match="Site name mismatch"):
+        bad_scene.add_entity([gs.morphs.MJCF(file=xml_v0), gs.morphs.MJCF(file=xml_mismatch)])
+
+    morph0 = gs.morphs.MJCF(
+        file=xml_v0,
+        scale=1.0,
+        offset_pos=(0.05, -0.03, 0.02),
+        offset_quat=(0.9659258, 0.0, 0.2588190, 0.0),
+    )
+    morph1 = gs.morphs.MJCF(
+        file=xml_v1,
+        scale=1.4,
+        offset_pos=(-0.04, 0.06, -0.01),
+        offset_quat=(0.9238795, 0.3826834, 0.0, 0.0),
+    )
+
+    scene_het = gs.Scene(show_viewer=False)
+    het = scene_het.add_entity([morph0, morph1])
+    scene_het.build(n_envs=2)
+
+    scene_v0 = gs.Scene(show_viewer=False)
+    ref0 = scene_v0.add_entity(morph0)
+    scene_v0.build(n_envs=0)
+
+    scene_v1 = gs.Scene(show_viewer=False)
+    ref1 = scene_v1.add_entity(morph1)
+    scene_v1.build(n_envs=0)
+
+    dofs_vel = np.array([[0.3, -0.2, 0.4, 0.5, -0.6, 0.2], [-0.4, 0.5, -0.1, -0.3, 0.4, -0.5]], dtype=gs.np_float)
+    het.set_dofs_velocity(dofs_vel)
+    ref0.set_dofs_velocity(dofs_vel[0])
+    ref1.set_dofs_velocity(dofs_vel[1])
+
+    for relative in (True, False):
+        pos = het.get_sites_pos(relative=relative)
+        quat = het.get_sites_quat(relative=relative)
+        vel = het.get_sites_vel(relative=relative)
+        assert_allclose(pos[0], ref0.get_sites_pos(relative=relative), tol=tol)
+        assert_allclose(pos[1], ref1.get_sites_pos(relative=relative), tol=tol)
+        assert_allclose(quat[0], ref0.get_sites_quat(relative=relative), tol=tol)
+        assert_allclose(quat[1], ref1.get_sites_quat(relative=relative), tol=tol)
+        assert_allclose(vel[0], ref0.get_sites_vel(relative=relative), tol=tol)
+        assert_allclose(vel[1], ref1.get_sites_vel(relative=relative), tol=tol)
+        assert_allclose(het.get_site("grip").get_pos(envs_idx=1, relative=relative), pos[1, 0], tol=tol)
