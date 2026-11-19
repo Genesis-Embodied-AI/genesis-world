@@ -22,6 +22,11 @@ jobs:
 
     runs-on: ubuntu-24.04
 
+    # Two '/ci' comments on one pull request would re-run the same runs, so the second one waits for the first. The
+    # group is set on the job, so that the other comments, whose job is skipped, never cancel a pending command.
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.issue.number }}
+
     steps:
       - name: Re-run the skipped workflows of the pull request
         uses: actions/github-script@v8
@@ -47,9 +52,15 @@ jobs:
             }
 
             const { data: pull } = await github.rest.pulls.get({ owner, repo, pull_number: context.issue.number });
+            if (!pull.draft) {
+              core.notice('The pull request is ready for review, so every push already runs its CI.');
+              await react('confused');
+              return;
+            }
             // The runs of the commit may not exist yet right after a push, and a run can be re-run only once completed,
             // so they are polled until they settle. The precommit run is never gated, so its presence shows that the
-            // push created its runs. The bound of 30 minutes sits far above the duration of lint.
+            // push created its runs. A run re-run already, by hand or by an earlier '/ci', is never waited for. The
+            // bound of 30 minutes sits far above the duration of lint.
             let runsLatest = [];
             let isSettled = false;
             for (let i_poll = 0; i_poll < 180; i_poll++) {
@@ -65,15 +76,16 @@ jobs:
               runsLatest = runsPull.filter(
                 (run, i_run) => runsPull.findIndex(({ path }) => path === run.path) === i_run);
               isSettled = runsLatest.some((run) => run.path === process.env.PRECOMMIT_WORKFLOW)
-                && runsLatest.every((run) => run.status === 'completed' || run.conclusion === 'action_required');
+                && runsLatest.every((run) => run.status === 'completed' || run.conclusion === 'action_required'
+                  || run.run_attempt > 1);
               if (isSettled) {
                 break;
               }
               await new Promise((resolve) => setTimeout(resolve, 10000));
             }
             if (!isSettled) {
-              core.notice(`The runs of ${pull.head.sha} did not complete in time. Comment /ci again once they do.`);
               await react('confused');
+              core.setFailed(`The runs of ${pull.head.sha} did not complete in time. Comment /ci again once they do.`);
               return;
             }
             // A run from a fork that needs a maintainer's approval waits as 'action_required', and is approved on the
@@ -90,9 +102,11 @@ jobs:
               await react('confused');
               return;
             }
+            // Re-running the precommit run starts the Nyx Plugin workflow past its draft gate (see that workflow). A
+            // precommit run re-run already is still in progress, and the Nyx Plugin run it starts passes the gate too.
             const runPrecommit = runsLatest.find((run) => run.path === process.env.PRECOMMIT_WORKFLOW);
-            // Re-running the precommit run starts the Nyx Plugin workflow past its draft gate (see that workflow).
-            for (const run of [...runsSkipped, runPrecommit]) {
+            const runsRerun = [...runsSkipped, runPrecommit].filter((run) => run.status === 'completed');
+            for (const run of runsRerun) {
               await github.rest.actions.reRunWorkflow({ owner, repo, run_id: run.id });
               core.notice(`Re-running ${run.html_url}`);
             }

@@ -38,7 +38,7 @@ jobs:
       pull-requests: read
 
     outputs:
-      IS_DRAFT: ${{ steps.check.outputs.is_draft }}
+      IS_SKIPPED: ${{ steps.check.outputs.is_skipped }}
 
     steps:
       # The pull request is asked of the API as in the setup job of the production workflow, the event never listing
@@ -56,7 +56,7 @@ jobs:
               head: `${run.head_repository.owner.login}:${run.head_branch}`,
             });
             const pulls = data.filter((pull) => pull.head.sha === run.head_sha);
-            core.setOutput('is_draft', pulls.every((pull) => pull.draft));
+            core.setOutput('is_skipped', pulls.every((pull) => pull.draft));
 
   unit-tests:
     name: nyx_plugin-unit_tests
@@ -70,7 +70,7 @@ jobs:
 
     # A draft pull request is gated as in the production workflow. Re-running the precommit run, which '/ci' does (see
     # the CI Command workflow), starts a new run of this workflow that passes the gate.
-    if: needs.setup.outputs.IS_DRAFT == 'false' || github.event.workflow_run.run_attempt > 1 || github.run_attempt > 1
+    if: needs.setup.outputs.IS_SKIPPED == 'false' || github.event.workflow_run.run_attempt > 1 || github.run_attempt > 1
 
     permissions:
       contents: read
