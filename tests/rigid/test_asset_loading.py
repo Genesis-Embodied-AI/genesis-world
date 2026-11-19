@@ -388,6 +388,17 @@ def test_parsing_inertia_defaults(
             rho=1000.0,
         ),
     )
+    # A primitive drawn without collision geometry takes the inertia of its exact shape rather than its tessellation
+    entity_ball = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            radius=0.1,
+            pos=(7.2, 0.0, 1.0),
+            collision=False,
+        ),
+        material=gs.materials.Rigid(
+            rho=1000.0,
+        ),
+    )
     # An entity attached beneath another shares its root, so attaching that one onto a moving link makes both bases
     # movable at once. Each is estimated at the density of its own entity. The three stand consecutively, since an
     # entity created between attached ones is rejected.
@@ -430,6 +441,10 @@ def test_parsing_inertia_defaults(
     assert_allclose(stacked_tip.base_link.get_mass(), 8000.0 * 0.1**3, tol=gs.EPS)
 
     assert_allclose(entity_torus.base_link.desc.mass, 1000.0 * torus.volume, rtol=1e-6)
+
+    ball_mass = 1000.0 * 4.0 / 3.0 * np.pi * 0.1**3
+    assert_allclose(entity_ball.base_link.desc.mass, ball_mass, rtol=1e-6)
+    assert_allclose(np.linalg.eigvalsh(entity_ball.base_link.desc.inertia) / ball_mass, 2.0 / 5.0 * 0.1**2, rtol=1e-6)
 
     # The link 'no_inertial' has no inertial element, so its whole inertial is the geometry estimate. Every link carries
     # the same sphere, so this mass is the reference for the recovered masses below.
