@@ -1611,11 +1611,13 @@ class USD(FileMorph):
         If no matching attribute is found, Genesis default (0.0) is used.
         Defaults to ["physxJoint:armature", "physics:armature", "armature"].
     revolute_joint_stiffness_attr_candidates : List[str], optional
-        List of candidate attribute names for revolute joint stiffness. The parser will try these in order.
+        List of candidate attribute names for revolute joint stiffness, in torque / deg.
+        The parser will try these in order.
         If no matching attribute is found, Genesis default (0.0) is used.
         Defaults to ["physxLimit:angular:stiffness", "physics:stiffness", "stiffness"].
     revolute_joint_damping_attr_candidates : List[str], optional
-        List of candidate attribute names for revolute joint damping. The parser will try these in order.
+        List of candidate attribute names for revolute joint damping, in torque * s / deg.
+        The parser will try these in order.
         If no matching attribute is found, Genesis default (0.0) is used.
         Defaults to ["physxLimit:angular:damping", "physics:angular:damping", "angular:damping"].
     prismatic_joint_stiffness_attr_candidates : List[str], optional

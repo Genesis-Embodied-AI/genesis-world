@@ -286,7 +286,8 @@ def _parse_link(
             if joint_type == gs.JOINT_TYPE.REVOLUTE:
                 j_info["dofs_motion_ang"] = joint_axis[None]
                 j_info["dofs_motion_vel"] = np.zeros((1, 3), dtype=gs.np_float)
-                j_info["dofs_stiffness"] = np.array(
+                # USD states angular stiffness and damping per degree, while joint positions are radians.
+                j_info["dofs_stiffness"] = np.rad2deg(
                     [
                         get_attr_value_by_candidates(
                             joint_prim,
@@ -297,7 +298,7 @@ def _parse_link(
                     ],
                     dtype=gs.np_float,
                 )
-                j_info["dofs_damping"] = np.array(
+                j_info["dofs_damping"] = np.rad2deg(
                     [
                         get_attr_value_by_candidates(
                             joint_prim,

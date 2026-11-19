@@ -1322,10 +1322,10 @@ def all_joints_usd(asset_tmp_path, all_joints_mjcf: ET.ElementTree, request):
     revolute_joint_prim.CreateUpperLimitAttr().Set(revolute_range[1])
     revolute_joint_prim.CreateLocalPos0Attr().Set(Gf.Vec3f(*(revolute_box_pos + revolute_anchor)))
     revolute_joint_prim.CreateLocalPos1Attr().Set(Gf.Vec3f(*revolute_anchor))
-    revolute_joint_prim.GetPrim().CreateAttribute("stiffness", Sdf.ValueTypeNames.Float).Set(50.0)
-    revolute_joint_prim.GetPrim().CreateAttribute("angular:damping", Sdf.ValueTypeNames.Float).Set(5.0)
+    # USD specifies every angular gain per degree, while the MJCF gains are per radian.
+    revolute_joint_prim.GetPrim().CreateAttribute("stiffness", Sdf.ValueTypeNames.Float).Set(np.deg2rad(50.0))
+    revolute_joint_prim.GetPrim().CreateAttribute("angular:damping", Sdf.ValueTypeNames.Float).Set(np.deg2rad(5.0))
     revolute_drive_api = UsdPhysics.DriveAPI.Apply(revolute_joint_prim.GetPrim(), "angular")
-    # UsdPhysics specifies angular drive gains per degree, while the MJCF actuator gains are per radian.
     revolute_drive_api.CreateStiffnessAttr().Set(np.deg2rad(120.0))
     revolute_drive_api.CreateDampingAttr().Set(np.deg2rad(12.0))
 
