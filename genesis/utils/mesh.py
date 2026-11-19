@@ -1764,7 +1764,7 @@ class MeshCache:
         for filename in sorted(os.listdir(self._bucket_dir), key=lambda name: name != self._filename):
             try:
                 with open(os.path.join(self._bucket_dir, filename), "rb") as file:
-                    verts_ref = serialization.read_record(file)
+                    verts_ref = serialization.read_record(file, np.ndarray)
                     # Vertices equal bit for bit, as those of an unchanged asset are, spare the reductions of the
                     # tolerance check, which cost far more than the rest of a load.
                     if not np.array_equal(self._verts, verts_ref):
@@ -1783,5 +1783,5 @@ class MeshCache:
         assert payload is not None
         os.makedirs(self._bucket_dir, exist_ok=True)
         with open(os.path.join(self._bucket_dir, self._filename), "wb") as file:
-            serialization.write_record(file, self._verts)
+            serialization.write_record(file, self._verts, np.ndarray)
             serialization.write_record(file, payload)
