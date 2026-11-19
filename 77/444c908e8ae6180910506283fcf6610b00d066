@@ -23,6 +23,7 @@ tests/rigid/test_api.py
 genesis/engine/entities/rigid_entity/description.py
   s_4e532cc51f4368::t_76efe26cbac9cf 62-65,1853
   s_1eb4103db5e662::t_27fa16feccf7a9 61,1848-1850
+  s_bd03de55a8e2ea::t_25789377c502a7 1782-1784,1804
 genesis/engine/entities/particle_entity.py
   s_4e532cc51f4368::t_5be1e1dbfbf1d1 187
 genesis/options/options.py
@@ -49,6 +50,14 @@ genesis/options/options.py
         "model": "claude-opus-5-5"
       },
       "human_author": null
+    },
+    "s_bd03de55a8e2ea": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "913814ec-208b-4803-874b-4ea1fef1f8b3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
     }
   }
 }
