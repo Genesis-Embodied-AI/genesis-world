@@ -1,4 +1,3 @@
-import functools
 import re
 import sys
 import threading
@@ -9,13 +8,13 @@ import pytest
 
 import av
 import OpenGL.error
-from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
 
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.options.sensors import RasterizerCameraOptions
 from genesis.recorders.trajectory import TRAJECTORY_FORMAT, Trajectory
 from genesis.utils.misc import tensor_to_array
+from genesis.utils.video_encoder import VideoEncoder
 from genesis.vis.keybindings import Key, KeyAction, Keybind, KeyMod, MouseButton
 from genesis.vis.viewer_plugins.plugins.mouse_interaction import GRAB_ACC
 
@@ -302,20 +301,16 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
 
     monkeypatch.setattr("genesis.ext.pyrender.viewer.Viewer._get_save_filename", get_save_filename)
 
-    # Record losslessly, so that the decoded video holds the very frames the viewer handed over, whatever the encoder.
-    # The encoding of a frame blocks until released, which must not hold up the simulation.
+    # The encoding of a frame blocks until released, which must not hold up the simulation
     is_encoding, is_encoder_released = threading.Event(), threading.Event()
 
-    class BlockingVideoWriter(FFMPEG_VideoWriter):
-        def write_frame(self, img_array):
+    class BlockingVideoEncoder(VideoEncoder):
+        def write(self, frame):
             is_encoding.set()
             is_encoder_released.wait()
-            super().write_frame(img_array)
+            super().write(frame)
 
-    monkeypatch.setattr(
-        "moviepy.video.io.ffmpeg_writer.FFMPEG_VideoWriter",
-        functools.partial(BlockingVideoWriter, codec="libx264rgb", ffmpeg_params=["-qp", "0"], pixel_format="rgb24"),
-    )
+    monkeypatch.setattr("genesis.ext.pyrender.viewer.VideoEncoder", BlockingVideoEncoder)
 
     # Mock 'on_key_release' to determine whether requests have been processed
     n_key_releases = 0
@@ -393,10 +388,22 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
         frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)]
     assert len(frames) == 2
 
+    # A resize of the window stops the recording and saves the frames recorded at the previous size
+    pyrender_viewer.dispatch_event("on_key_release", Key.R, 0)
+    wait_for_viewer_events(pyrender_viewer, lambda: n_key_releases == 4)
+    scene.visualizer.update(force=True)
+    wait_for_viewer_events(pyrender_viewer, lambda: pyrender_viewer._last_recorded_t == scene.sim.cur_step_global)
+    width, height = pyrender_viewer.viewport_size
+    pyrender_viewer.dispatch_event("on_resize", width + 2, height)
+    wait_for_viewer_events(pyrender_viewer, lambda: not pyrender_viewer.viewer_flags["record"])
+    pyrender_viewer.dispatch_event("on_resize", width, height)
+    with av.open(VIDEO_FILENAME) as container:
+        assert sum(1 for _ in container.decode(video=0)) == 1
+
     # The frames of the links show once toggled on, and leave once toggled off
     rgbs = []
-    for n_releases in (3, 4, 5):
-        if n_releases > 3:
+    for n_releases in (4, 5, 6):
+        if n_releases > 4:
             pyrender_viewer.dispatch_event("on_key_release", Key.L, 0)
             wait_for_viewer_events(pyrender_viewer, lambda: n_key_releases == n_releases)
         rgb, *_ = pyrender_viewer.render_offscreen(

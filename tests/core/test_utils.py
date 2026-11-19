@@ -10,6 +10,7 @@ from unittest.mock import call, patch
 import numpy as np
 import torch
 
+import av
 import igl
 import pytest
 import scipy.linalg
@@ -1401,6 +1402,21 @@ def test_build_guard_requires_buildable_mixin():
             @gs.assert_built
             def step(self):
                 pass
+
+
+@pytest.mark.required
+def test_animate(tmp_path):
+    colors = ((255, 0, 0), (0, 255, 0), (0, 0, 255))
+    # The alpha channel of the first image is dropped, which gives it the shape of the others
+    imgs = [
+        np.full((48, 64, 4), (*colors[0], 128), dtype=np.uint8),
+        *(np.full((48, 64, 3), color, dtype=np.uint8) for color in colors[1:]),
+    ]
+    video_path = tmp_path / "video.mp4"
+    gs.tools.animate(imgs, video_path, fps=30)
+    with av.open(video_path) as container:
+        frames = np.stack([frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)])
+    assert_allclose(frames, np.array(colors)[:, None, None], atol=5)
 
 
 if __name__ == "__main__":
