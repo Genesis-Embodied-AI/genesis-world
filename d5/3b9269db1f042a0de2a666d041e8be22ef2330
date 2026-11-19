@@ -1,0 +1,19 @@
+tests/rendering/test_interactive_viewer.py
+  s_10289137e49fd1::t_d9115d668cbecd 304,388-389,419
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d53b9269db1f042a0de2a666d041e8be22ef2330",
+  "prompts": {},
+  "sessions": {
+    "s_10289137e49fd1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "241667de-6467-4d47-883f-9060668e0e06",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
