@@ -60,7 +60,7 @@ jobs:
               head: `${run.head_repository.owner.login}:${run.head_branch}`,
             });
             const pulls = data.filter((pull) => pull.head.sha === run.head_sha);
-            core.setOutput('is_draft', pulls.length > 0 && pulls.every((pull) => pull.draft));
+            core.setOutput('is_draft', pulls.every((pull) => pull.draft));
 
   unit-tests:
     name: nyx_plugin-unit_tests
