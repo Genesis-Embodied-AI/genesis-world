@@ -141,9 +141,6 @@ if TYPE_CHECKING:
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 
 
-IS_OLD_TORCH = tuple(map(int, torch.__version__.split(".")[:2])) < (2, 8)
-
-
 class ConstraintSolver:
     def __init__(self, rigid_solver: "RigidSolver"):
         self._solver = rigid_solver
@@ -329,9 +326,7 @@ class ConstraintSolver:
         """Remove the constraints of the environments 'envs_idx' (None for all of them), their warm start aside."""
         self._eq_const_info_cache.clear()
 
-        if gs.use_zerocopy and (
-            not isinstance(envs_idx, torch.Tensor) or (not IS_OLD_TORCH or envs_idx.dtype == torch.bool)
-        ):
+        if gs.use_zerocopy:
             n_constraints = qd_to_torch(self.constraint_state.n_constraints, copy=False)
             n_constraints_equality = qd_to_torch(self.constraint_state.n_constraints_equality, copy=False)
             n_constraints_frictionloss = qd_to_torch(self.constraint_state.n_constraints_frictionloss, copy=False)

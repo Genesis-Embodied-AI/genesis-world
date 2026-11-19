@@ -1,5 +1,5 @@
-import gc
 import argparse
+import gc
 import os
 import pathlib
 import signal
@@ -9,6 +9,7 @@ import time
 import weakref
 
 import numpy as np
+import torch
 
 import pytest
 
@@ -45,9 +46,12 @@ def test_switching(backend, order):
         os.environ["GS_ENABLE_NDARRAY"] = "1" if use_nd else "0"
 
         try:
-            gs.init(backend=gs.cpu, seed=0)
+            # Debug mode alternates too, as its settings of torch are global to the process
+            is_debug = cycle_idx % 2 == 0
+            gs.init(backend=gs.cpu, seed=0, debug=is_debug)
 
             assert gs.use_ndarray == use_nd, f"Cycle {cycle_idx}: expected use_ndarray={use_nd}, got {gs.use_ndarray}"
+            assert torch.are_deterministic_algorithms_enabled() == is_debug
 
             # A kernel taking an ndarray accepts the tensor on the ndarray backend alone
             t = V(qd.i32, (4,))

@@ -968,7 +968,7 @@ def test_sap_rigid_floor_contact(xml_path, asset_tmp_path, show_viewer):
         assert_allclose(entity_depths, entity_rest_depths, rtol=5e-3)
 
 
-@pytest.mark.required("sparse")
+@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["long_chain"])
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_sap_long_kinematic_chain(xml_path, show_viewer):

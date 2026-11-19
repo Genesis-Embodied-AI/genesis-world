@@ -9,8 +9,7 @@ import weakref
 from collections.abc import Callable
 from contextlib import redirect_stdout
 from functools import partial
-from typing import Any
-from warnings import warn
+from typing import Any, NamedTuple
 
 # Import quadrants while collecting its output without printing directly
 _qd_outputs = io.StringIO()
@@ -26,6 +25,17 @@ except ImportError as e:
     raise ImportError(
         "'torch' module not available. Please install pytorch manually: https://pytorch.org/get-started/locally/"
     ) from e
+# Genesis requires:
+# * torch 2.8.0: writes in place through integer index tensors into zero-copy views.
+# * torch 2.10.0 on Apple Metal: supports the zero-copy of 'qd.Field'.
+#   See https://github.com/pytorch/pytorch/pull/168193
+# * torch 2.12.0 on Apple Metal: fills uint64 tensors, as deterministic algorithms do on every allocation.
+#   See https://github.com/pytorch/pytorch/pull/179230
+_TORCH_VERSION = tuple(map(int, torch.__version__.split(".")[:2]))
+if _TORCH_VERSION < (2, 8):
+    raise ImportError(
+        "'torch<2.8.0' is not supported. Please upgrade pytorch manually: https://pytorch.org/get-started/locally/"
+    )
 import numpy as np
 
 from .constants import backend as _gs_backend
@@ -34,16 +44,18 @@ from .utils import ZeroCopyMode, get_device, redirect_libc_stderr, set_environ, 
 from .version import __version__
 
 
-_IS_OLD_TORCH = tuple(map(int, torch.__version__.split(".")[:2])) < (2, 8)
-# FIXME: qd.Field does not support zero-copy on Metal for 'torch<=2.9.1'.
-# See: https://github.com/pytorch/pytorch/pull/168193
-_TORCH_MPS_SUPPORT_DLPACK_FIELD = torch.torch_version.TorchVersion(torch.__version__.split("+", 1)[0]) > (2, 9, 1)
-if _IS_OLD_TORCH:
-    warn("'torch<2.8.0' is not supported. Please upgrade pytorch manually: https://pytorch.org/get-started/locally/")
+class _TorchSettings(NamedTuple):
+    cublas_workspace_config: str | None
+    is_deterministic: bool
+    is_deterministic_warn_only: bool
+    is_cudnn_deterministic: bool
+    is_cudnn_benchmark: bool
 
 
 # Global state
 _initialized: bool = False
+# The settings of torch global to the process that debug mode changes, as they were before, which 'destroy' restores
+_torch_settings: _TorchSettings | None = None
 _scene_registry: list[weakref.ReferenceType["Scene"]] = []
 _module_registry: set[tuple[Callable[[], None], Callable[[], None]]] = set()
 logger: Logger | None = None
@@ -131,6 +143,11 @@ def init(
             if not backend_candidates:
                 raise_exception_from(f"Backend ~<{_backend}>~ not available on this machine.", e)
     globals()["backend"] = backend
+    if backend == _gs_backend.metal and _TORCH_VERSION < (2, 12):
+        raise_exception(
+            "'torch<2.12.0' is not supported on Apple Metal. Please upgrade pytorch manually: "
+            "https://pytorch.org/get-started/locally/"
+        )
 
     # Fallback to Torch CPU device if requested
     if backend != _gs_backend.cpu and os.environ.get("GS_TORCH_FORCE_CPU_DEVICE") == "1":
@@ -145,8 +162,6 @@ def init(
     # Unlike dynamic vs static array mode, and fastcache, zero-copy can be toggle on/off between init without issue
     _use_zerocopy = bool(int(os.environ["GS_ENABLE_ZEROCOPY"])) if "GS_ENABLE_ZEROCOPY" in os.environ else None
     if _use_zerocopy:
-        if backend == _gs_backend.metal and not _use_ndarray and not _TORCH_MPS_SUPPORT_DLPACK_FIELD:
-            raise_exception("Zero-copy not supported for static array mode on Apple Metal if 'torch<=2.9.1'.")
         if (backend == _gs_backend.metal and device.type != "mps") or (
             backend in (_gs_backend.cuda, _gs_backend.amdgpu) and device.type != "cuda"
         ):
@@ -158,7 +173,7 @@ def init(
     if (
         (backend == gs.cpu and device.type == "cpu")
         or (backend in (_gs_backend.cuda, _gs_backend.amdgpu) and device.type == "cuda")
-        or (backend == _gs_backend.metal and device.type == "mps" and (_use_ndarray or _TORCH_MPS_SUPPORT_DLPACK_FIELD))
+        or (backend == _gs_backend.metal and device.type == "mps")
     ):
         if _use_zerocopy is None:
             _use_zerocopy = True
@@ -241,6 +256,13 @@ def init(
     if debug:
         if backend != _gs_backend.cpu:
             logger.warning("Debug mode is partially supported for GPU backend.")
+        globals()["_torch_settings"] = _TorchSettings(
+            cublas_workspace_config=os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+            is_deterministic=torch.are_deterministic_algorithms_enabled(),
+            is_deterministic_warn_only=torch.is_deterministic_algorithms_warn_only_enabled(),
+            is_cudnn_deterministic=torch.backends.cudnn.deterministic,
+            is_cudnn_benchmark=torch.backends.cudnn.benchmark,
+        )
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.deterministic = True
@@ -353,16 +375,6 @@ def init(
     if backend == _gs_backend.amdgpu:
         logger.debug("[Quadrants] Beware AMD GPU backend is still experimental and may be unstable.")
 
-    if _IS_OLD_TORCH:
-        logger.warning(
-            "'torch<2.8.0' is not supported. Please upgrade pytorch manually: https://pytorch.org/get-started/locally/"
-        )
-    elif backend == _gs_backend.metal and not _TORCH_MPS_SUPPORT_DLPACK_FIELD:
-        logger.warning(
-            "'torch<2.9.1' does not supported zero-copy on Apple Metal. Consider upgrading pytorch to improve "
-            "runtime performance: https://pytorch.org/get-started/locally/"
-        )
-
     logger.banner(device_name, backend, total_mem, seed, debug, precision, performance_mode)
 
     if _use_zerocopy is None:
@@ -389,6 +401,20 @@ def destroy():
 
     Note that gs.init() needs to be called again to re-initialize Genesis after destroy.
     """
+    # Restore the settings of torch that debug mode changed, an initialization that failed included
+    global _torch_settings
+    if _torch_settings is not None:
+        if _torch_settings.cublas_workspace_config is None:
+            os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
+        else:
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = _torch_settings.cublas_workspace_config
+        torch.use_deterministic_algorithms(
+            _torch_settings.is_deterministic, warn_only=_torch_settings.is_deterministic_warn_only
+        )
+        torch.backends.cudnn.deterministic = _torch_settings.is_cudnn_deterministic
+        torch.backends.cudnn.benchmark = _torch_settings.is_cudnn_benchmark
+        _torch_settings = None
+
     # Early return if not initialized
     global _initialized
     if not _initialized:

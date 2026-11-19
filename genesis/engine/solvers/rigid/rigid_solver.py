@@ -167,8 +167,6 @@ if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
 
 
-IS_OLD_TORCH = tuple(map(int, torch.__version__.split(".")[:2])) < (2, 8)
-
 # minimum constraint impedance
 IMP_MIN = 0.0001
 # maximum constraint impedance
