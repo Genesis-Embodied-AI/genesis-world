@@ -1,7 +1,9 @@
 name: Precommit Checks (Lint and Format)
 
 on:
+  # Marking a pull request ready for review starts the Nyx Plugin workflow, which follows this one.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
 

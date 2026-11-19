@@ -26,16 +26,51 @@ env:
   GS_PRECISION: "32"
 
 jobs:
+  setup:
+    name: nyx_plugin-setup
+
+    # Only a pull request is worth checking, the plugin being validated before a change lands rather than after.
+    if: github.event.workflow_run.event == 'pull_request'
+
+    runs-on: ubuntu-24.04
+
+    permissions:
+      pull-requests: read
+
+    outputs:
+      IS_DRAFT: ${{ steps.check.outputs.is_draft }}
+
+    steps:
+      # The event lists no pull request when it comes from a fork, and never its draft flag, so the pull request is
+      # asked of the API. Pull requests of one branch toward distinct bases share its commit, and a ready one among
+      # them asks for the commit to be tested.
+      - name: Check the pull request
+        id: check
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const { data: pulls } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${run.head_repository.owner.login}:${run.head_branch}`,
+            });
+            core.setOutput('is_draft', pulls.length > 0 && pulls.every((pull) => pull.draft));
+
   unit-tests:
     name: nyx_plugin-unit_tests
+
+    needs: setup
 
     # The renderer bridges to Genesis through CUDA device pointers, so a GPU runner is required even though the
     # simulation itself could run on CPU. This is the runner the plugin's own CI uses, which additionally makes its
     # reference images comparable.
     runs-on: gpu-t4-4-core
 
-    # Only a pull request is worth checking, the plugin being validated before a change lands rather than after.
-    if: github.event.workflow_run.event == 'pull_request'
+    # A draft pull request is gated as in the production workflow. Since this workflow follows the precommit one, a
+    # re-run of either lets a draft through, '/ci' re-running the precommit one (see the CI Command workflow).
+    if: >-
+      needs.setup.outputs.IS_DRAFT == 'false' || github.event.workflow_run.run_attempt > 1 || github.run_attempt > 1
 
     permissions:
       contents: read

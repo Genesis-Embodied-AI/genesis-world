@@ -1,8 +1,9 @@
 name: CI Command
 
 # A comment starting with '/ci' on a pull request re-runs its workflows that skipped the latest commit for being a
-# draft (see the production workflow). The re-run keeps the event and permissions of the pull request, so this
-# workflow, which runs from the default branch with a write token, never checks out the code of the pull request.
+# draft (see the production workflow), and its precommit run, whose re-run lets the Nyx Plugin workflow through. The
+# re-run keeps the event and permissions of the pull request, so this workflow, which runs from the default branch with
+# a write token, never checks out the code of the pull request.
 on:
   issue_comment:
     types: [created]
@@ -25,6 +26,7 @@ jobs:
         uses: actions/github-script@v8
         env:
           WORKFLOW_PATHS: .github/workflows/production.yml .github/workflows/generic.yml
+          PRECOMMIT_PATH: .github/workflows/format.yml
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -53,12 +55,14 @@ jobs:
             // head branch, since other branches may point at the same commit. A commit can have several runs of a
             // workflow, one per event of its pull request. The runs are listed newest first, and the latest one alone
             // is re-run.
-            const runsLatest = paths.map((path) => runs.find((run) => run.path === path
+            const findRunLatest = (path) => runs.find((run) => run.path === path
               && run.head_branch === pull.head.ref
-              && run.head_repository.full_name === pull.head.repo.full_name)).filter(Boolean);
+              && run.head_repository.full_name === pull.head.repo.full_name);
+            const runsLatest = paths.map(findRunLatest).filter(Boolean);
+            const runPrecommit = findRunLatest(process.env.PRECOMMIT_PATH);
             // A run from a fork that needs a maintainer's approval waits as 'action_required', and is approved on the
             // pull request page before '/ci' can re-run it.
-            if (runsLatest.some((run) => run.conclusion === 'action_required')) {
+            if ([...runsLatest, runPrecommit].some((run) => run?.conclusion === 'action_required')) {
               core.notice('The workflows of the pull request wait for approval. Approve them, then comment /ci again.');
               await react('confused');
               return;
@@ -69,7 +73,12 @@ jobs:
               await react('confused');
               return;
             }
-            for (const run of runsSkipped) {
+            if (runPrecommit && runPrecommit.status !== 'completed') {
+              core.notice(`${runPrecommit.html_url} is still running. Comment /ci again once it completes.`);
+              await react('confused');
+              return;
+            }
+            for (const run of [...runsSkipped, runPrecommit].filter(Boolean)) {
               await github.rest.actions.reRunWorkflow({ owner, repo, run_id: run.id });
               core.notice(`Re-running ${run.html_url}`);
             }
