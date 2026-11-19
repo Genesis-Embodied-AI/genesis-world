@@ -301,16 +301,13 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
 
     monkeypatch.setattr("genesis.ext.pyrender.viewer.Viewer._get_save_filename", get_save_filename)
 
-    # Encoding is lossy, so the frames handed to the encoder are intercepted to compare them exactly. The encoding of a
-    # frame blocks until released, which must not hold up the simulation.
+    # The encoding of a frame blocks until released, which must not hold up the simulation
     is_encoding, is_encoder_released = threading.Event(), threading.Event()
-    frames_encoded = []
 
     class BlockingVideoEncoder(VideoEncoder):
         def write(self, frame):
             is_encoding.set()
             is_encoder_released.wait()
-            frames_encoded.append(frame.copy())
             super().write(frame)
 
     monkeypatch.setattr("genesis.ext.pyrender.viewer.VideoEncoder", BlockingVideoEncoder)
@@ -388,7 +385,8 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
     pyrender_viewer.dispatch_event("on_key_release", Key.R, 0)
     wait_for_viewer_events(pyrender_viewer, lambda: n_key_releases == 3)
     with av.open(VIDEO_FILENAME) as container:
-        assert sum(1 for _ in container.decode(video=0)) == len(frames_encoded) == 2
+        frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)]
+    assert len(frames) == 2
 
     # The frames of the links show once toggled on, and leave once toggled off
     rgbs = []
@@ -418,7 +416,7 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
     # Make sure that the result is valid
     with open(IMAGE_FILENAME, "rb") as f:
         assert f.read() == png_snapshot
-    for frame in frames_encoded:
+    for frame in frames:
         assert rgb_array_to_png_bytes(frame) == png_snapshot
 
 
