@@ -722,7 +722,7 @@ def read_record(file: BinaryIO):
             arrays[i] = np.frombuffer(buffer, dtype=dtype, count=math.prod(shape), offset=offset).reshape(shape)
             offset += arrays[i].nbytes
         return _load_any(header["value"], arrays)
-    except (struct.error, KeyError, IndexError, TypeError, gs.GenesisException) as e:
+    except (struct.error, KeyError, IndexError, TypeError, OverflowError, gs.GenesisException) as e:
         raise ValueError("The file holds no record written by 'write_record' here.") from e
 
 
