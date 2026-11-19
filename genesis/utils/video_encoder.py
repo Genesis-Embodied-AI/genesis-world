@@ -255,8 +255,13 @@ class VideoEncoder:
 
     @property
     def filename(self):
-        """Path of the output video file, or None if no frame was written or encoding failed before creating it."""
-        return self._filename if self._is_file_created else None
+        """Path of the output video file."""
+        return self._filename
+
+    @property
+    def has_file(self):
+        """Whether the current video created its file, which it does on its first encoded frame."""
+        return self._is_file_created
 
     def close(self):
         """
