@@ -586,7 +586,10 @@ def func_inverse_kinematics(
                                 i_error + 3, i_d, i_b
                             ] * (targets.rot_mask[i_error] * targets.link_rot_mask[i_ee])
 
-                # In-place Cholesky factorization of the damped Gram matrix, forming each entry when it reaches it
+                # In-place Cholesky factorization of the damped Gram matrix, forming each entry when it reaches it.
+                # Each entry carries a rounding error of about n * eps * |J|^2, which damping^2 must dominate near a
+                # singular configuration, so in single precision a damping below about 1e-3 per metre of reach loses
+                # the accuracy of the step there.
                 for i_row in range(n_rows):
                     for j_row in range(i_row + 1):
                         val = gs.qd_float(0.0)
