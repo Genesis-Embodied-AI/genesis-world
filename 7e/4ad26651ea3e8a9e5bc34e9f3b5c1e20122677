@@ -1,0 +1,19 @@
+genesis/engine/materials/hybrid.py
+  s_bd03de55a8e2ea::t_b499dabe0f362d 6,44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7e4ad26651ea3e8a9e5bc34e9f3b5c1e20122677",
+  "prompts": {},
+  "sessions": {
+    "s_bd03de55a8e2ea": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "913814ec-208b-4803-874b-4ea1fef1f8b3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
