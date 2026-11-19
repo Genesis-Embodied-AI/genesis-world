@@ -1,0 +1,19 @@
+genesis/utils/video_encoder.py
+  s_10289137e49fd1::t_b8b1954f15ad6d 230-231,283
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1472f0d9a5d7da2e4934ea4773cd1f1bc2abb843",
+  "prompts": {},
+  "sessions": {
+    "s_10289137e49fd1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "241667de-6467-4d47-883f-9060668e0e06",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
