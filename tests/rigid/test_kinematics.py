@@ -398,6 +398,19 @@ def test_inverse_kinematics_multilink(xml_path, show_viewer, tol):
     assert_allclose(err[:, 0, 3], theta * damping**2 / (1.0 + damping**2), tol=tol)
     assert_allclose(err[:, 0, 4:], 0.0, tol=tol)
 
+    # A target given its position alone leaves its orientation free. The point moves along -y at the rate of the hinge,
+    # so one damped step towards the point turned by theta is sin(theta) / (1 + damping^2).
+    qpos = pendulum.inverse_kinematics_multilink(
+        links=(arm, base),
+        poss=((0.0, -0.5 - np.sin(theta), np.cos(theta)), None),
+        quats=(None, base.get_quat()),
+        local_points=((0.0, 0.0, 1.0), None),
+        max_samples=1,
+        max_solver_iters=1,
+        damping=damping,
+    )
+    assert_allclose(qpos, np.sin(theta) / (1.0 + damping**2), tol=tol)
+
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_inverse_kinematics_local_point(n_envs, show_viewer, tol):
