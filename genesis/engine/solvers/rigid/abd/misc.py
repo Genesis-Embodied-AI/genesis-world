@@ -799,7 +799,7 @@ def kernel_init_equality_fields(
         dyn_info.equalities.eq_obj1id[i_eq, i_b] = equalities_eq_obj1id[i_eq]
         dyn_info.equalities.eq_obj2id[i_eq, i_b] = equalities_eq_obj2id[i_eq]
         dyn_info.equalities.eq_type[i_eq, i_b] = equalities_eq_type[i_eq]
-        for j in qd.static(range(11)):
+        for j in range(equalities_eq_data.shape[1]):
             dyn_info.equalities.eq_data[i_eq, i_b][j] = equalities_eq_data[i_eq, j]
         for j in qd.static(range(7)):
             dyn_info.equalities.sol_params[i_eq, i_b][j] = equalities_sol_params[i_eq, j]

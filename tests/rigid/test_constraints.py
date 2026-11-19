@@ -517,6 +517,7 @@ def test_urdf_mimic(show_viewer, tol, scaled_urdf_mimic):
         ),
         show_viewer=show_viewer,
     )
+    # The hand loads from MJCF and the mimic model from URDF, so that one solver holds the equalities of both parsers.
     hand = scene.add_entity(
         gs.morphs.MJCF(
             file="xml/franka_emika_panda/hand.xml",

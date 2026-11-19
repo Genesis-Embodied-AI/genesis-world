@@ -12,7 +12,7 @@ from PIL import Image
 from trimesh.visual.texture import TextureVisuals
 
 import genesis as gs
-from genesis.constants import XACRO_FORMAT
+from genesis.constants import EQUALITY_DATA_SIZE, XACRO_FORMAT
 from genesis.ext import urdfpy
 
 from . import geom as gu
@@ -772,8 +772,7 @@ def parse_equalities(mj, scale):
 
         eq_info = dict()
         eq_info["name"] = mj_equality.name
-        # Every parser writes the 11 entries the solver reads, while MuJoCo stores 12 per equality from version 3.17.
-        eq_info["data"] = mj.eq_data[i_e, :11].copy()
+        eq_info["data"] = mj.eq_data[i_e, :EQUALITY_DATA_SIZE].copy()
         eq_info["sol_params"] = np.concatenate((mj.eq_solref[i_e], mj.eq_solimp[i_e]))
 
         objs_idx = [mj.eq_obj1id[i_e], mj.eq_obj2id[i_e]]
