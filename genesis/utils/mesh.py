@@ -20,16 +20,8 @@ from PIL import Image
 import genesis as gs
 
 from . import geom as gu
-from .cache import (
-    OwnedCache,
-    SizeCappedCache,
-    get_cvx_cache,
-    get_exr_path,
-    get_hashkey,
-    get_wt_cache,
-    get_wth_cache,
-    register_cache_clear,
-)
+from .cache import OwnedCache, SizeCappedCache, get_exr_path, get_hashkey, register_cache_clear
+from .mesh_cache import get_cvx_cache, get_wt_cache, get_wth_cache
 from .misc import get_assets_dir, get_src_dir, unique_rows
 
 MESH_REPAIR_ERROR_THRESHOLD = 0.01

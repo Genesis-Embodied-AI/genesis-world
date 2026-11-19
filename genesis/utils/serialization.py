@@ -25,6 +25,7 @@ from typing import BinaryIO, Callable, NamedTuple
 
 import numpy as np
 
+import trimesh
 from frozendict import frozendict
 from pydantic import AfterValidator, TypeAdapter, ValidationError, ValidationInfo
 
@@ -737,3 +738,34 @@ def _loaded_array(raw: int, loading: Loading) -> np.ndarray:
 
 
 register(np.ndarray, _exported_array, _loaded_array)
+
+
+def _exported_geometry(mesh: trimesh.Trimesh, exporting: Exporting) -> dict:
+    """Export the geometry of a trimesh: its vertices, the faces joining them, their normals and their colours.
+
+    Only colours the mesh states are exported. Asking a mesh coloured by anything else for its vertex colours makes
+    trimesh invent a default one per vertex, which a file would then carry as if the author had chosen it.
+    """
+    colours = mesh.visual.vertex_colors if mesh.visual.kind == "vertex" else None
+    return {
+        "verts": exporting.array(mesh.vertices),
+        "faces": exporting.array(mesh.faces),
+        "normals": exporting.array(mesh.vertex_normals),
+        "colours": None if colours is None else exporting.array(colours),
+    }
+
+
+def _loaded_geometry(raw: dict, loading: Loading) -> trimesh.Trimesh:
+    """Recreate the trimesh as it was exported, with the vertices, faces and normals the file holds."""
+    mesh = trimesh.Trimesh(
+        vertices=loading.array(raw["verts"]),
+        faces=loading.array(raw["faces"]),
+        vertex_normals=loading.array(raw["normals"]),
+        process=False,
+    )
+    if raw["colours"] is not None:
+        mesh.visual.vertex_colors = loading.array(raw["colours"])
+    return mesh
+
+
+register(trimesh.Trimesh, _exported_geometry, _loaded_geometry)

@@ -3,11 +3,13 @@ Furthest point sampling (FPS) on triangle mesh surfaces.
 """
 
 import numpy as np
+
 import trimesh
 
 import genesis as gs
 
-from .cache import MeshCache, get_fps_pc_cache_dir
+from .cache import get_fps_pc_cache_dir
+from .mesh_cache import MeshCache
 
 
 def get_fps_pc_cache(verts, faces, n_points: int, n_candidates: int, return_normals: bool, seed: int):

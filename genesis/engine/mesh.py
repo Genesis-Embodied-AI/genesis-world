@@ -21,7 +21,8 @@ from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
 from genesis.typing import Matrix3x3Type, Vec3FType
 from genesis.utils import serialization
-from genesis.utils.cache import OwnedCache, get_gsd_path, get_hashkey, get_remesh_cache
+from genesis.utils.cache import OwnedCache, get_gsd_path, get_hashkey
+from genesis.utils.mesh_cache import get_remesh_cache
 from genesis.utils.misc import redirect_libc_stderr
 
 if TYPE_CHECKING:
@@ -829,7 +830,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         rescales it: what a file carries is the geometry as it now stands, so reading one back processes nothing.
         """
         return {
-            "geometry": _exported_geometry(self.trimesh, exporting),
+            "geometry": exporting.value(self.trimesh, trimesh.Trimesh),
             "uvs": None if self.uvs is None else exporting.array(self.uvs),
             "surface": exporting.value(self.surface, Surface),
             "metadata": exporting.value(self.metadata, Any),
@@ -844,7 +845,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         the geometry.
         """
         mesh = cls(
-            mesh=_loaded_geometry(raw["geometry"], loading),
+            mesh=loading.value(raw["geometry"], trimesh.Trimesh),
             surface=loading.value(raw["surface"], Surface),
             uvs=None if raw["uvs"] is None else loading.array(raw["uvs"]),
             # The metadata says what was already done to the geometry, so it is handed back rather than acted on again
@@ -1133,34 +1134,3 @@ def _get_support_table(verts: np.ndarray, support_res: int) -> SupportTable:
     is_slot = candidates_rank < 2
     slots_vid[cells_idx[is_slot], candidates_rank[is_slot]] = verts_idx[is_slot]
     return SupportTable(slots_vid, verts_idx[~is_slot], np.bincount(cells_idx[~is_slot], minlength=n_geom_cells))
-
-
-def _exported_geometry(mesh: trimesh.Trimesh, exporting: serialization.Exporting) -> dict:
-    """Export the geometry of a trimesh: its vertices, the faces joining them, their normals and their colours.
-
-    Only colours the mesh states are exported. Asking a mesh coloured by anything else for its vertex colours makes
-    trimesh invent a default one per vertex, which a file would then carry as if the author had chosen it.
-    """
-    colours = mesh.visual.vertex_colors if mesh.visual.kind == "vertex" else None
-    return {
-        "verts": exporting.array(mesh.vertices),
-        "faces": exporting.array(mesh.faces),
-        "normals": exporting.array(mesh.vertex_normals),
-        "colours": None if colours is None else exporting.array(colours),
-    }
-
-
-def _loaded_geometry(raw: dict, loading: serialization.Loading) -> trimesh.Trimesh:
-    """Recreate the trimesh as it was exported, with the vertices, faces and normals the file holds."""
-    mesh = trimesh.Trimesh(
-        vertices=loading.array(raw["verts"]),
-        faces=loading.array(raw["faces"]),
-        vertex_normals=loading.array(raw["normals"]),
-        process=False,
-    )
-    if raw["colours"] is not None:
-        mesh.visual.vertex_colors = loading.array(raw["colours"])
-    return mesh
-
-
-serialization.register(trimesh.Trimesh, _exported_geometry, _loaded_geometry)

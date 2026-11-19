@@ -1,7 +1,7 @@
-import numba as nb
 import numpy as np
 
 import igl
+import numba as nb
 import pysplashsurf
 import trimesh
 from skimage.measure import marching_cubes
@@ -9,7 +9,7 @@ from skimage.measure import marching_cubes
 import genesis as gs
 
 from . import geom as gu
-from .cache import get_ptc_cache
+from .mesh_cache import get_ptc_cache
 
 
 def n_particles_vol(p_size=0.01, volume=1.0):

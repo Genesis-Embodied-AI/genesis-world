@@ -5,7 +5,7 @@ import igl
 import genesis as gs
 
 from . import mesh as mu
-from .cache import get_tet_cache
+from .mesh_cache import get_tet_cache
 
 
 def mesh_to_elements(mesh, tet_cfg=dict()):

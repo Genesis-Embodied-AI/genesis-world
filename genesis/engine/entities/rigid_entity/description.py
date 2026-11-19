@@ -31,7 +31,7 @@ from genesis.options.patches import resolve_patches_fields
 from genesis.options.surfaces import DynamicVertices, Surface
 from genesis.typing import PositiveVec3FType, PositiveVec3IType
 from genesis.utils import geom as gu, gltf as gltf_utils, mesh as mu, mjcf as mju, terrain as tu, urdf as uu
-from genesis.utils.cache import MESH_CACHE_MATCH_RTOL
+from genesis.utils.mesh_cache import MESH_CACHE_MATCH_RTOL
 from genesis.utils.misc import get_assets_dir
 
 from ..base_entity import EntityDescription
