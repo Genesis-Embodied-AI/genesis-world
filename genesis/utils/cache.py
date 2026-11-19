@@ -1,6 +1,7 @@
 """Caches of Genesis: where they live on disk, how their keys are computed, and the in-memory caches shared across
 scenes."""
 
+import copyreg
 import dataclasses
 import functools
 import hashlib
@@ -19,6 +20,7 @@ from typing import Any
 import numpy as np
 
 import numba as nb
+import trimesh
 from pydantic import BaseModel
 
 import genesis as gs
@@ -27,6 +29,14 @@ import genesis as gs
 # identical by the on-disk caches. Orders of magnitude below the spacing of genuinely distinct geometry, and orders of
 # magnitude above the last-significant-digit noise separating two exports of the same model.
 MESH_CACHE_MATCH_RTOL = 1e-6
+# Pickles a mesh by its geometry alone, since the class of its ray helper depends on the optional packages installed.
+MESH_CACHE_PICKLE_REDUCERS = {
+    **copyreg.dispatch_table,
+    trimesh.Trimesh: lambda mesh: (
+        functools.partial(trimesh.Trimesh, process=False),
+        (mesh.vertices.view(np.ndarray), mesh.faces.view(np.ndarray)),
+    ),
+}
 # Bumped when watertighten output changes for a fixed (mesh, aggressiveness): forces a cache miss on stale entries.
 WT_CACHE_VERSION = 8
 # Bumped when the wall-thickness estimate changes for a fixed mesh and parameters: forces a cache miss on stale entries.
@@ -481,7 +491,8 @@ class MeshCache:
     the vertices, so a hit is always verified rather than inferred from a key.
 
     An entry stores its reference vertices ahead of the payload in the same file, so the scan deserializes only that
-    leading record for the candidates it rejects.
+    leading record for the candidates it rejects. A 'trimesh.Trimesh' in the payload is stored by its vertices and
+    faces alone, so it loads back without its visual and metadata.
 
     Parameters
     ----------
@@ -529,4 +540,6 @@ class MeshCache:
         os.makedirs(self._bucket_dir, exist_ok=True)
         with open(os.path.join(self._bucket_dir, self._filename), "wb") as file:
             pickle.dump(self._verts, file, protocol=pickle.HIGHEST_PROTOCOL)
-            pickle.dump(payload, file, protocol=pickle.HIGHEST_PROTOCOL)
+            payload_pickler = pickle.Pickler(file, protocol=pickle.HIGHEST_PROTOCOL)
+            payload_pickler.dispatch_table = MESH_CACHE_PICKLE_REDUCERS
+            payload_pickler.dump(payload)

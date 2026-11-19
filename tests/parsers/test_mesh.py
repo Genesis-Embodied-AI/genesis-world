@@ -1,6 +1,7 @@
 import importlib.metadata
 import io
 import os
+import sys
 from contextlib import nullcontext
 
 import numpy as np
@@ -1062,6 +1063,11 @@ def test_convex_decompose_cache(monkeypatch, asset_tmp_path):
     # A decomposition computed by another coacd release is never reused.
     real_version = importlib.metadata.version
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.0.0" if name == "coacd" else real_version(name))
+    real_convex_decompose(*seen_args[0])
+    assert n_coacd_runs == 2
+
+    # An entry loads in an environment lacking the ray helper of the one that wrote it, as when the writer has embreex.
+    monkeypatch.setitem(sys.modules, "trimesh.ray.ray_triangle", None)
     real_convex_decompose(*seen_args[0])
     assert n_coacd_runs == 2
 
