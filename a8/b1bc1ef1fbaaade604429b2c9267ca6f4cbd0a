@@ -1,0 +1,23 @@
+genesis/utils/serialization.py
+  s_f23dc54ea62af2::t_752f3abb183e92 708
+  s_f23dc54ea62af2::t_4854444775dc82 740-741
+  s_f23dc54ea62af2::t_bc7bf2edef5646 742,745-747
+tests/parsers/test_mesh.py
+  s_f23dc54ea62af2::t_ceb800bd852d85 1061-1062
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a8b1bc1ef1fbaaade604429b2c9267ca6f4cbd0a",
+  "prompts": {},
+  "sessions": {
+    "s_f23dc54ea62af2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9cf92f21-8c71-4830-81b7-b9852f6c9b21",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
