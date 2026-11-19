@@ -227,8 +227,8 @@ class VideoEncoder:
         is_color = frame.ndim == 3 and frame.shape[-1] == 3
         if frame.ndim != 2 + is_color or not np.issubdtype(frame.dtype, np.integer):
             gs.raise_exception("Frames must be either grayscale [H, W] or color [H, W, RGB] of integer type.")
-        # No encoding thread and no frame storage means a new video, the encoder being reusable once closed
-        if self._thread is None and self._buffer is None:
+        # The encoder is reusable once closed, which starts a new video
+        if self._frame_shape is None:
             self._frame_shape = frame.shape
             self._is_file_created = False
         elif frame.shape != self._frame_shape:
@@ -280,6 +280,7 @@ class VideoEncoder:
             self._thread.join()
             self._thread = None
             is_encoding_lost = not self._is_encoding_over
+        self._frame_shape = None
 
         if self._container is not None:
             # 'stream' is None if no frame was ever written, in which case there is nothing to flush.
