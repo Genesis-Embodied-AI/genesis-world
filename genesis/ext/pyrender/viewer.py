@@ -893,6 +893,11 @@ class Viewer(pyglet.window.Window):
         if self._renderer is None:
             return
 
+        # Every frame of a video has the size of its first one, so a resize ends the recording
+        if self.viewer_flags["record"] and (width, height) != self._viewport_size:
+            gs.logger.warning("Viewer window resized while recording. Stopping the recording.")
+            self.toggle_recording()
+
         self._renderer._delete_shadow_framebuffer()
         self._renderer._delete_floor_framebuffer()
 

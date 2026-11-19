@@ -388,10 +388,22 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
         frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)]
     assert len(frames) == 2
 
+    # A resize of the window stops the recording and saves the frames recorded at the previous size
+    pyrender_viewer.dispatch_event("on_key_release", Key.R, 0)
+    wait_for_viewer_events(pyrender_viewer, lambda: n_key_releases == 4)
+    scene.visualizer.update(force=True)
+    wait_for_viewer_events(pyrender_viewer, lambda: pyrender_viewer._last_recorded_t == scene.sim.cur_step_global)
+    width, height = pyrender_viewer._viewport_size
+    pyrender_viewer.dispatch_event("on_resize", width + 2, height)
+    wait_for_viewer_events(pyrender_viewer, lambda: not pyrender_viewer.viewer_flags["record"])
+    pyrender_viewer.dispatch_event("on_resize", width, height)
+    with av.open(VIDEO_FILENAME) as container:
+        assert sum(1 for _ in container.decode(video=0)) == 1
+
     # The frames of the links show once toggled on, and leave once toggled off
     rgbs = []
-    for n_releases in (3, 4, 5):
-        if n_releases > 3:
+    for n_releases in (4, 5, 6):
+        if n_releases > 4:
             pyrender_viewer.dispatch_event("on_key_release", Key.L, 0)
             wait_for_viewer_events(pyrender_viewer, lambda: n_key_releases == n_releases)
         rgb, *_ = pyrender_viewer.render_offscreen(
