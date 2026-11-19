@@ -1,5 +1,9 @@
 name: Nyx Plugin
 
+# A 'workflow_run' run carries the commit of the default branch, so the commit under test is named in the run, where
+# '/ci' finds it (see the CI Command workflow).
+run-name: Nyx Plugin ${{ github.event.workflow_run.head_sha }}
+
 # Checking out the internal plugin repository needs a token, and a pull request coming from a fork is never given
 # one. 'workflow_run' runs in the context of the base repository, where secrets are available, hence the only trigger
 # able to validate such a pull request. In exchange, this file is always taken from the default branch, and the
@@ -42,8 +46,8 @@ jobs:
 
     steps:
       # The event lists no pull request when it comes from a fork, and never its draft flag, so the pull request is
-      # asked of the API. Pull requests of one branch toward distinct bases share its commit, and a ready one among
-      # them asks for the commit to be tested.
+      # asked of the API, which gives its state when this job runs. Pull requests of one branch toward distinct bases
+      # share its commit, and a ready one among them asks for the commit to be tested.
       - name: Check the pull request
         id: check
         uses: actions/github-script@v8
@@ -67,10 +71,8 @@ jobs:
     # reference images comparable.
     runs-on: gpu-t4-4-core
 
-    # A draft pull request is gated as in the production workflow. Since this workflow follows the precommit one, a
-    # re-run of either lets a draft through, '/ci' re-running the precommit one (see the CI Command workflow).
-    if: >-
-      needs.setup.outputs.IS_DRAFT == 'false' || github.event.workflow_run.run_attempt > 1 || github.run_attempt > 1
+    # A draft pull request is gated as in the production workflow.
+    if: needs.setup.outputs.IS_DRAFT == 'false' || github.run_attempt > 1
 
     permissions:
       contents: read
