@@ -1,0 +1,24 @@
+.github/workflows/examples.yml
+  s_a2fd639a6afbd9::t_b0a12f5c8829c7 18
+.github/workflows/nyx_plugin.yml
+  s_a2fd639a6afbd9::t_b0a12f5c8829c7 48-50,57,62,215
+.github/workflows/ci_command.yml
+  s_a2fd639a6afbd9::t_b0a12f5c8829c7 55-58,68,71,78-79,82-86,88
+  s_a2fd639a6afbd9::t_7fa7d72e69f28f 59-60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b4a035758a9e9e9216b85fc4a8456befd4e03044",
+  "prompts": {},
+  "sessions": {
+    "s_a2fd639a6afbd9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d975c073-9851-44e4-9c86-8b1a38728b2d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

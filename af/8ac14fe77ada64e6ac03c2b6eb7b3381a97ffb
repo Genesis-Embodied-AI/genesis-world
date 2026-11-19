@@ -1,0 +1,22 @@
+.github/workflows/ci_command.yml
+  s_59c3427832144d::t_f5522809c46e4f 1-51,56-65
+  s_59c3427832144d::t_e8270b1caff855 52-55
+.github/workflows/production.yml
+  s_59c3427832144d::t_f09be4bc0df181 8-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "af8ac14fe77ada64e6ac03c2b6eb7b3381a97ffb",
+  "prompts": {},
+  "sessions": {
+    "s_59c3427832144d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6505ce98-eef3-4b6b-8376-0493cb09323b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
