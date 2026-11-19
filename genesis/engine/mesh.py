@@ -23,7 +23,6 @@ from genesis.repr_base import RBC
 from genesis.typing import Matrix3x3Type, Vec3FType
 from genesis.utils import serialization
 from genesis.utils.cache import OwnedCache, get_gsd_path, get_hashkey
-from genesis.utils.mesh_cache import get_remesh_cache
 from genesis.utils.misc import redirect_libc_stderr
 
 if TYPE_CHECKING:
@@ -243,7 +242,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         """
         Remesh for tetrahedralization.
         """
-        cache = get_remesh_cache(self.verts, self.faces, edge_len_abs, edge_len_ratio, fix)
+        cache = mu.get_remesh_cache(self.verts, self.faces, edge_len_abs, edge_len_ratio, fix)
 
         remeshed = cache.load()
         if remeshed is not None:

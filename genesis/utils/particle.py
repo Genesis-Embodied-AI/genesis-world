@@ -9,7 +9,7 @@ from skimage.measure import marching_cubes
 import genesis as gs
 
 from . import geom as gu
-from .mesh_cache import get_ptc_cache
+from .mesh import get_ptc_cache
 
 
 def n_particles_vol(p_size=0.01, volume=1.0):

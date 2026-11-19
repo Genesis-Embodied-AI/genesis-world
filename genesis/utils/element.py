@@ -5,12 +5,11 @@ import igl
 import genesis as gs
 
 from . import mesh as mu
-from .mesh_cache import get_tet_cache
 
 
 def mesh_to_elements(mesh, tet_cfg=dict()):
     """Tetrahedralize a surface trimesh, with the result cached on disk keyed on vertices, faces and configuration."""
-    cache = get_tet_cache(mesh.vertices, mesh.faces, tet_cfg)
+    cache = mu.get_tet_cache(mesh.vertices, mesh.faces, tet_cfg)
 
     # loading pre-computed cache if available
     elements = cache.load()
