@@ -1730,7 +1730,7 @@ class MeshCache:
     key scans its bucket, accepting the first candidate matching within 'MESH_CACHE_MATCH_RTOL'. Both arms compare
     the vertices, so a hit is always verified rather than inferred from a key.
 
-    An entry holds two records (see 'serialization.write_record'), the reference vertices then the payload, so the
+    An entry holds two records (see 'serialization.export_record'), the reference vertices then the payload, so the
     scan reads only the vertices of the candidates it rejects. Nothing is pickled, so an entry loads in any environment
     sharing the cache, whatever its Python, NumPy or optional packages. The payload is any value a record holds.
 
@@ -1764,7 +1764,7 @@ class MeshCache:
         for filename in sorted(os.listdir(self._bucket_dir), key=lambda name: name != self._filename):
             try:
                 with open(os.path.join(self._bucket_dir, filename), "rb") as file:
-                    verts_ref = serialization.read_record(file, np.ndarray)
+                    verts_ref = serialization.load_record(file, np.ndarray)
                     # Vertices equal bit for bit, as those of an unchanged asset are, spare the reductions of the
                     # tolerance check, which cost far more than the rest of a load.
                     if not np.array_equal(self._verts, verts_ref):
@@ -1773,7 +1773,7 @@ class MeshCache:
                             atol = MESH_CACHE_MATCH_RTOL * np.linalg.norm(verts_extent)
                         if verts_ref.shape != self._verts.shape or (np.abs(self._verts - verts_ref) > atol).any():
                             continue
-                    return serialization.read_record(file)
+                    return serialization.load_record(file)
             except (ValueError, MemoryError):
                 gs.logger.info("Ignoring corrupted cache.")
         return None
@@ -1783,5 +1783,5 @@ class MeshCache:
         assert payload is not None
         os.makedirs(self._bucket_dir, exist_ok=True)
         with open(os.path.join(self._bucket_dir, self._filename), "wb") as file:
-            serialization.write_record(file, self._verts, np.ndarray)
-            serialization.write_record(file, payload)
+            serialization.export_record(file, self._verts, np.ndarray)
+            serialization.export_record(file, payload)

@@ -878,7 +878,7 @@ def _get_sdf_grid(
         gs.logger.debug(f"Preprocessed file (`.gsd`) found in cache: {gsd_path}.")
         try:
             with open(gsd_path, "rb") as file:
-                sdf_grid = serialization.read_record(file, SDFGrid)
+                sdf_grid = serialization.load_record(file, SDFGrid)
         except (ValueError, MemoryError):
             gs.logger.info("Ignoring corrupted cache.")
 
@@ -948,7 +948,7 @@ def _get_sdf_grid(
         )
         os.makedirs(os.path.dirname(gsd_path), exist_ok=True)
         with open(gsd_path, "wb") as file:
-            serialization.write_record(file, sdf_grid, SDFGrid)
+            serialization.export_record(file, sdf_grid, SDFGrid)
 
     return sdf_grid
 
