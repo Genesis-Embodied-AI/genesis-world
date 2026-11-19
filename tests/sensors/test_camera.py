@@ -574,6 +574,93 @@ def test_raytracer(n_envs, png_snapshot):
 
 @pytest.mark.required
 @pytest.mark.skipif(not ENABLE_RAYTRACER, reason=SKIP_NO_LUISA)
+def test_raytracer_thin_lens(show_viewer):
+    CAMERA_POS = (1.5, 0.0, 0.6)
+    CAMERA_LOOKAT = (0.0, 0.0, 0.1)
+
+    scene = gs.Scene(
+        renderer=gs.renderers.RayTracer(),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=CAMERA_POS,
+            camera_lookat=CAMERA_LOOKAT,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(0.0, 0.0, 0.1),
+        ),
+        surface=gs.surfaces.Default(
+            color=(1.0, 0.5, 0.2),
+        ),
+    )
+    lights = [
+        dict(
+            pos=(2.0, 2.0, 5.0),
+            color=(10.0, 10.0, 10.0),
+            intensity=1.0,
+        )
+    ]
+    sensors = []
+    for model, focal_len in (("pinhole", 0.05), ("thinlens", 0.05), ("thinlens", 0.3)):
+        sensor = scene.add_sensor(
+            gs.sensors.RaytracerCameraOptions(
+                res=(320, 240),
+                pos=CAMERA_POS,
+                lookat=CAMERA_LOOKAT,
+                fov=40.0,
+                lights=lights,
+                model=model,
+                spp=64,
+                denoise=False,
+                aperture=2.0,
+                focal_len=focal_len,
+                focus_dist=np.linalg.norm(np.subtract(CAMERA_LOOKAT, CAMERA_POS)),
+            )
+        )
+        sensors.append(sensor)
+    camera = scene.add_camera(
+        res=(320, 240),
+        pos=CAMERA_POS,
+        lookat=CAMERA_LOOKAT,
+        fov=40.0,
+        spp=64,
+        denoise=False,
+        lens=gs.options.ThinLens(
+            aperture=2.0,
+            focal_len=0.3,
+        ),
+    )
+    scene.build()
+
+    scene.step()
+    images = [tensor_to_array(sensor.read().rgb) for sensor in sensors]
+    images.append(camera.render(rgb=True)[0])
+    boxes_extent, floor_sharpnesses = [], []
+    for rgb in images:
+        rgb = rgb.astype(np.float32)
+        ys, xs = np.nonzero(rgb[..., 0] - rgb[..., 2] > 60.0)
+        boxes_extent.append((xs.min(), xs.max(), ys.min(), ys.max()))
+        # The edges of the far floor, on the image averaged over blocks of pixels against the noise of the sampling
+        floor_luminance = rgb[24:72, :, :].mean(axis=-1).reshape((12, 4, 80, 4)).mean(axis=(1, 3))
+        floor_sharpnesses.append(np.hypot(*np.gradient(floor_luminance)).mean())
+
+    # The field of view frames the scene whatever the lens, as a short focal length shows the box around the focus
+    # distance sharp
+    assert_allclose(boxes_extent[1], boxes_extent[0], atol=1.0)
+    # A longer focal length at the same f-number is a wider lens, which blurs more the floor behind the box
+    assert floor_sharpnesses[2] < 0.85 * floor_sharpnesses[1]
+    # The lens of a camera of the scene renders as that of a camera sensor
+    assert_allclose(boxes_extent[3], boxes_extent[2], atol=1.0)
+    assert_allclose(floor_sharpnesses[3], floor_sharpnesses[2], rtol=0.02)
+
+
+@pytest.mark.required
+@pytest.mark.skipif(not ENABLE_RAYTRACER, reason=SKIP_NO_LUISA)
 def test_raytracer_attached_without_offset_T():
     CAM_RES = (128, 64)
     CAM_POS = (1.0, 0.5, 2.0)

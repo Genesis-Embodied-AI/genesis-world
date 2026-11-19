@@ -134,9 +134,7 @@ class Visualizer(BuildableMixin, RBC):
         self._renderer = None
         self._is_built = False
 
-    def add_camera(
-        self, res, pos, lookat, up, model, fov, aperture, focus_dist, GUI, spp, denoise, near, far, env_idx, debug
-    ):
+    def add_camera(self, res, pos, lookat, up, model, fov, lens, GUI, spp, denoise, near, far, env_idx, debug):
         cam_idx = len([camera for camera in self._cameras if camera.debug == debug])
         camera = Camera(
             self,
@@ -147,8 +145,7 @@ class Visualizer(BuildableMixin, RBC):
             lookat,
             up,
             fov,
-            aperture,
-            focus_dist,
+            lens,
             GUI,
             spp,
             denoise,

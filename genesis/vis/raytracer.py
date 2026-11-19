@@ -121,6 +121,23 @@ class MeshLight(ShapeLight):
         renderer.update_rigid(self.name, self.transform)
 
 
+def _get_luisa_thin_lens(fov: float, res: tuple[int, int], lens: "gs.options.ThinLens") -> tuple[float, float]:
+    """Return the focal length in millimeters and the f-number that LuisaRender takes to render a thin lens.
+
+    LuisaRender frames a thin-lens camera through a full-frame sensor of 36x24 mm behind a lens of the focal length it
+    takes, and sizes the radius of the lens as that focal length over twice the f-number. The focal length it takes is
+    the one framing the vertical field of view `fov` at the resolution `res`, and the f-number the one giving the
+    radius of the lens `lens`, whose focus distance is set.
+    """
+    if res[0] > res[1]:
+        projected_pixel_size = min(0.036 / res[0], 0.024 / res[1])
+    else:
+        projected_pixel_size = min(0.036 / res[1], 0.024 / res[0])
+    image_dist = res[1] * projected_pixel_size / (2.0 * np.tan(np.deg2rad(fov / 2.0)))
+    luisa_focal_len = 1.0 / (1.0 / image_dist + 1.0 / lens.focus_dist)
+    return 1000.0 * luisa_focal_len, lens.aperture * luisa_focal_len / lens.focal_len
+
+
 class Raytracer(BuildableMixin):
     def __init__(self, options, vis_options):
         self.logging_level = options.logging_level
@@ -507,9 +524,20 @@ class Raytracer(BuildableMixin):
 
     def add_camera(self, camera):
         camera_name = str(camera.uid)
-        camera_model = camera.model
 
-        if camera_model == "pinhole":
+        if camera.lens is not None:
+            luisa_focal_len, luisa_aperture = _get_luisa_thin_lens(camera.fov, camera.res, camera.lens)
+            self._cameras[camera_name] = LuisaRenderPy.ThinLensCamera(
+                name=camera_name,
+                pose=self.get_transform(np.eye(4)),
+                film=LuisaRenderPy.Film(resolution=camera.res),
+                filter=LuisaRenderPy.Filter(),
+                spp=camera.spp,
+                aperture=luisa_aperture,
+                focal_len=luisa_focal_len,
+                focus_dis=camera.lens.focus_dist,
+            )
+        elif camera.model == "pinhole":
             self._cameras[camera_name] = LuisaRenderPy.PinholeCamera(
                 name=camera_name,
                 pose=self.get_transform(np.eye(4)),
@@ -518,17 +546,6 @@ class Raytracer(BuildableMixin):
                 spp=camera.spp,
                 fov=camera.fov,
             )
-        elif camera_model == "thinlens":
-            self._cameras[camera_name] = LuisaRenderPy.ThinLensCamera(
-                name=camera_name,
-                pose=self.get_transform(np.eye(4)),
-                film=LuisaRenderPy.Film(resolution=camera.res),
-                filter=LuisaRenderPy.Filter(),
-                spp=camera.spp,
-                aperture=camera.aperture,
-                focal_len=camera.focal_len * 1000,  # measure in mms
-                focus_dis=camera.focus_dist,
-            )
         else:
             gs.raise_exception("Invalid camera model.")
 
@@ -536,18 +553,18 @@ class Raytracer(BuildableMixin):
 
     def update_camera(self, camera):
         camera_name = str(camera.uid)
-        camera_model = camera.model
         camera_transform = camera.transform
 
-        if camera_model == "pinhole":
-            self._cameras[camera_name].update(pose=self.get_transform(camera_transform), fov=camera.fov)
-        elif camera_model == "thinlens":
+        if camera.lens is not None:
+            luisa_focal_len, luisa_aperture = _get_luisa_thin_lens(camera.fov, camera.res, camera.lens)
             self._cameras[camera_name].update(
                 pose=self.get_transform(camera_transform),
-                aperture=camera.aperture,
-                focal_len=camera.focal_len * 1000,
-                focus_dis=camera.focus_dist,
+                aperture=luisa_aperture,
+                focal_len=luisa_focal_len,
+                focus_dis=camera.lens.focus_dist,
             )
+        elif camera.model == "pinhole":
+            self._cameras[camera_name].update(pose=self.get_transform(camera_transform), fov=camera.fov)
         else:
             gs.raise_exception("Invalid camera model.")
 
