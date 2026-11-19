@@ -98,43 +98,72 @@ def build_model(
             mjcf = ET.SubElement(root, "mujoco") if is_urdf_file else root
 
         # Parse all included sub-models recursively, splicing <include> elements in place inside any parent element.
-        root_parent_stack = [(mjcf, Path(""))]
-        while root_parent_stack:
-            xml_root, parent_dir = root_parent_stack.pop()
-            for parent in tuple(xml_root.iter()):
-                for elem in tuple(parent.findall("include")):
-                    rel_include = Path(elem.attrib["file"])
-                    candidate = parent_dir / rel_include
-                    include_path = candidate if (Path(asset_path) / candidate).exists() else rel_include
-                    include_root = ET.parse(Path(asset_path) / include_path).getroot()
-                    for inc_comp in include_root.findall("compiler"):
-                        for name in ("assetdir", "meshdir", "texturedir"):
-                            if (
-                                name in inc_comp.attrib
-                                and (Path(asset_path) / include_path.parent / inc_comp.attrib[name]).exists()
-                            ):
-                                inc_comp.attrib[name] = str(include_path.parent / inc_comp.attrib[name])
-                    # Asset file paths authored relative to the included file's directory are rewritten when found
-                    # there, while paths authored against a shared top-level <compiler meshdir="..."/> stay untouched.
-                    # Only <asset> elements carry files; <default> classes and procedural vertex meshes carry none.
-                    for tag in ("mesh", "texture", "hfield"):
-                        for include_elem in include_root.findall(f".//asset/{tag}[@file]"):
-                            asset_file = include_elem.attrib["file"]
-                            if (
-                                not os.path.isabs(asset_file)
-                                and (Path(asset_path) / include_path.parent / asset_file).exists()
-                            ):
-                                # os.path.abspath normalizes '..' without resolving symlinks (preserving extensions).
-                                include_elem.attrib["file"] = os.path.abspath(
-                                    Path(asset_path) / include_path.parent / asset_file
-                                )
-                    elem_idx = list(parent).index(elem)
-                    parent.remove(elem)
-                    children = list(include_root)
-                    for offset, child in enumerate(children):
-                        parent.insert(elem_idx + offset, child)
-                    for child in reversed(children):
-                        root_parent_stack.append((child, include_path.parent))
+        active_compiler_dirs: dict[str, str] = {}
+        asset_tag_dirs = (
+            ("mesh", "meshdir"),
+            ("texture", "texturedir"),
+            ("hfield", "assetdir"),
+            ("skin", "assetdir"),
+        )
+
+        def _record_compiler_dirs(comp_elem: ET.Element, target: dict[str, str]) -> None:
+            for dir_attr in ("assetdir", "meshdir", "texturedir"):
+                if dir_attr in comp_elem.attrib:
+                    target[dir_attr] = comp_elem.attrib[dir_attr]
+
+        def _expand_includes(parent_elem: ET.Element, current_dir: Path) -> None:
+            for child in list(parent_elem):
+                if child.tag == "compiler":
+                    _record_compiler_dirs(child, active_compiler_dirs)
+                    continue
+                if child.tag != "include":
+                    _expand_includes(child, current_dir)
+                    continue
+
+                rel_include = Path(child.attrib["file"])
+                candidate = current_dir / rel_include
+                include_path = candidate if (Path(asset_path) / candidate).exists() else rel_include
+                include_root = ET.parse(Path(asset_path) / include_path).getroot()
+
+                local_compiler_dirs = dict(active_compiler_dirs)
+                for inc_comp in include_root.findall("compiler"):
+                    for dir_attr in ("assetdir", "meshdir", "texturedir"):
+                        if (
+                            dir_attr in inc_comp.attrib
+                            and not os.path.isabs(inc_comp.attrib[dir_attr])
+                            and (Path(asset_path) / include_path.parent / inc_comp.attrib[dir_attr]).exists()
+                        ):
+                            inc_comp.attrib[dir_attr] = str(include_path.parent / inc_comp.attrib[dir_attr])
+                    _record_compiler_dirs(inc_comp, local_compiler_dirs)
+
+                # Rewrite direct <asset> file paths relative to the fragment's directory only when an active
+                # <compiler> asset/mesh/texture directory does not already resolve the file.
+                for tag, dir_attr in asset_tag_dirs:
+                    comp_dir = local_compiler_dirs.get(dir_attr) or local_compiler_dirs.get("assetdir")
+                    for include_elem in include_root.findall(f".//asset/{tag}[@file]"):
+                        asset_file = include_elem.attrib["file"]
+                        if os.path.isabs(asset_file):
+                            continue
+                        if comp_dir is not None:
+                            comp_base = Path(comp_dir) if os.path.isabs(comp_dir) else Path(asset_path) / comp_dir
+                            if (comp_base / asset_file).exists():
+                                continue
+                        if (Path(asset_path) / include_path.parent / asset_file).exists():
+                            # os.path.abspath normalizes '..' without resolving symlinks (preserving extensions).
+                            include_elem.attrib["file"] = os.path.abspath(
+                                Path(asset_path) / include_path.parent / asset_file
+                            )
+
+                # Expand any nested <include> elements inside the fragment (including direct children of
+                # <mujocoinclude>) while retaining this fragment's directory context.
+                _expand_includes(include_root, include_path.parent)
+
+                elem_idx = list(parent_elem).index(child)
+                parent_elem.remove(child)
+                for offset, inc_child in enumerate(list(include_root)):
+                    parent_elem.insert(elem_idx + offset, inc_child)
+
+        _expand_includes(mjcf, Path(""))
 
         # Drop ground planes authored directly under the worldbody so a model that embeds its own floor can be
         # loaded into a scene that already provides a ground. Removing the source geoms before compilation leaves
