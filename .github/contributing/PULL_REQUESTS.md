@@ -64,7 +64,7 @@ Thank you for your interest in contributing to Genesis! We welcome contributions
   pytest -v --forked -m required ./tests
   ```
 
-- A draft Pull Request runs the lint and format checks alone. The online CI tests start once you mark it ready for review, or when a maintainer comments `/ci` on it to test the latest commit of a draft.
+- A draft Pull Request runs the lint and format checks and skips the online CI tests. They start once you mark it ready for review, or when a maintainer comments `/ci` on it to test the latest commit of a draft.
 
 - In the title of your Pull Request, please include [BUG FIX], [FEATURE] or [MISC] to indicate the purpose, preceded by [CHANGING] (the simulated physics change by default: a different model, or different default parameters) or [BREAKING] (API break) when it applies, e.g. `[BREAKING][BUG FIX]`. [CHANGING] and [BREAKING] never stand alone and never go together. The title is a sentence and ends with a period.
 - Commit titles are plain single-line sentences without the bracket tag, also ending with a period.
