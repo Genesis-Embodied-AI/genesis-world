@@ -1,3 +1,4 @@
+import dataclasses
 import functools
 import math
 import os
@@ -37,19 +38,20 @@ class InertialProperties(NamedTuple):
     i: Matrix3x3Type
 
 
-class SDFGrid(NamedTuple):
-    """Signed distance field (SDF) of a geometry sampled at the nodes of a regular grid.
-
-    'value' and 'grad' hold the signed distance and its gradient at each node, 'closest_verts_idx' the index of the
-    vertex of the geometry closest to each node, 'max_value' the largest signed distance of the grid, and
-    'T_mesh_to_sdf' the transform from the mesh frame to the grid frame, in which the nodes sit at integer coordinates.
-    """
+@dataclasses.dataclass(frozen=True)
+class SDFGrid:
+    """Signed distance field (SDF) of a geometry sampled at the nodes of a regular grid."""
 
     value: np.ndarray
+    """Signed distance at each node."""
     grad: np.ndarray
+    """Gradient of the signed distance at each node."""
     closest_verts_idx: np.ndarray
+    """Index of the vertex of the geometry closest to each node."""
     max_value: float
+    """Largest signed distance of the grid."""
     T_mesh_to_sdf: np.ndarray
+    """Transform from the mesh frame to the grid frame, in which the nodes sit at integer coordinates."""
 
 
 class SupportTable(NamedTuple):
@@ -877,7 +879,7 @@ def _get_sdf_grid(
         gs.logger.debug(f"Preprocessed file (`.gsd`) found in cache: {gsd_path}.")
         try:
             with open(gsd_path, "rb") as file:
-                sdf_grid = SDFGrid(*serialization.read_record(file))
+                sdf_grid = serialization.read_record(file, SDFGrid)
         except (ValueError, MemoryError):
             gs.logger.info("Ignoring corrupted cache.")
 
@@ -947,7 +949,7 @@ def _get_sdf_grid(
         )
         os.makedirs(os.path.dirname(gsd_path), exist_ok=True)
         with open(gsd_path, "wb") as file:
-            serialization.write_record(file, sdf_grid)
+            serialization.write_record(file, sdf_grid, SDFGrid)
 
     return sdf_grid
 

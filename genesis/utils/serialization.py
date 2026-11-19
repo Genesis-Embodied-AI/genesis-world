@@ -680,18 +680,18 @@ def load(path: str | os.PathLike, expect: dict) -> dict:
         gs.raise_exception_from(f"'{path}' holds values a Genesis scene is not made of.", e)
 
 
-def write_record(file: BinaryIO, value) -> None:
+def write_record(file: BinaryIO, value, expect=typing.Any) -> None:
     """Write one value to a binary file as a record that 'read_record' loads back, without pickling it.
 
     A record is the size of a JSON header, the header, then the raw bytes of the arrays the value holds. The header
-    holds the value as a field declared 'Any' exports it, and the type and shape of each array, which is the minimum
-    needed to rebuild the value exactly. The value may nest dicts, lists, tuples, numbers, strings, None, NumPy arrays
-    and every class that says how it travels in a file, such as 'trimesh.Trimesh'. It loads back with its tuples as
-    lists and its NumPy scalars as Python ones. Records follow one another in a file, so a reader may stop after the
-    ones it needs.
+    holds the value as a field declared 'expect' exports it in a Genesis file (see 'export'), and the type and shape of
+    each array, which is the minimum needed to rebuild the value exactly. A value declared 'Any' may nest dicts, lists,
+    tuples, numbers, strings, None, NumPy arrays and every class that says how it travels in a file, such as
+    'trimesh.Trimesh', and loads back with its tuples as lists and its NumPy scalars as Python ones. Records follow one
+    another in a file, so a reader may stop after the ones it needs.
     """
     exported = Exported(values=[], slots={}, stored=[], classes=set())
-    held = _export_any(value, exported)
+    held = _export_value(value, expect, exported)
     arrays_spec = [(array.dtype.str, array.shape) for array in exported.values]
     header = json.dumps({"arrays": arrays_spec, "value": held}).encode()
     file.write(struct.pack("<I", len(header)))
@@ -704,10 +704,11 @@ def write_record(file: BinaryIO, value) -> None:
         file.write(array.data)
 
 
-def read_record(file: BinaryIO):
-    """Read back the value of the next record of a binary file, as 'write_record' wrote it.
+def read_record(file: BinaryIO, expect=typing.Any):
+    """Read back the value of the next record of a binary file, as the type 'write_record' was given.
 
-    Raises ValueError if the file holds no such record there, as when it is truncated or was written another way.
+    Raises ValueError if the file holds no such record there, as when it is truncated, was written another way, or
+    holds a value its declared type no longer admits.
     """
     try:
         (header_size,) = struct.unpack("<I", file.read(4))
@@ -722,7 +723,7 @@ def read_record(file: BinaryIO):
             dtype, shape = arrays_spec[i]
             arrays[i] = np.frombuffer(buffer, dtype=dtype, count=math.prod(shape), offset=offset).reshape(shape)
             offset += arrays[i].nbytes
-        return _load_any(header["value"], arrays)
+        return _load_value(header["value"], expect, arrays)
     except (struct.error, KeyError, IndexError, TypeError, OverflowError, gs.GenesisException) as e:
         raise ValueError("The file holds no record written by 'write_record' here.") from e
 
