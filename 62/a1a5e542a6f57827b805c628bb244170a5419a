@@ -10,6 +10,7 @@ tests/parsers/conftest.py
   s_c639b397214f9a::t_805b7f05c85359 1574
 genesis/engine/entities/rigid_entity/rigid_entity.py
   s_0ad35ed8e9a835::t_8db895c309be0d 25
+  s_b64e5cb3dc9916::t_d6bfdfa5ff410b 1742-1744,1751,1753
 genesis/engine/entities/rigid_entity/description.py
   s_f8bb96e63e5f07::t_b1dbd73a7a72f6 1641-1642
   s_f8bb96e63e5f07::t_d3858fa53ece12 1611-1615,1637
@@ -31,14 +32,21 @@ genesis/engine/entities/rigid_entity/description.py
   s_f8bb96e63e5f07::t_5b7a33e4f3cbc8 1627-1634
   s_0ad35ed8e9a835::t_8096f2823cc3c1 965-967
   s_b64e5cb3dc9916::t_ce45f43edeb227 677,679-686,1583,1585-1592,1646,1669
+  s_b64e5cb3dc9916::t_24b2b166b21d8d 1943-1944
+  s_b64e5cb3dc9916::t_eb37174ae67c72 1598-1599,1601-1602
+  s_b64e5cb3dc9916::t_4470799e71e7ff 1597
+  s_b64e5cb3dc9916::t_601807bff402e0 1605,1607-1609,1623,1635-1636,1644,1652,1655,1660-1662,1900-1910,1918-1927,1934
+  s_b64e5cb3dc9916::t_ef7b1dda029374 1935-1938
 genesis/engine/mesh.py
   s_f8bb96e63e5f07::t_3bb99a4554044a 356-357
   s_f8bb96e63e5f07::t_43915b0a9d002f 366-372
   s_0ad35ed8e9a835::t_09affcdf992ef5 1143-1157
   s_f8bb96e63e5f07::t_5a495ca09b819b 355
+  s_b64e5cb3dc9916::t_eb37174ae67c72 1141-1142
 genesis/engine/entities/rigid_entity/inertial.py
   s_f8bb96e63e5f07::t_6745730a553c36 131-133,151-152
   s_f8bb96e63e5f07::t_7e73d4c12711e3 22-23
+  s_b64e5cb3dc9916::t_601807bff402e0 189-190,196
 genesis/options/morphs.py
   s_f8bb96e63e5f07::t_4529c40706ca68 563-567,606,771-776,968-969,1113-1117,1257-1262,1611-1616
   s_c639b397214f9a::t_a88379791a58f1 972-974
