@@ -1,0 +1,23 @@
+.github/contributing/EXAMPLES.md
+  s_6331e9b5eb051b::t_c22e645eceb426 9,59-78,105-106
+tests/test_examples.py
+  s_6331e9b5eb051b::t_55dc9ffa7f6e25 16
+README.md
+  s_6331e9b5eb051b::t_bf324bfac565fe 55,167,234,241,243
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d473bd4bf09d853b4029059f6c673d4b9ffde7ea",
+  "prompts": {},
+  "sessions": {
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
