@@ -1,0 +1,20 @@
+.github/workflows/ci_command.yml
+  s_a2fd639a6afbd9::t_6cbb67780e1ace 84
+  s_a2fd639a6afbd9::t_e7de062ae9bb3d 60-63,70-72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "69af1e74ebad340ce185153b646e8803e318b233",
+  "prompts": {},
+  "sessions": {
+    "s_a2fd639a6afbd9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d975c073-9851-44e4-9c86-8b1a38728b2d",
+        "model": "unknown"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
