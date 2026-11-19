@@ -1,0 +1,25 @@
+tests/snapshots.lock
+  s_14f6743a84fe95::t_9776fe41e839f5 459-460
+genesis/engine/solvers/rigid/abd/accessor.py
+  s_14f6743a84fe95::t_2273a1b4d6077e 547
+genesis/engine/solvers/rigid/data.py
+  s_14f6743a84fe95::t_d8fd744eaf8463 223-224
+genesis/engine/solvers/rigid/rigid_solver.py
+  s_14f6743a84fe95::t_3b7abdcbc0b549 2496,2498
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f5aabcd527119f9a3cf7a8d2d25b43bd5b84bcef",
+  "prompts": {},
+  "sessions": {
+    "s_14f6743a84fe95": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dab96431-8b64-412d-bd80-88a4370029ae",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

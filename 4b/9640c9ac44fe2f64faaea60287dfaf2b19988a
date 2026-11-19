@@ -1,0 +1,29 @@
+tests/rigid/test_control.py
+  s_14f6743a84fe95::t_1c66dc55ea8ee1 234-245
+tests/snapshots.lock
+  s_cd058fbbbca29f::t_bc61676f013cd1 22,25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4b9640c9ac44fe2f64faaea60287dfaf2b19988a",
+  "prompts": {},
+  "sessions": {
+    "s_14f6743a84fe95": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dab96431-8b64-412d-bd80-88a4370029ae",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_cd058fbbbca29f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a12ae99fa7cb4af48",
+        "model": "unknown"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
