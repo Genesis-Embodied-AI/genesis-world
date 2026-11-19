@@ -1,0 +1,19 @@
+tests/parsers/test_mesh.py
+  s_ba6818de79411d::t_e6b4f703db9e9a 996-998
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f73aa4e5785047de0d8c17ec38fc284f2981085a",
+  "prompts": {},
+  "sessions": {
+    "s_ba6818de79411d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7b6882f7-45d2-409b-b6b7-a4f2092c5b57",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
