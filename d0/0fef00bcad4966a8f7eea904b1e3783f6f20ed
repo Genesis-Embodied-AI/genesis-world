@@ -1,0 +1,20 @@
+tests/core/test_recorders.py
+  s_10289137e49fd1::t_b9093638b49279 329
+  s_10289137e49fd1::t_b629586f50b04d 375-376
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d00fef00bcad4966a8f7eea904b1e3783f6f20ed",
+  "prompts": {},
+  "sessions": {
+    "s_10289137e49fd1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "241667de-6467-4d47-883f-9060668e0e06",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
