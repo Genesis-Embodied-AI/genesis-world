@@ -45,20 +45,21 @@ jobs:
       IS_DRAFT: ${{ steps.check.outputs.is_draft }}
 
     steps:
-      # The event lists no pull request when it comes from a fork, and never its draft flag, so the pull request is
-      # asked of the API, which gives its state when this job runs. Pull requests of one branch toward distinct bases
-      # share its commit, and a ready one among them asks for the commit to be tested.
+      # The pull request is asked of the API as in the setup job of the production workflow, the event never listing
+      # its draft flag. The API gives the flag when this job runs, where the other gated workflows read it from their
+      # event. A ready one among the pull requests sharing the commit asks for it to be tested.
       - name: Check the pull request
         id: check
         uses: actions/github-script@v8
         with:
           script: |
             const run = context.payload.workflow_run;
-            const { data: pulls } = await github.rest.pulls.list({
+            const { data } = await github.rest.pulls.list({
               owner: context.repo.owner,
               repo: context.repo.repo,
               head: `${run.head_repository.owner.login}:${run.head_branch}`,
             });
+            const pulls = data.filter((pull) => pull.head.sha === run.head_sha);
             core.setOutput('is_draft', pulls.length > 0 && pulls.every((pull) => pull.draft));
 
   unit-tests:
@@ -211,7 +212,7 @@ jobs:
                 repo: context.repo.repo,
                 run_id: context.runId
               });
-              logUrl = data.jobs[0]?.html_url || logUrl;
+              logUrl = data.jobs.find((job) => job.name === 'nyx_plugin-unit_tests')?.html_url || logUrl;
             } catch (error) {
               core.warning(`Could not resolve the job log: ${error.message}`);
             }
