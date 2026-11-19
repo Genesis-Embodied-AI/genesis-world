@@ -1172,7 +1172,7 @@ def all_joints_mjcf():
         gainprm="120.0 0 0",
         biasprm="0 -120.0 -12.0",
     )
-    # A unit gear on each rotational DOF of the ball joint applies the same PD gains to all three of them
+    # Genesis reads a ball joint actuator with a unit gear as the same PD gains on each of the three DOFs
     ET.SubElement(
         actuator,
         "general",
@@ -1342,7 +1342,7 @@ def all_joints_usd(asset_tmp_path, all_joints_mjcf: ET.ElementTree, request):
     spherical_joint_prim.CreateBody1Rel().SetTargets([spherical_box.GetPrim().GetPath()])
     spherical_joint_prim.CreateLocalPos0Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
     spherical_joint_prim.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
-    # Angular drive gains per degree, as for the revolute drive
+    # Per-degree gains, as for the revolute drive, matching the ball joint actuator of the MJCF counterpart
     for dof_name in ("rotX", "rotY", "rotZ"):
         spherical_drive_api = UsdPhysics.DriveAPI.Apply(spherical_joint_prim.GetPrim(), dof_name)
         spherical_drive_api.CreateStiffnessAttr().Set(np.deg2rad(120.0))
