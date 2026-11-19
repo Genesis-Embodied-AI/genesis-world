@@ -10,7 +10,8 @@ on:
 permissions:
   actions: write
   issues: write
-  pull-requests: read
+  # Reacting to a comment on a pull request takes write access to pull requests on top of issues.
+  pull-requests: write
 
 jobs:
   rerun:
