@@ -1,0 +1,26 @@
+genesis/engine/solvers/rigid/abd/inverse_kinematics.py
+  s_97d9f72a1a8313::t_f6e45eddf2f3a4 455-525,547,549-551,562-582,584-590,592-596,598-637,639-640,642-653,655-660,662-665,667-688,690-735,757,767-837,841-900,904-952
+  s_97d9f72a1a8313::t_4644bb6b0a54fa 838-840,901-903
+  s_97d9f72a1a8313::t_bf9d2e684d4208 22,30,32-33,37-41,44,46,48-49,51,53,55,57-59,66,69,71-74
+genesis/engine/solvers/kinematic_solver.py
+  s_97d9f72a1a8313::t_99f4ad1ec06ac1 1293-1295,1307,1379,1390-1391
+  s_97d9f72a1a8313::t_2d4348257c5781 1392-1406
+  s_97d9f72a1a8313::t_4644bb6b0a54fa 33,39-40
+  s_97d9f72a1a8313::t_5abe944d71dd8e 1361,1389
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "303ba78cd07214c06fac4ba384df7bfa1822d270",
+  "prompts": {},
+  "sessions": {
+    "s_97d9f72a1a8313": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1e5d1aac-b534-45a8-8bbe-9b1b95becf40",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
