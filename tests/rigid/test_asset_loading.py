@@ -577,6 +577,9 @@ def test_parsing_inertia_defaults(
     # collision and visual geometry feed the computation.
     assert_allclose(mounted_arm.base_link.get_mass(), free_arm.base_link.get_mass(), tol=gs.EPS)
     assert_allclose(mounted_drawn.get_mass(), free_drawn.get_mass(), tol=gs.EPS)
+    # A sphere the asset states for drawing alone takes the mass of its exact shape rather than its tessellation, at
+    # object density since the asset has a single link.
+    assert_allclose(free_drawn.get_mass(), 600.0 * 4.0 / 3.0 * np.pi * 0.06**3, rtol=1e-6)
     # Genesis applies the robot density because the asset is articulated. The convex hull of the authored sphere
     # loses a little volume, so the measured mass lands slightly below the closed form.
     assert_allclose(mounted_arm.base_link.get_mass(), 1500.0 * 4.0 / 3.0 * np.pi * 0.06**3, rtol=0.1)
