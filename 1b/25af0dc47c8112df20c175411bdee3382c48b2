@@ -1,0 +1,32 @@
+genesis/engine/sensors/point_cloud_tactile.py
+  s_9eec2c61f5d462::t_12bb9788abec33 211
+genesis/engine/mesh.py
+  s_9eec2c61f5d462::t_b29e65eb28e8a5 302-303
+tests/core/test_misc.py
+  s_9eec2c61f5d462::t_eda3109b2ef224 442,446-448
+  s_9eec2c61f5d462::t_2c7423787e8dbb 463
+  s_9eec2c61f5d462::t_2bc4dd51b55f80 440,445
+  s_9eec2c61f5d462::t_301a55e8251c9e 485-487,491
+  s_9eec2c61f5d462::t_4841207eb67f09 495
+  s_9eec2c61f5d462::t_0d04b868248097 500
+genesis/utils/point_cloud.py
+  s_9eec2c61f5d462::t_eed1ab87365992 152
+  s_9eec2c61f5d462::t_d7cf1d30458bfd 125-126,129-130
+  s_9eec2c61f5d462::t_e9ac561ebba171 104-105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1b25af0dc47c8112df20c175411bdee3382c48b2",
+  "prompts": {},
+  "sessions": {
+    "s_9eec2c61f5d462": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b1b54b7e-8677-4f81-9361-b07e01dc68ec",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
