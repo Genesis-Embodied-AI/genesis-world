@@ -1289,19 +1289,24 @@ class KinematicSolver(Solver):
         n_tgts = self._options.IK_max_targets
         if n_links > n_tgts:
             gs.raise_exception(f"Cannot solve for {n_links} targets. Raise 'IK_max_targets' above {n_tgts}.")
+        # Masked axes and targets leave zero rows in the Jacobian, so the normal matrix is singular without damping
+        if damping <= 0.0:
+            gs.raise_exception(f"'damping' must be strictly positive, got {damping}.")
 
-        # The damped normal matrix of inverse kinematics is quadratic in RigidOptions.IK_max_targets, so the scratch is
-        # allocated by the first solve and a scene that never solves inverse kinematics allocates none of it
+        # The scratch of inverse kinematics grows with RigidOptions.IK_max_targets, so it is allocated by the first solve
+        # and a scene that never solves inverse kinematics allocates none of it
         if self._ik_scratch is None:
             entities = self.entities
+            entity_dofs = max([entity.n_dofs for entity in entities], default=0)
             self._ik_scratch = IKScratch(
                 sizes=dict(
                     envs=self.n_envs_,
                     entity_qs=max([entity.n_qs for entity in entities], default=0),
-                    entity_dofs=max([entity.n_dofs for entity in entities], default=0),
+                    entity_dofs=entity_dofs,
                     entity_links=max([entity.n_links for entity in entities], default=0),
                     entity_joints=max([entity.n_joints for entity in entities], default=0),
                     ik_targets=n_tgts,
+                    ik_normal=min(6 * n_tgts, entity_dofs),
                 ),
                 # The initial configuration of an environment is read as a whole
                 env_first={IKScratch.targets.init_qpos: True},
@@ -1354,6 +1359,7 @@ class KinematicSolver(Solver):
             q_start,
             link_start,
             joint_start,
+            seed,
             self.dyn_state,
             ik_state,
             ik_fk,
@@ -1366,14 +1372,13 @@ class KinematicSolver(Solver):
             n_links,
             len(dofs_idx),
             len(envs_idx),
-            custom_init_qpos,
             max_samples,
             max_solver_iters,
             damping,
             pos_tol,
             rot_tol,
             max_step_size,
-            seed,
+            custom_init_qpos,
             respect_joint_limit,
         )
 

@@ -27,6 +27,8 @@ from genesis.utils.misc import qd_isfinite
 IK_TARGETS = Size("ik_targets")
 # The pose residuals of the targets stacked, six per target
 IK_ERRORS = 6 * IK_TARGETS
+# The rows of the damped normal matrix, the smaller of the error and dof spaces (see func_inverse_kinematics)
+IK_NORMAL = Size("ik_normal")
 
 
 class IKState(Data, kind=DataKind.SCRATCH):
@@ -36,16 +38,13 @@ class IKState(Data, kind=DataKind.SCRATCH):
     jacobian: qd.Tensor = field(float, shape=(6, ENTITY_DOFS, ENVS))
     # Jacobian of all targets stacked
     jacobian_stacked: qd.Tensor = field(float, shape=(IK_ERRORS, ENTITY_DOFS, ENVS))
-    # Damped normal matrix J J^T + damping^2 I, its LU factors with their forward-substitution scratch, and its inverse
-    mat: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
-    lu_lower: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
-    lu_upper: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
-    lu_y: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
-    inv: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
-    # Pose residual of all targets stacked, the best one across restarts, and inv @ residual
+    # Lower Cholesky factor of the damped normal matrix, J J^T + damping^2 I in the error space or J^T J + damping^2 I
+    # in the dof space, whichever is smaller (see func_inverse_kinematics), its upper triangle unused
+    chol: qd.Tensor = field(float, shape=(IK_NORMAL, IK_NORMAL, ENVS))
+    # Pose residual of all targets stacked, the best one across restarts, and the solution of the normal equations
     err_pose: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
     err_pose_best: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
-    vec: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
+    vec: qd.Tensor = field(float, shape=(IK_NORMAL, ENVS))
     # Joint-space step, and the best configuration across restarts
     delta_qpos: qd.Tensor = field(float, shape=(ENTITY_DOFS, ENVS))
     qpos_best: qd.Tensor = field(float, shape=(ENTITY_QS, ENVS))
@@ -121,10 +120,9 @@ def func_forward_kinematics_scratch(
 ):
     """Forward kinematics of one entity on caller-owned scratch buffers.
 
-    Reads the configuration from qpos[:, i_col_q] (entity-local q coordinates keyed by q_offset) and writes link
-    poses and joint frames at column i_col_out of the given tensors; the live solver state is only read (model
-    info and the fixed root pose). Handles every joint type, so callers get correct kinematics without mutating
-    solver state.
+    Reads the configuration from qpos[:, i_col_q] (entity-local q coordinates keyed by q_offset) and writes link poses
+    and joint frames at column i_col_out of the given tensors. The live solver state is only read (model info and the
+    fixed root pose). Handles every joint type, so callers get kinematics without mutating solver state.
     """
     for i_l_ in range(dyn_info.entities.link_start[entity_idx], dyn_info.entities.link_end[entity_idx]):
         i_l = gs.qd_int(i_l_)
@@ -132,9 +130,10 @@ def func_forward_kinematics_scratch(
 
         pos = dyn_info.links.pos[I_l]
         quat = dyn_info.links.quat[I_l]
-        if dyn_info.links.parent_idx[I_l] != -1:
-            parent_pos = links_pos[dyn_info.links.parent_idx[I_l] - link_offset, i_col_out]
-            parent_quat = links_quat[dyn_info.links.parent_idx[I_l] - link_offset, i_col_out]
+        i_l_parent = dyn_info.links.parent_idx[I_l]
+        if i_l_parent != -1:
+            parent_pos = links_pos[i_l_parent - link_offset, i_col_out]
+            parent_quat = links_quat[i_l_parent - link_offset, i_col_out]
             pos = parent_pos + gu.qd_transform_by_quat(dyn_info.links.pos[I_l], parent_quat)
             quat = gu.qd_transform_quat_by_quat(dyn_info.links.quat[I_l], parent_quat)
 
@@ -392,12 +391,12 @@ def func_integrate_dq_scratch(
     qpos: qd.Tensor,
     dyn_info: DynInfo,
     rigid_config: qd.template(),
-    respect_joint_limit: int,
+    respect_joint_limit: bool,
 ):
     """Integrate a joint-space step into the scratch configuration column.
 
     Mirrors the solver-state integrator on caller-owned qpos, leaving the live state untouched. dq is indexed by
-    entity-local DOF; a FREE root advances its position additively and its orientation by a world-frame delta
+    entity-local DOF. A FREE root advances its position additively and its orientation by a world-frame delta
     rotation, and a REVOLUTE / PRISMATIC DOF advances additively with optional limit clamping.
     """
 
@@ -449,6 +448,7 @@ def func_inverse_kinematics(
     q_offset: int,
     link_offset: int,
     joint_offset: int,
+    seed: int,
     dyn_state: DynState,
     ik_state: IKState,
     fk: IKScratchFK,
@@ -461,15 +461,14 @@ def func_inverse_kinematics(
     n_links: int,
     n_dofs: int,
     n_envs: int,
-    custom_init_qpos: int,
     max_samples: int,
     max_solver_iters: int,
     damping: float,
     pos_tol: float,
     rot_tol: float,
     max_step_size: float,
-    seed: int,
-    respect_joint_limit: int,
+    custom_init_qpos: bool,
+    respect_joint_limit: bool,
 ):
     """Damped-least-squares inverse kinematics for the target links.
 
@@ -477,11 +476,18 @@ def func_inverse_kinematics(
 
     Runs up to max_samples restarts of at most max_solver_iters Gauss-Newton steps against the stacked multi-target
     pose error, keeping the least-error configuration. Every evaluation and integration happens on the caller-owned
-    forward-kinematics scratch (fk), so the live solver state is only read; unconverged restarts resample
-    joint-limited DOFs with a counter-based draw so the result is deterministic across parallel schedules.
+    forward-kinematics scratch (fk), so the live solver state is only read. Unconverged restarts resample
+    joint-limited DOFs with a counter-based draw, so the result is deterministic across parallel schedules.
     """
 
     n_error_dims = 6 * n_links
+
+    # The damped normal equations are solved in the smaller of the error and dof spaces, the step
+    # J^T (J J^T + damping^2 I)^-1 err being equal to (J^T J + damping^2 I)^-1 J^T err. Both factor the damped Gram
+    # matrix A A^T + damping^2 I of the rows of A, those of J in the error space and those of J^T in the dof space.
+    is_dof_space = n_dofs < n_error_dims
+    n_rows = n_dofs if is_dof_space else n_error_dims
+    n_cols = n_error_dims if is_dof_space else n_dofs
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(n_envs):
@@ -497,9 +503,10 @@ def func_inverse_kinematics(
         for i_error in range(n_error_dims):
             ik_state.err_pose_best[i_error, i_b] = 1e4
 
-        solved = False
+        is_solved = False
         for i_sample in range(max_samples):
-            for _ in range(max_solver_iters):
+            # The last iteration only evaluates the residual of the configuration the iteration budget ends on.
+            for i_iter in range(max_solver_iters + 1):
                 func_forward_kinematics_scratch(
                     i_b,
                     i_b,
@@ -519,7 +526,7 @@ def func_inverse_kinematics(
                     rigid_config,
                 )
 
-                solved = True
+                is_solved = True
                 for i_ee in range(n_links):
                     i_l_ee = targets.links_idx[i_ee]
                     ee_quat = fk.links_quat[i_l_ee - link_offset, i_b]
@@ -531,7 +538,7 @@ def func_inverse_kinematics(
                     for k in range(3):
                         err_pos_i[k] = err_pos_i[k] * (targets.pos_mask[k] * targets.link_pos_mask[i_ee])
                     if err_pos_i.norm() > pos_tol:
-                        solved = False
+                        is_solved = False
 
                     err_rot_i = gu.qd_quat_to_rotvec(
                         gu.qd_transform_quat_by_quat(gu.qd_inv_quat(ee_quat), targets.quat[i_ee, i_b])
@@ -539,13 +546,13 @@ def func_inverse_kinematics(
                     for k in range(3):
                         err_rot_i[k] = err_rot_i[k] * (targets.rot_mask[k] * targets.link_rot_mask[i_ee])
                     if err_rot_i.norm() > rot_tol:
-                        solved = False
+                        is_solved = False
 
                     for k in range(3):
                         ik_state.err_pose[i_ee * 6 + k, i_b] = err_pos_i[k]
                         ik_state.err_pose[i_ee * 6 + k + 3, i_b] = err_rot_i[k]
 
-                if solved:
+                if is_solved or i_iter == max_solver_iters:
                     break
 
                 for i_ee in range(n_links):
@@ -554,7 +561,8 @@ def func_inverse_kinematics(
                     ee_pos = fk.links_pos[i_l_ee - link_offset, i_b] + gu.qd_transform_by_quat(
                         targets.local_point[i_ee], ee_quat
                     )
-                    # Full single-link Jacobian over the entity DOFs; axis masking is applied while stacking below.
+                    # Full single-link Jacobian over the entity DOFs, masked while stacking below like the residual.
+                    # A row left unmasked under a zero residual asks the step to hold that coordinate still.
                     func_jacobian_scratch(
                         i_b,
                         i_b,
@@ -568,87 +576,69 @@ def func_inverse_kinematics(
                         dyn_info,
                         rigid_config,
                     )
-
                     for i_d_ in range(n_dofs):
                         i_d = targets.dofs_idx[i_d_]
                         for i_error in qd.static(range(3)):
-                            ik_state.jacobian_stacked[i_ee * 6 + i_error, i_d_, i_b] = (
-                                ik_state.jacobian[i_error, i_d, i_b] * targets.pos_mask[i_error]
-                            )
-                            ik_state.jacobian_stacked[i_ee * 6 + i_error + 3, i_d_, i_b] = (
-                                ik_state.jacobian[i_error + 3, i_d, i_b] * targets.rot_mask[i_error]
-                            )
+                            ik_state.jacobian_stacked[i_ee * 6 + i_error, i_d_, i_b] = ik_state.jacobian[
+                                i_error, i_d, i_b
+                            ] * (targets.pos_mask[i_error] * targets.link_pos_mask[i_ee])
+                            ik_state.jacobian_stacked[i_ee * 6 + i_error + 3, i_d_, i_b] = ik_state.jacobian[
+                                i_error + 3, i_d, i_b
+                            ] * (targets.rot_mask[i_error] * targets.link_rot_mask[i_ee])
 
-                # Damped normal matrix J J^T + damping^2 I
-                for i_error in range(n_error_dims):
-                    for j_error in range(n_error_dims):
-                        ik_state.mat[i_error, j_error, i_b] = 0.0
-                        for i_d_ in range(n_dofs):
-                            ik_state.mat[i_error, j_error, i_b] = ik_state.mat[i_error, j_error, i_b] + (
+                # In-place Cholesky factorization of the damped Gram matrix, forming each entry when it reaches it.
+                # Each entry carries a rounding error of about n * eps * |J|^2, which damping^2 must dominate near a
+                # singular configuration, so in single precision a damping below about 1e-3 per metre of reach loses
+                # the accuracy of the step there.
+                for i_row in range(n_rows):
+                    for j_row in range(i_row + 1):
+                        val = gs.qd_float(0.0)
+                        for i_col in range(n_cols):
+                            i_error = i_col if is_dof_space else i_row
+                            j_error = i_col if is_dof_space else j_row
+                            i_d_ = i_row if is_dof_space else i_col
+                            j_d_ = j_row if is_dof_space else i_col
+                            val = val + (
                                 ik_state.jacobian_stacked[i_error, i_d_, i_b]
-                                * ik_state.jacobian_stacked[j_error, i_d_, i_b]
+                                * ik_state.jacobian_stacked[j_error, j_d_, i_b]
                             )
-                    ik_state.mat[i_error, i_error, i_b] = ik_state.mat[i_error, i_error, i_b] + damping**2
-
-                # LU factorization of the damped normal matrix
-                for i_error in range(n_error_dims):
-                    for j_error in range(i_error, n_error_dims):
-                        val = ik_state.mat[i_error, j_error, i_b]
-                        for k_error in range(i_error):
-                            val = (
-                                val
-                                - ik_state.lu_lower[i_error, k_error, i_b] * ik_state.lu_upper[k_error, j_error, i_b]
-                            )
-                        ik_state.lu_upper[i_error, j_error, i_b] = val
-                    for j_error in range(i_error + 1, n_error_dims):
-                        val = ik_state.mat[j_error, i_error, i_b]
-                        for k_error in range(i_error):
-                            val = (
-                                val
-                                - ik_state.lu_lower[j_error, k_error, i_b] * ik_state.lu_upper[k_error, i_error, i_b]
-                            )
-                        ik_state.lu_lower[j_error, i_error, i_b] = val / ik_state.lu_upper[i_error, i_error, i_b]
-
-                # Inverse of the damped normal matrix, by forward then backward substitution of each identity column
-                for k_error in range(n_error_dims):
-                    for i_error in range(n_error_dims):
-                        val = gs.qd_float(0.0)
-                        for j_error in range(i_error):
-                            val = val + ik_state.lu_lower[i_error, j_error, i_b] * ik_state.lu_y[k_error, j_error, i_b]
-                        if i_error == k_error:
-                            ik_state.lu_y[k_error, i_error, i_b] = 1.0 - val
+                        for k_row in range(j_row):
+                            val = val - ik_state.chol[i_row, k_row, i_b] * ik_state.chol[j_row, k_row, i_b]
+                        if i_row == j_row:
+                            ik_state.chol[i_row, i_row, i_b] = qd.sqrt(val + damping**2)
                         else:
-                            ik_state.lu_y[k_error, i_error, i_b] = -val
-                    for i_error_ in range(n_error_dims):
-                        i_error = n_error_dims - 1 - i_error_
-                        val = gs.qd_float(0.0)
-                        for j_error in range(i_error + 1, n_error_dims):
-                            val = val + ik_state.lu_upper[i_error, j_error, i_b] * ik_state.inv[j_error, k_error, i_b]
-                        ik_state.inv[i_error, k_error, i_b] = (
-                            ik_state.lu_y[k_error, i_error, i_b] - val
-                        ) / ik_state.lu_upper[i_error, i_error, i_b]
+                            ik_state.chol[i_row, j_row, i_b] = val / ik_state.chol[j_row, j_row, i_b]
 
-                for i_error in range(n_error_dims):
-                    ik_state.vec[i_error, i_b] = 0.0
-                    for j_error in range(n_error_dims):
-                        ik_state.vec[i_error, i_b] = (
-                            ik_state.vec[i_error, i_b]
-                            + ik_state.inv[i_error, j_error, i_b] * ik_state.err_pose[j_error, i_b]
-                        )
+                # Forward then backward substitution, of err in the error space and of J^T err in the dof space
+                for i_row in range(n_rows):
+                    val = gs.qd_float(0.0)
+                    if is_dof_space:
+                        for i_error in range(n_error_dims):
+                            val = val + ik_state.jacobian_stacked[i_error, i_row, i_b] * ik_state.err_pose[i_error, i_b]
+                    else:
+                        val = ik_state.err_pose[i_row, i_b]
+                    for k_row in range(i_row):
+                        val = val - ik_state.chol[i_row, k_row, i_b] * ik_state.vec[k_row, i_b]
+                    ik_state.vec[i_row, i_b] = val / ik_state.chol[i_row, i_row, i_b]
+                for i_row_ in range(n_rows):
+                    i_row = n_rows - 1 - i_row_
+                    val = ik_state.vec[i_row, i_b]
+                    for k_row in range(i_row + 1, n_rows):
+                        val = val - ik_state.chol[k_row, i_row, i_b] * ik_state.vec[k_row, i_b]
+                    ik_state.vec[i_row, i_b] = val / ik_state.chol[i_row, i_row, i_b]
 
+                # The joint-space step is the solution in the dof space, and J^T times it in the error space
                 for i_d_ in range(entity_n_dofs):
-                    ik_state.delta_qpos[i_d_, i_b] = 0
+                    ik_state.delta_qpos[i_d_, i_b] = 0.0
                 for i_d_ in range(n_dofs):
                     i_d = targets.dofs_idx[i_d_]
-                    for j in range(n_error_dims):
-                        ik_state.delta_qpos[i_d, i_b] = ik_state.delta_qpos[i_d, i_b] + (
-                            ik_state.jacobian_stacked[j, i_d_, i_b] * ik_state.vec[j, i_b]
-                        )
-
-                for i_d_ in range(entity_n_dofs):
-                    ik_state.delta_qpos[i_d_, i_b] = qd.math.clamp(
-                        ik_state.delta_qpos[i_d_, i_b], -max_step_size, max_step_size
-                    )
+                    val = gs.qd_float(0.0)
+                    if is_dof_space:
+                        val = ik_state.vec[i_d_, i_b]
+                    else:
+                        for i_error in range(n_error_dims):
+                            val = val + ik_state.jacobian_stacked[i_error, i_d_, i_b] * ik_state.vec[i_error, i_b]
+                    ik_state.delta_qpos[i_d, i_b] = qd.math.clamp(val, -max_step_size, max_step_size)
 
                 func_integrate_dq_scratch(
                     i_b,
@@ -662,95 +652,42 @@ def func_inverse_kinematics(
                     respect_joint_limit,
                 )
 
-            if not solved:
-                # Recompute the residual for the final configuration when the iteration budget ran out.
-                func_forward_kinematics_scratch(
-                    i_b,
-                    i_b,
-                    i_b,
-                    entity_idx,
-                    link_offset,
-                    joint_offset,
-                    q_offset,
-                    fk.qpos,
-                    fk.links_pos,
-                    fk.links_quat,
-                    fk.joints_xanchor,
-                    fk.joints_xaxis,
-                    dyn_state,
-                    dyn_info,
-                    rigid_info,
-                    rigid_config,
-                )
-                solved = True
-                for i_ee in range(n_links):
-                    i_l_ee = targets.links_idx[i_ee]
-                    ee_quat = fk.links_quat[i_l_ee - link_offset, i_b]
-                    ee_pos = fk.links_pos[i_l_ee - link_offset, i_b] + gu.qd_transform_by_quat(
-                        targets.local_point[i_ee], ee_quat
-                    )
-                    err_pos_i = targets.pos[i_ee, i_b] - ee_pos
-                    for k in range(3):
-                        err_pos_i[k] = err_pos_i[k] * (targets.pos_mask[k] * targets.link_pos_mask[i_ee])
-                    if err_pos_i.norm() > pos_tol:
-                        solved = False
-
-                    err_rot_i = gu.qd_quat_to_rotvec(
-                        gu.qd_transform_quat_by_quat(gu.qd_inv_quat(ee_quat), targets.quat[i_ee, i_b])
-                    )
-                    for k in range(3):
-                        err_rot_i[k] = err_rot_i[k] * (targets.rot_mask[k] * targets.link_rot_mask[i_ee])
-                    if err_rot_i.norm() > rot_tol:
-                        solved = False
-
-                    for k in range(3):
-                        ik_state.err_pose[i_ee * 6 + k, i_b] = err_pos_i[k]
-                        ik_state.err_pose[i_ee * 6 + k + 3, i_b] = err_rot_i[k]
-
-            if solved:
+            if is_solved:
                 for i_q in range(n_qs):
                     ik_state.qpos_best[i_q, i_b] = fk.qpos[i_q, i_b]
                 for i_error in range(n_error_dims):
                     ik_state.err_pose_best[i_error, i_b] = ik_state.err_pose[i_error, i_b]
                 break
 
-            else:
-                improved = True
-                for i_ee in range(n_links):
-                    error_pos_i = qd.Vector([ik_state.err_pose[i_ee * 6 + i_error, i_b] for i_error in range(3)])
-                    error_rot_i = qd.Vector([ik_state.err_pose[i_ee * 6 + i_error, i_b] for i_error in range(3, 6)])
-                    error_pos_best = qd.Vector(
-                        [ik_state.err_pose_best[i_ee * 6 + i_error, i_b] for i_error in range(3)]
-                    )
-                    error_rot_best = qd.Vector(
-                        [ik_state.err_pose_best[i_ee * 6 + i_error, i_b] for i_error in range(3, 6)]
-                    )
-                    if error_pos_i.norm() > error_pos_best.norm() or error_rot_i.norm() > error_rot_best.norm():
-                        improved = False
-                        break
+            is_improved = True
+            for i_ee in range(n_links):
+                error_pos_i = qd.Vector([ik_state.err_pose[i_ee * 6 + i_error, i_b] for i_error in range(3)])
+                error_rot_i = qd.Vector([ik_state.err_pose[i_ee * 6 + i_error, i_b] for i_error in range(3, 6)])
+                error_pos_best = qd.Vector([ik_state.err_pose_best[i_ee * 6 + i_error, i_b] for i_error in range(3)])
+                error_rot_best = qd.Vector([ik_state.err_pose_best[i_ee * 6 + i_error, i_b] for i_error in range(3, 6)])
+                if error_pos_i.norm() > error_pos_best.norm() or error_rot_i.norm() > error_rot_best.norm():
+                    is_improved = False
 
-                if improved:
-                    for i_q in range(n_qs):
-                        ik_state.qpos_best[i_q, i_b] = fk.qpos[i_q, i_b]
-                    for i_error in range(n_error_dims):
-                        ik_state.err_pose_best[i_error, i_b] = ik_state.err_pose[i_error, i_b]
+            if is_improved:
+                for i_q in range(n_qs):
+                    ik_state.qpos_best[i_q, i_b] = fk.qpos[i_q, i_b]
+                for i_error in range(n_error_dims):
+                    ik_state.err_pose_best[i_error, i_b] = ik_state.err_pose[i_error, i_b]
 
-                if respect_joint_limit and i_sample < max_samples - 1:
-                    entity_dof_start = dyn_info.entities.dof_start[entity_idx]
-                    for i_l in range(dyn_info.entities.link_start[entity_idx], dyn_info.entities.link_end[entity_idx]):
-                        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+            if respect_joint_limit and i_sample < max_samples - 1:
+                entity_dof_start = dyn_info.entities.dof_start[entity_idx]
+                for i_l in range(dyn_info.entities.link_start[entity_idx], dyn_info.entities.link_end[entity_idx]):
+                    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
 
-                        must_resample = False
-                        for i_d_ in range(n_dofs):
-                            i_d = targets.dofs_idx[i_d_]
-                            link_dof_start_local = dyn_info.links.dof_start[I_l] - entity_dof_start
-                            link_dof_end_local = dyn_info.links.dof_end[I_l] - entity_dof_start
-                            if link_dof_start_local <= i_d and i_d < link_dof_end_local:
-                                must_resample = True
-                                break
-                        if not must_resample:
-                            continue
+                    must_resample = False
+                    for i_d_ in range(n_dofs):
+                        i_d = targets.dofs_idx[i_d_]
+                        link_dof_start_local = dyn_info.links.dof_start[I_l] - entity_dof_start
+                        link_dof_end_local = dyn_info.links.dof_end[I_l] - entity_dof_start
+                        if link_dof_start_local <= i_d and i_d < link_dof_end_local:
+                            must_resample = True
 
+                    if must_resample:
                         for i_j in range(dyn_info.links.joint_start[I_l], dyn_info.links.joint_end[I_l]):
                             I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
                             i_d = dyn_info.joints.dof_start[I_j]
@@ -762,9 +699,9 @@ def func_inverse_kinematics(
                                 or dyn_info.joints.type[I_j] == gs.JOINT_TYPE.PRISMATIC
                             ) and qd_isfinite(dof_limit):
                                 q_start = dyn_info.joints.q_start[I_j]
-                                # Counter-based draw keyed on (env, restart, DOF): a qd.random() per-thread stream
-                                # would order by the parallel schedule, making the resampled - and returned -
-                                # configuration nondeterministic across runs.
+                                # Counter-based draw keyed on (env, restart, DOF). A qd.random() per-thread stream
+                                # would order by the parallel schedule, which makes the resampled configuration, and
+                                # thus the returned one, nondeterministic across runs.
                                 fk.qpos[q_start - q_offset, i_b] = dof_limit[0] + gu.qd_hash01(
                                     seed, i_b, i_sample, q_start
                                 ) * (dof_limit[1] - dof_limit[0])
@@ -776,6 +713,7 @@ def kernel_inverse_kinematics_entity(
     q_offset: int,
     link_offset: int,
     joint_offset: int,
+    seed: int,
     dyn_state: DynState,
     ik_state: IKState,
     fk: IKScratchFK,
@@ -788,15 +726,14 @@ def kernel_inverse_kinematics_entity(
     n_links: int,
     n_dofs: int,
     n_envs: int,
-    custom_init_qpos: int,
     max_samples: int,
     max_solver_iters: int,
     damping: float,
     pos_tol: float,
     rot_tol: float,
     max_step_size: float,
-    seed: int,
-    respect_joint_limit: int,
+    custom_init_qpos: bool,
+    respect_joint_limit: bool,
 ):
     """Entity-facing launch wrapper forwarding the IK scratch and model scalars to func_inverse_kinematics."""
     func_inverse_kinematics(
@@ -804,6 +741,7 @@ def kernel_inverse_kinematics_entity(
         q_offset,
         link_offset,
         joint_offset,
+        seed,
         dyn_state,
         ik_state,
         fk,
@@ -816,14 +754,13 @@ def kernel_inverse_kinematics_entity(
         n_links,
         n_dofs,
         n_envs,
-        custom_init_qpos,
         max_samples,
         max_solver_iters,
         damping,
         pos_tol,
         rot_tol,
         max_step_size,
-        seed,
+        custom_init_qpos,
         respect_joint_limit,
     )
 
