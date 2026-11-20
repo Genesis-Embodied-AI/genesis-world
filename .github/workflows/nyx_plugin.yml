@@ -68,8 +68,8 @@ jobs:
     # reference images comparable.
     runs-on: gpu-t4-4-core
 
-    # A draft pull request is gated as in the production workflow. Re-running the precommit run, which '/ci' does (see
-    # the CI Command workflow), starts a new run of this workflow that passes the gate.
+    # A draft pull request is gated as in the production workflow. Re-running the precommit run, which the CI Command
+    # workflow does, starts a new run of this workflow that passes the gate.
     if: needs.setup.outputs.IS_SKIPPED == 'false' || github.event.workflow_run.run_attempt > 1 || github.run_attempt > 1
 
     permissions:
