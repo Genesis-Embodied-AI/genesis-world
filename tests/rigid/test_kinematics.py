@@ -321,7 +321,8 @@ def test_joint_get_anchor_pos_and_axis(n_envs):
 @pytest.mark.slow("gpu")  # gpu ~250s
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-def test_inverse_kinematics_multilink(show_viewer, tol):
+@pytest.mark.parametrize("model_name", ["pendulum"])
+def test_inverse_kinematics_multilink(xml_path, show_viewer, tol):
     scene = gs.Scene(
         vis_options=gs.options.VisOptions(
             rendered_envs_idx=(1,),
@@ -342,6 +343,13 @@ def test_inverse_kinematics_multilink(show_viewer, tol):
     robot = scene.add_entity(
         morph=gs.morphs.URDF(
             file="urdf/shadow_hand/shadow_hand.urdf",
+        ),
+    )
+    pendulum = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=xml_path,
+            pos=(0.0, -0.5, 0.0),
+            fixed=True,
         ),
     )
     scene.build(n_envs=2)
@@ -371,6 +379,24 @@ def test_inverse_kinematics_multilink(show_viewer, tol):
     assert_allclose(index_finger_distal.get_pos(envs_idx=(1,)), index_finger_pos, tol=tol)
     assert_allclose(middle_finger_distal.get_pos(envs_idx=(1,)), middle_finger_pos, tol=tol)
     assert_allclose(wrist.get_pos(envs_idx=(1,)), wrist_pos, tol=tol)
+
+    # A target given its orientation alone leaves its position free. The point 1 m along the arm only has to turn, so
+    # one damped step about the hinge leaves the residual theta * damping^2 / (1 + damping^2) and nothing else.
+    arm, base = pendulum.get_link("PendulumArm_0"), pendulum.get_link("base")
+    theta, damping = 0.3, 0.01
+    qpos, err = pendulum.inverse_kinematics_multilink(
+        links=(arm, base),
+        poss=(None, base.get_pos()),
+        quats=((np.cos(0.5 * theta), np.sin(0.5 * theta), 0.0, 0.0), None),
+        local_points=((0.0, 0.0, 1.0), None),
+        max_samples=1,
+        max_solver_iters=1,
+        damping=damping,
+        return_error=True,
+    )
+    assert_allclose(qpos, theta / (1.0 + damping**2), tol=tol)
+    assert_allclose(err[:, 0, 3], theta * damping**2 / (1.0 + damping**2), tol=tol)
+    assert_allclose(err[:, 0, 4:], 0.0, tol=tol)
 
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
@@ -607,6 +633,27 @@ def test_multi_robot_inverse_kinematics(show_viewer, tol):
         robot.set_qpos(qpos)
         ee_pos = robot.get_link("hand").get_pos()
         assert_allclose(target_pos, ee_pos, atol=tol)
+
+    # A hand pose reached by four joints of the arm alone, fewer than the six components of its error
+    robot = robots[1]
+    hand = robot.get_link("hand")
+    dofs_idx_local = [1, 3, 5, 6]
+    robot.set_dofs_position((0.3, -1.8, 1.6, 0.4), dofs_idx_local=dofs_idx_local)
+    hand_pos, hand_quat = hand.get_pos(), hand.get_quat()
+    robot.set_dofs_position((0.0, -1.5, 1.2, 0.0), dofs_idx_local=dofs_idx_local)
+    qpos, err = robot.inverse_kinematics(
+        link=hand,
+        pos=hand_pos,
+        quat=hand_quat,
+        pos_tol=tol,
+        rot_tol=tol,
+        max_solver_iters=100,
+        dofs_idx_local=dofs_idx_local,
+        return_error=True,
+    )
+    assert_allclose(err, 0.0, atol=tol)
+    robot.set_qpos(qpos)
+    assert_allclose(hand.get_pos(), hand_pos, tol=tol)
 
 
 @pytest.mark.slow("gpu")  # gpu ~300s
@@ -1012,6 +1059,9 @@ def test_kinematics_queries(n_envs, show_viewer, tol):
 
         entity.set_qpos(qpos)
         assert_allclose(end_effector.get_pos(), target_pos, tol=tol)
+
+    with pytest.raises(gs.GenesisException):
+        franka.inverse_kinematics(link=end_effector, pos=target_pos, damping=0.0)
 
     # Carrying more targets than the error buffer is sized for is rejected, rather than written past.
     n_tgts = franka.solver.options.IK_max_targets
