@@ -8,7 +8,6 @@ scene = gs.Scene(
     vis_options=gs.options.VisOptions(
         show_world_frame=True,
         world_frame_size=1.0,
-        show_link_frame=False,
         show_cameras=False,
         plane_reflection=True,
         ambient_light=(0.1, 0.1, 0.1),

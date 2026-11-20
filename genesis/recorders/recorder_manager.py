@@ -1,14 +1,16 @@
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 import genesis as gs
+from genesis.utils.misc import BuildableMixin
 
 if TYPE_CHECKING:
     from .base_recorder import Recorder, RecorderOptions
 
 
-class RecorderManager:
+class RecorderManager(BuildableMixin):
     """
     Manage the creation, processing, and cleanup of all data recorders.
 
@@ -25,7 +27,6 @@ class RecorderManager:
 
         self._recorders: list["Recorder"] = []
         self._is_recording = False
-        self._is_built = False
 
     @gs.assert_unbuilt
     def add_recorder(self, data_func: Callable[[], Any], rec_options: "RecorderOptions") -> "Recorder":
@@ -92,9 +93,15 @@ class RecorderManager:
                 except Exception as recorder_error:
                     if error is None:
                         error = recorder_error
+            # A recorder may stop another one it feeds, so they are destroyed once all of them stopped
+            for recorder in self._recorders:
+                recorder.destroy()
             self._recorders.clear()
             if error is not None:
                 raise error
+
+    def destroy(self) -> None:
+        self._is_built = False
 
     @gs.assert_built
     def reset(self, envs_idx=None):
@@ -140,10 +147,6 @@ class RecorderManager:
     @property
     def is_recording(self) -> bool:
         return self._is_recording
-
-    @property
-    def is_built(self) -> bool:
-        return self._is_built
 
 
 def register_recording(options_cls: type["RecorderOptions"]):

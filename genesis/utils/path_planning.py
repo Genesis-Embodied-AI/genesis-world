@@ -2,13 +2,15 @@ import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
-import quadrants as qd
 import torch
 import torch.nn.functional as F
 
+import quadrants as qd
+
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils import array_class
+from genesis.engine.solvers.rigid.collider.data import ColliderState
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
@@ -100,7 +102,7 @@ class PathPlanner(ABC):
         Planning is refused for the joints whose coordinates are not their degrees of freedom, which are the free and
         the ball joint, so the limits of the degrees of freedom are the limits of the coordinates sampled here.
         """
-        is_batched = self._solver._options.batch_dofs_info
+        is_batched = self._solver.options.batch_dofs_info
         lower, upper = self._entity.get_dofs_limit(envs_idx=envs_idx if is_batched else None)
         is_goal_out_of_limit = ((qpos_goal < lower) | (qpos_goal > upper)).any(dim=-1)
         # One row per environment, laid out rather than broadcast: the limits come as a strided view of the pair they
@@ -157,13 +159,13 @@ class PathPlanner(ABC):
         mask: qd.types.ndarray(),  # [B]
         tensor: qd.types.ndarray(),  # [N, B, Dof]
     ):
-        qd.loop_config(serialize=self._solver._para_level < gs.PARA_LEVEL.ALL)
+        qd.loop_config(serialize=self._solver.sim.para_level < gs.PARA_LEVEL.ALL)
         for i_b in range(path.shape[1]):
             for i_q in range(self._entity.n_qs):
                 for i_s in range(path.shape[0]):
                     tensor[i_s, i_b, i_q] = path[i_s, i_b, i_q]
 
-        qd.loop_config(serialize=self._solver._para_level < gs.PARA_LEVEL.ALL)
+        qd.loop_config(serialize=self._solver.sim.para_level < gs.PARA_LEVEL.ALL)
         for i_b in range(path.shape[1]):
             if mask[i_b]:
                 num_samples = sample_ind[i_b, 1] - sample_ind[i_b, 0]
@@ -217,7 +219,7 @@ class PathPlanner(ABC):
         obj_geom_end: qd.i32,
         ignore_geom_pairs: qd.types.ndarray(),
         out: qd.types.ndarray(),
-        collider_state: array_class.ColliderState,
+        collider_state: ColliderState,
         is_plan_with_obj: qd.i32,
     ):
         for i_b_ in range(envs_idx.shape[0]):
@@ -235,7 +237,7 @@ class PathPlanner(ABC):
         obj_geom_start: qd.i32,
         obj_geom_end: qd.i32,
         ignore_geom_pairs: qd.types.ndarray(),
-        collider_state: array_class.ColliderState,
+        collider_state: ColliderState,
         is_plan_with_obj: qd.i32,
     ) -> qd.i32:
         is_collision_detected = qd.cast(False, gs.qd_int)
@@ -327,16 +329,16 @@ class RRT(PathPlanner):
             self._rrt_max_nodes = max_nodes
             self._rrt_pos_tol = pos_tol
             self._rrt_max_step_size = max_step_size
-            self._rrt_start_configuration = qd.field(dtype=gs.qd_float, shape=(self._entity.n_qs, self._solver._B))
-            self._rrt_goal_configuration = qd.field(dtype=gs.qd_float, shape=(self._entity.n_qs, self._solver._B))
+            self._rrt_start_configuration = qd.field(dtype=gs.qd_float, shape=(self._entity.n_qs, self._solver.n_envs_))
+            self._rrt_goal_configuration = qd.field(dtype=gs.qd_float, shape=(self._entity.n_qs, self._solver.n_envs_))
             self.struct_rrt_node_info = qd.types.struct(
                 configuration=qd.types.vector(self._entity.n_qs, gs.qd_float), parent_idx=gs.qd_int
             )
             # FIXME: AOS, which does not match other Genesis structs. Old, untested code. We prefer not to touch for now.
-            self._rrt_node_info = self.struct_rrt_node_info.field(shape=(self._rrt_max_nodes, self._solver._B))
-            self._rrt_tree_size = qd.field(dtype=gs.qd_int, shape=(self._solver._B,))
-            self._rrt_is_active = qd.field(dtype=gs.qd_bool, shape=(self._solver._B,))
-            self._rrt_goal_reached_node_idx = qd.field(dtype=gs.qd_int, shape=(self._solver._B,))
+            self._rrt_node_info = self.struct_rrt_node_info.field(shape=(self._rrt_max_nodes, self._solver.n_envs_))
+            self._rrt_tree_size = qd.field(dtype=gs.qd_int, shape=(self._solver.n_envs_,))
+            self._rrt_is_active = qd.field(dtype=gs.qd_bool, shape=(self._solver.n_envs_,))
+            self._rrt_goal_reached_node_idx = qd.field(dtype=gs.qd_int, shape=(self._solver.n_envs_,))
             self._is_rrt_init = True
 
     def _reset_rrt_fields(self):
@@ -357,7 +359,7 @@ class RRT(PathPlanner):
         q_limit_lower: qd.types.ndarray(),
         q_limit_upper: qd.types.ndarray(),
     ):
-        qd.loop_config(serialize=self._solver._para_level < gs.PARA_LEVEL.ALL)
+        qd.loop_config(serialize=self._solver.sim.para_level < gs.PARA_LEVEL.ALL)
         for i_b_ in range(envs_idx.shape[0]):
             i_b = envs_idx[i_b_]
             # Every sample lies within the limits, so a goal outside them cannot be reached. Such an environment
@@ -380,9 +382,9 @@ class RRT(PathPlanner):
         envs_idx: qd.types.ndarray(),
         q_limit_lower: qd.types.ndarray(),
         q_limit_upper: qd.types.ndarray(),
-        dyn_state: array_class.DynState,
-        dyn_info: array_class.DynInfo,
-        rigid_info: array_class.RigidInfo,
+        dyn_state: DynState,
+        dyn_info: DynInfo,
+        rigid_info: RigidInfo,
     ):
         """
         Step 1 includes:
@@ -468,7 +470,7 @@ class RRT(PathPlanner):
         obj_geom_start: qd.i32,
         obj_geom_end: qd.i32,
         ignore_geom_pairs: qd.types.ndarray(),
-        collider_state: array_class.ColliderState,
+        collider_state: ColliderState,
         ignore_collision: qd.i32,
         is_plan_with_obj: qd.i32,
     ):
@@ -671,16 +673,16 @@ class RRTConnect(PathPlanner):
             self._rrt_goal_bias = goal_bias
             self._rrt_max_nodes = max_nodes
             self._rrt_max_step_size = max_step_size
-            self._rrt_start_configuration = qd.field(dtype=gs.qd_float, shape=(self._entity.n_qs, self._solver._B))
-            self._rrt_goal_configuration = qd.field(dtype=gs.qd_float, shape=(self._entity.n_qs, self._solver._B))
+            self._rrt_start_configuration = qd.field(dtype=gs.qd_float, shape=(self._entity.n_qs, self._solver.n_envs_))
+            self._rrt_goal_configuration = qd.field(dtype=gs.qd_float, shape=(self._entity.n_qs, self._solver.n_envs_))
             self.struct_rrt_node_info = qd.types.struct(
                 configuration=qd.types.vector(self._entity.n_qs, gs.qd_float), parent_idx=gs.qd_int, child_idx=gs.qd_int
             )
             # FIXME: AOS, which does not match other Genesis structs. Old, untested code. We prefer not to touch for now.
-            self._rrt_node_info = self.struct_rrt_node_info.field(shape=(self._rrt_max_nodes, self._solver._B))
-            self._rrt_tree_size = qd.field(dtype=gs.qd_int, shape=(self._solver._B,))
-            self._rrt_is_active = qd.field(dtype=gs.qd_bool, shape=(self._solver._B,))
-            self._rrt_goal_reached_node_idx = qd.field(dtype=gs.qd_int, shape=(self._solver._B,))
+            self._rrt_node_info = self.struct_rrt_node_info.field(shape=(self._rrt_max_nodes, self._solver.n_envs_))
+            self._rrt_tree_size = qd.field(dtype=gs.qd_int, shape=(self._solver.n_envs_,))
+            self._rrt_is_active = qd.field(dtype=gs.qd_bool, shape=(self._solver.n_envs_,))
+            self._rrt_goal_reached_node_idx = qd.field(dtype=gs.qd_int, shape=(self._solver.n_envs_,))
             self._is_rrt_connect_init = True
 
     def _reset_rrt_connect_fields(self):
@@ -703,7 +705,7 @@ class RRTConnect(PathPlanner):
         q_limit_upper: qd.types.ndarray(),
     ):
         # NOTE: run IK before this
-        qd.loop_config(serialize=self._solver._para_level < gs.PARA_LEVEL.ALL)
+        qd.loop_config(serialize=self._solver.sim.para_level < gs.PARA_LEVEL.ALL)
         for i_b_ in range(envs_idx.shape[0]):
             i_b = envs_idx[i_b_]
             # See the note in RRT: a goal outside the limits cannot be reached, which the valid mask reports.
@@ -728,9 +730,9 @@ class RRTConnect(PathPlanner):
         qpos: qd.Tensor,
         q_limit_lower: qd.types.ndarray(),
         q_limit_upper: qd.types.ndarray(),
-        dyn_state: array_class.DynState,
-        dyn_info: array_class.DynInfo,
-        rigid_info: array_class.RigidInfo,
+        dyn_state: DynState,
+        dyn_info: DynInfo,
+        rigid_info: RigidInfo,
         forward_pass: qd.i32,
     ):
         """
@@ -833,8 +835,8 @@ class RRTConnect(PathPlanner):
         obj_geom_start: qd.i32,
         obj_geom_end: qd.i32,
         ignore_geom_pairs: qd.types.ndarray(),
-        collider_state: array_class.ColliderState,
-        rigid_info: array_class.RigidInfo,
+        collider_state: ColliderState,
+        rigid_info: RigidInfo,
         forward_pass: qd.i32,
         ignore_collision: qd.i32,
         is_plan_with_obj: qd.i32,

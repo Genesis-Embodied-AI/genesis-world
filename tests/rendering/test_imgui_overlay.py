@@ -11,7 +11,7 @@ import genesis as gs
 from genesis.ext.pyrender.overlay import ImGuiOverlayPlugin
 
 from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_IMGUI_BUNDLE, is_imgui_bundle_supported
-from ..utils.assertions import assert_allclose, assert_pixel_match, rgb_array_to_png_bytes
+from ..utils.assertions import assert_allclose, assert_equal, assert_pixel_match, rgb_array_to_png_bytes
 
 
 def _apply_deterministic_imgui_overrides(monkeypatch):
@@ -81,9 +81,10 @@ def _apply_deterministic_imgui_overrides(monkeypatch):
     def _capture_pending_entities_basename(self):
         orig_capture(self)
         for entity_kwargs in self._pending_entities_kwargs.values():
-            morph = entity_kwargs["morph"]
-            if isinstance(morph, gs.morphs.FileMorph):
-                morph.file = os.path.basename(morph.file)
+            spec = entity_kwargs["spec"]
+            if isinstance(spec.morph, gs.morphs.FileMorph):
+                morph = spec.morph.model_copy(update={"file": os.path.basename(spec.morph.file)})
+                entity_kwargs["spec"] = spec.model_copy(update={"morph": morph})
 
     monkeypatch.setattr(ImGuiOverlayPlugin, "_capture_pending_entities_kwargs", _capture_pending_entities_basename)
 
@@ -317,8 +318,8 @@ def test_scene_rebuild():
     # manual InteractiveScene. A Rebuild click only queues the request; scene.step() applies it on its thread.
     scene = _build_default_scene(enable_gui=True, run_in_thread=(sys.platform == "linux"))
     # A UV-mapped mesh with an image texture, so the capture comparison below catches the renderer swap invalidating
-    # GL textures shared across the rebuild.
-    scene.add_entity(
+    # GL textures shared across the rebuild. The friction set on its geoms must survive a rebuild that edits its morph.
+    duck_spec = gs.entities.Rigid(
         morph=gs.morphs.Mesh(
             file="meshes/duck/duck.obj",
             scale=0.001,
@@ -327,6 +328,8 @@ def test_scene_rebuild():
         ),
         name="duck",
     )
+    duck_spec.select(gs.indices.Geom.at(slice(None))).set_friction(0.9)
+    scene.add_entity(spec=duck_spec)
     scene.build()
 
     scene_id = id(scene)
@@ -375,17 +378,57 @@ def test_scene_rebuild():
     duck_aabb = scene.get_entity("duck").get_AABB()
     digest_before = scene._desc_digest
     duck_kwargs = plugin._pending_entities_kwargs["duck"]
-    duck_kwargs["morph"] = duck_kwargs["morph"].model_copy(update={"scale": 0.002})
+    duck_morph = duck_kwargs["spec"].morph.model_copy(update={"scale": 0.002})
+    duck_kwargs["spec"] = duck_kwargs["spec"].model_copy(update={"morph": duck_morph})
     interactive.rebuild(entities_kwargs=plugin._pending_entities_kwargs)
     scene.step()
     duck_aabb_scaled = scene.get_entity("duck").get_AABB()
     assert_allclose(duck_aabb_scaled[1] - duck_aabb_scaled[0], 2.0 * (duck_aabb[1] - duck_aabb[0]), tol=1e-3)
+    for geom in scene.get_entity("duck").geoms:
+        assert_allclose(geom.get_friction(), 0.9, tol=gs.EPS)
     # A checkpoint restore compares against the cached digest, so the cache must follow the edit
     assert scene._desc_digest != digest_before
 
-    # Switching the visual mode of an entity gives its geoms fresh nodes, which must keep following the simulation:
-    # the arm sags under gravity once unpaused, so the frames before and after must differ
-    interactive.set_entity_vis_mode(scene.get_entity("panda"), "collision")
+    # The runtime controls of the panel change what the window draws, and back: the frames of the links and their size,
+    # and the representation of the robot alone.
+    rigid_context = scene.rigid_solver.render_context
+    robot = scene.get_entity("panda")
+    rgbs = []
+    for method, args in (
+        (rigid_context.set_link_frames, (False,)),
+        (rigid_context.set_link_frames, (True,)),
+        (rigid_context.set_link_frame_size, (0.4,)),
+        (rigid_context.set_debug, (robot, True)),
+        (rigid_context.set_link_frames, (False,)),
+        (rigid_context.set_debug, (robot, None)),
+    ):
+        method(*args)
+        rgb, *_ = window_before.render_offscreen(
+            window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
+        )
+        rgbs.append(rgb)
+    rgb_looks, rgb_frames, rgb_frames_large, rgb_robot_debug, _, rgb_restored = rgbs
+    is_frame = (rgb_frames != rgb_looks).any(axis=-1)
+    assert is_frame.any() and (rgb_frames_large != rgb_looks).any(axis=-1).sum() > is_frame.sum()
+    assert (rgb_robot_debug != rgb_frames_large).any()
+    assert_equal(rgb_restored, rgb_looks)
+
+    # The frames of the links drawn at runtime keep being drawn at their size once the scene is rebuilt
+    scene.visualizer.set_link_frames(True)
+    rgb_frames_before, *_ = window_before.render_offscreen(
+        window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
+    )
+    interactive.rebuild(entities_kwargs=plugin._pending_entities_kwargs)
+    scene.step()
+    rgb_frames_after, *_ = window_before.render_offscreen(
+        window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
+    )
+    assert_pixel_match(rgb_frames_after, rgb_frames_before, err_msg="Rebuilt scene draws other link frames.")
+    rigid_context = scene.rigid_solver.render_context
+
+    # Switching the viewer to the debug representation gives the geoms fresh nodes, which must keep following the
+    # simulation: the arm sags under gravity once unpaused, so the frames before and after must differ.
+    interactive.set_debug_view(True)
     interactive.resume()
     rgb_collision_before, *_ = window_before.render_offscreen(
         window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
@@ -396,6 +439,17 @@ def test_scene_rebuild():
         window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
     )
     assert (rgb_collision_after != rgb_collision_before).any(axis=-1).mean() > 0.01
+
+    # The contacts of the cube resting on the ground show once asked for, the arrows of their force cyan
+    rigid_context.set_visualize_contact(scene.get_entity("cube"), True)
+    rgb_contacts, *_ = window_before.render_offscreen(
+        window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
+    )
+    arrow_pixel_counts = []
+    for rgb in (rgb_collision_after, rgb_contacts):
+        red, green, blue = np.moveaxis(rgb, -1, 0)
+        arrow_pixel_counts.append(((blue > 120) & (green > 120) & (red < 60)).sum())
+    assert arrow_pixel_counts[1] > arrow_pixel_counts[0]
 
 
 @pytest.mark.required
@@ -422,16 +476,13 @@ def test_capture_pending_entities_preserves_heterogeneous_morphs():
 
     plugin._capture_pending_entities_kwargs()
 
-    single_kwargs = plugin._pending_entities_kwargs[single_entity.name]
-    assert single_kwargs["morph"] is single_morph
-    assert single_kwargs["material"] is single_entity.material
-    assert single_kwargs["surface"] is single_entity.surface
-    assert single_kwargs["visualize_contact"] is True
+    single_spec = plugin._pending_entities_kwargs[single_entity.name]["spec"]
+    assert single_spec is single_entity.spec
+    assert single_spec.morph is single_morph
+    assert single_spec.visualize_contact
 
-    heterogeneous_kwargs = plugin._pending_entities_kwargs[heterogeneous_entity.name]
-    assert heterogeneous_kwargs["morph"] == heterogeneous_morphs
-    assert heterogeneous_kwargs["morph"][0] is heterogeneous_morphs[0]
-    assert heterogeneous_kwargs["morph"][1] is heterogeneous_morphs[1]
-    assert heterogeneous_kwargs["material"] is heterogeneous_entity.material
-    assert heterogeneous_kwargs["surface"] is heterogeneous_entity.surface
-    assert heterogeneous_kwargs["visualize_contact"] is True
+    heterogeneous_spec = plugin._pending_entities_kwargs[heterogeneous_entity.name]["spec"]
+    assert heterogeneous_spec is heterogeneous_entity.spec
+    assert heterogeneous_spec.morph[0] is heterogeneous_morphs[0]
+    assert heterogeneous_spec.morph[1] is heterogeneous_morphs[1]
+    assert heterogeneous_spec.visualize_contact

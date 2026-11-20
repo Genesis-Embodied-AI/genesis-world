@@ -42,17 +42,17 @@ def main():
     )
     scene.add_entity(gs.morphs.Plane())
     elastic = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.25),
-            size=(0.12, 0.12, 0.12),
-        ),
-        material=gs.materials.MPM.Elastic(
-            E=1e4,
-            nu=0.3,
-            sampler="regular",
-        ),
-        surface=gs.surfaces.Default(
-            vis_mode="particle",
+        spec=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.25),
+                size=(0.12, 0.12, 0.12),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=1e4,
+                nu=0.3,
+                sampler="regular",
+            ),
+            vis=gs.options.EntityVisOptions(debug=True),
         ),
     )
     scene.build()

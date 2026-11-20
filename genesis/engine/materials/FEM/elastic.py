@@ -1,23 +1,22 @@
-from typing import Any, Literal
+from enum import IntEnum
+from typing import Literal
 
 import quadrants as qd
-from pydantic import PrivateAttr, model_validator
 
 import genesis as gs
+import genesis.utils.geom as gu
 
 from .base import Base
 
 
-@qd.func
-def partialJpartialF(F):
-    pJpF0 = F[:, 1].cross(F[:, 2])
-    pJpF1 = F[:, 2].cross(F[:, 0])
-    pJpF2 = F[:, 0].cross(F[:, 1])
-    pJpF = qd.Matrix.cols([pJpF0, pJpF1, pJpF2])
-    return pJpF
+class FEMModel(IntEnum):
+    """The constitutive models of the elastic FEM materials, by which the FEM kernels dispatch each element."""
+
+    LINEAR = 0
+    STABLE_NEOHOOKEAN = 1
+    LINEAR_COROTATED = 2
 
 
-@qd.data_oriented
 class Elastic(Base):
     """
     The elastic material class for FEM.
@@ -29,7 +28,7 @@ class Elastic(Base):
     nu : float, optional
         Poisson ratio, describing the material's volume change under stress. Default is 0.2.
     rho : float, optional
-        Material density (kg/m³). Default is 1000.
+        Material density (kg/m^3). Default is 1000.
     hydroelastic_modulus : float, optional
         Hydroelastic modulus for hydroelastic contact. Default is 1e7.
     friction_mu : float, optional
@@ -47,176 +46,175 @@ class Elastic(Base):
 
     model: Literal["linear", "stable_neohookean", "linear_corotated"] = "linear"
 
-    # Internal buffer for linear corotated rotation matrix
-    _R: Any = PrivateAttr(default=None)
+    @property
+    def model_id(self) -> FEMModel:
+        """The constitutive model of the material, as the FEM kernels dispatch on it."""
+        return FEMModel[self.model.upper()]
 
-    @model_validator(mode="before")
-    @classmethod
-    def _resolve_deprecated_model(cls, data: dict) -> dict:
-        if data.get("model") == "stable_neohooken":
-            gs.logger.warning("The 'stable_neohooken' model is deprecated. Use 'stable_neohookean' instead.")
-            data["model"] = "stable_neohookean"
-        return data
 
-    def model_post_init(self, context: Any) -> None:
-        super().model_post_init(context)
+# --- Linear model ---
 
-        if self.model == "linear":
-            self.update_stress = self._update_stress_linear
-            self.compute_energy_gradient_hessian = self._compute_energy_gradient_hessian_linear
-            self.compute_energy_gradient = self._compute_energy_gradient_linear
-            self.compute_energy = self._compute_energy_linear
-            self.hessian_invariant = True
-        elif self.model == "stable_neohookean":
-            self.update_stress = self._update_stress_stable_neohookean
-            self.compute_energy_gradient_hessian = self._compute_energy_gradient_hessian_stable_neohookean
-            self.compute_energy_gradient = self._compute_energy_gradient_stable_neohookean
-            self.compute_energy = self._compute_energy_stable_neohookean
-            self.hessian_invariant = False
-        elif self.model == "linear_corotated":
-            self.build = self._build_linear_corotated
-            self.pre_compute = self._pre_compute_linear_corotated
-            self.update_stress = self._update_stress_linear_corotated
-            self.compute_energy_gradient_hessian = self._compute_energy_gradient_hessian_linear_corotated
-            self.compute_energy_gradient = self._compute_energy_gradient_linear_corotated
-            self.compute_energy = self._compute_energy_linear_corotated
 
-    def _build_linear_corotated(self, fem_solver):
-        self._R = qd.field(dtype=gs.qd_mat3, shape=(fem_solver._B, fem_solver.n_elements))
+@qd.func
+def func_linear_stress(mu: float, lam: float, F: qd.types.matrix(3, 3)):
+    """Return the first Piola-Kirchhoff stress of the linear model."""
+    I = qd.Matrix.identity(gs.qd_float, 3)
+    return mu * (F + F.transpose() - 2 * I) + lam * (F - I).trace() * I
 
-    @qd.func
-    def _pre_compute_linear_corotated(self, J, F, i_e, i_b):
-        U, S, V = qd.svd(F)
-        R = U @ V.transpose()
-        self._R[i_b, i_e] = R
 
-    # ─── Linear model ───
+@qd.func
+def func_linear_hessian_product(mu: float, lam: float, dF: qd.types.matrix(3, 3)):
+    """Return the product of the Hessian of the energy density of the linear model with a change of deformation."""
+    return mu * (dF + dF.transpose()) + lam * dF.trace() * qd.Matrix.identity(gs.qd_float, 3)
 
-    @qd.func
-    def _update_stress_linear(self, mu, lam, J, F, actu, m_dir):
-        I = qd.Matrix.identity(dt=gs.qd_float, n=3)
-        stress = mu * (F + F.transpose() - 2 * I) + lam * (F - I).trace() * I
-        return stress
 
-    @qd.func
-    def _compute_energy_gradient_hessian_linear(self, mu, lam, J, F, actu, m_dir, i_e, i_b, hessian_field):
-        I = qd.Matrix.identity(dt=gs.qd_float, n=3)
-        eps = 0.5 * (F + F.transpose()) - I
-        trEps = eps.trace()
-        energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
-        gradient = 2.0 * mu * eps + lam * trEps * I
+@qd.func
+def func_linear_energy_gradient(mu: float, lam: float, F: qd.types.matrix(3, 3)):
+    """Return the energy density of the linear model and its gradient with respect to the deformation gradient."""
+    I = qd.Matrix.identity(gs.qd_float, 3)
+    eps = 0.5 * (F + F.transpose()) - I
+    trEps = eps.trace()
+    energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
+    gradient = 2.0 * mu * eps + lam * trEps * I
+    return energy, gradient
 
-        for i in qd.static(qd.grouped(qd.ndrange(3, 3))):
-            hessian_field[i_b, i, i_e].fill(0.0)
 
-        for i, k in qd.static(qd.ndrange(3, 3)):
-            hessian_field[i_b, i, i, i_e][k, k] = mu
+@qd.func
+def func_linear_energy(mu: float, lam: float, F: qd.types.matrix(3, 3)):
+    """Return the energy density of the linear model."""
+    eps = 0.5 * (F + F.transpose()) - qd.Matrix.identity(gs.qd_float, 3)
+    return mu * eps.norm_sqr() + 0.5 * lam * eps.trace() ** 2
 
-        hessian_field[i_b, 0, 0, i_e][0, 0] += mu + lam
-        hessian_field[i_b, 1, 1, i_e][1, 1] += mu + lam
-        hessian_field[i_b, 2, 2, i_e][2, 2] += mu + lam
 
-        hessian_field[i_b, 0, 1, i_e][1, 0] = hessian_field[i_b, 1, 0, i_e][0, 1] = mu
-        hessian_field[i_b, 0, 2, i_e][2, 0] = hessian_field[i_b, 2, 0, i_e][0, 2] = mu
-        hessian_field[i_b, 1, 2, i_e][2, 1] = hessian_field[i_b, 2, 1, i_e][1, 2] = mu
+# --- Stable Neo-Hookean model ---
 
-        hessian_field[i_b, 0, 1, i_e][0, 1] = hessian_field[i_b, 0, 2, i_e][0, 2] = lam
-        hessian_field[i_b, 1, 0, i_e][1, 0] = hessian_field[i_b, 2, 0, i_e][2, 0] = lam
-        hessian_field[i_b, 1, 2, i_e][1, 2] = hessian_field[i_b, 2, 1, i_e][2, 1] = lam
-        return energy, gradient
 
-    @qd.func
-    def _compute_energy_gradient_linear(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
-        I = qd.Matrix.identity(dt=gs.qd_float, n=3)
-        eps = 0.5 * (F + F.transpose()) - I
-        trEps = eps.trace()
-        energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
-        gradient = 2.0 * mu * eps + lam * trEps * I
-        return energy, gradient
+@qd.func
+def func_stable_neohookean_stress(mu: float, lam: float, J: float, F: qd.types.matrix(3, 3)):
+    """Return the first Piola-Kirchhoff stress of the stable Neo-Hookean model, the gradient of its energy density."""
+    lam_shifted = lam + mu
+    alpha = 1.0 + mu / lam_shifted
+    dJdF = qd.Matrix.cols([F[:, 1].cross(F[:, 2]), F[:, 2].cross(F[:, 0]), F[:, 0].cross(F[:, 1])])
+    return mu * F + lam_shifted * (J - alpha) * dJdF
 
-    @qd.func
-    def _compute_energy_linear(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
-        I = qd.Matrix.identity(dt=gs.qd_float, n=3)
-        eps = 0.5 * (F + F.transpose()) - I
-        trEps = eps.trace()
-        energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
-        return energy
 
-    # ─── Stable Neo-Hookean model ───
+@qd.func
+def func_stable_neohookean_energy(mu: float, lam: float, J: float, F: qd.types.matrix(3, 3)):
+    """
+    Return the energy density of the stable Neo-Hookean model.
 
-    @qd.func
-    def _update_stress_stable_neohookean(self, mu, lam, J, F, actu, m_dir):
-        IC = F.norm_sqr()
-        dJdF0 = F[:, 1].cross(F[:, 2])
-        dJdF1 = F[:, 2].cross(F[:, 0])
-        dJdF2 = F[:, 0].cross(F[:, 1])
-        dJdF = qd.Matrix.cols([dJdF0, dJdF1, dJdF2])
-        alpha = 1 + 0.75 * mu / lam
-        stress = mu * (1 - 1 / (IC + 1)) * F + lam * (J - alpha) * dJdF
-        return stress
+    The first Lame parameter shifted by the second one gives the model the stiffness of linear elasticity with the same
+    parameters under small strains, and the rest volume ratio `alpha` leaves the undeformed element free of stress.
+    """
+    lam_shifted = lam + mu
+    alpha = 1.0 + mu / lam_shifted
+    return 0.5 * (mu * (F.norm_sqr() - 3.0) + lam_shifted * (J - alpha) ** 2)
 
-    @qd.func
-    def _compute_energy_gradient_hessian_stable_neohookean(self, mu, lam, J, F, actu, m_dir, i_e, i_b, hessian_field):
-        raise NotImplementedError("Hessian computation is not implemented for stable_neohookean model.")
 
-    @qd.func
-    def _compute_energy_gradient_stable_neohookean(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
-        gs.raise_exception("Gradient computation is not implemented for stable_neohookean model.")
+# --- Linear corotated model ---
 
-    @qd.func
-    def _compute_energy_stable_neohookean(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
-        _lambda = lam + mu
-        _alpha = 1.0 + mu / _lambda
-        Ic = F.norm_sqr()
-        Jminus1 = J - _alpha
-        energy = 0.5 * (mu * (Ic - 3.0) + _lambda * Jminus1**2)
-        return energy
 
-    # ─── Linear Corotated model ───
+@qd.func
+def func_linear_corotated_rotation(F: qd.types.matrix(3, 3), rotation_atol: float):
+    """
+    Return the rotation of the polar decomposition of a deformation gradient, which the linear corotated model takes at
+    the start of a substep.
 
-    @qd.func
-    def _update_stress_linear_corotated(self, mu, lam, J, F, actu, m_dir):
-        gs.raise_exception("Linear corotated stress update is not implemented yet.")
+    In double precision, the scaled Newton iteration X <- (z X + X^-T / z) / 2 from X = F, z the square root of the
+    ratio of the Frobenius norms of X^-T and X, converges to the rotation within rounding up to condition numbers of
+    1e6, without a transcendental function. The singular value decomposition (SVD) of F takes over where the iteration
+    ends farther than `rotation_atol` from a rotation, for an ill-conditioned element, and for an inverted one, whose
+    rotation pairs with a negative smallest singular value where the polar decomposition is a reflection. In single
+    precision, the SVD alone costs less than the iteration.
+    """
+    # The iterations reaching the rounding of double precision for the condition numbers a simulation meets
+    N_NEWTON_ITERATIONS = qd.static(6)
 
-    @qd.func
-    def _compute_energy_gradient_hessian_linear_corotated(self, mu, lam, J, F, actu, m_dir, i_e, i_b, hessian_field):
-        R = self._R[i_b, i_e]
-        F_hat = R.transpose() @ F
-        eps = 0.5 * (F_hat + F_hat.transpose())
-        for i in qd.static(range(3)):
-            eps[i, i] -= 1.0
-        trEps = eps.trace()
-        energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
-        gradient = 2.0 * mu * R @ eps + lam * trEps * R
+    X = F
+    is_rotation = False
+    if qd.static(gs.qd_float == qd.f64):
+        for _ in qd.static(range(N_NEWTON_ITERATIONS)):
+            Y = X.inverse().transpose()
+            z = qd.sqrt(qd.sqrt((Y * Y).sum() / (X * X).sum()))
+            X = 0.5 * (z * X + Y / z)
+        error = qd.abs(X.transpose() @ X - qd.Matrix.identity(gs.qd_float, 3)).max()
+        is_rotation = F.determinant() > 0.0 and error < rotation_atol
+    if not is_rotation:
+        U, S, V = gu.qd_svd(F)
+        X = U @ V.transpose()
+    return X
 
-        for i in qd.static(qd.grouped(qd.ndrange(3, 3))):
-            hessian_field[i_b, i, i_e].fill(0.0)
 
-        for i, k in qd.static(qd.ndrange(3, 3)):
-            hessian_field[i_b, i, i, i_e][k, k] = mu
+@qd.func
+def func_linear_corotated_hessian_product(mu: float, lam: float, R: qd.types.matrix(3, 3), dF: qd.types.matrix(3, 3)):
+    """
+    Return the product of the Hessian of the energy density of the linear corotated model with a change of deformation.
 
-        for i, j, alpha, beta in qd.ndrange(3, 3, 3, 3):
-            hessian_field[i_b, j, beta, i_e][i, alpha] += mu * R[i, beta] * R[alpha, j] + lam * R[alpha, beta] * R[i, j]
+    The Hessian depends on the rotation `R` of the element alone.
+    """
+    return mu * dF + mu * R @ dF.transpose() @ R + lam * (R * dF).sum() * R
 
-        return energy, gradient
 
-    @qd.func
-    def _compute_energy_gradient_linear_corotated(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
-        F_hat = self._R[i_b, i_e].transpose() @ F
-        eps = 0.5 * (F_hat + F_hat.transpose())
-        for i in qd.static(range(3)):
-            eps[i, i] -= 1.0
-        trEps = eps.trace()
-        energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
-        gradient = 2.0 * mu * self._R[i_b, i_e] @ eps + lam * trEps * self._R[i_b, i_e]
-        return energy, gradient
+@qd.func
+def func_linear_corotated_energy_gradient(mu: float, lam: float, R: qd.types.matrix(3, 3), F: qd.types.matrix(3, 3)):
+    """
+    Return the energy density of the linear corotated model and its gradient with respect to the deformation gradient.
 
-    @qd.func
-    def _compute_energy_linear_corotated(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
-        F_hat = self._R[i_b, i_e].transpose() @ F
-        eps = 0.5 * (F_hat + F_hat.transpose())
-        for i in qd.static(range(3)):
-            eps[i, i] -= 1.0
-        trEps = eps.trace()
-        energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
-        return energy
+    Both are linearized about the rotation `R` of the element.
+    """
+    F_hat = R.transpose() @ F
+    eps = 0.5 * (F_hat + F_hat.transpose()) - qd.Matrix.identity(gs.qd_float, 3)
+    trEps = eps.trace()
+    energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
+    gradient = 2.0 * mu * R @ eps + lam * trEps * R
+    return energy, gradient
+
+
+@qd.func
+def func_linear_corotated_energy(mu: float, lam: float, R: qd.types.matrix(3, 3), F: qd.types.matrix(3, 3)):
+    """
+    Return the energy density of the linear corotated model.
+
+    It is linearized about the rotation `R` of the element.
+    """
+    F_hat = R.transpose() @ F
+    eps = 0.5 * (F_hat + F_hat.transpose()) - qd.Matrix.identity(gs.qd_float, 3)
+    return mu * eps.norm_sqr() + 0.5 * lam * eps.trace() ** 2
+
+
+@qd.func
+def func_linear_corotated_rotation_grad(
+    mu: float,
+    lam: float,
+    R: qd.types.matrix(3, 3),
+    F_start: qd.types.matrix(3, 3),
+    F: qd.types.matrix(3, 3),
+    dF_damping: qd.types.matrix(3, 3),
+    gradient_grad: qd.types.matrix(3, 3),
+):
+    """
+    Return the adjoint of the start deformation gradient of a substep through the rotation of the corotated model.
+
+    The adjoint comes from the adjoint `gradient_grad` of the energy gradient at the end of the substep. The rotation R
+    enters the energy gradient 2 mu R E + lam tr(E) R with E = sym(R^T F) and the damping stress
+    mu D + mu R D^T R + lam (R : D) R with D = `dF_damping`. With F_start = U S V^T, a change dF turns the rotation
+    R = U V^T by U W V^T, where W is skew with W_ij = (A_ij - A_ji) / (S_ii + S_jj) and A = U^T dF V. The singular
+    values are signed (see 'qd_svd'), so a sum vanishes only for an element turned inside out, where the rotation has
+    no derivative: the adjoint of the state then turns non-finite, which halts the backward pass
+    (see 'StepOperation.backward').
+    """
+    I_3 = qd.Matrix.identity(gs.qd_float, 3)
+    E = 0.5 * (R.transpose() @ F + F.transpose() @ R) - I_3
+    M = 0.5 * (R.transpose() @ gradient_grad + gradient_grad.transpose() @ R)
+    gradient_dot_R = (gradient_grad * R).sum()
+    R_grad = 2.0 * mu * (gradient_grad @ E + F @ M) + lam * (gradient_dot_R * F + E.trace() * gradient_grad)
+    R_grad = R_grad + mu * (gradient_grad @ R.transpose() @ dF_damping + dF_damping @ R.transpose() @ gradient_grad)
+    R_grad = R_grad + lam * (gradient_dot_R * dF_damping + (R * dF_damping).sum() * gradient_grad)
+
+    U, S, V = gu.qd_svd(F_start)
+    K = U.transpose() @ R_grad @ V
+    X = qd.Matrix.zero(gs.qd_float, 3, 3)
+    for i_x, j_x in qd.static(qd.ndrange(3, 3)):
+        if qd.static(i_x != j_x):
+            X[i_x, j_x] = (K[i_x, j_x] - K[j_x, i_x]) / (S[i_x, i_x] + S[j_x, j_x])
+    return U @ X @ V.transpose()

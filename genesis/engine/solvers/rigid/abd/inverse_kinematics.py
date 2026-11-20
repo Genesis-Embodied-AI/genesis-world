@@ -8,11 +8,96 @@ that achieve desired end-effector poses.
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
-import genesis.utils.linalg as lu
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_forward_kinematics_root
+from genesis.engine.solvers.rigid.data import (
+    ENTITY_DOFS,
+    ENTITY_JOINTS,
+    ENTITY_LINKS,
+    ENTITY_QS,
+    DynInfo,
+    DynState,
+    RigidInfo,
+)
+from genesis.utils.data import ENVS, Data, DataKind, Size, eoa, field
 from genesis.utils.misc import qd_isfinite
+
+
+# The cap of inverse-kinematics targets
+IK_TARGETS = Size("ik_targets")
+# The pose residuals of the targets stacked, six per target
+IK_ERRORS = 6 * IK_TARGETS
+
+
+class IKState(Data, kind=DataKind.SCRATCH):
+    """Damped-least-squares inverse-kinematics scratch, one column per environment or per restart of the planner."""
+
+    # Spatial Jacobian of one target, rebuilt per target link and copied into the stacked block
+    jacobian: qd.Tensor = field(float, shape=(6, ENTITY_DOFS, ENVS))
+    # Jacobian of all targets stacked
+    jacobian_stacked: qd.Tensor = field(float, shape=(IK_ERRORS, ENTITY_DOFS, ENVS))
+    # Damped normal matrix J J^T + damping^2 I, its LU factors with their forward-substitution scratch, and its inverse
+    mat: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    lu_lower: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    lu_upper: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    lu_y: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    inv: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    # Pose residual of all targets stacked, the best one across restarts, and inv @ residual
+    err_pose: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
+    err_pose_best: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
+    vec: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
+    # Joint-space step, and the best configuration across restarts
+    delta_qpos: qd.Tensor = field(float, shape=(ENTITY_DOFS, ENVS))
+    qpos_best: qd.Tensor = field(float, shape=(ENTITY_QS, ENVS))
+
+
+class IKScratchFK(Data, kind=DataKind.SCRATCH):
+    """Forward kinematics of the inverse-kinematics solve of an entity, apart from the state of the solver.
+
+    It holds the configuration the solve iterates and the link and joint frames of that configuration, one column per
+    environment.
+    """
+
+    qpos: qd.Tensor = field(float, shape=(ENTITY_QS, ENVS))
+    # Written by func_forward_kinematics_scratch
+    links_pos: qd.Tensor = field((float, 3), shape=(ENTITY_LINKS, ENVS))
+    links_quat: qd.Tensor = field((float, 4), shape=(ENTITY_LINKS, ENVS))
+    joints_xanchor: qd.Tensor = field((float, 3), shape=(ENTITY_JOINTS, ENVS))
+    joints_xaxis: qd.Tensor = field((float, 3), shape=(ENTITY_JOINTS, ENVS))
+
+
+class IKTargets(Data, kind=DataKind.SCRATCH):
+    """Targets and dofs of an inverse-kinematics solve, one column per environment or per restart of the planner.
+
+    The caller writes every field before the solve.
+    """
+
+    # Global indices of the target links, of the dofs to move and of the columns to solve
+    links_idx: qd.Tensor = field(int, shape=(IK_TARGETS,))
+    dofs_idx: qd.Tensor = field(int, shape=(ENTITY_DOFS,))
+    envs_idx: qd.Tensor = field(int, shape=(ENVS,))
+    # Target pose per (link, column) in the world frame, and the link-local point it drives
+    pos: qd.Tensor = field((float, 3), shape=(IK_TARGETS, ENVS))
+    quat: qd.Tensor = field((float, 4), shape=(IK_TARGETS, ENVS))
+    local_point: qd.Tensor = field((float, 3), shape=(IK_TARGETS,))
+    # Initial configuration per column, read when custom_init_qpos is set
+    init_qpos: qd.Tensor = field(float, shape=(ENTITY_QS, ENVS))
+    # The position and rotation axes to solve for all links, and the position and rotation switches of each link
+    pos_mask: qd.Tensor = field(float, shape=(3,))
+    rot_mask: qd.Tensor = field(float, shape=(3,))
+    link_pos_mask: qd.Tensor = field(int, shape=(IK_TARGETS,))
+    link_rot_mask: qd.Tensor = field(int, shape=(IK_TARGETS,))
+
+
+class IKScratch(Data, kind=DataKind.SCRATCH):
+    """The scratch of the inverse-kinematics solves of every entity of a solver.
+
+    It spans the largest entity and the target cap, and a solve writes the leading rows its entity spans.
+    """
+
+    state: IKState
+    fk: IKScratchFK
+    targets: IKTargets
 
 
 @qd.func
@@ -29,9 +114,9 @@ def func_forward_kinematics_scratch(
     links_quat: qd.Tensor,
     joints_xanchor: qd.Tensor,
     joints_xaxis: qd.Tensor,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Forward kinematics of one entity on caller-owned scratch buffers.
@@ -114,7 +199,7 @@ def func_forward_kinematics_scratch(
 
                 q_delta = qpos[q_loc, i_col_q] - rigid_info.qpos0[q_start, i_b]
                 if joint_type == gs.JOINT_TYPE.REVOLUTE:
-                    qloc = gu.qd_rotvec_to_quat(axis * q_delta, rigid_info.EPS[None])
+                    qloc = gu.qd_rotvec_to_quat(axis * q_delta)
                     quat = gu.qd_transform_quat_by_quat(qloc, quat)
                     pos = joints_xanchor[i_j - joint_offset, i_col_out] - gu.qd_transform_by_quat(
                         dyn_info.joints.pos[I_j], quat
@@ -122,10 +207,11 @@ def func_forward_kinematics_scratch(
                 else:
                     pos = pos + joints_xaxis[i_j - joint_offset, i_col_out] * q_delta
 
-        # Fixed root links keep their live pose, exactly like the solver FK (users may overwrite them manually).
-        if dyn_info.links.parent_idx[I_l] == -1 and dyn_info.links.is_fixed[I_l]:
-            pos = dyn_state.links.pos[i_l, i_b]
-            quat = dyn_state.links.quat[i_l, i_b]
+        # See func_forward_kinematics_link
+        i_fr = dyn_info.links.fixed_root_idx[I_l]
+        if i_fr != -1:
+            pos = dyn_state.fixed_roots.pos[i_fr, i_b]
+            quat = gu.qd_normalize(dyn_state.fixed_roots.quat[i_fr, i_b], rigid_info.EPS[None])
         links_pos[i_l - link_offset, i_col_out] = pos
         links_quat[i_l - link_offset, i_col_out] = quat
 
@@ -141,7 +227,7 @@ def func_jacobian_scratch(
     jacobian: qd.Tensor,
     joints_xanchor: qd.Tensor,
     joints_xaxis: qd.Tensor,
-    dyn_info: array_class.DynInfo,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     """Spatial Jacobian (6 x n_dofs) of the goal point at column i_col.
@@ -197,8 +283,8 @@ def func_get_jacobian(
     dof_start: int,
     p_local: qd.types.vector(3),
     jacobian: qd.Tensor,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     """Full spatial Jacobian (6 x n_dofs) of a target link's local point.
@@ -260,14 +346,14 @@ def func_get_jacobian(
         i_l = dyn_info.links.parent_idx[I_l]
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_get_jacobian(
     tgt_link_idx: int,
     dof_start: int,
     p_local: qd.types.ndarray(),
     jacobian: qd.Tensor,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
     n_batch: int,
 ):
@@ -283,8 +369,8 @@ def kernel_get_jacobian_zero(
     tgt_link_idx: int,
     dof_start: int,
     jacobian: qd.Tensor,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
     n_batch: int,
 ):
@@ -304,8 +390,7 @@ def func_integrate_dq_scratch(
     q_offset: int,
     dq: qd.Tensor,
     qpos: qd.Tensor,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
     respect_joint_limit: int,
 ):
@@ -315,7 +400,6 @@ def func_integrate_dq_scratch(
     entity-local DOF; a FREE root advances its position additively and its orientation by a world-frame delta
     rotation, and a REVOLUTE / PRISMATIC DOF advances additively with optional limit clamping.
     """
-    EPS = rigid_info.EPS[None]
 
     for i_l in range(dyn_info.entities.link_start[entity_idx], dyn_info.entities.link_end[entity_idx]):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
@@ -337,8 +421,7 @@ def func_integrate_dq_scratch(
                 [qpos[q_loc + 3, i_col], qpos[q_loc + 4, i_col], qpos[q_loc + 5, i_col], qpos[q_loc + 6, i_col]]
             )
             dquat = gu.qd_rotvec_to_quat(
-                qd.Vector([dq[dq_start + 3, i_col], dq[dq_start + 4, i_col], dq[dq_start + 5, i_col]], dt=gs.qd_float),
-                EPS,
+                qd.Vector([dq[dq_start + 3, i_col], dq[dq_start + 4, i_col], dq[dq_start + 5, i_col]], dt=gs.qd_float)
             )
             # The delta rotation is expressed in the world frame, so it composes on the left of the orientation.
             quat = gu.qd_transform_quat_by_quat(quat, dquat)
@@ -366,12 +449,12 @@ def func_inverse_kinematics(
     q_offset: int,
     link_offset: int,
     joint_offset: int,
-    dyn_state: array_class.DynState,
-    ik_state: array_class.IKState,
-    fk: array_class.IKScratchFK,
-    targets: array_class.IKTargets,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    ik_state: IKState,
+    fk: IKScratchFK,
+    targets: IKTargets,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     n_qs: int,
     entity_n_dofs: int,
@@ -397,7 +480,6 @@ def func_inverse_kinematics(
     forward-kinematics scratch (fk), so the live solver state is only read; unconverged restarts resample
     joint-limited DOFs with a counter-based draw so the result is deterministic across parallel schedules.
     """
-    EPS = rigid_info.EPS[None]
 
     n_error_dims = 6 * n_links
 
@@ -408,7 +490,7 @@ def func_inverse_kinematics(
         # Seed the working configuration from the requested initial guess or the live solver configuration.
         for i_q in range(n_qs):
             if custom_init_qpos:
-                fk.qpos[i_q, i_b] = targets.init_qpos[i_b, i_q]
+                fk.qpos[i_q, i_b] = targets.init_qpos[i_q, i_b]
             else:
                 fk.qpos[i_q, i_b] = rigid_info.qpos[i_q + q_offset, i_b]
 
@@ -452,7 +534,7 @@ def func_inverse_kinematics(
                         solved = False
 
                     err_rot_i = gu.qd_quat_to_rotvec(
-                        gu.qd_transform_quat_by_quat(gu.qd_inv_quat(ee_quat), targets.quat[i_ee, i_b]), EPS
+                        gu.qd_transform_quat_by_quat(gu.qd_inv_quat(ee_quat), targets.quat[i_ee, i_b])
                     )
                     for k in range(3):
                         err_rot_i[k] = err_rot_i[k] * (targets.rot_mask[k] * targets.link_rot_mask[i_ee])
@@ -497,27 +579,62 @@ def func_inverse_kinematics(
                                 ik_state.jacobian[i_error + 3, i_d, i_b] * targets.rot_mask[i_error]
                             )
 
-                lu.mat_transpose(ik_state.jacobian_stacked, ik_state.jacobian_stacked_t, n_error_dims, n_dofs, i_b)
-                lu.mat_mul(
-                    ik_state.jacobian_stacked,
-                    ik_state.jacobian_stacked_t,
-                    ik_state.mat,
-                    n_error_dims,
-                    n_dofs,
-                    n_error_dims,
-                    i_b,
-                )
-                lu.mat_add_eye(ik_state.mat, damping**2, n_error_dims, i_b)
-                lu.mat_inverse(
-                    ik_state.mat,
-                    ik_state.lu_lower,
-                    ik_state.lu_upper,
-                    ik_state.lu_y,
-                    ik_state.inv,
-                    n_error_dims,
-                    i_b,
-                )
-                lu.mat_mul_vec(ik_state.inv, ik_state.err_pose, ik_state.vec, n_error_dims, n_error_dims, i_b)
+                # Damped normal matrix J J^T + damping^2 I
+                for i_error in range(n_error_dims):
+                    for j_error in range(n_error_dims):
+                        ik_state.mat[i_error, j_error, i_b] = 0.0
+                        for i_d_ in range(n_dofs):
+                            ik_state.mat[i_error, j_error, i_b] = ik_state.mat[i_error, j_error, i_b] + (
+                                ik_state.jacobian_stacked[i_error, i_d_, i_b]
+                                * ik_state.jacobian_stacked[j_error, i_d_, i_b]
+                            )
+                    ik_state.mat[i_error, i_error, i_b] = ik_state.mat[i_error, i_error, i_b] + damping**2
+
+                # LU factorization of the damped normal matrix
+                for i_error in range(n_error_dims):
+                    for j_error in range(i_error, n_error_dims):
+                        val = ik_state.mat[i_error, j_error, i_b]
+                        for k_error in range(i_error):
+                            val = (
+                                val
+                                - ik_state.lu_lower[i_error, k_error, i_b] * ik_state.lu_upper[k_error, j_error, i_b]
+                            )
+                        ik_state.lu_upper[i_error, j_error, i_b] = val
+                    for j_error in range(i_error + 1, n_error_dims):
+                        val = ik_state.mat[j_error, i_error, i_b]
+                        for k_error in range(i_error):
+                            val = (
+                                val
+                                - ik_state.lu_lower[j_error, k_error, i_b] * ik_state.lu_upper[k_error, i_error, i_b]
+                            )
+                        ik_state.lu_lower[j_error, i_error, i_b] = val / ik_state.lu_upper[i_error, i_error, i_b]
+
+                # Inverse of the damped normal matrix, by forward then backward substitution of each identity column
+                for k_error in range(n_error_dims):
+                    for i_error in range(n_error_dims):
+                        val = gs.qd_float(0.0)
+                        for j_error in range(i_error):
+                            val = val + ik_state.lu_lower[i_error, j_error, i_b] * ik_state.lu_y[k_error, j_error, i_b]
+                        if i_error == k_error:
+                            ik_state.lu_y[k_error, i_error, i_b] = 1.0 - val
+                        else:
+                            ik_state.lu_y[k_error, i_error, i_b] = -val
+                    for i_error_ in range(n_error_dims):
+                        i_error = n_error_dims - 1 - i_error_
+                        val = gs.qd_float(0.0)
+                        for j_error in range(i_error + 1, n_error_dims):
+                            val = val + ik_state.lu_upper[i_error, j_error, i_b] * ik_state.inv[j_error, k_error, i_b]
+                        ik_state.inv[i_error, k_error, i_b] = (
+                            ik_state.lu_y[k_error, i_error, i_b] - val
+                        ) / ik_state.lu_upper[i_error, i_error, i_b]
+
+                for i_error in range(n_error_dims):
+                    ik_state.vec[i_error, i_b] = 0.0
+                    for j_error in range(n_error_dims):
+                        ik_state.vec[i_error, i_b] = (
+                            ik_state.vec[i_error, i_b]
+                            + ik_state.inv[i_error, j_error, i_b] * ik_state.err_pose[j_error, i_b]
+                        )
 
                 for i_d_ in range(entity_n_dofs):
                     ik_state.delta_qpos[i_d_, i_b] = 0
@@ -525,7 +642,7 @@ def func_inverse_kinematics(
                     i_d = targets.dofs_idx[i_d_]
                     for j in range(n_error_dims):
                         ik_state.delta_qpos[i_d, i_b] = ik_state.delta_qpos[i_d, i_b] + (
-                            ik_state.jacobian_stacked_t[i_d_, j, i_b] * ik_state.vec[j, i_b]
+                            ik_state.jacobian_stacked[j, i_d_, i_b] * ik_state.vec[j, i_b]
                         )
 
                 for i_d_ in range(entity_n_dofs):
@@ -541,7 +658,6 @@ def func_inverse_kinematics(
                     ik_state.delta_qpos,
                     fk.qpos,
                     dyn_info,
-                    rigid_info,
                     rigid_config,
                     respect_joint_limit,
                 )
@@ -580,7 +696,7 @@ def func_inverse_kinematics(
                         solved = False
 
                     err_rot_i = gu.qd_quat_to_rotvec(
-                        gu.qd_transform_quat_by_quat(gu.qd_inv_quat(ee_quat), targets.quat[i_ee, i_b]), EPS
+                        gu.qd_transform_quat_by_quat(gu.qd_inv_quat(ee_quat), targets.quat[i_ee, i_b])
                     )
                     for k in range(3):
                         err_rot_i[k] = err_rot_i[k] * (targets.rot_mask[k] * targets.link_rot_mask[i_ee])
@@ -660,12 +776,12 @@ def kernel_inverse_kinematics_entity(
     q_offset: int,
     link_offset: int,
     joint_offset: int,
-    dyn_state: array_class.DynState,
-    ik_state: array_class.IKState,
-    fk: array_class.IKScratchFK,
-    targets: array_class.IKTargets,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    ik_state: IKState,
+    fk: IKScratchFK,
+    targets: IKTargets,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     n_qs: int,
     entity_n_dofs: int,
@@ -725,7 +841,7 @@ def kernel_set_ik_targets(
     rot_mask: qd.types.ndarray(),
     link_pos_mask: qd.types.ndarray(),
     link_rot_mask: qd.types.ndarray(),
-    targets: array_class.IKTargets,
+    targets: IKTargets,
 ):
     """Copy externally supplied inverse-kinematics targets into the solver-side struct (non-zero-copy fallback)."""
     for i_ee in range(links_idx.shape[0]):
@@ -744,13 +860,13 @@ def kernel_set_ik_targets(
     for i_c in range(envs_idx.shape[0]):
         targets.envs_idx[i_c] = envs_idx[i_c]
         for i_q in range(init_qpos.shape[1]):
-            targets.init_qpos[envs_idx[i_c], i_q] = init_qpos[i_c, i_q]
+            targets.init_qpos[i_q, envs_idx[i_c]] = init_qpos[i_c, i_q]
     for k in qd.static(range(3)):
         targets.pos_mask[k] = pos_mask[k]
         targets.rot_mask[k] = rot_mask[k]
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_forward_kinematics_query(
     entity_idx: int,
     qs_idx: qd.types.ndarray(),
@@ -760,9 +876,9 @@ def kernel_forward_kinematics_query(
     links_quat: qd.types.ndarray(),
     qpos: qd.types.ndarray(),
     qpos_cache: qd.Tensor,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Link poses of one entity at a queried configuration, leaving the live configuration as it was.
@@ -772,7 +888,7 @@ def kernel_forward_kinematics_query(
     indices index it directly.
     """
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_q_, i_b_ in qd.ndrange(qs_idx.shape[0], envs_idx.shape[0]):
+    for i_q_, i_b_ in qd.ndrange(qs_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(rigid_info.qpos))):
         qpos_cache[qs_idx[i_q_], envs_idx[i_b_]] = rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]]
         rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]] = qpos[i_b_, i_q_]
 
@@ -787,14 +903,14 @@ def kernel_forward_kinematics_query(
         )
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_l_, i_b_ in qd.ndrange(links_idx.shape[0], envs_idx.shape[0]):
+    for i_l_, i_b_ in qd.ndrange(links_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_state.links.pos))):
         for i in qd.static(range(3)):
             links_pos[i_b_, i_l_, i] = dyn_state.links.pos[links_idx[i_l_], envs_idx[i_b_]][i]
         for i in qd.static(range(4)):
             links_quat[i_b_, i_l_, i] = dyn_state.links.quat[links_idx[i_l_], envs_idx[i_b_]][i]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_q_, i_b_ in qd.ndrange(qs_idx.shape[0], envs_idx.shape[0]):
+    for i_q_, i_b_ in qd.ndrange(qs_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(rigid_info.qpos))):
         rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]] = qpos_cache[qs_idx[i_q_], envs_idx[i_b_]]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)

@@ -1,6 +1,7 @@
 """Tests for the entity naming system."""
 
 import gc
+import itertools
 import os
 import xml.etree.ElementTree as ET
 
@@ -9,13 +10,11 @@ import pytest
 import torch
 import trimesh
 
-import quadrants as qd
-
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.point_cloud as pc
 from genesis.utils.cache import disable_owned_cache_release, enable_owned_cache_release
-from genesis.utils.misc import indices_to_mask, sanitize_index, tensor_to_array
+from genesis.utils.misc import assign_indexed_tensor, broadcast_tensor, indices_to_mask, sanitize_index, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -29,12 +28,12 @@ def test_scene_destroy_cleans_up_simulator():
     scene.build()
     scene.step()
 
-    assert scene._sim is not None
+    assert scene.is_built
 
     scene.destroy()
 
-    assert scene._sim is None
-    assert scene._visualizer is None
+    assert not scene.is_built
+    assert scene.visualizer is None
 
 
 @pytest.mark.required
@@ -47,10 +46,10 @@ def test_scene_destroy_idempotent():
     scene.step()
 
     scene.destroy()
-    assert scene._sim is None
+    assert not scene.is_built
 
     scene.destroy()
-    assert scene._sim is None
+    assert not scene.is_built
 
 
 @pytest.mark.required
@@ -95,13 +94,11 @@ def test_destroy_after_aborted_camera_build(monkeypatch, raise_before_build):
         )
     )
 
-    # Capture the shared metadata reference now; SensorManager.destroy() drops its dict entry,
-    # but the dataclass instance itself stays alive through our local reference so we can
-    # inspect its fields after teardown.
+    # The shared metadata outlives its entry in the sensor manager through this reference, so its fields stay readable
     shared_metadata = camera._shared_metadata
 
-    # Inject a bug either at build entry (no metadata population) or after the original build
-    # has populated renderer / context / sensors / image_cache.
+    # Inject a bug either at build entry (no metadata population) or after the original build populated the renderer,
+    # the context, the sensors and the image cache.
     original_build = RasterizerCameraSensor.build
 
     def buggy_build(self):
@@ -111,21 +108,8 @@ def test_destroy_after_aborted_camera_build(monkeypatch, raise_before_build):
 
     monkeypatch.setattr(RasterizerCameraSensor, "build", buggy_build)
 
-    with pytest.raises(RuntimeError, match="injected camera build failure"):
-        scene.build()
-
-    if raise_before_build:
-        assert shared_metadata.renderer is None
-    else:
-        assert shared_metadata.renderer is not None
-        assert shared_metadata.context is not None
-        assert shared_metadata.sensors is not None
-        assert shared_metadata.image_cache is not None
-
-    # Track shared_metadata.destroy() invocations via instance-level shadow. Assigning to the
-    # instance __dict__ takes precedence over class-level lookup for this instance only, so
-    # neither the class nor any other metadata instance is affected. The `del` reverts the
-    # instance to plain class-level lookup before any finalizer can fire.
+    # Count the teardowns of the shared metadata through an instance-level shadow, which leaves the class and every other
+    # metadata instance untouched, and is removed before any finalizer can fire.
     original_destroy = shared_metadata.destroy
     destroy_call_count = [0]
 
@@ -135,15 +119,20 @@ def test_destroy_after_aborted_camera_build(monkeypatch, raise_before_build):
 
     shared_metadata.destroy = tracked_destroy
     try:
+        # The aborted build is torn down at once, from whatever state it reached
+        with pytest.raises(RuntimeError, match="injected camera build failure"):
+            scene.build()
+        assert destroy_call_count[0] == 1
+        assert shared_metadata.renderer is None
+        assert shared_metadata.context is None
+        assert shared_metadata.sensors is None
+        assert shared_metadata.image_cache is None
+
+        # Destroying the scene afterwards tears nothing down twice
         scene.destroy()
     finally:
         del shared_metadata.destroy
-
     assert destroy_call_count[0] == 1
-    assert shared_metadata.renderer is None
-    assert shared_metadata.context is None
-    assert shared_metadata.sensors is None
-    assert shared_metadata.image_cache is None
 
 
 @pytest.mark.required
@@ -304,13 +293,6 @@ def test_morph_orientation_offset_resolution():
 
 
 @pytest.mark.required
-def test_coacd_options_pca_validation():
-    gs.options.CoacdOptions(pca=False)
-    with pytest.raises(gs.GenesisException, match="pca=True"):
-        gs.options.CoacdOptions(pca=True)
-
-
-@pytest.mark.required
 @pytest.mark.parametrize(
     ("index", "expected"),
     (
@@ -358,20 +340,76 @@ def test_sanitize_index_rejects_invalid_collections(index):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("as_boolean", (False, True))
-def test_indices_to_mask_selects_the_cross_product(as_boolean):
-    buf = torch.arange(20, dtype=torch.int32).reshape((4, 5))
-    if as_boolean:
-        envs_idx = torch.tensor((False, True, False, True))
-        dofs_idx = torch.tensor((True, False, True, False, False))
-    else:
-        envs_idx = torch.tensor((1, 3), dtype=torch.int32)
-        dofs_idx = torch.tensor((0, 2), dtype=torch.int32)
+def test_tensor_read_write_by_mixed_selection():
+    tensor_ref = np.arange(20).reshape((4, 5))
+    # Every form a selection of one axis takes, with the entries it selects. A trailing None leaves a single axis.
+    selections = [
+        (
+            (None, np.arange(size)),
+            (1, np.array((1,))),
+            (slice(1, 4), np.arange(1, 4)),
+            (range(0, size, 2), np.arange(0, size, 2)),
+            ([3, 0, 2], np.array((3, 0, 2))),
+            (np.array((3, 0, 2)), np.array((3, 0, 2))),
+            (torch.tensor((3, 0, 2), device=gs.device), np.array((3, 0, 2))),
+            (torch.tensor((True, False, True, True, False)[:size], device=gs.device), np.array((0, 2, 3))),
+        )
+        for size in tensor_ref.shape
+    ]
+    for (selection_0, idx_0), (selection_1, idx_1) in itertools.product(*selections):
+        idx = np.ix_(idx_0, idx_1)
+        tensor = torch.as_tensor(tensor_ref, dtype=gs.tc_float, device=gs.device)
+        assert_equal(tensor[indices_to_mask(selection_0, selection_1, boolean_mask=False)], tensor_ref[idx])
 
-    # Selecting on two axes takes every combination, rather than pairing the two selections elementwise, which for
-    # these inputs would give the two values on the diagonal.
-    assert_equal(buf[indices_to_mask(envs_idx, dofs_idx)], torch.tensor(((5, 7), (15, 17)), dtype=torch.int32))
-    assert_equal(buf[indices_to_mask(envs_idx)], buf[torch.tensor((1, 3))])
+        # A value is a scalar, broadcast along either axis, holds the selected entries, or holds every entry of the
+        # axes selected by a mask, the selected entries being written in the order of the selection.
+        n_0, n_1 = len(idx_0), len(idx_1)
+        blocks = (np.arange(n_1), np.arange(n_0)[:, None], np.arange(n_0 * n_1).reshape((n_0, n_1)))
+        values_and_blocks = [(7, 7), *[(block, block) for block in blocks]]
+        is_mask = []
+        for selection in (selection_0, selection_1):
+            is_mask.append(isinstance(selection, torch.Tensor) and selection.dtype == torch.bool)
+        if any(is_mask):
+            full_value_shape, full_value_idx = [], []
+            for size, axis_idx, is_axis_mask in zip(tensor_ref.shape, (idx_0, idx_1), is_mask):
+                full_value_shape.append(size if is_axis_mask else len(axis_idx))
+                full_value_idx.append(axis_idx if is_axis_mask else np.arange(len(axis_idx)))
+            full_value = np.arange(np.prod(full_value_shape)).reshape(full_value_shape)
+            values_and_blocks.append((full_value, full_value[np.ix_(*full_value_idx)]))
+        mask = indices_to_mask(selection_0, selection_1)
+        for dtype in (gs.tc_float, torch.uint32):
+            for value, block in values_and_blocks:
+                if isinstance(value, int):
+                    value_tensor = value
+                else:
+                    value_tensor = torch.as_tensor(value, dtype=dtype, device=gs.device)
+                if value is block:
+                    assert_equal(broadcast_tensor(value_tensor, dtype, (n_0, n_1)), np.broadcast_to(block, (n_0, n_1)))
+                tensor_written = torch.as_tensor(tensor_ref, dtype=dtype, device=gs.device)
+                assign_indexed_tensor(tensor_written, mask, value_tensor)
+                expected = tensor_ref.copy()
+                expected[idx] = block
+                assert_equal(tensor_written, expected)
+
+    # A selection of two dimensions takes one row of entries per selected environment, or a row shared by all of them.
+    # A write keeps the last occurrence of an entry repeated in a row, and the last row of a repeated environment.
+    for selection_0, idx_0 in (*selections[0], (torch.tensor((3, 0, 3), device=gs.device), np.array((3, 0, 3)))):
+        rows = (np.arange(len(idx_0))[:, None] + (4, 1, 4)) % 5
+        for rows_idx in (rows, rows[:1]):
+            idx_0_block, rows_block = np.broadcast_arrays(idx_0[:, None], rows_idx)
+            mask = indices_to_mask(selection_0, rows_idx, boolean_mask=False, pair_rows=True)
+            tensor = torch.as_tensor(tensor_ref, dtype=gs.tc_float, device=gs.device)
+            assert_equal(tensor[mask], tensor_ref[idx_0_block, rows_block])
+            for value in (7, np.arange(rows_block.size).reshape(rows_block.shape)):
+                tensor = torch.as_tensor(tensor_ref, dtype=gs.tc_float, device=gs.device)
+                value_tensor = value if isinstance(value, int) else torch.as_tensor(value, device=gs.device)
+                assign_indexed_tensor(tensor, mask, value_tensor)
+                expected = tensor_ref.copy()
+                values_block = np.broadcast_to(value, rows_block.shape)
+                for i in {i_0: i for i, i_0 in enumerate(idx_0)}.values():
+                    for i_0, i_1, entry in zip(idx_0_block[i], rows_block[i], values_block[i]):
+                        expected[i_0, i_1] = entry
+                assert_equal(tensor, expected)
 
 
 @pytest.mark.required
@@ -496,9 +534,16 @@ def test_solver_state_change_subscribers(show_viewer, two_link_fixed_urdf):
             pos=(0.0, 0.0, 0.5),
         ),
     )
+    floating_tower = scene.add_entity(
+        gs.morphs.URDF(
+            file=two_link_fixed_urdf,
+            pos=(4.0, 0.0, 1.0),
+            merge_fixed_links=False,
+        )
+    )
     scene.build(n_envs=2)
 
-    solver = scene.sim.rigid_solver
+    solver = scene.rigid_solver
 
     # Eager mode: a callback fires immediately on each matching change and nothing is retained.
     eager_events = []
@@ -590,6 +635,17 @@ def test_solver_state_change_subscribers(show_viewer, two_link_fixed_urdf):
     tower.set_pos((2.0, 1.0, 0.0))
     assert child_watcher.pending == frozenset({StateChange.GEOMETRY})
 
+    # A configuration setter reaches the links holding the configuration entries it writes and their kinematic
+    # subtrees: writing the configuration of the floating tower wakes a watcher of its fixed child link, while writing
+    # that of the cube leaves it silent.
+    floating_child = next(link for link in floating_tower.links if link.name == "child")
+    floating_watcher = Subscriber(to=frozenset({StateChange.GEOMETRY}), links_filter=[floating_child.idx])
+    solver.subscribe(floating_watcher)
+    cube.set_qpos([[0.0, 0.0, 12.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 13.0, 1.0, 0.0, 0.0, 0.0]])
+    assert floating_watcher.pending == frozenset()
+    floating_tower.set_qpos([[4.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0], [4.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0]])
+    assert floating_watcher.pending == frozenset({StateChange.GEOMETRY})
+
     # A whole-state restore may move any link, so the unbounded reach always passes the filter.
     scene.reset()
     assert plane_watcher.pending == frozenset({StateChange.GEOMETRY})
@@ -627,11 +683,11 @@ def test_per_solver_gravity():
 
         new_gravity = [0.0, 0.0, -5.0]
 
-        rigid = scene.sim.rigid_solver
+        rigid = scene.rigid_solver
         rigid.set_gravity(new_gravity)
         assert_allclose(rigid.get_gravity(), new_gravity, atol=1e-6)
 
-        mpm = scene.sim.mpm_solver
+        mpm = scene.mpm_solver
         mpm.set_gravity(new_gravity)
         assert_allclose(mpm.get_gravity(), new_gravity, atol=1e-6)
 
@@ -711,16 +767,6 @@ def test_derived_substeps(show_viewer, tol):
     N_STEPS = 10
     SUBSTEPS = 5
 
-    @qd.data_oriented
-    class NullJet:
-        @qd.func
-        def get_tan_dir(self, t: float):
-            return qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
-
-        @qd.func
-        def get_factor(self, i, j, k, dx: float, t: float):
-            return 0.0
-
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
@@ -728,11 +774,6 @@ def test_derived_substeps(show_viewer, tol):
         ),
         rigid_options=gs.options.RigidOptions(
             dt=0.01 / SUBSTEPS,
-        ),
-        sf_options=gs.options.SFOptions(
-            dt=0.01 / SUBSTEPS,
-            res=16,
-            solver_iters=2,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.5, 0.0, 1.0),
@@ -745,75 +786,75 @@ def test_derived_substeps(show_viewer, tol):
             pos=(0.0, 0.0, 1.0),
         ),
     )
-    sf_solver = scene.sim.sf_solver
-    sf_solver.set_jets([NullJet()])
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(1.0, 0.0, 1.0),
+            size=(0.02, 0.02, 0.02),
+        ),
+        material=gs.materials.PBD.Particle(),
+    )
     scene.build()
 
     # A solver integrates at the interval it was given, as many times per scene step as that interval divides the
-    # step dt, and the bodies and the grid read the same resolution.
+    # step dt, and every solver reads the same resolution.
     solver = scene.rigid_solver
     assert_equal(solver.substeps, SUBSTEPS)
     assert_allclose(solver.substep_dt, 0.01 / SUBSTEPS, tol=gs.EPS)
 
     # A step advances the step dt whatever the rate: the fall accumulates once per substep, at the solver dt, for as
     # many substeps as the ratio gives.
-    t_built = sf_solver.t
     for _ in range(N_STEPS):
         scene.step()
     n_substeps = N_STEPS * solver.substeps
     expected_z = 1.0 + GRAVITY * solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
     assert_allclose(ball.get_pos()[2], expected_z, tol=tol)
 
-    # Solvers integrating on a grid rather than on bodies read the interval off the same resolution, so their own
-    # clock advances one step dt per scene step however many substeps the ratio gives them.
-    assert_equal(sf_solver.substeps, SUBSTEPS)
-    assert_allclose(sf_solver.t - t_built, N_STEPS * 0.01, tol=gs.EPS)
+    # The substep loop advances every active solver once per iteration, so the interval one of them asks for is the
+    # rate they all take, whether they asked for one or not.
+    assert_equal(scene.pbd_solver.substeps, SUBSTEPS)
 
-    # The substeps shorthand decides the rate when no solver asks for one of its own, which is settled as a solver is
-    # made rather than as a scene is built.
+    # The substeps shorthand decides the rate of every solver when none asks for one of its own
     scene_from_substeps = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
-            substeps=4,
+            gravity=(0.0, 0.0, GRAVITY),
+            substeps=SUBSTEPS,
         ),
         show_viewer=False,
     )
-    assert_equal(scene_from_substeps.rigid_solver.substeps, 4)
-    assert_allclose(scene_from_substeps.rigid_solver.substep_dt, 0.0025, tol=gs.EPS)
-
-    # The substep loop advances every active solver once per iteration, so the interval one of them asks for is the
-    # rate they all take, whether they asked for one or not.
-    scene_from_solver_dt = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=0.01,
-        ),
-        sf_options=gs.options.SFOptions(
-            dt=0.01 / SUBSTEPS,
-            res=16,
-            solver_iters=2,
-        ),
-        show_viewer=False,
-    )
-    ball_at_derived_rate = scene_from_solver_dt.add_entity(
+    ball_from_substeps = scene_from_substeps.add_entity(
         morph=gs.morphs.Sphere(
             pos=(0.0, 0.0, 1.0),
         ),
     )
-    scene_from_solver_dt.sim.sf_solver.set_jets([NullJet()])
-    scene_from_solver_dt.build()
-    assert_equal(scene_from_solver_dt.rigid_solver.substeps, SUBSTEPS)
-    assert_allclose(scene_from_solver_dt.rigid_solver.substep_dt, 0.01 / SUBSTEPS, tol=gs.EPS)
+    scene_from_substeps.add_entity(
+        morph=gs.morphs.Box(
+            pos=(1.0, 0.0, 1.0),
+            size=(0.02, 0.02, 0.02),
+        ),
+        material=gs.materials.PBD.Particle(),
+    )
+    scene_from_substeps.build()
+    assert_equal(scene_from_substeps.rigid_solver.substeps, SUBSTEPS)
+    assert_allclose(scene_from_substeps.rigid_solver.substep_dt, 0.01 / SUBSTEPS, tol=gs.EPS)
 
-    # The interval reaches what integrates, not only what reports it: a solver settles its buffers as it builds, so a
-    # rate inherited afterwards would leave it stepping the scene interval as many times as the shorter one.
+    # The constraint time constant is floored against the substep the rigid solver integrates at, so the contacts are
+    # as stiff as in a scene whose rigid solver asks for that rate itself.
+    timeconst, *_ = ball_from_substeps.geoms[0].get_sol_params()
+    timeconst_ref, *_ = ball.geoms[0].get_sol_params()
+    assert timeconst + gs.EPS >= 2.0 * scene_from_substeps.rigid_solver.substep_dt
+    assert_allclose(timeconst, timeconst_ref, tol=gs.EPS)
+
+    # The rate reaches what integrates, not only what reports it: a solver settles its buffers as it builds, so a rate
+    # settled afterwards would leave it stepping the scene interval as many times as the shorter one.
     for _ in range(N_STEPS):
-        scene_from_solver_dt.step()
+        scene_from_substeps.step()
     n_substeps = N_STEPS * SUBSTEPS
-    expected_z = 1.0 + GRAVITY * scene_from_solver_dt.rigid_solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
-    assert_allclose(ball_at_derived_rate.get_pos()[2], expected_z, tol=tol)
+    expected_z = 1.0 + GRAVITY * scene_from_substeps.rigid_solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
+    assert_allclose(ball_from_substeps.get_pos()[2], expected_z, tol=tol)
 
-    # A differentiable scene holds the frames of the substeps of a step, as many as the rate a solver dt derives: the
-    # gradient of the position over one step reaches the velocity it started from through every one of them.
+    # A differentiable scene replays the substeps of a step, as many as the rate a solver dt derives: the gradient of
+    # the position over one step reaches the velocity it started from through every one of them.
     scene_differentiable = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
@@ -843,11 +884,11 @@ def test_derived_substeps(show_viewer, tol):
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(dt=0.01),
             rigid_options=gs.options.RigidOptions(dt=0.005),
-            sf_options=gs.options.SFOptions(dt=0.0025, res=16, solver_iters=2),
+            pbd_options=gs.options.PBDOptions(dt=0.0025),
             show_viewer=False,
         )
         scene.add_entity(gs.morphs.Sphere(pos=(0.0, 0.0, 1.0)))
-        scene.sim.sf_solver.set_jets([NullJet()])
+        scene.add_entity(gs.morphs.Box(pos=(1.0, 0.0, 1.0), size=(0.02, 0.02, 0.02)), gs.materials.PBD.Particle())
         scene.build()
 
     # A rate is settled for the solvers the entities made active, and only for those: what an interval would imply for

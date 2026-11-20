@@ -12,22 +12,25 @@ import io
 import json
 import os
 import pathlib
-import sys
+import struct
 import types
 import typing
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Iterable, Mapping, Sequence, Set
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 from functools import lru_cache, partial
-from typing import Callable, NamedTuple
+from typing import BinaryIO, Callable, NamedTuple
 
 import numpy as np
+
+import trimesh
 from frozendict import frozendict
 from pydantic import AfterValidator, TypeAdapter, ValidationError, ValidationInfo
 
 import genesis as gs
 from genesis.options.options import Options
+from genesis.repr_base import get_public_name
 
 # What every member of an archive is stamped with, so a file is the bytes its scene comes to and nothing else.
 EPOCH = (1980, 1, 1, 0, 0, 0)
@@ -148,33 +151,31 @@ def _field_check(cls: type, name: str) -> TypeAdapter:
     What a field constrains stands beside its type rather than in it, so the two are put back together here.
     """
     info = cls.model_fields[name]
-    admitted = typing.Annotated[tuple([info.annotation, *info.metadata])] if info.metadata else info.annotation
+    annotation = _bind_self(info.annotation, cls)
+    admitted = typing.Annotated[tuple([annotation, *info.metadata])] if info.metadata else annotation
     return TypeAdapter(admitted)
 
 
-def _resolve_quoted(hint, namespace: dict):
-    """Returns a declaration holding the classes it names, where Python 3.10 left a quoted name unresolved.
-
-    Until Python 3.11, a name quoted inside a generic - 'list["Joint"]' - stays the string it was written as, and a
-    declaration read as a string states nothing about what it holds.
-    """
-    if not isinstance(hint, types.GenericAlias):
-        return hint
-    args = typing.get_args(hint)
-    return typing.get_origin(hint)[
-        tuple(namespace[arg] if isinstance(arg, str) else _resolve_quoted(arg, namespace) for arg in args)
-    ]
+def _bind_self(annotation, cls: type):
+    """Return a declared type with 'typing.Self' standing for the class declaring it, as pydantic reads it."""
+    if annotation is typing.Self:
+        return cls
+    origin, args = typing.get_origin(annotation), typing.get_args(annotation)
+    if not args:
+        return annotation
+    bound_args = tuple(_bind_self(arg, cls) for arg in args)
+    if origin is typing.Annotated:
+        return typing.Annotated[tuple([bound_args[0], *annotation.__metadata__])]
+    if origin in (types.UnionType, typing.Union):
+        return typing.Union[bound_args]
+    return origin[bound_args]
 
 
 def _declared_fields(cls: type) -> dict[str, type]:
     """Return the declared type of each field of a class. Those types drive how a value loads back."""
     if issubclass(cls, Options):
-        return {name: info.annotation for name, info in cls.model_fields.items()}
-    hints = typing.get_type_hints(cls)
-    if sys.version_info < (3, 11):
-        namespace = vars(sys.modules[cls.__module__])
-        return {name: _resolve_quoted(hint, namespace) for name, hint in hints.items()}
-    return hints
+        return {name: _bind_self(info.annotation, cls) for name, info in cls.model_fields.items()}
+    return typing.get_type_hints(cls)
 
 
 def _unwrap_annotation(expect):
@@ -249,9 +250,9 @@ def _has_declared_fields(expect) -> bool:
     )
 
 
-def _layout(cls: type) -> list[str] | dict[str, int]:
+def _layout(cls: type) -> list[str] | dict[str, int | str]:
     """What one class is made of: the value of every member where it enumerates, its field names otherwise."""
-    if issubclass(cls, IntEnum):
+    if issubclass(cls, (IntEnum, StrEnum)):
         return {member.name: member.value for member in cls}
     return sorted(_declared_fields(cls))
 
@@ -264,7 +265,7 @@ def schema(classes: set[type]) -> dict:
     that gained a field since keeps loading while one whose fields moved is rejected by name. Sorted by name, so what
     a file holds follows from the classes alone rather than from the order they are met in.
     """
-    return {cls.__name__: _layout(cls) for cls in sorted(classes, key=lambda cls: cls.__name__)}
+    return {get_public_name(cls): _layout(cls) for cls in sorted(classes, key=get_public_name)}
 
 
 def declared_schema(expect: dict) -> dict:
@@ -284,14 +285,14 @@ def declared_schema(expect: dict) -> dict:
             if not isinstance(declared, type) or declared in seen:
                 continue
             seen.add(declared)
-            if issubclass(declared, IntEnum):
-                layout[declared.__name__] = _layout(declared)
+            if issubclass(declared, (IntEnum, StrEnum)):
+                layout[get_public_name(declared)] = _layout(declared)
             elif _has_declared_fields(declared):
                 for cls in _classes_by_name(declared).values():
                     if cls in seen and cls is not declared:
                         continue
                     seen.add(cls)
-                    layout[cls.__name__] = _layout(cls)
+                    layout[get_public_name(cls)] = _layout(cls)
                     declarations.extend(_declared_fields(cls).values())
     return layout
 
@@ -344,11 +345,16 @@ def _store_array(value, exported: "Exported") -> int:
     """
     layout = value.__array_interface__
     key = (layout["data"][0], layout["shape"], layout["strides"], layout["typestr"])
-    slot = exported.slots.get(key)
+    # The address of an empty array is arbitrary (pickle protocol 5 loads every empty array at one address), so keying
+    # it would make the slots depend on how the arrays were created. Each empty array is stored in a slot of its own.
+    # Leaving it out of the file instead would require the manifest to record its shape and dtype, since the manifest
+    # holds nothing but the slot index of each array.
+    slot = exported.slots.get(key) if value.nbytes > 0 else None
     if slot is None:
         slot = len(exported.values)
-        exported.slots[key] = slot
-        exported.stored.append(value)
+        if value.nbytes > 0:
+            exported.slots[key] = slot
+            exported.stored.append(value)
         exported.values.append(np.require(value, requirements="C"))
     return slot
 
@@ -377,7 +383,7 @@ def _export_value(value, expect, exported: "Exported"):
         return _export_any(value, exported)
     if isinstance(value, np.generic):
         return value.item()
-    if isinstance(value, IntEnum):
+    if isinstance(value, (IntEnum, StrEnum)):
         exported.classes.add(type(value))
         return value.name
     codec = _class_codec(type(value))
@@ -399,7 +405,10 @@ def _export_value(value, expect, exported: "Exported"):
             # are sorted, so exporting the same scene twice gives the same file.
             values = {"values": values, "given": sorted(value.model_fields_set)}
         return values if _accepted_classes(expect) == (type(value),) else {"@": type(value).__name__, **values}
-    expect = _deduce_union(expect, value)
+    # A union mixing an option with a sequence of them, such as one morph or several, exports as the argument it holds
+    deduced = _deduce_union(expect, value)
+    if deduced is not expect:
+        return _export_value(value, deduced, exported)
     origin = typing.get_origin(expect)
     if _is_sequence(origin):
         args = typing.get_args(expect)
@@ -469,7 +478,7 @@ def _load_value(raw, expect, loaded: list[np.ndarray]):
     expect = _unwrap_annotation(expect)
     if expect is typing.Any or expect is object:
         return _load_any(raw, loaded)
-    if isinstance(expect, type) and issubclass(expect, IntEnum):
+    if isinstance(expect, type) and issubclass(expect, (IntEnum, StrEnum)):
         return expect[raw]
     if isinstance(raw, dict) and "@class" in raw:
         cls = _classes_by_name(expect).get(raw["@class"])
@@ -511,7 +520,10 @@ def _load_value(raw, expect, loaded: list[np.ndarray]):
                     gs.raise_exception_from(f"A Genesis file states a '{name}' that {cls.__name__} rejects.", e)
             return cls.model_construct(_fields_set=set(raw["given"]), **values)
         return cls(**{name: _load_value(raw[name], declared[name], loaded) for name in declared if name in raw})
-    expect = _deduce_union(expect, raw)
+    # See '_export_value' for a union mixing an option with a sequence of them
+    deduced = _deduce_union(expect, raw)
+    if deduced is not expect:
+        return _load_value(raw, deduced, loaded)
     origin = typing.get_origin(expect)
     if _is_sequence(origin):
         args = typing.get_args(expect)
@@ -667,6 +679,77 @@ def load(path: str | os.PathLike, expect: dict) -> dict:
         gs.raise_exception_from(f"'{path}' holds values a Genesis scene is not made of.", e)
 
 
+def export_record(file: BinaryIO, value, expect=typing.Any) -> None:
+    """Write one value to a binary file as a record that 'load_record' loads back, without pickling it.
+
+    A record is the size of a JSON header, the header, then the raw bytes of the arrays the value holds. The header
+    holds the value as a field declared 'expect' exports it in a Genesis file (see 'export'), and the type and shape of
+    each array, which is the minimum needed to rebuild the value exactly. A value declared 'Any' may nest dicts, lists,
+    tuples, numbers, strings, None, NumPy arrays and every class that says how it travels in a file, such as
+    'trimesh.Trimesh', and loads back with its tuples as lists and its NumPy scalars as Python ones. Records follow one
+    another in a file, so a reader may stop after the ones it needs.
+
+    Parameters
+    ----------
+    file : BinaryIO
+        The binary file to write to, opened for writing. The record starts at its current position.
+    value : Any
+        The value to write. Its arrays must hold numbers, since an array of Python objects has no raw bytes to store.
+    expect : type, optional
+        The type the value is declared to be, which 'load_record' must be given to load it back. Declaring the exact
+        type saves the header from naming it. Default is 'typing.Any'.
+    """
+    exported = Exported(values=[], slots={}, stored=[], classes=set())
+    held = _export_value(value, expect, exported)
+    arrays_spec = [(array.dtype.str, array.shape) for array in exported.values]
+    header = json.dumps({"arrays": arrays_spec, "value": held}).encode()
+    file.write(struct.pack("<I", len(header)))
+    file.write(header)
+    # The arrays follow by decreasing item size, the order in which 'load_record' reads them back.
+    for array in sorted(exported.values, key=lambda array: -array.itemsize):
+        # An object array holds references, which have no raw bytes to store.
+        assert not array.dtype.hasobject
+        file.write(array.data)
+
+
+def load_record(file: BinaryIO, expect=typing.Any):
+    """Read back the value of the next record of a binary file, as the type 'export_record' was given.
+
+    Parameters
+    ----------
+    file : BinaryIO
+        The binary file to read from, opened for reading at the start of a record. It is left at the end of the record.
+    expect : type, optional
+        The type the value was declared to be when it was written. Default is 'typing.Any'.
+
+    Returns
+    -------
+    value : Any
+        The value of the record, as an instance of 'expect'. Its arrays are writable.
+
+    Raises
+    ------
+    ValueError
+        If the file holds no such record at its current position, as when it is truncated, was written another way, or
+        holds a value its declared type no longer admits.
+    """
+    try:
+        (header_size,) = struct.unpack("<I", file.read(4))
+        header = json.loads(file.read(header_size))
+        arrays_spec = [(np.dtype(dtype), shape) for dtype, shape in header["arrays"]]
+        # Each array gets its own allocation, since an array packed right after another one is misaligned for the
+        # vectorized loads of native code, which then crashes.
+        arrays = [None] * len(arrays_spec)
+        for i in sorted(range(len(arrays_spec)), key=lambda i: -arrays_spec[i][0].itemsize):
+            dtype, shape = arrays_spec[i]
+            arrays[i] = np.empty(shape, dtype=dtype)
+            if file.readinto(arrays[i].data) != arrays[i].nbytes:
+                raise ValueError("The record is truncated.")
+        return _load_value(header["value"], expect, arrays)
+    except (struct.error, KeyError, IndexError, TypeError, OverflowError, gs.GenesisException) as e:
+        raise ValueError("The file holds no record written by 'export_record' here.") from e
+
+
 def _exported_array(value: np.ndarray, exporting: Exporting) -> int:
     """Store the array in the file's array member and return its index, which the values carry in its place."""
     return exporting.array(value)
@@ -678,3 +761,34 @@ def _loaded_array(raw: int, loading: Loading) -> np.ndarray:
 
 
 register(np.ndarray, _exported_array, _loaded_array)
+
+
+def _exported_geometry(mesh: trimesh.Trimesh, exporting: Exporting) -> dict:
+    """Export the geometry of a trimesh: its vertices, the faces joining them, their normals and their colours.
+
+    Only colours the mesh states are exported. Asking a mesh coloured by anything else for its vertex colours makes
+    trimesh invent a default one per vertex, which a file would then carry as if the author had chosen it.
+    """
+    colours = mesh.visual.vertex_colors if mesh.visual.kind == "vertex" else None
+    return {
+        "verts": exporting.array(mesh.vertices),
+        "faces": exporting.array(mesh.faces),
+        "normals": exporting.array(mesh.vertex_normals),
+        "colours": None if colours is None else exporting.array(colours),
+    }
+
+
+def _loaded_geometry(raw: dict, loading: Loading) -> trimesh.Trimesh:
+    """Recreate the trimesh as it was exported, with the vertices, faces and normals the file holds."""
+    mesh = trimesh.Trimesh(
+        vertices=loading.array(raw["verts"]),
+        faces=loading.array(raw["faces"]),
+        vertex_normals=loading.array(raw["normals"]),
+        process=False,
+    )
+    if raw["colours"] is not None:
+        mesh.visual.vertex_colors = loading.array(raw["colours"])
+    return mesh
+
+
+register(trimesh.Trimesh, _exported_geometry, _loaded_geometry)

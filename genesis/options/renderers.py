@@ -1,11 +1,13 @@
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import numpy as np
+
 from pydantic import Field, StrictBool, StrictInt, model_validator
 
 import genesis as gs
-from genesis.typing import PositiveFloat, UnitVec4FType, Vec3FType
 from genesis.datatypes import List
+from genesis.typing import PositiveFloat, UnitVec4FType, Vec3FType
 
 from .options import Options
 from .surfaces import Surface

@@ -6,7 +6,6 @@ import pytest
 import torch
 
 import genesis as gs
-from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 from .utils import make_diff_scene_pair
@@ -37,27 +36,27 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, tol,
     scene_a.reset()
     v1_a = torch.tensor(v1, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     loss_h1_a = run_segment(scene_a, robot_a, v1_a)
-    qpos_mid_a = tensor_to_array(robot_a.get_qpos())
+    qpos_mid_a = robot_a.get_qpos()
     time_mid_a = scene_a.get_time().clone()
     scene_a.backward(loss_h1_a)
     # backward restores the physics state it snapshotted, so the clocks describing it come back too
     assert_allclose(scene_a.get_time(), time_mid_a, tol=gs.EPS)
-    grad1_a = tensor_to_array(v1_a.grad).copy()
+    grad1_a = v1_a.grad
 
     v2_a = torch.tensor(v2, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     loss_h2_a = run_segment(scene_a, robot_a, v2_a)
-    qpos_end_a = tensor_to_array(robot_a.get_qpos())
+    qpos_end_a = robot_a.get_qpos()
     scene_a.backward(loss_h2_a)
-    grad2_a = tensor_to_array(v2_a.grad).copy()
+    grad2_a = v2_a.grad
 
     # Scene B: horizon 1 only, whose backward pass returns the terminal snapshot Scene C resumes from.
     scene_b, robot_b = build()
     scene_b.reset()
     v1_b = torch.tensor(v1, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     loss_h1_b = run_segment(scene_b, robot_b, v1_b)
-    qpos_mid_b = tensor_to_array(robot_b.get_qpos())
+    qpos_mid_b = robot_b.get_qpos()
     snapshot_b = scene_b.backward(loss_h1_b)
-    grad1_b = tensor_to_array(v1_b.grad).copy()
+    grad1_b = v1_b.grad
 
     assert_equal(qpos_mid_a, qpos_mid_b)
     assert_equal(loss_h1_a, loss_h1_b)
@@ -68,9 +67,9 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, tol,
     scene_c.reset(snapshot_b)
     v2_c = torch.tensor(v2, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     loss_h2_c = run_segment(scene_c, robot_c, v2_c)
-    qpos_end_c = tensor_to_array(robot_c.get_qpos())
+    qpos_end_c = robot_c.get_qpos()
     scene_c.backward(loss_h2_c)
-    grad2_c = tensor_to_array(v2_c.grad).copy()
+    grad2_c = v2_c.grad
 
     assert_equal(qpos_end_a, qpos_end_c)
     assert_equal(loss_h2_a, loss_h2_c)
@@ -78,9 +77,12 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, tol,
 
 
 @pytest.mark.required
-def test_sim_vs_solver_state_grad_parity(show_viewer):
+def test_state_query_grad_parity(show_viewer):
+    DT = 0.01
+
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
+            dt=DT,
             gravity=(0.0, 0.0, 0.0),
             requires_grad=True,
         ),
@@ -103,15 +105,14 @@ def test_sim_vs_solver_state_grad_parity(show_viewer):
     ctrl = torch.tensor(np.random.randn(robot.n_dofs), dtype=gs.tc_float, device=gs.device, requires_grad=True)
 
     grads = []
-    for is_sim_state_source in (False, True):
+    for is_link_source in (False, True):
         scene.reset()
         robot.set_dofs_velocity(ctrl)
         scene.step()
-        if is_sim_state_source:
-            sim_state = scene.get_state()
-            chassis_pos = sim_state.solvers_state[scene.solvers.index(scene.rigid_solver)].links_pos[:, 0].squeeze()
+        if is_link_source:
+            chassis_pos = robot.base_link.get_pos()
         else:
-            chassis_pos = robot.get_state().pos.squeeze()
+            chassis_pos = robot.get_pos()
         loss = torch.linalg.norm(chassis_pos)
         loss.backward()
         # The backward pass of a step replays it from the state it started from, so the clock follows the physics the
@@ -126,9 +127,18 @@ def test_sim_vs_solver_state_grad_parity(show_viewer):
 
     # A state queried after a setter reflects it, even within the step of an earlier query
     scene.reset()
-    robot.get_state()
+    robot.get_pos()
     robot.set_pos((0.1, -0.2, 0.3))
-    assert_allclose(robot.get_state().pos[0], (0.1, -0.2, 0.3), tol=gs.EPS)
+    assert_allclose(robot.get_pos(), (0.1, -0.2, 0.3), tol=gs.EPS)
+
+    # Starting at rest, a body turns by its angular velocity times the time step, and the imaginary part of its
+    # quaternion by half of that.
+    scene.reset()
+    ang_vel = torch.zeros(3, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    robot.set_dofs_velocity(ang_vel, dofs_idx_local=[3, 4, 5])
+    scene.step()
+    (ang_vel_grad,) = torch.autograd.grad(robot.get_quat()[1:].sum(), ang_vel)
+    assert_allclose(ang_vel_grad, 0.5 * DT, tol=gs.EPS)
 
 
 @pytest.mark.required
@@ -352,14 +362,11 @@ def test_state_getters_grad_matches_fd(grad_free_with_hinge_ball_slide, precisio
 
 
 @pytest.mark.required
-# The SAP coupler, one of the couplings refused, supports 64 bits precision alone
-@pytest.mark.precision("64")
 def test_reject_non_differentiable_solvers():
     box = gs.morphs.Box(pos=(0.0, 0.0, 0.5), size=(0.1, 0.1, 0.1))
     for materials, options, component_name in (
         ((gs.materials.PBD.Liquid(),), {}, "PBDSolver"),
         ((gs.materials.SPH.Liquid(),), {}, "SPHSolver"),
-        ((gs.materials.FEM.Elastic(),), {"fem_options": gs.options.FEMOptions(use_implicit_solver=True)}, "FEMSolver"),
         ((gs.materials.FEM.Elastic(), gs.materials.Rigid()), {}, "LegacyCoupler"),
         ((gs.materials.Rigid(),), {"coupler_options": gs.options.SAPCouplerOptions()}, "SAPCoupler"),
     ):

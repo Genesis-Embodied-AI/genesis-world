@@ -24,6 +24,7 @@ def test_surface_distance_sensor_box_sphere(show_viewer, tol, n_envs):
     # analytic sphere surface (icosphere faceting). Used only for the on-surface grounding check; the distance
     # self-consistency check stays exact.
     MESH_TOL = 5e-4
+    WORLD_GAP = 0.02
     BOX_PROBE_POS = [(0.0, 0.0, 0.0), (0.0, 0.0, BOX_SIZE / 2.0)]
     SPHERE_PROBE_POS = [(0.0, 0.0, SPHERE_RADIUS)]
 
@@ -65,6 +66,14 @@ def test_surface_distance_sensor_box_sphere(show_viewer, tol, n_envs):
         ),
     )
 
+    # A sensor attached to no entity sits in the world frame, its probe above the top of the second sphere
+    world_dist_sensor = scene.add_sensor(
+        gs.sensors.SurfaceDistanceProbe(
+            probe_local_pos=((0.0, 0.0, DISTANCE * 2.0 + SPHERE_RADIUS + WORLD_GAP),),
+            probe_radius=MAX_RANGE,
+            track_link_idx=(sphere2.base_link_idx,),
+        )
+    )
     box_to_spheres_dist_sensor = scene.add_sensor(
         gs.sensors.SurfaceDistanceProbe(
             entity_idx=box.idx,
@@ -111,6 +120,7 @@ def test_surface_distance_sensor_box_sphere(show_viewer, tol, n_envs):
         assert_allclose(torch.linalg.norm(nearest[..., i, :] - sphere1_center, dim=-1), SPHERE_RADIUS, tol=MESH_TOL)
     # The box drifts only in y, so the box face directly under the sphere-mounted probe stays put and the gap holds.
     assert_allclose(sphere_prox_data, DISTANCE, tol=tol)
+    assert_allclose(world_dist_sensor.read_ground_truth(), WORLD_GAP, tol=MESH_TOL)
     with np.testing.assert_raises(AssertionError):
         assert_allclose(sphere_prox_noisy_data, sphere_prox_data, tol=tol)
 
@@ -211,6 +221,24 @@ def test_kinematic_contact_probe_box_sphere_support(show_viewer, tol, n_envs):
         (0.0, 0.0, 1.0),
         (0.0, 0.0, 1.0),
         (0.0, 0.0, -1.0),
+    )
+    # Sensors attached to no entity sit in the world frame, their probe away from everything
+    world_kwargs = dict(probe_local_pos=((2.0, 2.0, 0.5),), probe_radius=PROBE_RADIUS, draw_debug=show_viewer)
+    world_contact_probe = scene.add_sensor(
+        gs.sensors.ContactProbe(
+            **world_kwargs,
+        )
+    )
+    world_depth_probe = scene.add_sensor(
+        gs.sensors.ContactDepthProbe(
+            **world_kwargs,
+        )
+    )
+    world_taxel = scene.add_sensor(
+        gs.sensors.KinematicTaxel(
+            normal_stiffness=STIFFNESS,
+            **world_kwargs,
+        )
     )
     common_kwargs = dict(
         entity_idx=box.idx,
@@ -326,6 +354,10 @@ def test_kinematic_contact_probe_box_sphere_support(show_viewer, tol, n_envs):
     assert_allclose(gained_force[..., 3, :], force[..., 3, :] * GAIN, tol=tol)
     assert_allclose(gained_taxel.read_ground_truth().force, force, tol=gs.EPS)
 
+    assert not world_contact_probe.read_ground_truth().any()
+    assert_allclose(world_depth_probe.read_ground_truth(), 0.0, tol=gs.EPS)
+    assert_allclose(world_taxel.read_ground_truth().force, 0.0, tol=gs.EPS)
+
     # Ground is the only contact so far, so filtering it zeros the bottom probe on every branch.
     assert_allclose(depth_probe_ground_filtered.read_ground_truth(), 0.0, tol=gs.EPS)
     assert not contact_probe_ground_filtered.read_ground_truth().any()
@@ -368,10 +400,9 @@ def test_kinematic_contact_probe_box_sphere_support(show_viewer, tol, n_envs):
 
 @pytest.mark.required
 def test_raycast_probe_on_fully_fixed_solver(show_viewer):
-    # A fully-fixed solver shares its static collision BVH across identical envs (a single tree, see the raycaster's
-    # RaycastContext), so the raycast probe must traverse it through the env -> tree routing. Fixed-fixed pairs are
-    # filtered out of collision detection, so the candidate-geom mask stays empty and the probe reads zero depth
-    # despite the geometric overlap.
+    # The rays cast from the center of the pad hit its side in every environment, while fixed-fixed pairs are filtered
+    # out of collision detection, so the candidate-geom mask stays empty and the probe reads zero depth despite the
+    # geometric overlap.
     scene = gs.Scene(show_viewer=show_viewer)
     pad = scene.add_entity(
         gs.morphs.Box(
@@ -395,12 +426,20 @@ def test_raycast_probe_on_fully_fixed_solver(show_viewer):
             contact_depth_query="raycast",
         )
     )
+    lidar = scene.add_sensor(
+        gs.sensors.Lidar(
+            entity_idx=pad.idx,
+            pattern=gs.options.sensors.SphericalPattern(
+                n_points=(1, 1),
+                fov=(0.0, 0.0),
+            ),
+            max_range=1.0,
+        )
+    )
     scene.build(n_envs=2)
     scene.step()
 
-    (collision_bvh,) = probe._shared_context.collision_bvh_contexts
-    assert collision_bvh.maybe_static
-    assert collision_bvh.n_trees == 1
+    assert_allclose(lidar.read().distances[..., 0, 0], 0.1, tol=1e-6)
     assert_equal(probe.read_ground_truth(), 0.0)
 
 
@@ -1318,6 +1357,19 @@ def test_proximity_sensor_box_on_box(show_viewer, tol, n_envs):
             draw_debug=show_viewer,
         )
     )
+    # A sensor attached to no entity sits in the world frame, its probe sunk into the top of the support
+    world_sensor = scene.add_sensor(
+        gs.sensors.ProximityTaxel(
+            probe_local_pos=((0.0, 0.0, BOX_SIZE - PENETRATION),),
+            probe_radius=0.06,
+            probe_local_normal=(0.0, 0.0, -1.0),
+            track_link_idx=(support.base_link_idx,),
+            n_sample_points=600,
+            stiffness=100.0,
+            shear_coupling=0.0,
+            draw_debug=show_viewer,
+        )
+    )
     # probe_gain variant (no radius noise so the measured branch is deterministic): force is linear in the summed
     # penetration, so the measured force scales by the gain while GT is untouched.
     gained_sensor = scene.add_sensor(
@@ -1340,6 +1392,8 @@ def test_proximity_sensor_box_on_box(show_viewer, tol, n_envs):
 
     force_norm = torch.linalg.norm(sensor.read_ground_truth().force, dim=-1)
     assert (force_norm > tol).all()
+
+    assert (torch.linalg.norm(world_sensor.read_ground_truth().force, dim=-1) > tol).all()
 
     gained_meas = gained_sensor.read().force
     gained_gt = gained_sensor.read_ground_truth().force

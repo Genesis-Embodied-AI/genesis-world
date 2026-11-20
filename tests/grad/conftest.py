@@ -4,22 +4,26 @@ import weakref
 import xml.etree.ElementTree as ET
 
 import pytest
-import torch
 
-import quadrants as qd
+from ..conftest import lazy_imports
 
-import genesis as gs
-from genesis.grad.bridge import LaunchRecorder
-from genesis.utils.misc import qd_to_torch
+# Imported on first use (see pytest_sessionstart in tests/conftest.py)
+with lazy_imports():
+    import torch
+
+    import quadrants as qd
+
+    import genesis as gs
+    from genesis.grad.bridge import LaunchRecorder
+    from genesis.utils.misc import qd_to_torch
 
 
 @pytest.fixture(autouse=True)
 def step_overwrites(backend, monkeypatch):
     # Check that the backward pass of a recorded rollout saves every overwrite it needs (see LaunchRecorder): before
     # each entry of a recorder, copy the arrays its launches use that an earlier entry used, and report those the entry
-    # changed without the recorder saving them. The arrays a kernel reaches through the solver it is a method of, such
-    # as the frames of the particle solvers, are outside of its reach. The arrays a kernel writes follow from its source
-    # alone, the same on every backend, so it runs on CPU alone.
+    # changed without the recorder saving them. The arrays a kernel writes follow from its source alone, the same on
+    # every backend, so it runs on CPU alone.
     if isinstance(backend, str):
         backend = getattr(gs.constants.backend, backend)
     if backend != gs.cpu:
@@ -148,6 +152,19 @@ def grad_revolute():
 
 
 @pytest.fixture(scope="session")
+def grad_fixed_base():
+    mjcf = ET.Element("mujoco", model="fixed_base")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    # A base without geometry takes a pose of its own in each environment. The arm hangs off the origin of the base, so
+    # that its position follows the orientation of the base, and the hinge sits off the origin of the arm, so that the
+    # velocity of the arm moves the origin, and with it the gradient the pose of the base receives.
+    base = ET.SubElement(worldbody, "body", name="base", pos="0 0 0")
+    ET.SubElement(base, "inertial", mass="1.0", pos="0 0 0", diaginertia="0.1 0.1 0.1")
+    _add_hinge_arm(base, "arm", "0.2 0.1 0", joint_pos="-0.1 0 0", stiffness="2.0")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def grad_revolute_frictionloss():
     mjcf = ET.Element("mujoco", model="revolute_frictionloss")
     worldbody = ET.SubElement(mjcf, "worldbody")
@@ -185,6 +202,14 @@ def grad_capsule():
     body = ET.SubElement(worldbody, "body", name="capsule", pos="0 0 0")
     ET.SubElement(body, "geom", type="capsule", size="0.1 0.2")
     ET.SubElement(body, "joint", name="capsule_joint", type="free")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def grad_capsule_ground():
+    mjcf = ET.Element("mujoco", model="capsule_ground")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    ET.SubElement(worldbody, "geom", type="capsule", fromto="1.3 0 -0.1 1.7 0 -0.1", size="0.1")
     return ET.tostring(mjcf, encoding="unicode")
 
 

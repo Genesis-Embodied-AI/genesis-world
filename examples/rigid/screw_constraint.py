@@ -68,7 +68,7 @@ def main():
 
     scene.build()
 
-    rigid = scene.sim.rigid_solver
+    rigid = scene.rigid_solver
     bolt_idx = bolt.base_link.idx
     nut_idx = nut.base_link.idx
     nut_qpos = nut.get_qpos()
@@ -146,7 +146,7 @@ def main():
         if spin_direction != 0:
             spin_rate = gu.inv_transform_by_quat(nut.get_ang(), nut.get_quat())[2]
             torque = min(max(2.0e-3 * (spin_direction * 4.0 * math.pi - spin_rate), -args.torque), args.torque)
-        rigid.apply_links_external_wrench(torque=(0.0, 0.0, torque), links_idx=(nut_idx,), local=True)
+        nut.base_link.apply_external_wrench(torque=(0.0, 0.0, torque), local=True)
         scene.step()
         i_step += 1
 

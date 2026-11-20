@@ -4,7 +4,6 @@ import torch
 import trimesh
 
 import genesis as gs
-from genesis.engine.states.solvers import MPMSolverState
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -48,18 +47,18 @@ def test_particles_stress(model, n_envs, show_viewer, tol):
         material=liquid.material,
     )
     elastic = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.1, 0.0, 0.3),
-            size=(0.06, 0.06, 0.06),
-        ),
-        material=gs.materials.MPM.Elastic(
-            E=1200.0,
-            nu=0.25,
-            sampler="regular",
-            model=model,
-        ),
-        surface=gs.surfaces.Default(
-            vis_mode="particle",
+        spec=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0.1, 0.0, 0.3),
+                size=(0.06, 0.06, 0.06),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=1200.0,
+                nu=0.25,
+                sampler="regular",
+                model=model,
+            ),
+            vis=gs.options.EntityVisOptions(debug=True),
         ),
     )
     scene.build(n_envs=n_envs)
@@ -69,7 +68,7 @@ def test_particles_stress(model, n_envs, show_viewer, tol):
         liquid.get_particles_stress()
 
     snapshot = scene.get_state()
-    state = next(state for state in snapshot if isinstance(state, MPMSolverState))
+    state = snapshot.solvers["MPMSolver"].arrays
     particles_slice = slice(elastic.particle_start, elastic.particle_start + elastic.n_particles)
     rotation = torch.tensor(
         [
@@ -84,13 +83,15 @@ def test_particles_stress(model, n_envs, show_viewer, tol):
     deformation = torch.diag(stretches)
     with torch.no_grad():
         for i_b in range(max(n_envs, 1)):
-            state.F[i_b, particles_slice] = (1.0 - 0.1 * i_b) * deformation
-            state.F[i_b, elastic.particle_start + elastic.n_particles // 2 : particles_slice.stop] = (
-                (1.0 - 0.1 * i_b) * rotation @ deformation
-            )
+            state["mpm_state.particles.F"][particles_slice, i_b] = (1.0 - 0.1 * i_b) * deformation
+            state["mpm_state.particles.F"][
+                elastic.particle_start + elastic.n_particles // 2 : particles_slice.stop, i_b
+            ] = (1.0 - 0.1 * i_b) * rotation @ deformation
     scene.reset(state=snapshot)
     stress_before = elastic.get_particles_stress()
     assert stress_before.shape == ((n_envs,) if n_envs else ()) + (elastic.n_particles, 3, 3)
+    assert stress_before.device == stretches.device
+    assert stress_before.dtype == stretches.dtype
     stress_saved = stress_before.clone()
     stress_diagonal = stress_before[..., 0, :, :]
     stress_rotated = stress_before[..., -1, :, :]
@@ -98,7 +99,8 @@ def test_particles_stress(model, n_envs, show_viewer, tol):
 
     # Differentiate the strain energy independently of the solver's constitutive stress function
     for _ in range(2):
-        deformation = elastic.get_state().F.detach().clone().requires_grad_(True)
+        deformation = scene.mpm_solver.get_state().arrays["mpm_state.particles.F"][particles_slice].transpose(0, 1)
+        deformation = (deformation if n_envs else deformation[0]).detach().requires_grad_(True)
         volume_ratio = torch.linalg.det(deformation)
         if model == "corotation":
             energy = 480.0 * (torch.linalg.svdvals(deformation) - 1.0).square().sum(dim=-1)
@@ -121,27 +123,33 @@ def test_particles_stress(model, n_envs, show_viewer, tol):
     assert_equal(stress_before, stress_saved)
     scene.reset(state=snapshot_initial)
     assert_equal(elastic.get_particles_stress(), 0.0)
-    state = next(state for state in snapshot_initial if isinstance(state, MPMSolverState))
+    state = snapshot_initial.solvers["MPMSolver"].arrays
     with torch.no_grad():
-        state.F[:, particles_slice] = rotation
+        state["mpm_state.particles.F"][particles_slice] = rotation
     scene.reset(state=snapshot_initial)
     assert_allclose(elastic.get_particles_stress() / 1200.0, 0.0, tol=tol)
     with torch.no_grad():
-        state.F[:, elastic.particle_start, 0, 0] = -1.0
+        state["mpm_state.particles.F"][elastic.particle_start, :, 0, 0] = -1.0
     scene.reset(state=snapshot_initial)
     with pytest.raises(gs.GenesisException, match="positive"):
         elastic.get_particles_stress()
-    state.active[:, elastic.particle_start] = 0
+    state["mpm_state.particles.is_active"][elastic.particle_start] = 0
     scene.reset(state=snapshot_initial)
     assert_allclose(elastic.get_particles_stress() / 1200.0, 0.0, tol=tol)
 
 
 @pytest.mark.required
 def test_particle_constraints(show_viewer, tol):
+    GRAVITY = 9.81
+    N_STEPS = 5
+    # A density that single precision cannot represent
+    RHO = 1000.1
+
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=2e-3,
             substeps=20,
+            gravity=(0.0, 0.0, -GRAVITY),
         ),
         mpm_options=gs.options.MPMOptions(
             grid_density=64,
@@ -168,7 +176,7 @@ def test_particle_constraints(show_viewer, tol):
         material=gs.materials.MPM.Elastic(
             E=5e4,
             nu=0.3,
-            rho=1000,
+            rho=RHO,
         ),
         morph=gs.morphs.Box(
             pos=(0, 0, 0.35),
@@ -189,7 +197,36 @@ def test_particle_constraints(show_viewer, tol):
             sampler="regular",
         ),
     )
+    moving_box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, -0.5, 0.85),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.Rigid(
+            gravity_compensation=1.0,
+        ),
+    )
+    mpm_follower = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, -0.5, 0.7),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.MPM.Elastic(),
+    )
+    # A block held by its middle slab, the particles on either side mirroring each other about it
+    mpm_held_block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.5, -0.5, 0.3),
+            size=(0.1, 0.05, 0.05),
+        ),
+        material=gs.materials.MPM.Elastic(
+            sampler="regular",
+        ),
+    )
     scene.build(n_envs=2)
+
+    # The mass of the particles follows the density at the precision of the simulation
+    assert_allclose(mpm_cube.get_mass(), mpm_cube.n_particles * scene.mpm_solver.particle_volume_real * RHO, tol=tol)
 
     # Each member is rotated about its own position: the box offset lands at -x for the member rotated about z and at
     # +z for the one rotated about x, and the long axis follows. A regular lattice spans the box minus one particle.
@@ -215,6 +252,9 @@ def test_particle_constraints(show_viewer, tol):
     assert mask.any(), "bbox should select some particles"
     assert not mask.all(), "bbox should not select all particles"
 
+    # A checkpoint made before any particle is constrained
+    checkpoint_unconstrained = scene.sim.__getstate__()
+
     # Attach and test following
     link_idx = rigid_box.links[0].idx
     mpm_cube.set_particle_constraints(mask, link_idx, stiffness=1e5)
@@ -223,11 +263,47 @@ def test_particle_constraints(show_viewer, tol):
 
     pos_diff = torch.tensor([0.2, 0, 0], device=gs.device)
     rigid_box.set_pos(initial_rigid_pos + pos_diff, zero_velocity=False)
+
+    # Particles attached to a link translating at the velocity they share move rigidly with it
+    mpm_follower.set_particle_constraints(True, moving_box.links[0].idx, stiffness=1e3)
+    moving_box.set_dofs_velocity((1.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+    mpm_follower.set_velocity((1.0, 0.0, 0.0))
+    follower_pos_0 = mpm_follower.get_particles_pos()
+    moving_box_pos_0 = moving_box.get_pos()
+
+    held_block_offset_x = mpm_held_block.init_particles[:, 0] - 0.5
+    mpm_held_block.set_free(np.abs(held_block_offset_x) > mpm_held_block.particle_size)
+
     for _ in range(30):
         scene.step()
 
+    # The attached particles follow the link, the springs keeping every particle finite whatever their stiffness
+    assert mpm_cube.get_particles_vel().isfinite().all()
     mpm_diff = mpm_cube.get_particles_pos()[:, mask[0], 0].mean() - initial_mpm_x
-    assert mpm_diff > pos_diff[0] * 0.3, f"MPM should follow rigid link. Got {mpm_diff:.3f}"
+    # The springs deflect under the pull of the rest of the block, so the attached particles lag the link by a physical
+    # offset that precision does not bound
+    assert_allclose(mpm_diff, pos_diff[0], tol=1e-4)
+
+    # The followers keep their offset to the link along its motion, gravity only sagging them vertically
+    moving_box_disp = moving_box.get_pos() - moving_box_pos_0
+    assert_allclose(moving_box_disp, (30 * scene.dt, 0.0, 0.0), tol=tol)
+    follower_offset = mpm_follower.get_particles_pos() - follower_pos_0 - moving_box_disp[:, None]
+    assert_allclose(follower_offset[..., :2], 0.0, tol=tol)
+
+    # The held particles zero the cells they touch once every particle scattered into them, whatever the order of the
+    # particles, so the sides of the block sag alike
+    held_block_pos = mpm_held_block.get_particles_pos()
+    assert_allclose(
+        held_block_pos[:, held_block_offset_x > 0.0, 2].mean(dim=-1),
+        held_block_pos[:, held_block_offset_x < 0.0, 2].mean(dim=-1),
+        tol=tol,
+    )
+
+    # Restoring the checkpoint brings back unconstrained particles, which fall freely
+    scene.sim.__setstate__(checkpoint_unconstrained)
+    for _ in range(N_STEPS):
+        scene.step()
+    assert_allclose(mpm_follower.get_particles_vel()[..., 2], -GRAVITY * N_STEPS * scene.dt, tol=1e-3)
 
 
 @pytest.mark.required
@@ -279,7 +355,7 @@ def test_perf_dispatch(variant, show_viewer):
     scene.build(n_envs=2)
 
     # Aggregate SVD flag must match the variant for the dispatch path under test to actually run.
-    assert scene.sim.mpm_solver.needs_svd == (variant == "svd")
+    assert scene.mpm_solver.mpm_config.is_svd_needed == (variant == "svd")
 
     init_elastic_pos = elastic.get_particles_pos()
     init_liquid_pos = liquid.get_particles_pos()
@@ -298,3 +374,52 @@ def test_perf_dispatch(variant, show_viewer):
     # is normal for the MPM coupling, so allow up to 2mm.
     assert final_elastic_pos[..., 2].min() > -1e-3
     assert final_liquid_pos[..., 2].min() > -2e-3
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("precision", ["32"])
+def test_halt_on_nan(show_viewer):
+    scene = gs.Scene(
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-0.5, -0.5, 0.0),
+            upper_bound=(0.5, 0.5, 1.0),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.6, 0.6, 0.5),
+            camera_lookat=(0.0, 0.0, 0.2),
+        ),
+        show_viewer=show_viewer,
+    )
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.3),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(
+            E=1e9,
+        ),
+    )
+    scene.build(n_envs=2)
+
+    # The explicit integration of a stiff block diverges, the block of the second env first since it hits the floor
+    # faster. The diverging env is flagged and frozen before its state stops being finite, while the other proceeds.
+    block.set_velocity(((0.0, 0.0, 0.0), (0.0, 0.0, -5.0)))
+    for _ in range(10):
+        scene.step()
+        assert block.get_particles_pos().isfinite().all()
+        if scene.get_error_envs_mask().any():
+            break
+    assert_equal(scene.get_error_envs_mask(), (False, True))
+
+    # The error raises at the beginning of the next step on CPU, and at worst of the one after it on GPU
+    with pytest.raises(
+        gs.GenesisException, match=r"(?s)Invalid MPM particle velocities.* Failing environments: \[1\]\.$"
+    ):
+        for _ in range(1 if gs.backend == gs.cpu else 2):
+            scene.step()
+
+    # Resetting the scene clears the error, so the simulation proceeds
+    scene.reset()
+    scene.step()
+    assert block.get_particles_pos().isfinite().all()
+    assert not scene.get_error_envs_mask().any()

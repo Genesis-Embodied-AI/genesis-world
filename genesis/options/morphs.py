@@ -8,10 +8,10 @@ rigid object / MPM object / FEM object.
 import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Literal
-from typing_extensions import Self
+from typing import Annotated, Any, ClassVar, Literal, Self
 
 import numpy as np
+
 from pydantic import Field, StrictBool, StrictInt, model_validator
 
 import genesis as gs
@@ -124,7 +124,6 @@ class Morph(Options):
     offset_quat: UnitVec4FType | None = None
     visualization: StrictBool = True
     collision: StrictBool = True
-    enable_custom_vverts: StrictBool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -495,9 +494,6 @@ class Plane(Primitive):
         if not fixed:
             gs.raise_exception("Plane `fixed` must be True.")
         super().__init__(fixed=True, **data)
-
-        if self.enable_custom_vverts:
-            gs.raise_exception("`enable_custom_vverts` must be False for `Plane`.")
 
 
 ############################ Mesh ############################
@@ -1615,11 +1611,13 @@ class USD(FileMorph):
         If no matching attribute is found, Genesis default (0.0) is used.
         Defaults to ["physxJoint:armature", "physics:armature", "armature"].
     revolute_joint_stiffness_attr_candidates : List[str], optional
-        List of candidate attribute names for revolute joint stiffness. The parser will try these in order.
+        List of candidate attribute names for revolute joint stiffness, in torque / deg.
+        The parser will try these in order.
         If no matching attribute is found, Genesis default (0.0) is used.
         Defaults to ["physxLimit:angular:stiffness", "physics:stiffness", "stiffness"].
     revolute_joint_damping_attr_candidates : List[str], optional
-        List of candidate attribute names for revolute joint damping. The parser will try these in order.
+        List of candidate attribute names for revolute joint damping, in torque * s / deg.
+        The parser will try these in order.
         If no matching attribute is found, Genesis default (0.0) is used.
         Defaults to ["physxLimit:angular:damping", "physics:angular:damping", "angular:damping"].
     prismatic_joint_stiffness_attr_candidates : List[str], optional

@@ -7,7 +7,6 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.states.solvers import RigidSolverState
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -44,7 +43,7 @@ def test_data_accessor(n_envs, batched, tol):
     gs_geom = gs_link.geoms[0]
     gs_vgeom = gs_link.vgeoms[0]
     scene.build(n_envs=n_envs)
-    gs_s = scene.sim.rigid_solver
+    gs_s = scene.rigid_solver
 
     # Initialize the simulation
     np.random.seed(0)
@@ -112,9 +111,6 @@ def test_data_accessor(n_envs, batched, tol):
                     trim_i = trimmed[key] if n_envs == 0 else trimmed[key][i_b]
                     assert len(pad_i) == capacity
                     assert_equal(pad_i[:n_contacts], trim_i[:n_contacts])
-
-    gs_s._func_forward_dynamics()
-    gs_s._func_constraint_force()
 
     # Make sure that all the robots ends up in the different state
     qposs = gs_robot.get_qpos()
@@ -420,12 +416,12 @@ def test_getter_vs_state_post_step_consistency(enable_mujoco_compatibility):
     scene.build()
 
     scene.step()
-    dof_vel = scene.rigid_solver.get_dofs_velocity()
+    dof_vel = box.get_dofs_velocity()
     assert_allclose(dof_vel[:3], (0.0, 0.0, GRAVITY * DT), atol=gs.EPS)
     vel = box_link.get_vel()
     with pytest.raises(AssertionError) if enable_mujoco_compatibility else nullcontext():
         assert_allclose(dof_vel[:3], vel, atol=gs.EPS)
-    dof_pos = scene.rigid_solver.get_qpos()
+    dof_pos = box.get_qpos()
     assert_allclose(dof_pos[:3], (0.0, 0.0, GRAVITY * DT**2), atol=gs.EPS)
     pos = box_link.get_pos()
     with pytest.raises(AssertionError) if enable_mujoco_compatibility else nullcontext():
@@ -606,8 +602,8 @@ def test_geom_pos_quat(n_envs, show_viewer):
     scene.build(n_envs=n_envs)
     batch_shape = (n_envs,) if n_envs > 0 else ()
 
+    # The visual geoms follow the pose of their link as soon as it is set
     box.set_dofs_position(np.random.rand(*batch_shape, 6))
-    scene.rigid_solver.update_vgeoms()
 
     for link in box.links:
         for vgeom, geom in zip(link.vgeoms, link.geoms):
@@ -619,6 +615,17 @@ def test_geom_pos_quat(n_envs, show_viewer):
             assert vgeom_quat.shape == (*batch_shape, 4)
             assert_allclose(geom_pos, vgeom_pos, atol=gs.EPS)
             assert_allclose(geom_quat, vgeom_quat, atol=gs.EPS)
+            assert_allclose(vgeom.get_vAABB(), geom.get_AABB(), atol=1e-6)
+
+    # Setting the pose of some environments moves their visual geoms alone
+    if n_envs > 0:
+        vgeom = box.vgeoms[0]
+        vgeom_pos_0, vgeom_quat_0 = vgeom.get_pos(), vgeom.get_quat()
+        box.set_dofs_position(np.random.rand(6), envs_idx=[0])
+        assert_allclose(vgeom.get_pos(envs_idx=[0]), box.geoms[0].get_pos(envs_idx=[0]), atol=gs.EPS)
+        assert_allclose(vgeom.get_quat(envs_idx=[0]), box.geoms[0].get_quat(envs_idx=[0]), atol=gs.EPS)
+        assert_allclose(vgeom.get_pos()[1:], vgeom_pos_0[1:], atol=gs.EPS)
+        assert_allclose(vgeom.get_quat()[1:], vgeom_quat_0[1:], atol=gs.EPS)
 
 
 @pytest.mark.slow  # ~200s
@@ -910,9 +917,8 @@ def test_normalized_quat(show_viewer, tol):
 
 
 @pytest.mark.required
-def test_inertial_property_setters(
-    sliding_ball_pair, free_bodies_in_one_model, implicit_inertial_origin_chain, show_viewer, tol
-):
+@pytest.mark.parametrize("model_name", ["free_bodies_in_one_model"])
+def test_inertial_property_setters(sliding_ball_pair, xml_path, implicit_inertial_origin_chain, show_viewer, tol):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
@@ -946,12 +952,12 @@ def test_inertial_property_setters(
     )
     free_bodies = scene.add_entity(
         morph=gs.morphs.MJCF(
-            file=free_bodies_in_one_model,
+            file=xml_path,
         ),
     )
     unaligned = scene.add_entity(
         morph=gs.morphs.MJCF(
-            file=free_bodies_in_one_model,
+            file=xml_path,
             pos=(0.0, 10.0, 8.0),
             align=False,
         ),
@@ -975,8 +981,8 @@ def test_inertial_property_setters(
 
     # One route brings a single link to the mass, keeping the inertia it was given, and the other the whole body by a
     # ratio, which scales the inertia with it - so the link route writes the heavier inertia itself to match.
-    mass_ratio = 2.0 / scene.rigid_solver.get_links_mass(per_link.links[1].idx)
-    links_inertia = scene.rigid_solver.get_links_inertia(per_link.links[1].idx)
+    mass_ratio = 2.0 / per_link.get_links_mass(1)
+    links_inertia = per_link.get_links_inertia(1)
     per_link.links[1].set_mass(2.0)
     per_link.set_links_inertia(links_inertia * mass_ratio[..., None, None], links_idx_local=1)
     whole_entity.set_mass(3.0)
@@ -986,15 +992,14 @@ def test_inertial_property_setters(
         assert_allclose(pair.get_mass(), authored.get_mass(), tol=gs.EPS)
 
     # The inertia grows with the mass, as it does for a body of the same shape built heavier.
-    authored_inertia = scene.rigid_solver.get_links_inertia(authored.links[1].idx)
-    assert_allclose(authored_inertia, scene.rigid_solver.get_links_inertia(per_link.links[1].idx), tol=gs.EPS)
+    assert_allclose(authored.get_links_inertia(1), per_link.get_links_inertia(1), tol=gs.EPS)
 
-    links_idx = [pair.base_link.idx for pair in pairs]
     for pair in pairs:
         pair.set_dofs_velocity([0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     # Long enough to fall onto the plane and keep sliding, so the contact rows take part.
     for _ in range(60):
-        scene.rigid_solver.apply_links_external_wrench([[[2.0, 0.0, 0.0]] * len(links_idx)] * 4, links_idx=links_idx)
+        for pair in pairs:
+            pair.base_link.apply_external_force([2.0, 0.0, 0.0])
         scene.step()
     assert (authored.get_pos()[:, 2] < 0.2).all(), "the pairs must have landed for the contact solve to be exercised"
 
@@ -1095,22 +1100,39 @@ def test_inertial_property_setters(
     # entity be weighed side by side through one pair of buffers. Sentinels are written over every row first: those of
     # the tree that is not weighed must come back untouched.
     SENTINEL = -7.0
-    scratch = solver.data_manager.weight_scratch
+    constraint_state = solver.constraint_solver.constraint_state
     dofs_idx = slice(free_bodies.dof_start, free_bodies.dof_start + free_bodies.n_dofs)
     untouched = slice(free_bodies.dof_start + 6, free_bodies.dof_start + free_bodies.n_dofs)
-    for buffer in (scratch.jac_row, scratch.solve_out):
+    for buffer in (constraint_state.grad, constraint_state.Mgrad):
         sentinels = qd_to_numpy(buffer)
         sentinels[dofs_idx] = SENTINEL
         buffer.from_numpy(sentinels)
     free_bodies.links[0].set_mass(2.0)
-    for buffer in (scratch.jac_row, scratch.solve_out):
+    for buffer in (constraint_state.grad, constraint_state.Mgrad):
         assert_allclose(qd_to_numpy(buffer)[untouched], SENTINEL, tol=gs.EPS)
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 3])
-def test_axis_aligned_bounding_boxes(n_envs):
-    scene = gs.Scene()
+@pytest.mark.parametrize(
+    "n_envs, coupler_options, enable_collision",
+    [
+        (0, gs.options.LegacyCouplerOptions(), True),
+        (3, gs.options.LegacyCouplerOptions(), False),
+        (3, gs.options.SAPCouplerOptions(), False),
+    ],
+)
+def test_axis_aligned_bounding_boxes(n_envs, coupler_options, enable_collision, show_viewer):
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=enable_collision,
+        ),
+        coupler_options=coupler_options,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -3.0, 1.5),
+            camera_lookat=(0.5, 0.0, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
     scene.add_entity(
         gs.morphs.Plane(
             normal=(0, 0, 1),
@@ -1123,7 +1145,7 @@ def test_axis_aligned_bounding_boxes(n_envs):
             pos=(0.5, 0, 0.05),
         ),
     )
-    scene.add_entity(
+    cylinder = scene.add_entity(
         gs.morphs.Cylinder(
             height=0.8,
             radius=0.06,
@@ -1159,7 +1181,7 @@ def test_axis_aligned_bounding_boxes(n_envs):
         assert_allclose(torch.min(link_geoms_aabb[..., 0, :], dim=0).values, link_aabb[..., 0, :], tol=gs.EPS)
         assert_allclose(torch.max(link_geoms_aabb[..., 1, :], dim=0).values, link_aabb[..., 1, :], tol=gs.EPS)
 
-    all_aabbs = scene.sim.rigid_solver.get_AABB()
+    all_aabbs = scene.rigid_solver.get_AABB()
     aabbs = [geom.get_AABB().expand(aabb_shape) for entity in scene.entities for geom in entity.geoms]
     if n_envs > 0:
         assert all_aabbs.ndim == 4 and len(all_aabbs) == n_envs
@@ -1192,29 +1214,47 @@ def test_axis_aligned_bounding_boxes(n_envs):
     robot_vaabb = robot.get_vAABB()
     assert_allclose(robot_vaabb, robot_aabb, atol=1e-3)
 
+    # The boxes of the solver follow the geoms of a falling body after a step, whatever the coupler and the collisions
+    scene.step()
+    assert_allclose(cylinder.get_AABB(allow_fast_approx=True), cylinder.get_AABB(), tol=gs.EPS)
+
 
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.parametrize(
-    "friction_cone, sparse_solve, use_hibernation, enable_mujoco_compatibility",
+    "friction_cone, sparse_solve, use_hibernation, enable_mujoco_compatibility, constraint_solver, iterations",
     [
-        (gs.friction_cone.pyramidal, None, False, False),
+        (gs.friction_cone.pyramidal, None, False, False, gs.constraint_solver.Newton, 25),
+        # A solve capped at a single iteration ends where its warm start leads it, so the steps that follow a restored
+        # state reveal whether the warm start was restored with it.
+        (gs.friction_cone.pyramidal, None, False, False, gs.constraint_solver.CG, 1),
         # Hibernation sleeps both boxes before the state is captured, so the reset has to wake them. It needs its own
         # cell because MuJoCo compatibility lowers the rest threshold to a velocity this scene never reaches, which
         # would leave the sleeping path unexercised.
-        (gs.friction_cone.pyramidal, None, True, False),
+        (gs.friction_cone.pyramidal, None, True, False, gs.constraint_solver.Newton, 25),
         # The buffers a step leaves behind: the elliptic cone keeps a cone-free Hessian mirror, the sparse solve zeroes
         # each Jacobian row through the pattern the previous step left, and MuJoCo compatibility reads the warm-start
         # acceleration unconditionally.
-        (gs.friction_cone.elliptic, True, False, True),
+        (gs.friction_cone.elliptic, True, False, True, gs.constraint_solver.Newton, 25),
     ],
 )
-def test_reset(show_viewer, friction_cone, sparse_solve, use_hibernation, enable_mujoco_compatibility):
+def test_reset(
+    show_viewer,
+    precision,
+    friction_cone,
+    sparse_solve,
+    use_hibernation,
+    enable_mujoco_compatibility,
+    constraint_solver,
+    iterations,
+):
     N_STEPS = 60
     BOOL_MASK = torch.tensor([True, False, True, False], dtype=torch.bool, device=gs.device)
 
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
+            constraint_solver=constraint_solver,
+            iterations=iterations,
             friction_cone=friction_cone,
             sparse_solve=sparse_solve,
             use_hibernation=use_hibernation,
@@ -1252,6 +1292,9 @@ def test_reset(show_viewer, friction_cone, sparse_solve, use_hibernation, enable
     # before the first step that follows the reset. Acceleration only matches from the first step onwards: a restored
     # state derives it from the restored velocity, while the capture reflects the refresh the setter left pending.
     GETTERS = (
+        scene.rigid_solver.get_qpos,
+        scene.rigid_solver.get_dofs_velocity,
+        scene.rigid_solver.get_links_pos,
         box.get_pos,
         box.get_quat,
         box.get_vel,
@@ -1269,7 +1312,6 @@ def test_reset(show_viewer, friction_cone, sparse_solve, use_hibernation, enable
     )
 
     init_state = scene.get_state()
-    init_rigid_state = next(s for s in init_state.solvers_state if isinstance(s, RigidSolverState))
     init_getters = tuple(getter() for getter in GETTERS)
     # The horizon reaches past the point where both boxes come to rest, so the state is captured with them asleep
     # whenever hibernation is enabled, and the reset has to wake them.
@@ -1279,37 +1321,41 @@ def test_reset(show_viewer, friction_cone, sparse_solve, use_hibernation, enable
         for entity in (box, box_far):
             assert qd_to_numpy(scene.rigid_solver.dyn_state.links.is_hibernated, entity.base_link_idx).all()
     fallen_state = scene.get_state()
-    fallen_rigid_state = next(s for s in fallen_state.solvers_state if isinstance(s, RigidSolverState))
     fallen_getters = tuple(getter() for getter in GETTERS)
     fallen_acc_getters = tuple(getter() for getter in ACC_GETTERS)
+
+    # The step that follows a restored state replays the one that followed its capture, the warm starts of the collision
+    # detection and of the constraint solve included. Restoring a state wakes its sleeping bodies, so the replay holds
+    # while none sleeps.
+    if not use_hibernation:
+        scene.step()
+        scene.get_state()
+        continued_getters = tuple(getter() for getter in GETTERS)
+        scene.reset(state=fallen_state)
+        scene.step()
+        scene.get_state()
+        resumed_getters = tuple(getter() for getter in GETTERS)
+        # FIXME: quadrants#1086 - the replay drifts in the last bits, which contacts amplify to the tolerance in fp32.
+        tol = 1e-9 if precision == "64" else 2e-4
+        for actual, continued_ref in zip(resumed_getters, continued_getters):
+            assert_allclose(actual, continued_ref, tol=tol)
 
     for envs_idx in (BOOL_MASK, torch.where(BOOL_MASK)[0]):
         scene.reset(state=fallen_state)
         scene.reset(state=init_state, envs_idx=envs_idx)
-        restored_rigid_state = next(s for s in scene.get_state().solvers_state if isinstance(s, RigidSolverState))
         restored_getters = tuple(getter() for getter in GETTERS)
-        for actual, init_ref, fallen_ref in (
-            (restored_rigid_state.qpos, init_rigid_state.qpos, fallen_rigid_state.qpos),
-            (restored_rigid_state.dofs_vel, init_rigid_state.dofs_vel, fallen_rigid_state.dofs_vel),
-            (restored_rigid_state.links_pos, init_rigid_state.links_pos, fallen_rigid_state.links_pos),
-            *zip(restored_getters, init_getters, fallen_getters),
-        ):
+        for actual, init_ref, fallen_ref in zip(restored_getters, init_getters, fallen_getters):
             assert_equal(actual[BOOL_MASK], init_ref[BOOL_MASK])
             assert_equal(actual[~BOOL_MASK], fallen_ref[~BOOL_MASK])
 
     # After reset, simulation from init_state should reproduce the original fallen_state trajectory
     for _ in range(N_STEPS):
         scene.step()
-    replayed_rigid_state = next(s for s in scene.get_state().solvers_state if isinstance(s, RigidSolverState))
+    # Reading the state refreshes the poses the step left one integration behind, as the capture of 'fallen_state' did
+    scene.get_state()
     replayed_getters = tuple(getter() for getter in GETTERS)
     replayed_acc_getters = tuple(getter() for getter in ACC_GETTERS)
-    for actual, fallen_ref in (
-        (replayed_rigid_state.qpos, fallen_rigid_state.qpos),
-        (replayed_rigid_state.dofs_vel, fallen_rigid_state.dofs_vel),
-        (replayed_rigid_state.links_pos, fallen_rigid_state.links_pos),
-        *zip(replayed_getters, fallen_getters),
-        *zip(replayed_acc_getters, fallen_acc_getters),
-    ):
+    for actual, fallen_ref in (*zip(replayed_getters, fallen_getters), *zip(replayed_acc_getters, fallen_acc_getters)):
         assert_equal(actual[BOOL_MASK], fallen_ref[BOOL_MASK])
 
 
@@ -1397,7 +1443,7 @@ def test_object_repr():
     scene.build(n_envs=2)
 
     # Every printable object renders without raising, across both the brief and the full colorized form
-    for obj in (scene, scene.entities, cam, scene.sim.rigid_solver):
+    for obj in (scene, scene.entities, cam, scene.rigid_solver):
         assert repr(obj)
     for entity in scene.entities:
         assert entity._repr_brief()

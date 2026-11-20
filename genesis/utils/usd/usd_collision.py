@@ -1,9 +1,10 @@
-"""Translate USD collision filtering (CollisionGroup / FilteredPairsAPI) into contype/conaffinity."""
+"""Translate USD collision filtering (CollisionGroup / FilteredPairsAPI) into link pairs excluded from collision."""
+
+from collections import Counter
 
 from pxr import Usd, UsdPhysics
 
 import genesis as gs
-from genesis.utils.collision import solve_contype_conaffinity
 
 
 def _geoms_under(cg_infos: list[dict], path: str) -> list[int]:
@@ -12,20 +13,26 @@ def _geoms_under(cg_infos: list[dict], path: str) -> list[int]:
     return [i for i, g in enumerate(cg_infos) if g["prim_path"] == path or g["prim_path"].startswith(prefix)]
 
 
-def apply_collision_filtering(context, cg_infos: list[dict]):
+def apply_collision_filtering(context, l_infos: list[dict], links_g_infos: list[list[dict]]):
     """
-    Set contype/conaffinity on collision g_infos from USD collision filtering.
+    Record on the parsed links of one entity the link pairs that USD collision filtering excludes from collision.
 
     Honors ``UsdPhysics.CollisionGroup`` (collider membership + ``filteredGroups`` + ``mergeGroupName``)
-    and per-prim ``UsdPhysics.FilteredPairsAPI``, for the geoms in ``cg_infos`` (a single entity). The
-    resulting "must not collide" pairs are realized as contype/conaffinity bitmasks by the shared
-    solver; if they cannot be expressed as bitmasks, a warning is logged and defaults are kept.
+    and per-prim ``UsdPhysics.FilteredPairsAPI``. Filtering applies per link pair: a pair of links is excluded when
+    every pair of their collision geoms is filtered, and a pair filtered for some of its geoms alone keeps colliding,
+    with a warning.
 
     Filtering that spans entities is not expressible per entity, so it is detected against the stage's
     full collider set and reported once via ``context.note_unsupported_cross_entity_filtering()``.
 
-    ``cg_infos`` must each carry a ``prim_path``.
+    Every collision geom of ``links_g_infos`` must carry a ``prim_path``.
     """
+    cg_infos, geoms_link_idx = [], []
+    for i_l, link_g_infos in enumerate(links_g_infos):
+        for g_info in link_g_infos:
+            if g_info.get("contype") or g_info.get("conaffinity"):
+                cg_infos.append(g_info)
+                geoms_link_idx.append(i_l)
     if not cg_infos:
         return
 
@@ -119,16 +126,24 @@ def apply_collision_filtering(context, cg_infos: list[dict]):
                     if i != j:
                         invalid_pairs.add(frozenset((i, j)))
 
-    if invalid_pairs:
-        masks = solve_contype_conaffinity(n, invalid_pairs)
-        if masks is None:
-            gs.logger.warning(
-                "USD collision filtering cannot be expressed with 'contype'/'conaffinity' bitmasks. "
-                "Keeping default (all-colliding) values."
-            )
+    # Geoms of a single link never collide, so only the filtered pairs spanning two links count
+    links_pair_n_filtered = Counter()
+    for i, j in invalid_pairs:
+        i_l_1, i_l_2 = sorted((geoms_link_idx[i], geoms_link_idx[j]))
+        if i_l_1 != i_l_2:
+            links_pair_n_filtered[(i_l_1, i_l_2)] += 1
+    links_n_cgeoms = Counter(geoms_link_idx)
+    link_pairs_partially_filtered = []
+    for (i_l_1, i_l_2), n_filtered in links_pair_n_filtered.items():
+        if n_filtered == links_n_cgeoms[i_l_1] * links_n_cgeoms[i_l_2]:
+            l_infos[i_l_1].setdefault("contact_exclusions", []).append(l_infos[i_l_2]["name"])
         else:
-            for g_info, (contype, conaffinity) in zip(cg_infos, masks):
-                g_info["contype"], g_info["conaffinity"] = contype, conaffinity
+            link_pairs_partially_filtered.append(f"('{l_infos[i_l_1]['name']}', '{l_infos[i_l_2]['name']}')")
+    if link_pairs_partially_filtered:
+        gs.logger.warning(
+            "USD collision filtering excludes some collision geometries of these link pairs but not all of them: "
+            f"{', '.join(link_pairs_partially_filtered)}. Filtering applies per link pair, so these links keep colliding."
+        )
 
     if has_cross_entity_filtering:
         context.note_unsupported_cross_entity_filtering()

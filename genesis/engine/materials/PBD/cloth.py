@@ -1,5 +1,6 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
+from genesis.constants import STRUCTURE
 from genesis.typing import NonNegativeFloat, PositiveFloat, ValidFloat
 
 from .base import Base
@@ -32,6 +33,8 @@ class Cloth(Base["PBD2DEntity"]):
     air_resistance : float, optional
         The air resistance. Damping force due to air drag. Default is 1e-3.
     """
+
+    structure: ClassVar[STRUCTURE] = STRUCTURE.DEFORMABLE
 
     rho: PositiveFloat = 4.0
     static_friction: NonNegativeFloat = 0.15

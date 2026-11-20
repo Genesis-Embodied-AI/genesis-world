@@ -3,4 +3,3 @@ include LICENSE
 recursive-include genesis/assets *
 recursive-include genesis/ext/pyrender/fonts *
 recursive-include genesis/ext/pyrender/shaders *
-include genesis/ext/VolumeSampling

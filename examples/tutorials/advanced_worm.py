@@ -18,10 +18,12 @@ scene = gs.Scene(
         dt=5e-5,
         lower_bound=(-1.0, -1.0, -0.2),
         upper_bound=(1.0, 1.0, 1.0),
+        vis=gs.options.ParticleVisOptions(
+            boundary=True,
+        ),
     ),
     vis_options=gs.options.VisOptions(
         show_world_frame=True,
-        visualize_mpm_boundary=True,
     ),
     viewer_options=gs.options.ViewerOptions(
         camera_pos=(1.5, 0, 0.8),
@@ -62,10 +64,10 @@ scene.build(n_envs=3)
 
 
 if isinstance(worm.material, gs.materials.MPM.Muscle):
-    pos = worm.get_state().pos[0]
+    pos = worm.get_particles_pos()[0]
     n_units = worm.n_particles
 elif isinstance(worm.material, gs.materials.FEM.Muscle):
-    pos = worm.get_state().pos[0, worm.get_el2v()].mean(dim=1)
+    pos = worm.get_verts_pos()[0, worm.get_el2v()].mean(dim=1)
     n_units = worm.n_elements
 else:
     raise NotImplementedError

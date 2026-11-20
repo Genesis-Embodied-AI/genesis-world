@@ -18,6 +18,9 @@ def main():
         sim_options=gs.options.SimOptions(
             dt=0.01,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         show_viewer=args.vis,
         show_FPS=False,
     )
@@ -30,7 +33,6 @@ def main():
             euler=(80, 10, 90),
             pos=(0.05, -0.1, 0.0),
         ),
-        vis_mode="collision",
     )
     for i, asset_name in enumerate(("donut_0", "mug_1", "cup_2", "apple_15")):
         asset_path = snapshot_download(
@@ -45,7 +47,6 @@ def main():
                 file=f"{asset_path}/{asset_name}/output.xml",
                 pos=(0.0, 0.15 * (i - 1.5), 0.7),
             ),
-            vis_mode="collision",
         )
 
     scene.build()

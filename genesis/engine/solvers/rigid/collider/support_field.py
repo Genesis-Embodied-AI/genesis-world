@@ -6,12 +6,36 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.data import GEOMS, DynInfo
+from genesis.utils.data import Data, DataKind, Size, field, is_opted_in
+from .data import ColliderState
 
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+
+
+# The cells of the support tables and their candidate vertices (see SupportFieldInfo)
+SUPPORT_CELLS = Size("support_cells")
+SUPPORT_CANDIDATES = Size("support_candidates")
+
+
+class SupportFieldInfo(Data, kind=DataKind.CONSTANT):
+    """
+    The support tables of the geoms, listing the vertices supporting the directions of each cell (see SupportField).
+    """
+
+    # First cell of the table of each geom, the geoms of one trimesh sharing one table
+    support_cell_start: qd.Tensor = field(int, shape=(GEOMS,))
+    # First extra candidate of each cell, past those of its record, its extras ending where those of the next start
+    support_list_start: qd.Tensor = field(int, shape=(SUPPORT_CELLS + 1,))
+    # Mesh-frame position and index of each candidate vertex, among the vertices of its geom: the record of every cell
+    # at twice the index of the cell, holding the first two candidates of the cell (a single candidate twice), then the
+    # extra candidates of all cells
+    support_v: qd.Tensor = field((float, 3), shape=(SUPPORT_CANDIDATES,))
+    support_vid: qd.Tensor = field(int, shape=(SUPPORT_CANDIDATES,))
+    support_res: qd.Tensor = field(int, shape=())
 
 
 class SupportField:
@@ -34,16 +58,14 @@ class SupportField:
     """
 
     def __init__(self, rigid_solver: "RigidSolver") -> None:
+        """Build the support tables of the geoms into the support field info, for a scene opting it in."""
         self.solver = rigid_solver
         # The table is exact at any resolution, which only trades its memory against the length of the lists of its
         # cells. A multiple of four makes the band of rows of each chart span 45 to 135 degrees off its poles exactly.
         self._support_res = 120
-        # Allocated once, when activated or else empty when first read (see 'support_field_info')
-        self._support_field_info: array_class.SupportFieldInfo | None = None
-        self._is_active = False
-
-    def activate(self) -> None:
-        if self.is_active:
+        # A scene no consumer opts the support field in for holds placeholders the kernels never read
+        if not is_opted_in(SupportFieldInfo):
+            self.support_field_info = SupportFieldInfo(unused=True)
             return
 
         band_rows = self._support_res // 2
@@ -64,63 +86,52 @@ class SupportField:
                 tables_geom.append(geom)
             geoms_table_idx[geom.idx] = i_t
         n_support_cells = n_geom_cells * len(tables_geom)
-        # The records of the cells and the extra candidate counts are written in place as the tables are built, the
-        # extra candidates alone being collected per table, since their count is unknown beforehand
+        tables = [geom.mesh.get_support_table(self._support_res) for geom in tables_geom]
+        n_extras = sum([len(table_extras_vid) for _, table_extras_vid, _ in tables])
+        self.support_field_info = SupportFieldInfo(
+            sizes=dict(
+                geoms=self.solver.n_geoms,
+                support_cells=n_support_cells,
+                support_candidates=2 * n_support_cells + n_extras,
+            ),
+            values=dict(support_res=self._support_res),
+        )
+
+        # The records of the cells and the extra candidate counts are written in place, and the extra candidates
+        # of every cell start past the records of all cells, in cell order
         records_vid = np.empty((n_support_cells, 2), dtype=gs.np_int)
         support_list_start = np.empty((n_support_cells + 1,), dtype=gs.np_int)
-        extras_vid = []
-        for i_t, geom in enumerate(tables_geom):
+        for i_t, (slots_vid, _, cells_n_extras) in enumerate(tables):
             cell_start = i_t * n_geom_cells
-
-            slots_vid, table_extras_vid, cells_n_extras = geom.mesh.get_support_table(self._support_res)
             records_vid[cell_start : cell_start + n_geom_cells] = slots_vid
-            extras_vid.append(table_extras_vid)
             support_list_start[cell_start + 1 : cell_start + n_geom_cells + 1] = cells_n_extras
-
-        # The extra candidates of every cell start past the records of all cells, in cell order
         support_list_start[0] = 2 * n_support_cells
         np.cumsum(support_list_start, out=support_list_start)
-        extras_vid = np.concatenate((np.zeros((0,), dtype=gs.np_int), *extras_vid), dtype=gs.np_int)
-
-        assert self._support_field_info is None
-        self._support_field_info = array_class.get_support_field_info(
-            self.solver.n_geoms, n_support_cells, 2 * n_support_cells + len(extras_vid), self._support_res
-        )
         _kernel_init_support(
             n_geom_cells * geoms_table_idx,
             support_list_start,
             np.array([geom.vert_start for geom in tables_geom], dtype=gs.np_int),
             records_vid,
-            extras_vid,
+            np.concatenate(
+                [np.zeros((0,), dtype=gs.np_int), *[table_extras_vid for _, table_extras_vid, _ in tables]],
+                dtype=gs.np_int,
+            ),
             self.solver.dyn_info,
-            self._support_field_info,
+            self.support_field_info,
             self.solver.rigid_config,
             n_geom_cells,
         )
 
-        self._is_active = True
 
-    @property
-    def is_active(self):
-        return self._is_active
-
-    @property
-    def support_field_info(self) -> array_class.SupportFieldInfo:
-        """Support tables of the geoms, empty if the field was never activated."""
-        if self._support_field_info is None:
-            self._support_field_info = array_class.get_support_field_info(0, 0, 0, self._support_res)
-        return self._support_field_info
-
-
-@qd.kernel
+@qd.kernel(fastcache=True)
 def _kernel_init_support(
     support_cell_start: qd.types.ndarray(),
     support_list_start: qd.types.ndarray(),
     tables_vert_start: qd.types.ndarray(),
     records_vid: qd.types.ndarray(),
     extras_vid: qd.types.ndarray(),
-    dyn_info: array_class.DynInfo,
-    support_field_info: array_class.SupportFieldInfo,
+    dyn_info: DynInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     n_geom_cells: int,
 ):
@@ -165,8 +176,8 @@ def _func_support_world(
     d: qd.types.vector(3),
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
-    dyn_info: array_class.DynInfo,
-    collider_info: array_class.ColliderInfo,
+    dyn_info: DynInfo,
+    support_field_info: SupportFieldInfo,
     exhaustive: qd.template() = False,
 ):
     """Support position for a world direction.
@@ -185,13 +196,13 @@ def _func_support_world(
         v = gu.qd_transform_by_trans_quat(v_, pos, quat)
     else:
         d_mesh = gu.qd_transform_by_quat_fast(d, gu.qd_inv_quat(quat))
-        v_, vid = _func_support_mesh(i_g, d_mesh, dyn_info, collider_info)
+        v_, vid = _func_support_mesh(i_g, d_mesh, dyn_info, support_field_info)
         v = gu.qd_transform_by_trans_quat_fast(v_, pos, quat)
     return v, v_, vid
 
 
 @qd.func
-def _func_direction_cell(i_g: int, d_mesh: qd.types.vector(3), collider_info: array_class.ColliderInfo):
+def _func_direction_cell(i_g: int, d_mesh: qd.types.vector(3), support_field_info: SupportFieldInfo):
     """
     Cell of the support table of a geom that a mesh-frame direction falls in.
 
@@ -202,7 +213,7 @@ def _func_direction_cell(i_g: int, d_mesh: qd.types.vector(3), collider_info: ar
     of it pick the same vertex.
     """
     # Band of cells of each chart: see SupportField
-    support_res = collider_info.support_field.support_res[None]
+    support_res = support_field_info.support_res[None]
     band_start, band_rows = support_res // 4, support_res // 2
 
     i_chart = gs.qd_int(0)
@@ -230,46 +241,44 @@ def _func_direction_cell(i_g: int, d_mesh: qd.types.vector(3), collider_info: ar
     if i >= support_res:
         i = i - support_res
     j = gs.qd_int(qd.math.clamp(qd.math.floor(phi / math.pi * support_res) - band_start, 0, band_rows - 1))
-    return collider_info.support_field.support_cell_start[i_g] + (i_chart * support_res + i) * band_rows + j
+    return support_field_info.support_cell_start[i_g] + (i_chart * support_res + i) * band_rows + j
 
 
 @qd.func
-def _func_support_mesh(
-    i_g: int, d_mesh: qd.types.vector(3), dyn_info: array_class.DynInfo, collider_info: array_class.ColliderInfo
-):
+def _func_support_mesh(i_g: int, d_mesh: qd.types.vector(3), dyn_info: DynInfo, support_field_info: SupportFieldInfo):
     """Support vertex of a mesh-frame direction, the best of the candidates listed by the cell it falls in."""
     i_v_start = dyn_info.geoms.vert_start[i_g]
-    i_cell = _func_direction_cell(i_g, d_mesh, collider_info)
+    i_cell = _func_direction_cell(i_g, d_mesh, support_field_info)
     # Record of the cell (see SupportField)
-    v = collider_info.support_field.support_v[2 * i_cell]
-    vid = collider_info.support_field.support_vid[2 * i_cell]
-    pos = collider_info.support_field.support_v[2 * i_cell + 1]
+    v = support_field_info.support_v[2 * i_cell]
+    vid = support_field_info.support_vid[2 * i_cell]
+    pos = support_field_info.support_v[2 * i_cell + 1]
     dot_max = v.dot(d_mesh)
     dot = pos.dot(d_mesh)
     if dot > dot_max:
         v = pos
         dot_max = dot
-        vid = collider_info.support_field.support_vid[2 * i_cell + 1]
+        vid = support_field_info.support_vid[2 * i_cell + 1]
     # The other candidates are read four at a time, so that the reads of a chunk issue together. The index is clamped to
     # the end of the list, which repeats its last candidate, unable to win twice.
-    i_s_start = collider_info.support_field.support_list_start[i_cell]
-    i_s_end = collider_info.support_field.support_list_start[i_cell + 1]
+    i_s_start = support_field_info.support_list_start[i_cell]
+    i_s_end = support_field_info.support_list_start[i_cell + 1]
     for i_chunk_ in range((i_s_end - i_s_start + 3) // 4):
         for i_k in qd.static(range(4)):
             i_s = qd.min(i_s_start + 4 * i_chunk_ + i_k, i_s_end - 1)
-            pos = collider_info.support_field.support_v[i_s]
+            pos = support_field_info.support_v[i_s]
             dot = pos.dot(d_mesh)
             if dot > dot_max:
                 v = pos
                 dot_max = dot
-                vid = collider_info.support_field.support_vid[i_s]
+                vid = support_field_info.support_vid[i_s]
 
     # The table numbers the vertices of its geom from zero (see SupportFieldInfo)
     return v, i_v_start + vid
 
 
 @qd.func
-def _func_support_mesh_exhaustive(i_g: int, d_mesh: qd.types.vector(3), dyn_info: array_class.DynInfo):
+def _func_support_mesh_exhaustive(i_g: int, d_mesh: qd.types.vector(3), dyn_info: DynInfo):
     """Support vertex by exhaustive scan in the mesh frame, the first maximum winning, like the scan the reference
     engine's fallback collision pipeline runs below its hill-climb threshold."""
     dot_max = gs.qd_float(-1e20)
@@ -284,12 +293,7 @@ def _func_support_mesh_exhaustive(i_g: int, d_mesh: qd.types.vector(3), dyn_info
 
 @qd.func
 def _func_support_sphere(
-    i_g: int,
-    d: qd.types.vector(3),
-    pos: qd.types.vector(3),
-    quat: qd.types.vector(4),
-    dyn_info: array_class.DynInfo,
-    shrink: bool,
+    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo, shrink: bool
 ):
     sphere_center = pos
     sphere_radius = dyn_info.geoms.data[i_g][0]
@@ -310,7 +314,7 @@ def _func_support_sphere(
 
 @qd.func
 def _func_support_ellipsoid(
-    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: array_class.DynInfo
+    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo
 ):
     a = dyn_info.geoms.data[i_g][0]
     b = dyn_info.geoms.data[i_g][1]
@@ -331,12 +335,7 @@ def _func_support_ellipsoid(
 
 @qd.func
 def _func_support_capsule(
-    i_g: int,
-    d: qd.types.vector(3),
-    pos: qd.types.vector(3),
-    quat: qd.types.vector(4),
-    dyn_info: array_class.DynInfo,
-    shrink: bool,
+    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo, shrink: bool
 ):
     """
     Support function for capsule geometry.
@@ -364,12 +363,7 @@ def _func_support_capsule(
 
 @qd.func
 def _func_support_cylinder(
-    i_g: int,
-    d: qd.types.vector(3),
-    pos: qd.types.vector(3),
-    quat: qd.types.vector(4),
-    dyn_info: array_class.DynInfo,
-    shrink: bool,
+    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo, shrink: bool
 ):
     """
     Support function for cylinder geometry.
@@ -395,7 +389,7 @@ def _func_support_cylinder(
 
 
 @qd.func
-def _func_support_prism(i_b: int, d: qd.types.vector(3), collider_state: array_class.ColliderState):
+def _func_support_prism(i_b: int, d: qd.types.vector(3), collider_state: ColliderState):
     istart = 3
     if d[2] < 0:
         istart = 0
@@ -413,7 +407,7 @@ def _func_support_prism(i_b: int, d: qd.types.vector(3), collider_state: array_c
 
 @qd.func
 def _func_support_box(
-    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: array_class.DynInfo
+    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: DynInfo
 ):
     d_box = gu.qd_inv_transform_by_quat(d, quat)
 
@@ -433,33 +427,33 @@ def _func_support_box(
 
 @qd.func
 def _func_count_supports_world(
-    i_g: int, d: qd.types.vector(3), quat: qd.types.vector(4), collider_info: array_class.ColliderInfo
+    i_g: int, d: qd.types.vector(3), quat: qd.types.vector(4), support_field_info: SupportFieldInfo
 ):
     """
     Count the number of valid support points for the given world direction.
     Only needs quat since counting doesn't depend on position.
     """
     d_mesh = gu.qd_transform_by_quat_fast(d, gu.qd_inv_quat(quat))
-    return _func_count_supports_mesh(i_g, d_mesh, collider_info)
+    return _func_count_supports_mesh(i_g, d_mesh, support_field_info)
 
 
 @qd.func
-def _func_count_supports_mesh(i_g: int, d_mesh: qd.types.vector(3), collider_info: array_class.ColliderInfo):
+def _func_count_supports_mesh(i_g: int, d_mesh: qd.types.vector(3), support_field_info: SupportFieldInfo):
     """Count the vertices tied for the support of a mesh-frame direction, all of them listed by the cell holding it."""
-    i_cell = _func_direction_cell(i_g, d_mesh, collider_info)
-    dot_max = collider_info.support_field.support_v[2 * i_cell].dot(d_mesh)
+    i_cell = _func_direction_cell(i_g, d_mesh, support_field_info)
+    dot_max = support_field_info.support_v[2 * i_cell].dot(d_mesh)
     count = gs.qd_int(1)
     # A cell with a single candidate holds it twice in its record (see SupportFieldInfo)
-    if collider_info.support_field.support_vid[2 * i_cell + 1] != collider_info.support_field.support_vid[2 * i_cell]:
-        dot = collider_info.support_field.support_v[2 * i_cell + 1].dot(d_mesh)
+    if support_field_info.support_vid[2 * i_cell + 1] != support_field_info.support_vid[2 * i_cell]:
+        dot = support_field_info.support_v[2 * i_cell + 1].dot(d_mesh)
         if dot > dot_max:
             dot_max = dot
         elif dot == dot_max:
             count += 1
-    i_s_start = collider_info.support_field.support_list_start[i_cell]
-    i_s_end = collider_info.support_field.support_list_start[i_cell + 1]
+    i_s_start = support_field_info.support_list_start[i_cell]
+    i_s_end = support_field_info.support_list_start[i_cell + 1]
     for i_s in range(i_s_start, i_s_end):
-        dot = collider_info.support_field.support_v[i_s].dot(d_mesh)
+        dot = support_field_info.support_v[i_s].dot(d_mesh)
         if dot > dot_max:
             count = 1
             dot_max = dot
@@ -482,8 +476,3 @@ def _func_count_supports_box(d: qd.types.vector(3), quat: qd.types.vector(4)):
     d_box = gu.qd_inv_transform_by_quat(d, quat)
 
     return 2 ** (d_box == 0.0).cast(gs.qd_int).sum()
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.support_field_decomp")

@@ -64,7 +64,9 @@ Thank you for your interest in contributing to Genesis! We welcome contributions
   pytest -v --forked -m required ./tests
   ```
 
-- In the title of your Pull Request, please include [BUG FIX], [FEATURE], [MISC], [CHANGING] (the simulated physics change by default: a different model, or different default parameters) or [BREAKING] (API break) to indicate the purpose. The title is a sentence and ends with a period.
+- A draft Pull Request runs the lint and format checks and skips the online CI tests. They start on the latest commit once you mark it ready for review, or when someone with write access comments `/ci` on it. A commit is tested once: marking a pull request ready again, or commenting `/ci` again, re-runs only the tests that were skipped. When the tests of a pull request from a fork wait for approval, a maintainer approves them, then re-runs the failed CI Command check.
+
+- In the title of your Pull Request, please include [BUG FIX], [FEATURE] or [MISC] to indicate the purpose, preceded by [CHANGING] (the simulated physics change by default: a different model, or different default parameters) or [BREAKING] (API break) when it applies, e.g. `[BREAKING][BUG FIX]`. [CHANGING] and [BREAKING] never stand alone and never go together. The title is a sentence and ends with a period.
 - Commit titles are plain single-line sentences without the bracket tag, also ending with a period.
 - In the description, please provide example code or commands for testing.
 

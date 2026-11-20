@@ -1,5 +1,6 @@
+from collections.abc import Sequence
 from itertools import chain
-from typing import Literal, Sequence
+from typing import Literal
 
 import numpy as np
 
@@ -190,12 +191,16 @@ def init_paired_simulators(gs_sim, mj_sim, qpos=None, qvel=None):
     if qvel is not None:
         gs_sim.rigid_solver.set_dofs_velocity(qvel)
 
-    # The consistency checks compare pre-step derived quantities (bias forces, smooth accelerations), which only a
-    # dynamics pass populates on the Genesis side, mirroring the mj_forward call below.
-    gs_sim.rigid_solver.dyn_state.dofs.qf_constraint.fill(0.0)
-    gs_sim.rigid_solver._func_forward_dynamics()
-    gs_sim.rigid_solver._func_constraint_force()
-    gs_sim.rigid_solver._func_update_acc()
+    # The consistency checks compare pre-step derived quantities (bias forces, smooth and constrained accelerations),
+    # which a substep computes before integrating, mirroring the mj_forward call below. The initial state is then put
+    # back, keeping the contacts the substep detected at that same state.
+    rigid_solver = gs_sim.rigid_solver
+    qpos, dofs_vel = rigid_solver.get_qpos(), rigid_solver.get_dofs_velocity()
+    rigid_solver.substep()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(rigid_solver.collider, "clear", lambda envs_idx=None: None)
+        rigid_solver.set_qpos(qpos)
+    rigid_solver.set_dofs_velocity(dofs_vel)
 
     if gs_sim.scene.visualizer:
         gs_sim.scene.visualizer.update()
@@ -339,18 +344,18 @@ def check_mujoco_model_consistency(
     mj_gravity = mj_sim.model.opt.gravity
     assert_allclose(gs_gravity, mj_gravity, tol=tol)
     assert mj_sim.model.opt.timestep == gs_sim.rigid_solver.substep_dt
-    assert mj_sim.model.opt.tolerance == gs_sim.rigid_solver._options.tolerance
-    assert mj_sim.model.opt.iterations == gs_sim.rigid_solver._options.iterations
+    assert mj_sim.model.opt.tolerance == gs_sim.rigid_solver.options.tolerance
+    assert mj_sim.model.opt.iterations == gs_sim.rigid_solver.options.iterations
     assert not (mj_sim.model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_EULERDAMP)
     assert not (mj_sim.model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_REFSAFE)
     assert not (mj_sim.model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_GRAVITY)
     assert not (mj_sim.model.opt.enableflags & mujoco.mjtEnableBit.mjENBL_FWDINV)
 
     mj_adj_collision = bool(mj_sim.model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_FILTERPARENT)
-    gs_adj_collision = gs_sim.rigid_solver._options.enable_adjacent_collision
+    gs_adj_collision = gs_sim.rigid_solver.options.enable_adjacent_collision
     assert gs_adj_collision == mj_adj_collision
 
-    gs_use_gjk_collision = gs_sim.rigid_solver._options.use_gjk_collision
+    gs_use_gjk_collision = gs_sim.rigid_solver.options.use_gjk_collision
     mj_use_gjk_collision = not (mj_sim.model.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_NATIVECCD)
     assert gs_use_gjk_collision == mj_use_gjk_collision
 
@@ -358,28 +363,28 @@ def check_mujoco_model_consistency(
     if mj_solver.name == "mjSOL_PGS":
         assert False
     elif mj_solver.name == "mjSOL_CG":
-        assert gs_sim.rigid_solver._options.constraint_solver == gs.constraint_solver.CG
+        assert gs_sim.rigid_solver.options.constraint_solver == gs.constraint_solver.CG
     elif mj_solver.name == "mjSOL_NEWTON":
-        assert gs_sim.rigid_solver._options.constraint_solver == gs.constraint_solver.Newton
+        assert gs_sim.rigid_solver.options.constraint_solver == gs.constraint_solver.Newton
     else:
         assert False
 
     mj_integrator = mujoco.mjtIntegrator(mj_sim.model.opt.integrator)
     if mj_integrator.name == "mjINT_EULER":
-        assert gs_sim.rigid_solver._options.integrator == gs.integrator.Euler
+        assert gs_sim.rigid_solver.options.integrator == gs.integrator.Euler
     elif mj_integrator.name == "mjINT_IMPLICIT":
         assert False
     elif mj_integrator.name == "mjINT_IMPLICITFAST":
-        assert gs_sim.rigid_solver._options.integrator == gs.integrator.implicitfast
+        assert gs_sim.rigid_solver.options.integrator == gs.integrator.implicitfast
     else:
         assert False
 
     mj_cone = mujoco.mjtCone(mj_sim.model.opt.cone)
     if mj_cone.name == "mjCONE_ELLIPTIC":
-        assert gs_sim.rigid_solver._options.friction_cone == gs.friction_cone.elliptic
-        assert_allclose(gs_sim.rigid_solver._options.impratio, mj_sim.model.opt.impratio, tol=tol)
+        assert gs_sim.rigid_solver.options.friction_cone == gs.friction_cone.elliptic
+        assert_allclose(gs_sim.rigid_solver.options.impratio, mj_sim.model.opt.impratio, tol=tol)
     elif mj_cone.name == "mjCONE_PYRAMIDAL":
-        assert gs_sim.rigid_solver._options.friction_cone == gs.friction_cone.pyramidal
+        assert gs_sim.rigid_solver.options.friction_cone == gs.friction_cone.pyramidal
     else:
         assert False
 
@@ -712,7 +717,7 @@ def check_mujoco_data_consistency(
                 # Must relax tolerance because of compounding of errors.
                 assert_allclose(gs_improvement, mj_improvement, tol=tol * 1e2)
 
-    gs_qfrc_constraint = gs_sim.rigid_solver.dyn_state.dofs.qf_constraint.to_numpy()[:, 0]
+    gs_qfrc_constraint = gs_sim.rigid_solver.constraint_solver.qfrc_constraint.to_numpy()[:, 0]
     mj_qfrc_constraint = mj_sim.data.qfrc_constraint
     assert_allclose(gs_qfrc_constraint[gs_dofs_idx], mj_qfrc_constraint[mj_dofs_idx], atol=efc_atol, rtol=tol)
 

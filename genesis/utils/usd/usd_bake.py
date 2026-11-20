@@ -1,13 +1,8 @@
 import argparse
 import asyncio
-import importlib.metadata
 import logging
 import os
 import time
-
-# Kit 106 is the last release with wheels for Python 3.10 and 3.11; Python 3.12 gets Kit 107 and later, whose extension
-# registry, viewport and distiller differ from Kit 106 (see 'omni_bootstrap' and 'bake_usd_material').
-KIT_MAJOR = int(importlib.metadata.version("omniverse-kit").split(".")[0])
 
 
 def omni_bootstrap(device=0, log_level="warning"):
@@ -17,14 +12,14 @@ def omni_bootstrap(device=0, log_level="warning"):
     kit_dir = os.path.dirname(os.path.abspath(os.path.realpath(omni.kit_app.__file__)))
     kit_path = os.path.join(kit_dir, "apps", "omni.app.empty.kit")
 
-    omni_extensions = ["omni.usd", "omni.kit.material.library", "omni.kit.usd.collect", "omni.mdl.distill_and_bake"]
-    # The distiller reads the material from the RTX render engine attached to the stage, which the viewport window
-    # attaches and feeds when the stage opens. Kit 106 reaches both through the replicator, whose dependencies resolve
-    # from the Kit 107 shared registry; Kit 107 and later ship them in their own registry.
-    if KIT_MAJOR < 107:
-        omni_extensions.append("omni.replicator.core")
-    else:
-        omni_extensions += ["omni.hydra.rtx", "omni.kit.viewport.window"]
+    # The distiller reads the material from the RTX render engine attached to the stage, which a bare hydra texture
+    # feeds without the viewport window.
+    omni_extensions = [
+        "omni.kit.usd.collect",
+        "omni.mdl.distill_and_bake",
+        "omni.hydra.rtx",
+        "omni.kit.hydra_texture",
+    ]
     app_args = [
         kit_path,
         "--/app/window/hideUi=True",
@@ -43,14 +38,11 @@ def omni_bootstrap(device=0, log_level="warning"):
         "--/renderer/enabled=rtx",
         "--/renderer/active=rtx",
         "--/renderer/multiGpu/enabled=False",  # Avoids unnecessary GPU context initialization
+        # The bake uses no NGX feature (DLSS), whose initialization fails on some headless datacenter GPUs
+        "--/ngx/enabled=False",
         "--no-window",
         "--portable",  # TODO: set portable root to avoid extension conflicts
     ]
-    if KIT_MAJOR < 107:
-        app_args += [
-            "--/exts/omni.kit.registry.nucleus/registries/0/name=kit/default",
-            "--/exts/omni.kit.registry.nucleus/registries/0/url=https://ovextensionsprod.blob.core.windows.net/exts/kit/prod/107/shared",
-        ]
     for extension in omni_extensions:
         app_args += ["--enable", extension]
     app.startup(app_args)
@@ -71,7 +63,9 @@ def bake_usd_material(input_file, output_dir, usd_material_paths, device=0, log_
     import carb
     import omni.usd
     import omni.mdl.distill_and_bake
+    import omni.kit.hydra_texture
     import omni.kit.usd.collect
+    from pxr import Usd, UsdGeom
 
     # open stage
     start_time = time.time()
@@ -81,7 +75,19 @@ def bake_usd_material(input_file, output_dir, usd_material_paths, device=0, log_
     # create render product
     start_time = time.time()
     stage = omni.usd.get_context().get_stage()
-    app.update()  # important
+    # The render engine syncs the materials of the stage only once a render product reads from it, which is bound to a
+    # local to stay alive until the export.
+    omni.usd.create_hydra_engine("rtx", omni.usd.get_context())
+    # The render product views the stage through a camera, which it would otherwise define on the root layer that the
+    # export collects. The session layer keeps the camera and the settings the renderer authors on it out of the baked
+    # stage.
+    camera_path = "/GenesisBakeCamera"
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        UsdGeom.Camera.Define(stage, camera_path)
+        hydra_texture = omni.kit.hydra_texture.create_hydra_texture(
+            name="usd_bake", width=16, height=16, usd_camera_path=camera_path
+        )
+        app.update()  # important
     logs.append(f"\tCreate render product: {time.time() - start_time}s.")
 
     # distill the material
@@ -90,17 +96,14 @@ def bake_usd_material(input_file, output_dir, usd_material_paths, device=0, log_
     for usd_material_path in usd_material_paths:
         material_prim = stage.GetPrimAtPath(usd_material_path)
         distiller = omni.mdl.distill_and_bake.MdlDistillAndBake(material_prim, ouput_folder=output_dir)
-        if KIT_MAJOR < 107:
-            distiller.distill()
-        else:
-            # The synchronous call of Kit 107 and later returns before the material is baked, so the export below would
-            # collect the stage with its material untouched. The result re-raises what the distill raised, and is False
-            # when the renderer holds no such material; either way the export must never run on the unbaked stage.
-            task = asyncio.ensure_future(distiller.distill_async())
-            while not task.done():
-                app.update()
-            if not task.result():
-                raise RuntimeError(f"Distilling material '{usd_material_path}' failed.")
+        # The synchronous call returns before the material is baked, so the export below would collect the stage with
+        # its material untouched. The result re-raises what the distill raised, and is False when the renderer holds no
+        # such material: either way the export must never run on the unbaked stage.
+        task = asyncio.ensure_future(distiller.distill_async())
+        while not task.done():
+            app.update()
+        if not task.result():
+            raise RuntimeError(f"Distilling material '{usd_material_path}' failed.")
         carb.log_info("Distilled: " + usd_material_path)
         logs.append(f"\tDistill: {time.time() - start_time}s, {usd_material_path}.")
 

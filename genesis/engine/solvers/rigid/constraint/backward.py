@@ -1,20 +1,17 @@
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.collider.data import ColliderState
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
+from genesis.utils.data import eoa
 
 from . import solver
+from .data import ConstraintState
 
 
 @qd.func
-def func_matvec_Ap(
-    i_b: int,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
+def func_matvec_Ap(i_b: int, constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo):
     """
     Compute Ap = (M + J^T * diag(D) * J) * p on the current active set, which is used for solving the adjoint u.
 
@@ -25,7 +22,7 @@ def func_matvec_Ap(
         constraint_state.bw_Ap[i_d, i_b] = 0.0
 
     # Mp: Block multiplication
-    n_entities = dyn_info.entities.n_links.shape[0]
+    n_entities = dyn_info.entities.link_start.shape[0]
     for i_e in range(n_entities):
         for i_d1 in range(dyn_info.entities.dof_start[i_e], dyn_info.entities.dof_end[i_e]):
             acc = gs.qd_float(0.0)
@@ -49,11 +46,7 @@ def func_matvec_Ap(
 
 @qd.func
 def func_solve_adjoint_u_cg_batch(
-    i_b: int,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
+    i_b: int, constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo
 ):
     """Conjugate-gradient (CG) solve of A u = g for a single environment [i_b].
 
@@ -79,7 +72,7 @@ def func_solve_adjoint_u_cg_batch(
     for _ in range(rigid_info.iterations[None]):
         if num <= num_target:
             break
-        func_matvec_Ap(i_b, constraint_state, dyn_info, rigid_info, rigid_config)
+        func_matvec_Ap(i_b, constraint_state, dyn_info, rigid_info)
 
         # alpha = (r,r)/(p,Ap)
         den = gs.qd_float(0.0)
@@ -106,10 +99,7 @@ def func_solve_adjoint_u_cg_batch(
 
 @qd.kernel(fastcache=True)
 def kernel_solve_adjoint_u(
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
+    constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     r"""
     Solve for the adjoint vector [u] from Au = g, where A = dF/dqacc (primal Hessian on the active set) and g = dL/dqacc.
@@ -123,12 +113,10 @@ def kernel_solve_adjoint_u(
     The gradient g sums the one of the acceleration and the direct one of the constraint forces: efc_force is
     -D * (J qacc - aref) on an active row and a constant otherwise, so g += J^T * (-D * dL/defc_force).
     """
-    n_dofs = constraint_state.bw_u.shape[0]
     _B = constraint_state.bw_u.shape[1]
-    len_constraints = constraint_state.bw_Ju.shape[0]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_c, i_b in qd.ndrange(len_constraints, _B):
+    for i_c, i_b in qd.ndrange(*constraint_state.bw_Ju.shape, axes=qd.static(eoa(constraint_state.dL_dqacc))):
         if i_c < constraint_state.n_constraints[i_b] and constraint_state.active[i_c, i_b] != 0:
             dL_dJaref = -constraint_state.efc_D[i_c, i_b] * constraint_state.efc_force.grad[i_c, i_b]
             for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
@@ -137,7 +125,7 @@ def kernel_solve_adjoint_u(
 
     # Initialize u
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
+    for i_d, i_b in qd.ndrange(*constraint_state.bw_u.shape, axes=qd.static(eoa(constraint_state.bw_u))):
         constraint_state.bw_u[i_d, i_b] = 0.0
 
     if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton):
@@ -147,7 +135,7 @@ def kernel_solve_adjoint_u(
                 # No active constraint: A = M. The forward's constrained-Hessian Cholesky nt_H is unreliable for
                 # these envs (the GPU tiled factorization skips them), so solve M u = g via CG, which reads mass_mat
                 # directly and never touches nt_H.
-                func_solve_adjoint_u_cg_batch(i_b, constraint_state, dyn_info, rigid_info, rigid_config)
+                func_solve_adjoint_u_cg_batch(i_b, constraint_state, dyn_info, rigid_info)
             else:
                 # Reuse the forward's Cholesky factor A = L L^T through the forward's own solve, which reads L per
                 # island where the per-island factor wrote it (see func_cholesky_solve_batch).
@@ -164,11 +152,11 @@ def kernel_solve_adjoint_u(
         # CG solver for A * u = g (parallelized over the batch dimension).
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
         for i_b in range(_B):
-            func_solve_adjoint_u_cg_batch(i_b, constraint_state, dyn_info, rigid_info, rigid_config)
+            func_solve_adjoint_u_cg_batch(i_b, constraint_state, dyn_info, rigid_info)
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_gradients(constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo):
+def kernel_compute_gradients(constraint_state: ConstraintState, rigid_info: RigidInfo):
     r"""
     Compute gradients of the loss with respect to the input variables to this solver. Note that we use the intermediate
     adjoint vector [u] computed in [kernel_solve_adjoint_u] to compute these gradients.
@@ -184,7 +172,6 @@ def kernel_compute_gradients(constraint_state: array_class.ConstraintState, rigi
     """
     _B = constraint_state.bw_u.shape[1]
     n_dofs = constraint_state.bw_u.shape[0]
-    len_constraints = constraint_state.bw_Ju.shape[0]
 
     # The adjoint of the mass matrix is read whole (see kernel_accumulate_constraint_solver_grads), so it is cleared
     # whole before the mass blocks are written
@@ -192,13 +179,13 @@ def kernel_compute_gradients(constraint_state: array_class.ConstraintState, rigi
         constraint_state.dL_dM[i_d0, i_d1, i_b] = gs.qd_float(0.0)
 
     # force: u
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
+    for i_d, i_b in qd.ndrange(n_dofs, _B, axes=qd.static(eoa(constraint_state.dL_dforce))):
         constraint_state.dL_dforce[i_d, i_b] = constraint_state.bw_u[i_d, i_b]
 
     # One thread per row of every env. The reverses of the row assembly read the rows of the env alone, each over its
     # support (jac_dofs_idx), so the adjoints of a row are written there alone, zero for an inactive row: an entry
     # outside the support is structurally zero and moves nothing.
-    for i_c, i_b in qd.ndrange(len_constraints, _B):
+    for i_c, i_b in qd.ndrange(*constraint_state.bw_Ju.shape, axes=qd.static(eoa(constraint_state.bw_Ju))):
         if i_c < constraint_state.n_constraints[i_b]:
             # Ju, and w = J qacc - aref
             Ju = gs.qd_float(0.0)
@@ -211,8 +198,6 @@ def kernel_compute_gradients(constraint_state: array_class.ConstraintState, rigi
             # y = D \odot w
             y = constraint_state.efc_D[i_c, i_b] * w
             constraint_state.bw_Ju[i_c, i_b] = Ju
-            constraint_state.bw_w[i_c, i_b] = w
-            constraint_state.bw_y[i_c, i_b] = y
 
             is_active = constraint_state.active[i_c, i_b] != 0
             # aref: Ju \odot D, D: -Ju \odot w, the gradient of efc_force adding to Ju
@@ -227,9 +212,9 @@ def kernel_compute_gradients(constraint_state: array_class.ConstraintState, rigi
                 constraint_state.dL_djac[i_c, i_d, i_b] = dL_djac if is_active else gs.qd_float(0.0)
         constraint_state.efc_force.grad[i_c, i_b] = gs.qd_float(0.0)
 
-    # M: -u * qacc^T, over the mass blocks the forward reads (see dofs_mass_block_start in array_class.py): an entry
+    # M: -u * qacc^T, over the mass blocks the forward reads (see dofs_mass_block_start in rigid/data.py): an entry
     # outside them is structurally zero and moves nothing, so its gradient is zero.
-    for i, i_b in qd.ndrange(n_dofs, _B):
+    for i, i_b in qd.ndrange(n_dofs, _B, axes=qd.static(eoa(constraint_state.dL_dM))):
         for j in range(rigid_info.dofs_mass_block_start[i], rigid_info.dofs_mass_block_end[i]):
             val0 = -constraint_state.bw_u[i, i_b] * constraint_state.qacc[j, i_b]
             val1 = -constraint_state.bw_u[j, i_b] * constraint_state.qacc[i, i_b]
@@ -238,30 +223,23 @@ def kernel_compute_gradients(constraint_state: array_class.ConstraintState, rigi
 
 @qd.kernel(fastcache=True)
 def kernel_load_dL_dqacc_from_acc_grad(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    rigid_config: qd.template(),
+    dyn_state: DynState, constraint_state: ConstraintState, rigid_config: qd.template()
 ):
     """Copy the acc grad into constraint_state.dL_dqacc (the input buffer consumed by kernel_solve_adjoint_u) and
     zero the source grad so the downstream implicit-function-theorem path does not re-consume it.
     """
-    _B = dyn_state.dofs.acc.shape[1]
-    n_dofs = dyn_state.dofs.acc.shape[0]
     qd.loop_config(
         name="kernel_load_dL_dqacc_from_acc_grad",
         serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL),
     )
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
+    for i_d, i_b in qd.ndrange(*dyn_state.dofs.acc.shape, axes=qd.static(eoa(constraint_state.dL_dqacc))):
         constraint_state.dL_dqacc[i_d, i_b] = dyn_state.dofs.acc.grad[i_d, i_b]
         dyn_state.dofs.acc.grad[i_d, i_b] = gs.qd_float(0.0)
 
 
 @qd.kernel(fastcache=True)
 def kernel_accumulate_constraint_solver_grads(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
+    dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Fold the constraint-solver adjoint outputs into the autodiff grad fields:
     dyn_state.dofs.qf_smooth.grad += constraint_state.dL_dforce
@@ -274,7 +252,7 @@ def kernel_accumulate_constraint_solver_grads(
         name="kernel_accumulate_constraint_solver_grads",
         serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL),
     )
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
+    for i_d, i_b in qd.ndrange(n_dofs, _B, axes=qd.static(eoa(dyn_state.dofs.qf_smooth))):
         dyn_state.dofs.qf_smooth.grad[i_d, i_b] += constraint_state.dL_dforce[i_d, i_b]
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i, j, i_b in qd.ndrange(n_dofs, n_dofs, _B):
@@ -308,11 +286,11 @@ def kernel_accumulate_constraint_solver_grads(
 # ---------------------------------------------------------------------------
 @qd.kernel(fastcache=True)
 def kernel_manual_add_joint_limit_constraints_bw(
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     enable_collision: qd.template(),
 ):
@@ -434,11 +412,11 @@ def kernel_manual_add_joint_limit_constraints_bw(
 
 @qd.kernel(fastcache=True)
 def kernel_manual_add_collision_constraints_bw(
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Manual reverse of `add_collision_constraints`. See the section header
@@ -462,7 +440,6 @@ def kernel_manual_add_collision_constraints_bw(
     """
     EPS = rigid_info.EPS[None]
     _B = dyn_state.dofs.ctrl_mode.shape[1]
-    n_dofs = dyn_state.dofs.ctrl_mode.shape[0]
     max_contact_pairs = collider_state.contact_data.link_a.shape[0]
 
     qd.loop_config(
@@ -634,10 +611,10 @@ def kernel_manual_add_collision_constraints_bw(
 
 @qd.kernel(fastcache=True)
 def kernel_manual_add_frictionloss_constraints_bw(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Manual reverse of `add_frictionloss_constraints`. See the section header
@@ -701,8 +678,8 @@ def func_cddb_ang_bw(
     i_b: int,
     link: int,
     g_cddb_ang: qd.types.vector(3),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     """Reverse of the chain contraction cddb_ang = sum_d cdofd_ang[d] * vel[d] (see func_equality_jdotv in
@@ -722,8 +699,8 @@ def func_equality_jdotv_bw(
     link: int,
     anchor_pos: qd.types.vector(3),
     g_jdotv: qd.types.vector(3),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     """Reverse of func_equality_jdotv (see solver.py) for one chain, given the upstream gradient g_jdotv of its
@@ -772,10 +749,10 @@ def func_equality_jdotv_bw(
 
 @qd.kernel(fastcache=True)
 def kernel_manual_add_equality_constraints_bw(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Manual reverse of `add_equality_constraints` (JOINT + CONNECT + WELD).
@@ -1038,7 +1015,6 @@ def kernel_manual_add_equality_constraints_bw(
                                 i_d = dyn_info.links.dof_end[link_maybe_batch] - 1 - i_d_
 
                                 cdof_ang = dyn_state.dofs.cdof_ang[i_d, i_b]
-                                cdof_vel = dyn_state.dofs.cdof_vel[i_d, i_b]
                                 t_pos = anchor_pos - dyn_state.links.root_COM[link, i_b]
 
                                 # jac_i3 = sign * vel_motion[i_3]
@@ -1237,7 +1213,6 @@ def kernel_manual_add_equality_constraints_bw(
                                 i_d = dyn_info.links.dof_end[link_maybe_batch] - 1 - i_d_
 
                                 cdof_ang = dyn_state.dofs.cdof_ang[i_d, i_b]
-                                cdof_vel = dyn_state.dofs.cdof_vel[i_d, i_b]
                                 t_pos = anchor_pos - dyn_state.links.root_COM[link, i_b]
 
                                 g_jac_i3 = (

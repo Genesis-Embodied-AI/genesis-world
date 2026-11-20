@@ -1,60 +1,18 @@
 import os
 import xml.etree.ElementTree as ET
 
-import numpy as np
 import pytest
-import trimesh
 from PIL import Image
 
-import genesis.utils.geom as gu
-from genesis.utils.misc import get_assets_dir
+from ..conftest import lazy_imports
 
+# Imported on first use (see pytest_sessionstart in tests/conftest.py)
+with lazy_imports():
+    import numpy as np
+    import trimesh
 
-@pytest.fixture
-def xml_path(request, tmp_path, model_name):
-    """The model Mujoco is built from, which holds every subtree, however Genesis groups them into entities."""
-    # An asset-relative path passes through to the asset resolver; a bare name is the fixture generating the model.
-    if "/" in model_name:
-        return model_name
-    mjcf = request.getfixturevalue(model_name)
-    file_name = f"{model_name}.urdf" if mjcf.tag == "robot" else f"{model_name}.xml"
-    file_path = str(tmp_path / file_name)
-    ET.ElementTree(mjcf).write(file_path, encoding="utf-8", xml_declaration=True)
-    return file_path
-
-
-@pytest.fixture
-def xml_paths(request, tmp_path, xml_path):
-    """The models the Genesis scene is assembled from, one entity per model, which is the Mujoco model by default.
-
-    A test marked 'split_entities' gets the model of 'model_name' split into one model per independent subtree, so that
-    the Genesis scene holds one entity per subtree while Mujoco holds them all in one model. Every top-level body of
-    the worldbody roots a subtree of its own, and the geoms of the worldbody itself root nothing, so they make a model
-    of their own. Each part keeps the headers of the source model, its defaults and assets included.
-
-    Splitting changes which entity a body belongs to, and with it how Genesis pairs contacts, so it is asked for by the
-    tests that compare what must not depend on the grouping, rather than applied to every model.
-    """
-    if next(request.node.iter_markers("split_entities"), None) is None:
-        return (xml_path,)
-
-    model_name = request.getfixturevalue("model_name")
-    mjcf = request.getfixturevalue(model_name)
-    parts = []
-    worldbody = mjcf.find("worldbody")
-    geoms = worldbody.findall("geom")
-    for children in [[body] for body in worldbody.findall("body")] + ([geoms] if geoms else []):
-        part = ET.Element(mjcf.tag, mjcf.attrib)
-        part.extend(header for header in mjcf if header.tag != "worldbody")
-        ET.SubElement(part, "worldbody").extend(children)
-        parts.append(part)
-
-    paths = []
-    for i_part, part in enumerate(parts):
-        file_path = str(tmp_path / f"{model_name}_{i_part}.xml")
-        ET.ElementTree(part).write(file_path, encoding="utf-8", xml_declaration=True)
-        paths.append(file_path)
-    return tuple(paths)
+    import genesis.utils.geom as gu
+    from genesis.utils.misc import get_assets_dir
 
 
 def _build_plane_contact_model(model_name, condim, friction, plane_size):
@@ -313,24 +271,54 @@ def mimic_hinges():
 @pytest.fixture(scope="session")
 def connected_boxes():
     # The hung box starts lifted away from the fixed box by a rotation about its pivot, the top edge of the 5 mm gap
-    # between their facing sides
+    # between their facing sides. The welded box is held beside the fixed box by a weld between two sites at its
+    # center, which gravity leaves without torque. The frame of both free boxes stands off their center of mass.
     fixed_pos = np.array((0.0, 0.0, 0.3))
     pivot_pos = np.array((0.0225, 0.0, 0.02))
     hung_angle = -1.2
     hung_quat = gu.xyz_to_quat(np.array((0.0, hung_angle, 0.0)))
-    hung_pos = fixed_pos + pivot_pos - gu.transform_by_quat(np.array((-0.0225, 0.0, 0.02)), hung_quat)
+    hung_geom_pos = np.array((0.01, 0.0, -0.015))
+    hung_pos = fixed_pos + pivot_pos - gu.transform_by_quat(np.array((-0.0225, 0.0, 0.02)) + hung_geom_pos, hung_quat)
+    welded_pos = fixed_pos + np.array((0.02, 0.12, 0.01))
+    welded_quat = gu.xyz_to_quat(np.array((0.4, -0.2, 0.7)))
+    welded_geom_pos = np.array((0.02, 0.01, 0.0))
+    site_fixed_pos = welded_pos + gu.transform_by_quat(welded_geom_pos, welded_quat) - fixed_pos
+    site_fixed_quat = gu.xyz_to_quat(np.array((0.3, 0.5, 0.0)))
+    site_welded_quat = gu.transform_quat_by_quat(site_fixed_quat, gu.inv_quat(welded_quat))
     mjcf = ET.Element("mujoco", model="connected_boxes")
     ET.SubElement(mjcf, "compiler", angle="radian")
     worldbody = ET.SubElement(mjcf, "worldbody")
     box_fixed = ET.SubElement(worldbody, "body", name="box_fixed", pos=" ".join(map(str, fixed_pos)))
     ET.SubElement(box_fixed, "geom", type="box", size="0.02 0.02 0.02")
+    ET.SubElement(
+        box_fixed,
+        "site",
+        name="site_fixed",
+        pos=" ".join(map(str, site_fixed_pos)),
+        quat=" ".join(map(str, site_fixed_quat)),
+    )
     box_hung = ET.SubElement(
         worldbody, "body", name="box_hung", pos=" ".join(map(str, hung_pos)), axisangle=f"0 1 0 {hung_angle}"
     )
     ET.SubElement(box_hung, "freejoint")
-    ET.SubElement(box_hung, "geom", type="box", size="0.02 0.02 0.02")
+    ET.SubElement(box_hung, "geom", type="box", size="0.02 0.02 0.02", pos=" ".join(map(str, hung_geom_pos)))
+    box_welded = ET.SubElement(
+        worldbody, "body", name="box_welded", pos=" ".join(map(str, welded_pos)), quat=" ".join(map(str, welded_quat))
+    )
+    ET.SubElement(box_welded, "freejoint")
+    ET.SubElement(
+        box_welded, "geom", type="box", size="0.03 0.015 0.01", pos=" ".join(map(str, welded_geom_pos)), euler="0 0 0.4"
+    )
+    ET.SubElement(
+        box_welded,
+        "site",
+        name="site_welded",
+        pos=" ".join(map(str, welded_geom_pos)),
+        quat=" ".join(map(str, site_welded_quat)),
+    )
     equality = ET.SubElement(mjcf, "equality")
     ET.SubElement(equality, "connect", body1="box_fixed", body2="box_hung", anchor=" ".join(map(str, pivot_pos)))
+    ET.SubElement(equality, "weld", site1="site_welded", site2="site_fixed")
     return ET.tostring(mjcf, encoding="unicode")
 
 
@@ -345,45 +333,15 @@ def swinging_spindle():
     ET.SubElement(nut, "joint", name="travel", type="slide", axis="0 0 1")
     ET.SubElement(nut, "joint", name="turn", type="hinge", axis="0 0 1")
     ET.SubElement(nut, "geom", type="box", size="0.05 0.05 0.01")
-    # The spindle passes through the solid free nut, which only stays on it because the screw stops their collision
+    # The spindle passes through the solid free nuts, which only stay on it because the screw stops their collision.
+    # The frame of the eccentric nut stands off its center of mass.
     free_nut = ET.SubElement(worldbody, "body", name="free_nut", pos="0 0 0.5")
     ET.SubElement(free_nut, "freejoint")
     ET.SubElement(free_nut, "geom", type="box", size="0.05 0.05 0.01")
+    eccentric_nut = ET.SubElement(worldbody, "body", name="eccentric_nut", pos="0 0 0.85")
+    ET.SubElement(eccentric_nut, "freejoint")
+    ET.SubElement(eccentric_nut, "geom", type="box", size="0.05 0.05 0.01", pos="0.02 0.01 0", euler="20 0 0")
     return ET.tostring(mjcf, encoding="unicode")
-
-
-@pytest.fixture(scope="session")
-def scaled_mjcf_joint_equalities():
-    mjcf = ET.Element("mujoco", model="scaled_mjcf_joint_equalities")
-    worldbody = ET.SubElement(mjcf, "worldbody")
-    equality = ET.SubElement(mjcf, "equality")
-    for driver_type, follower_type, position_y in (
-        ("hinge", "hinge", -0.25),
-        ("slide", "slide", -0.5),
-        ("slide", "hinge", -0.75),
-        ("hinge", "slide", -1.0),
-    ):
-        pair_name = f"{driver_type}_{follower_type}"
-        driver_body = ET.SubElement(worldbody, "body", name=f"{pair_name}_driver_body", pos=f"0 {position_y} 0")
-        ET.SubElement(driver_body, "joint", name=f"{pair_name}_driver", type=driver_type, axis="1 0 0")
-        ET.SubElement(driver_body, "geom", type="sphere", size="0.05", mass="1", contype="0", conaffinity="0")
-        follower_body = ET.SubElement(worldbody, "body", name=f"{pair_name}_follower_body", pos=f"0.15 {position_y} 0")
-        ET.SubElement(follower_body, "joint", name=f"{pair_name}_follower", type=follower_type, axis="1 0 0")
-        ET.SubElement(follower_body, "geom", type="sphere", size="0.05", mass="1", contype="0", conaffinity="0")
-        ET.SubElement(
-            equality,
-            "joint",
-            name=f"{pair_name}_coupling",
-            joint1=f"{pair_name}_follower",
-            joint2=f"{pair_name}_driver",
-            polycoef="0.2 0.4 -0.3 0.2 -0.1",
-        )
-    for name, position_y in (("target", 0.0), ("unrelated", 0.25)):
-        body = ET.SubElement(worldbody, "body", name=f"{name}_body", pos=f"0 {position_y} 0")
-        ET.SubElement(body, "joint", name=name, type="slide", axis="1 0 0")
-        ET.SubElement(body, "geom", type="sphere", size="0.05", mass="1", contype="0", conaffinity="0")
-    ET.SubElement(equality, "joint", name="fixed_target", joint1="target", polycoef="0.25 1 0 0 0")
-    return mjcf
 
 
 @pytest.fixture(scope="session")
@@ -726,21 +684,25 @@ def _add_sphere_link(urdf, link_name, geom_pos, mass=None, inertia=None, inertia
 @pytest.fixture
 def joint_with_partial_dynamics(joint_damping, joint_friction):
     # Inertia is deliberately left undefined: recomputing it from geometry is the path along which an unset
-    # <dynamics> attribute reaches the solver instead of being replaced beforehand.
+    # <dynamics> attribute reaches the solver instead of being replaced beforehand. The <limit> tags author no effort,
+    # a zero effort and a negative effort respectively.
     urdf = ET.Element("robot", name="joint_with_partial_dynamics")
     _add_sphere_link(urdf, "base_link", "0.0 0.0 0.0")
-    _add_sphere_link(urdf, "PendulumArm_0", "0.0 0.0 0.09")
-    joint = ET.SubElement(urdf, "joint", name="PendulumJoint_0", type="continuous")
-    ET.SubElement(joint, "origin", xyz="0.0 0.0 0.0", rpy="0.0 0.0 0.0")
-    ET.SubElement(joint, "axis", xyz="1 0 0")
-    ET.SubElement(joint, "parent", link="base_link")
-    ET.SubElement(joint, "child", link="PendulumArm_0")
-    ET.SubElement(joint, "limit", effort="100.0", velocity="30.0")
-    dynamics = ET.SubElement(joint, "dynamics")
-    if joint_damping is not None:
-        dynamics.set("damping", str(joint_damping))
-    if joint_friction is not None:
-        dynamics.set("friction", str(joint_friction))
+    for i, effort in enumerate((None, "0.0", "-50.0")):
+        _add_sphere_link(urdf, f"PendulumArm_{i}", "0.0 0.0 0.09")
+        joint = ET.SubElement(urdf, "joint", name=f"PendulumJoint_{i}", type="continuous")
+        ET.SubElement(joint, "origin", xyz="0.0 0.0 0.0", rpy="0.0 0.0 0.0")
+        ET.SubElement(joint, "axis", xyz="1 0 0")
+        ET.SubElement(joint, "parent", link="base_link")
+        ET.SubElement(joint, "child", link=f"PendulumArm_{i}")
+        limit = ET.SubElement(joint, "limit", velocity="30.0")
+        if effort is not None:
+            limit.set("effort", effort)
+        dynamics = ET.SubElement(joint, "dynamics")
+        if joint_damping is not None:
+            dynamics.set("damping", str(joint_damping))
+        if joint_friction is not None:
+            dynamics.set("friction", str(joint_friction))
     return urdf
 
 
@@ -800,14 +762,28 @@ def sliding_ball_pair():
 
 @pytest.fixture(scope="session")
 def free_bodies_in_one_model():
-    """Generate an MJCF holding two free bodies, i.e. one entity of two kinematic trees sharing its mass blocks."""
+    """Generate an MJCF holding two free bodies, i.e. one entity of two kinematic trees sharing its mass blocks. Every
+    geom states its collision bitmasks, and the first body reaches into the second through a massless geom, the pair
+    of bodies being excluded from collision."""
     mjcf = ET.Element("mujoco")
     worldbody = ET.SubElement(mjcf, "worldbody")
     for i_body, mass in enumerate((1.0, 3.0)):
         body = ET.SubElement(worldbody, "body", name=f"free_{i_body}", pos=f"{i_body} 4.0 0.4")
         ET.SubElement(body, "freejoint")
-        ET.SubElement(body, "geom", type="box", size="0.05 0.05 0.05", mass=str(mass))
-    return ET.tostring(mjcf, encoding="unicode")
+        ET.SubElement(body, "geom", type="box", size="0.05 0.05 0.05", mass=str(mass), contype="3", conaffinity="5")
+    ET.SubElement(
+        worldbody[0],
+        "geom",
+        type="box",
+        size="0.05 0.05 0.05",
+        pos="0.95 0.0 0.0",
+        mass="0",
+        contype="3",
+        conaffinity="5",
+    )
+    contact = ET.SubElement(mjcf, "contact")
+    ET.SubElement(contact, "exclude", body1="free_0", body2="free_1")
+    return mjcf
 
 
 @pytest.fixture(scope="session")
@@ -1212,23 +1188,47 @@ def freeflyer_mjcf():
 
 @pytest.fixture(scope="session")
 def trees_and_slider_mjcf():
-    """Generate an MJCF model holding three kinematic trees: a free body with a hinged child twice, the second hinge
-    with an authored armature, and a body sliding on the world along one axis with an authored armature."""
+    """Generate an MJCF model of four kinematic trees, none of whose poses, anchors, axes or references is a default.
+
+    The first two trees are a free body with a hinged child, the second hinge with an authored armature. The third is a
+    body sliding on the world with an authored armature. The fourth chains every other joint type from a free body: a
+    ball joint, then a body moving through a hinge and a slide together, then a welded body, then a hinge, the free body
+    branching into a sliding body too. Its hinge and slide moving a body alone carry an authored armature.
+    """
     mjcf = ET.Element("mujoco", model="trees_and_slider")
+    ET.SubElement(mjcf, "compiler", angle="degree")
     worldbody = ET.SubElement(mjcf, "worldbody")
-    for name, pos, joint_attrs in (("tree_a", "0 0 1", {}), ("tree_b", "1 0 1", {"armature": "0.3"})):
-        body = ET.SubElement(worldbody, "body", name=name, pos=pos)
+    for name, pos, joint_attrs in (("tree_a", "0.1 -0.1 1", {}), ("tree_b", "1 0.1 1.1", {"armature": "0.3"})):
+        body = ET.SubElement(worldbody, "body", name=name, pos=pos, euler="10 -20 30")
         ET.SubElement(body, "joint", type="free")
         ET.SubElement(body, "inertial", pos="0 0 0", mass="1.0", diaginertia="0.01 0.01 0.01")
-        ET.SubElement(body, "geom", type="sphere", size="0.05")
-        child = ET.SubElement(body, "body", name=f"{name}_child", pos="0 0 0.1")
-        ET.SubElement(child, "joint", type="hinge", axis="0 1 0", **joint_attrs)
+        ET.SubElement(body, "geom", type="sphere", size="0.05", pos="0.01 -0.02 0.01")
+        child = ET.SubElement(body, "body", name=f"{name}_child", pos="0.02 0.01 0.1", euler="-15 5 25")
+        ET.SubElement(child, "joint", type="hinge", axis="0.2 1 0.3", pos="0.01 0.02 -0.01", ref="20", **joint_attrs)
         ET.SubElement(child, "inertial", pos="0 0 0", mass="0.5", diaginertia="0.001 0.001 0.001")
-        ET.SubElement(child, "geom", type="sphere", size="0.02")
-    slider = ET.SubElement(worldbody, "body", name="slider", pos="2 0 1")
-    ET.SubElement(slider, "joint", type="slide", axis="1 0 0", armature="0.3")
+        ET.SubElement(child, "geom", type="sphere", size="0.02", pos="0.02 0.01 -0.01")
+    slider = ET.SubElement(worldbody, "body", name="slider", pos="2 0.1 1", euler="5 -8 12")
+    ET.SubElement(slider, "joint", type="slide", axis="1 0.2 -0.3", pos="0.01 0.02 0.03", ref="0.05", armature="0.3")
     ET.SubElement(slider, "inertial", pos="0 0 0", mass="1.0", diaginertia="0.01 0.01 0.01")
-    ET.SubElement(slider, "geom", type="sphere", size="0.05")
+    ET.SubElement(slider, "geom", type="sphere", size="0.05", pos="-0.01 0.02 0.01")
+    base = ET.SubElement(worldbody, "body", name="chain_base", pos="3 -0.2 0.8", euler="10 -20 30")
+    ET.SubElement(base, "freejoint")
+    ET.SubElement(base, "geom", type="box", size="0.1 0.05 0.03", pos="0.02 0.01 -0.03", euler="5 -8 15")
+    ball = ET.SubElement(base, "body", name="chain_ball", pos="0.15 0.02 0.05", euler="-12 30 7")
+    ET.SubElement(ball, "joint", type="ball", axis="0.2 0.3 0.9", pos="-0.03 0.01 0.02")
+    ET.SubElement(ball, "geom", type="capsule", size="0.02 0.05", pos="0.06 -0.01 0.02", euler="3 90 -6")
+    multi = ET.SubElement(ball, "body", name="chain_multi", pos="0.12 -0.03 0.01", euler="15 9 -10")
+    ET.SubElement(multi, "joint", type="hinge", axis="0.3 -0.5 0.8", pos="0.02 0.03 -0.01", ref="25")
+    ET.SubElement(multi, "joint", type="slide", axis="-0.6 0.2 0.4", pos="0.01 -0.02 0.03", ref="0.07")
+    ET.SubElement(multi, "geom", type="sphere", size="0.03", pos="0.04 -0.02 0.01", euler="20 -15 35")
+    welded = ET.SubElement(multi, "body", name="chain_welded", pos="0.08 0.02 -0.01", euler="6 -40 20")
+    ET.SubElement(welded, "geom", type="box", size="0.02 0.02 0.02", pos="0.01 0.03 -0.02", euler="-25 10 5")
+    tip = ET.SubElement(welded, "body", name="chain_tip", pos="0.05 -0.01 0.02", euler="-18 4 27")
+    ET.SubElement(tip, "joint", type="hinge", axis="1 1 0.3", pos="0.01 0.02 -0.02", ref="-35", armature="0.3")
+    ET.SubElement(tip, "geom", type="cylinder", size="0.01 0.04", pos="0.01 0.02 0.03", euler="90 -12 8")
+    side = ET.SubElement(base, "body", name="chain_side", pos="-0.12 0.04 0.02", euler="7 -11 45")
+    ET.SubElement(side, "joint", type="slide", axis="0.1 0.6 0.8", pos="0.02 0.01 -0.01", ref="-0.05", armature="0.3")
+    ET.SubElement(side, "geom", type="box", size="0.03 0.02 0.01", pos="0.01 0.02 -0.01", euler="12 -9 4")
     return ET.tostring(mjcf, encoding="unicode")
 
 

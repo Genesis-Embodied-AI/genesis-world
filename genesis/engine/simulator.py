@@ -1,32 +1,46 @@
-import functools
+import os
 import weakref
 from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 import genesis as gs
+from genesis.engine.solvers.base_solver import BackwardErrorCode
 from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
-from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.array_class import DataItem, DataKind, ErrorCode, iter_data
-from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
+from genesis.typing import IndexType
+from genesis.utils.data import ArrayItem, DataItem, DataKind, check_data, iter_data
+from genesis.utils.misc import (
+    BatchedMixin,
+    BuildableMixin,
+    indices_to_mask,
+    qd_destroy_data,
+    qd_to_numpy,
+    qd_to_torch,
+    sanitize_index,
+)
 from genesis.utils.tools import StepTimer
+from genesis.utils.warnings import warn_once
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
+from .couplers.rigid_mpm_hybrid import RigidMPMHybrid
 from .entities import HybridEntity
+from .render_context import RenderContext
 from .sensors import SensorManager
-from .solvers import (
-    FEMSolver,
-    KinematicSolver,
-    MPMSolver,
-    PBDSolver,
-    RigidSolver,
-    SFSolver,
-    SPHSolver,
+from .solvers import FEMSolver, KinematicSolver, MPMSolver, PBDSolver, RigidSolver, SPHSolver
+from .solvers.base_solver import (
+    CheckpointMixin,
+    ErrnoMixin,
+    GravityMixin,
+    SimulatorState,
+    Solver,
+    TimeBasedMixin,
+    kernel_set_time,
+    merge_errno,
 )
-from .solvers.base_solver import GravityMixin, TimeBasedMixin, merge_errno
 from .state_change import StateChange, Subscriber
 from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 
@@ -34,12 +48,7 @@ if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity, EntityDescription
     from genesis.engine.scene import Scene
     from genesis.options.scene import SceneOptions
-
-    from .solvers.base_solver import Solver
-
-
-# The kinds of the state a step or a substep starts from, from which its backward pass replays it
-STATE_KINDS = frozenset((DataKind.STATE,))
+    from genesis.options.surfaces import Surface
 
 
 def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SolverCheckpoint]]) -> None:
@@ -51,7 +60,7 @@ def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SolverChec
         torch.mps.synchronize()
 
 
-class Simulator(RBC):
+class Simulator(BatchedMixin, BuildableMixin, RBC):
     """
     A simulator is a scene-level simulation manager, which manages all simulation-related operations in the scene, including multiple solvers and the inter-solver coupler.
 
@@ -78,6 +87,7 @@ class Simulator(RBC):
         self._requires_grad: bool = self.options.requires_grad
 
         self._cur_substep_global = 0
+        self.sim_state: SimulatorState | None = None
 
         # Autograd graph of the rollout (see genesis.grad.bridge), which a reset starts anew (see 'is_forward_ready' for
         # the steps a backward pass forbids)
@@ -87,15 +97,19 @@ class Simulator(RBC):
             # than with the context of the step being reversed when a deferred check reads them. The adjoints start
             # from zero.
             self._is_forward_ready = False
+            for component in self._active_systems:
+                component.update_errno()
+                component.check_errno()
             for solver in self._active_solvers:
-                solver.update_errno()
-                solver.check_errno()
                 solver.reset_grad()
+            # One flush for the zero-copy writes of every solver (see qd_zero_grad in misc.py)
+            if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+                torch.mps.synchronize()
 
         def end_backward_pass():
             # The errors the solvers flagged while replaying the rollout are raised once the pass is over
-            for solver in self._active_solvers:
-                solver.check_errno()
+            for component in self._active_systems:
+                component.check_errno()
 
         self._rollout_graph = RolloutGraph(
             self._requires_grad, on_pass_start=begin_backward_pass, on_pass_end=end_backward_pass
@@ -103,13 +117,12 @@ class Simulator(RBC):
         self._is_forward_ready = True
 
         # solvers
-        self.rigid_solver = RigidSolver(self.scene, self, options.rigid)
-        self.kinematic_solver = KinematicSolver(self.scene, self, options.kinematic)
-        self.mpm_solver = MPMSolver(self.scene, self, options.mpm)
-        self.sph_solver = SPHSolver(self.scene, self, options.sph)
-        self.pbd_solver = PBDSolver(self.scene, self, options.pbd)
-        self.fem_solver = FEMSolver(self.scene, self, options.fem)
-        self.sf_solver = SFSolver(self.scene, self, options.sf)
+        self.rigid_solver = RigidSolver(self, options.rigid)
+        self.kinematic_solver = KinematicSolver(self, options.kinematic)
+        self.mpm_solver = MPMSolver(self, options.mpm)
+        self.sph_solver = SPHSolver(self, options.sph)
+        self.pbd_solver = PBDSolver(self, options.pbd)
+        self.fem_solver = FEMSolver(self, options.fem)
 
         self._solvers: list["Solver"] = gs.List(
             [
@@ -119,11 +132,19 @@ class Simulator(RBC):
                 self.sph_solver,
                 self.pbd_solver,
                 self.fem_solver,
-                self.sf_solver,
             ]
         )
+        # The solver simulating the entities of each entity spec class, a subclass going where its base goes
+        self._solvers_by_spec_cls: dict[type[gs.entities.Spec], "Solver"] = {
+            solver.entity_spec_cls: solver for solver in self._solvers
+        }
+        assert len(self._solvers_by_spec_cls) == len(self._solvers)
 
         self._active_solvers: list["Solver"] = gs.List()
+        # What runs in the scene in its own right: the active solvers, then the coupler when one is active
+        self._active_systems: list["ErrnoMixin | CheckpointMixin"] = []
+        # The soft parts of the hybrid entities following their rigid links, updated after the coupling of every substep
+        self._rigid_mpm_hybrid: RigidMPMHybrid | None = None
 
         # coupler
         if isinstance(options.coupler, SAPCouplerOptions):
@@ -144,49 +165,53 @@ class Simulator(RBC):
         # sensors
         self._sensor_manager = SensorManager(self)
 
-    def _add_entity(
+        # The visual data of the scene, to which the components of the scene add their scoped context as they build
+        self._render_context = RenderContext(options.vis.debug)
+
+    def add_entity(
         self,
-        morph: Morph | None = None,
-        material=None,
-        surface=None,
-        visualize_contact=False,
-        name: str | None = None,
+        surface: "Surface | None" = None,
+        spec: "gs.entities.Spec | None" = None,
         desc: "EntityDescription | None" = None,
-    ):
+    ) -> "Entity":
         if desc is not None:
-            material = desc.material
-        if visualize_contact and not isinstance(material, gs.materials.Rigid):
-            gs.raise_exception("'visualize_contact' only applies to rigid entities.")
-        if isinstance(material, gs.materials.Hybrid):
-            # Note that adding to solver is handled in the hybrid entity
-            entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, name=name)
+            spec = desc.spec
+        if isinstance(spec, gs.entities.Hybrid):
+            # A hybrid entity adds its parts to the scene itself, as entities of their own
+            entity = HybridEntity(self.n_entities, self.scene, surface, spec)
         else:
-            # Several solvers may declare a class the material belongs to, since 'Rigid' derives from 'Kinematic'. The
-            # one declaring the most derived class simulates it (see 'Solver.material_cls').
-            solver = None
-            for candidate in self._solvers:
-                if candidate.material_cls is None or not isinstance(material, candidate.material_cls):
-                    continue
-                if solver is None or issubclass(candidate.material_cls, solver.material_cls):
-                    solver = candidate
-            if solver is None:
-                gs.raise_exception(f"No solver simulates entities of material {type(material).__name__}.")
-            entity = solver.add_entity(
-                self.n_entities, material, morph, surface, visualize_contact, name=name, desc=desc
+            solver = next(
+                (
+                    self._solvers_by_spec_cls[spec_cls]
+                    for spec_cls in type(spec).__mro__
+                    if spec_cls in self._solvers_by_spec_cls
+                ),
+                None,
             )
+            assert solver is not None
+            entity = solver.add_entity(self.n_entities, surface, spec, desc)
         self._entities.append(entity)
         if entity.desc is not None:
             self.scene._desc.entities.append(entity.desc)
         return entity
 
-    def _add_force_field(self, force_field):
+    def add_force_field(self, force_field):
         for solver in self._solvers:
             solver._add_force_field(force_field)
 
-    def build(self):
-        self.n_envs = self.scene.n_envs
-        self._B = self.scene._B
-        self._para_level = self.scene._para_level
+    @gs.assert_unbuilt
+    def build(self, n_envs: int) -> None:
+        super().build(n_envs)
+        # On CPU every loop is serialized, parallelization only paying off for n_envs >= number of threads, so it is
+        # left to the user to enforce it through the environment variable 'GS_PARA_LEVEL'. On GPU, every loop of a
+        # batched scene is parallelized, and only the loops large enough to pay off otherwise.
+        if gs.backend == gs.cpu:
+            para_level = gs.PARA_LEVEL.NEVER
+        elif n_envs <= 1:
+            para_level = gs.PARA_LEVEL.PARTIAL
+        else:
+            para_level = gs.PARA_LEVEL.ALL
+        self._para_level = int(os.environ.get("GS_PARA_LEVEL", para_level))
 
         # Settled before any solver builds: a solver fills its own buffers with the interval it holds, so a rate
         # settled afterwards would leave those buffers describing an interval the loop does not run at. Whether a
@@ -197,9 +222,9 @@ class Simulator(RBC):
         ]
         # A solver given an interval asks for a rate of its own, whatever that interval works out to. A solver left
         # unset takes the rate the shorthand of SimOptions decides, and has nothing to reconcile.
-        asking_solvers = [solver for solver in integrating_solvers if "dt" in solver._options.model_fields_set]
+        asking_solvers = [solver for solver in integrating_solvers if "dt" in solver.options.model_fields_set]
         for solver in asking_solvers:
-            interval = solver._options.dt
+            interval = solver.options.dt
             n_substeps = solver.substeps
             if abs(n_substeps * interval - self._dt) > gs.EPS * self._dt:
                 gs.raise_exception(
@@ -216,7 +241,7 @@ class Simulator(RBC):
         if len(rates) > 1:
             gs.raise_exception(
                 "Solvers integrating at different rates are not supported yet, got "
-                + ", ".join(f"{type(solver).__name__} at dt={solver._options.dt}" for solver in asking_solvers)
+                + ", ".join(f"{type(solver).__name__} at dt={solver.options.dt}" for solver in asking_solvers)
                 + "."
             )
         substeps = next(iter(rates), self._substeps)
@@ -229,20 +254,39 @@ class Simulator(RBC):
             solver._substep_dt = self._substep_dt
 
         # Counted per environment to support per-env reset, as steps rather than seconds to avoid drifting over time.
-        self._steps = torch.zeros((self._B,), dtype=gs.tc_int, device=gs.device)
+        self._steps = torch.zeros((self.n_envs_,), dtype=gs.tc_int, device=gs.device)
+        self.sim_state = SimulatorState(sizes=dict(envs=self.n_envs_))
 
         # solvers
         # IPCCoupler needs full substep flow for pre/post coupling phases
         self._rigid_only = self.rigid_solver.is_active and not isinstance(self._coupler, (SAPCoupler, IPCCoupler))
+        # The SAP coupler solves every FEM vertex from its momentum residual, which the quadratic energy of the models
+        # of the implicit solver makes exact (see func_init_fem_reference_gradient in sap_coupler.py).
+        self.fem_solver._is_free_solve_skipped = isinstance(self._coupler, SAPCoupler)
         for solver in self._solvers:
-            solver.build()
+            solver.build(n_envs)
             if solver.is_active:
                 self._active_solvers.append(solver)
+                self._active_systems.append(solver)
                 if not isinstance(solver, RigidSolver):
                     self._rigid_only = False
 
         # A coupler exchanges state once per substep, so it is built once the rate that loop runs at is known.
-        self._coupler.build()
+        # The systems are listed as they are built, so that a scene whose build fails frees those built (see 'destroy')
+        self._active_systems.append(self._coupler)
+        self._coupler.build(n_envs)
+        # The errors and the checkpoints of every system are handled at each step without further checks
+        for system in self._active_systems:
+            if not isinstance(system, ErrnoMixin):
+                gs.raise_exception(
+                    f"{type(system).__name__} does not support errno: solvers and couplers must report their errors "
+                    "through ErrnoMixin."
+                )
+            if not isinstance(system, CheckpointMixin):
+                gs.raise_exception(
+                    f"{type(system).__name__} does not support checkpoints: solvers and couplers must declare them "
+                    "through CheckpointMixin."
+                )
 
         # Every active solver and the coupler of a differentiable scene support gradients, which they declare. The
         # coupler declares it for the couplings it activated at build.
@@ -257,13 +301,15 @@ class Simulator(RBC):
                     f"Differentiable simulation ('requires_grad=True') is not supported by {unsupported_names}."
                 )
 
-        if self.n_envs > 0 and self.sf_solver.is_active:
-            gs.raise_exception("Batching is not supported for SF solver as of now.")
-
         # hybrid
-        for entity in self._entities:
-            if isinstance(entity, HybridEntity):
-                entity.build()
+        hybrid_entities = [
+            entity
+            for entity in self._entities
+            if isinstance(entity, HybridEntity) and entity.mpm_hybrid_part is not None
+        ]
+        if hybrid_entities:
+            self._rigid_mpm_hybrid = RigidMPMHybrid(hybrid_entities, self.mpm_solver, self.rigid_solver)
+            self._rigid_mpm_hybrid.build()
 
         # A change of the model invalidates every operation of the rollout (see 'RolloutGraph.invalidate'), while a
         # change of the state is a call the graph records (see 'mutates'). The state of a solver tracking no gradient
@@ -278,27 +324,59 @@ class Simulator(RBC):
         self._has_errno_flags = False
         if gs.backend == gs.cpu and gs.use_zerocopy.is_supported:
             self._errno_views = [
-                (solver._errno_latched.numpy(), qd_to_numpy(solver._errno, copy=False))
-                for solver in self._active_solvers
-                if solver._errno is not None
+                (component._errno_latched.numpy(), qd_to_numpy(component._errno, copy=False))
+                for component in self._active_systems
             ]
 
         self._step_timer.add_phases("physics", "sensors")
-        self._sensor_manager.build()
+
+        # The sensors build after the render context, since some of them read it as they build
+        self._render_context.build(n_envs, self._active_solvers, self.sanitize_envs_idx)
+        self._sensor_manager.build(n_envs)
+
+        self._is_built = True
 
     def destroy(self):
+        self._is_built = False
         self._sensor_manager.destroy()
+        self._render_context.destroy()
+        for solver in self._solvers:
+            solver.destroy()
+        self._coupler.destroy()
+        if self._rigid_mpm_hybrid is not None:
+            self._rigid_mpm_hybrid.destroy()
+
+        # The ndarrays of a solver are freed with its scene, whatever still references them, or else by 'qd.reset'.
+        # They are gathered first, since 'data' reads the gradient of an array after yielding it, and once each, since
+        # an array bound into another struct is yielded under both names (see nt_H in ConstraintState).
+        for system in self._active_systems:
+            if system.is_checkpointable:
+                arrays = {
+                    id(item.array): item.array
+                    for item in system.data
+                    if isinstance(item, ArrayItem) and not isinstance(item.array, torch.Tensor)
+                }
+                for array in arrays.values():
+                    qd_destroy_data(array)
+        # A scene destroyed again after a failed build frees nothing twice
+        self._active_systems.clear()
 
     def reset(self, state: SimState, envs_idx=None):
-        for solver, solver_state in zip(self._solvers, state):
-            if solver.n_entities > 0:
-                solver.set_state(0, solver_state, envs_idx)
+        """Put the given environments back in a state 'get_state' returned, all of them if None.
 
+        The states precede the restart, which starts the rollout of the autograd graph anew after them. A system holding
+        state outside its data, absent from the state, restarts alone (see 'CheckpointMixin').
+        """
+        for system in self._active_systems:
+            if system.is_checkpointable:
+                system.set_state(state.solvers[type(system).__name__], envs_idx)
         if envs_idx is None:
             self._steps.zero_()
         else:
             self._steps[indices_to_mask(envs_idx)] = 0
         self._restart(envs_idx)
+        # The appearance the render context holds, such as the variant of DynamicVertices shown, goes back to its start
+        self._render_context.reset(self.sanitize_envs_idx(envs_idx))
 
     def _restart(self, envs_idx=None):
         """Restart the coupler, the autograd graph of the rollout and the sensors."""
@@ -307,42 +385,54 @@ class Simulator(RBC):
         # The adjoints of the state start from zero, and a new rollout of the autograd graph begins
         for solver in self._active_solvers:
             solver.reset_grad()
+        # One flush for the zero-copy writes of every solver (see qd_zero_grad in misc.py)
+        if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+            torch.mps.synchronize()
         self._rollout_graph.restart()
         self._is_forward_ready = True
-        # The cursor is a position in the frames the solvers hold, not a clock, so it rewinds whole.
+        # The cursor counts the substeps since the last restart, the clock of each environment being its step count
         self._cur_substep_global = 0
 
         # reset sensors state
         self._sensor_manager.reset(envs_idx=envs_idx)
+        self._render_context.invalidate()
 
     def data(self, kinds: frozenset[DataKind]) -> Iterator[DataItem]:
-        """Yield every item of the requested kinds that the simulator and its active solvers hold.
+        """Yield every item of the requested kinds that the simulator and its active systems hold.
 
-        The items of the simulator are named under 'Simulator', and the ones of a solver under its class name.
+        The items of the simulator are named under 'Simulator', those of a solver or the coupler under its class name.
         """
-        if isinstance(self._coupler, IPCCoupler):
-            gs.raise_exception(
-                "A scene coupled by IPC cannot be checkpointed yet: the IPC world holds state of its own."
-            )
         for item in iter_data(self, "steps", DataKind.STATE):
             if item.kind in kinds:
                 yield item._replace(name=f"Simulator.{item.name}")
-        for solver in self._active_solvers:
-            prefix = type(solver).__name__
-            for item in solver.data:
+        for system in self._active_systems:
+            prefix = type(system).__name__
+            for item in system.data:
                 if isinstance(item, DataItem) and item.kind in kinds:
                     yield item._replace(name=f"{prefix}.{item.name}")
 
     def __getstate__(self) -> SimulatorCheckpoint:
         """Return a SimulatorCheckpoint of the simulation, for '__setstate__' to restore."""
-        if isinstance(self._coupler, IPCCoupler):
-            gs.raise_exception(
-                "A scene coupled by IPC cannot be checkpointed yet: the IPC world holds state of its own."
-            )
         return SimulatorCheckpoint(
             steps=self._steps.clone(),
-            solvers={type(solver).__name__: solver.__getstate__() for solver in self._active_solvers},
+            solvers={type(system).__name__: system.__getstate__() for system in self._active_systems},
         )
+
+    def check_checkpoint(self, state: SimulatorCheckpoint) -> None:
+        """Raise unless a record holds the arrays of every active system as this simulation lays them out.
+
+        Every system checks its record before anything is touched, so a record from another scene leaves the simulation
+        as it was.
+        """
+        systems = {type(system).__name__: system for system in self._active_systems}
+        if set(state.solvers) != set(systems):
+            gs.raise_exception(
+                f"The checkpoint holds {sorted(state.solvers)} where this scene simulates {sorted(systems)}."
+            )
+        for name, system in systems.items():
+            record = state.solvers[name]
+            items = (item for item in system.data if isinstance(item, DataItem) and item.kind in record.kinds)
+            check_data(items, record.arrays)
 
     def __setstate__(self, state: SimulatorCheckpoint) -> None:
         """Put the built simulation back in a state '__getstate__' read.
@@ -356,29 +446,32 @@ class Simulator(RBC):
         # The record was checked against every solver by the scene (see 'Scene.__setstate__'). The restart precedes the
         # state, whose gradients it would zero otherwise.
         self._restart()
-        for solver in self._active_solvers:
-            solver.__setstate__(state.solvers[type(solver).__name__])
+        for system in self._active_systems:
+            system.__setstate__(state.solvers[type(system).__name__])
         self._steps[:] = torch.as_tensor(state.steps, device=gs.device)
         # Flush the zero-copy writes of fill_data on Metal.
         if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
             torch.mps.synchronize()
 
     def check_errno(self, blocking: bool = True):
-        """Raise on the first error a solver flagged since the last reset of each env (see 'Solver.check_errno')."""
-        for solver in self._active_solvers:
-            solver.check_errno(blocking)
+        """Raise on the first error a solver or the coupler flagged since the last reset of each env.
+
+        See 'ErrnoMixin.check_errno'.
+        """
+        for component in self._active_systems:
+            component.check_errno(blocking)
 
     def get_error_envs_mask(self) -> torch.Tensor:
-        """Return whether each env flagged an error in any solver since its last reset."""
-        envs_mask = torch.zeros((self._B,), dtype=torch.bool, device=gs.device)
-        for solver in self._active_solvers:
-            envs_mask |= solver.get_error_envs_mask()
+        """Return whether each env flagged an error in any solver or the coupler since its last reset."""
+        envs_mask = torch.zeros((self.n_envs_,), dtype=torch.bool, device=gs.device)
+        for component in self._active_systems:
+            envs_mask |= component.get_error_envs_mask()
         return envs_mask
 
     def clear_errno(self, envs_idx=None):
-        """Clear the errors every solver flagged for the given envs, all of them if None."""
-        for solver in self._active_solvers:
-            solver.clear_errno(envs_idx)
+        """Clear the errors every solver and the coupler flagged for the given envs, all of them if None."""
+        for component in self._active_systems:
+            component.clear_errno(envs_idx)
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
@@ -398,7 +491,7 @@ class Simulator(RBC):
             if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
                 self._steps += 1
                 for _ in range(self._substeps):
-                    self.rigid_solver.substep(self.cur_substep_local)
+                    self.rigid_solver.substep()
                     self._cur_substep_global += 1
                 self.rigid_solver.clear_external_force()
             elif self._rollout_graph.is_recording:
@@ -408,6 +501,8 @@ class Simulator(RBC):
                 self._rollout_graph.mark_state_changed()
                 self._step()
 
+        self._render_context.advance()
+
         # The flags of the step are merged once, as it is over, which leaves the checks and the mask of the flagged envs
         # mere reads of them (see 'Solver.update_errno')
         if self._errno_views is not None:
@@ -415,23 +510,19 @@ class Simulator(RBC):
                 if merge_errno(errno_out, errno_in):
                     self._has_errno_flags = True
         else:
-            for solver in self._active_solvers:
-                solver.update_errno()
+            for component in self._active_systems:
+                component.update_errno()
 
         # The sensors read the state for themselves, outside of the autograd graph of a differentiable rollout
         with self._step_timer.phase("sensors"), torch.no_grad():
             self._sensor_manager.step()
 
     def _step(self):
-        """Run the substeps of a step, rolling the frames the solvers hold over at the end of each window of them."""
+        """Run the substeps of a step."""
         self._steps += 1
         for _ in range(self._substeps):
-            self.substep(self.cur_substep_local)
+            self.substep()
             self._cur_substep_global += 1
-            if self.cur_substep_local == 0:
-                for solver in self._active_solvers:
-                    if solver.has_frames:
-                        solver.copy_frame(solver.n_frames - 1, 0)
         if self.rigid_solver.is_active:
             self.rigid_solver.clear_external_force()
 
@@ -442,77 +533,87 @@ class Simulator(RBC):
 
         Each substep, last first, is replayed from its start while its kernels are recorded, and the recorded kernels
         reversed (see LaunchRecorder), the end of the step with the last one. The substeps before the last are replayed
-        once beforehand, to rebuild the frames of the step and save the start of each of them. The clocks of the
-        environments go back to `steps_start`, the steps they counted before it.
+        once beforehand, to save the start of each of them. The clocks of the environments go back to `steps_start`, the
+        steps they counted before it.
         """
-        # A solver holding its state in frames keeps the state of every substep of the step. The state of the others is
-        # saved at the start of every substep but the first, whose start the boundary checkpoints hold.
+        # The state is saved at the start of every substep but the first, whose start the boundary checkpoints hold
         differentiable_solvers = [solver for solver in self._active_solvers if solver.requires_grad]
         boundary_checkpoints = list(zip(differentiable_solvers, checkpoints))
         substeps_checkpoints = [boundary_checkpoints]
         self._cur_substep_global = substep_start
+        # The replay runs at the time of the step, which the clocks counted once it started
+        self._steps.copy_(steps_start)
+        self._steps += 1
         restore_checkpoints(boundary_checkpoints)
         for _ in range(self._substeps - 1):
-            self.substep(self.cur_substep_local)
+            self.substep()
             self._cur_substep_global += 1
             substeps_checkpoints.append(
-                [
-                    (solver, solver.save_checkpoint(STATE_KINDS, boundary_only=True))
-                    for solver in differentiable_solvers
-                    if not solver.has_frames
-                ]
+                [(solver, solver.save_checkpoint(boundary_only=True)) for solver in differentiable_solvers]
             )
-        # The roll of the frames overwrites frame 0 in arrays the recorder cannot see, which the boundary checkpoints of
-        # the solvers holding their state in frames restore
-        framed_checkpoints = [(solver, checkpoint) for solver, checkpoint in boundary_checkpoints if solver.has_frames]
-        restore_frames = functools.partial(restore_checkpoints, framed_checkpoints)
         for i_substep in reversed(range(self._substeps)):
             self._cur_substep_global = substep_start + i_substep
             is_last_substep = i_substep == self._substeps - 1
             if not is_last_substep:
                 restore_checkpoints(substeps_checkpoints[i_substep])
             with LaunchRecorder() as recorder:
-                self.substep(self.cur_substep_local)
-                if is_last_substep:
-                    with recorder.entry(restore=restore_frames, autodiff=True):
-                        for solver in self._active_solvers:
-                            if solver.has_frames:
-                                solver.copy_frame(solver.n_frames - 1, 0)
-                    if self.rigid_solver.is_active:
-                        self.rigid_solver.clear_external_force()
+                self.substep()
+                if is_last_substep and self.rigid_solver.is_active:
+                    self.rigid_solver.clear_external_force()
             recorder.reverse()
         self._cur_substep_global = substep_start
         self._steps.copy_(steps_start)
 
-    def substep(self, f):
-        self._coupler.preprocess(f)
-        self.substep_pre_coupling(f)
-        self._coupler.couple(f)
-        self.substep_post_coupling(f)
+    def substep(self):
+        # The kernels read the time of each environment from the simulator state, which keeps their launch context
+        # cacheable
+        i_substep = self._cur_substep_global % self._substeps
+        kernel_set_time(i_substep, self._steps, self.sim_state, self._substeps, self._substep_dt)
+        self._coupler.preprocess()
+        self.substep_pre_coupling()
+        self._coupler.couple()
+        self.substep_post_coupling()
+        # The soft parts of the hybrid entities follow their rigid links once the soft particles left the grid
+        if self._rigid_mpm_hybrid is not None:
+            self._rigid_mpm_hybrid.update_soft_parts()
 
     # -------------- pre coupling --------------
-    def substep_pre_coupling(self, f):
+    def substep_pre_coupling(self):
         for solver in self._active_solvers:
-            solver.substep_pre_coupling(f)
+            solver.substep_pre_coupling()
 
     # -------------- post coupling --------------
-    def substep_post_coupling(self, f):
+    def substep_post_coupling(self):
         for solver in self._active_solvers:
-            solver.substep_post_coupling(f)
+            solver.substep_post_coupling()
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def get_state(self):
-        state = SimState(
-            scene=self.scene,
-            s_global=self.cur_step_global,
-            f_local=self.cur_substep_local,
-            solvers=self._solvers,
-        )
+    def get_state(self) -> SimState:
+        """Return the state the simulation stands in, for 'reset' to restore (see 'Solver.get_state')."""
+        solvers_state = {
+            type(system).__name__: system.get_state() for system in self._active_systems if system.is_checkpointable
+        }
+        return SimState(self.scene, self.cur_step_global, solvers_state)
 
-        return state
+    def get_entity(self, name: str | None = None, *, uid: str | None = None) -> "Entity":
+        """Return the entity of the given name or short UID (see 'Scene.get_entity')."""
+        if not ((name is None) ^ (uid is None)):
+            gs.raise_exception("Please specify either one argument between `name` or `uid`.")
+
+        if name is not None:
+            try:
+                return next(entity for entity in self._entities if entity.name == name)
+            except StopIteration as e:
+                gs.raise_exception_from(f"Entity not found for name: '{name}'.", e)
+        else:  # uid is not None
+            matches = [entity for entity in self._entities if entity.uid.match(uid, short_only=True)]
+            if matches:
+                (match,) = matches
+                return match
+            gs.raise_exception(f"Entity not found for uid: '{uid}'.")
 
     def set_gravity(self, gravity, envs_idx=None):
         for solver in self._solvers:
@@ -522,6 +623,71 @@ class Simulator(RBC):
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
+
+    @property
+    def para_level(self) -> int:
+        """The level of parallelization of the loops of the kernels (see gs.PARA_LEVEL)."""
+        return self._para_level
+
+    @property
+    def _B(self) -> int:
+        warn_once(self, "'Simulator._B' is deprecated. Please use 'Simulator.n_envs_' instead.")
+        return self.n_envs_
+
+    @property
+    def rigid_only(self) -> bool:
+        """Whether the rigid solver alone advances the physics, which lets a step skip the coupling."""
+        return self._rigid_only
+
+    def sanitize_envs_idx(self, envs_idx: IndexType | None) -> torch.Tensor:
+        """Return the indices of the given parallel environments as a tensor, all of them if None.
+
+        A selection by a slice, a range, an integer or a list of contiguous indices returns a view of the indices of all
+        the environments. A scene without parallel environments takes no selection.
+        """
+        if envs_idx is None:
+            return self._envs_idx
+
+        if self.n_envs == 0:
+            gs.raise_exception("`envs_idx` is not supported for non-parallelized scene.")
+
+        if isinstance(envs_idx, slice):
+            if envs_idx.step is not None and envs_idx.step < 0:
+                return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
+            return self._envs_idx[envs_idx]
+        if isinstance(envs_idx, range):
+            if envs_idx.step < 0:
+                return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
+            return self._envs_idx[envs_idx]
+        if isinstance(envs_idx, (int, np.integer)):
+            if not -self.n_envs <= envs_idx < self.n_envs:
+                gs.raise_exception(f"`envs_idx` out of range: {envs_idx} not in [{-self.n_envs}, {self.n_envs}).")
+            if envs_idx < 0:
+                envs_idx = envs_idx + self.n_envs
+            return self._envs_idx[envs_idx : envs_idx + 1]
+        if isinstance(envs_idx, (list, tuple)) and envs_idx and not isinstance(envs_idx[0], bool):
+            # A contiguous run of indices given on the host, such as the environments a renderer draws, takes the view
+            # of a slice rather than a copy of the indices on the device. A list of booleans is a mask.
+            start, n_envs = envs_idx[0], len(envs_idx)
+            if (
+                isinstance(start, (int, np.integer))
+                and 0 <= start
+                and start + n_envs <= self.n_envs
+                and list(envs_idx) == list(range(start, start + n_envs))
+            ):
+                return self._envs_idx if n_envs == self.n_envs else self._envs_idx[start : start + n_envs]
+
+        return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
+
+    @property
+    def render_context(self) -> RenderContext:
+        """The visual data of the scene, which the renderers and the ray casting on visual geoms read."""
+        return self._render_context
+
+    @property
+    def sensor_manager(self) -> SensorManager:
+        """The manager of the sensors of the scene."""
+        return self._sensor_manager
 
     @property
     def steps(self) -> torch.Tensor:
@@ -574,14 +740,12 @@ class Simulator(RBC):
         return self._cur_substep_global
 
     @property
-    def cur_substep_local(self):
-        """
-        The frame the current substep starts from, among those the solvers hold.
-
-        The solvers of a differentiable scene hold the frames of the substeps of one step, those of any other scene the
-        frames of one substep (see 'Solver.has_frames').
-        """
-        return self._cur_substep_global % (self._substeps if self._requires_grad else 1)
+    def cur_substep_local(self) -> int:
+        """The current substep within the step."""
+        warn_once(
+            self, "'Simulator.cur_substep_local' is deprecated. Please use 'cur_substep_global % substeps' instead."
+        )
+        return self._cur_substep_global % self._substeps
 
     @property
     def step_timer(self) -> StepTimer:
@@ -644,9 +808,7 @@ class StepOperation(Operation):
 
     def forward(self) -> tuple[torch.Tensor, ...]:
         self._checkpoints = [
-            solver.save_checkpoint(STATE_KINDS, boundary_only=True)
-            for solver in self._sim._active_solvers
-            if solver.requires_grad
+            solver.save_checkpoint(boundary_only=True) for solver in self._sim._active_solvers if solver.requires_grad
         ]
         self._sim._step()
         return ()
@@ -670,7 +832,7 @@ class StepOperation(Operation):
             ]
             if grads:
                 envs_finite = torch.stack([grad.isfinite().all(dim=tuple(range(1, grad.ndim))) for grad in grads])
-                solver.flag_errno(ErrorCode.INVALID_GRAD_NAN, ~envs_finite.all(dim=0))
+                solver.flag_errno(BackwardErrorCode.INVALID_GRAD_NAN, ~envs_finite.all(dim=0))
             solver.update_errno()
             solver.check_errno(
                 blocking=False, context=f"Backward pass of step {self._substep_start // self._sim._substeps}"

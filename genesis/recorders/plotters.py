@@ -5,11 +5,12 @@ import math
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
-from typing import Any, Callable, TypeVar
+from typing import Any
 
 import numpy as np
+
 from PIL import Image
 
 import genesis as gs
@@ -55,10 +56,7 @@ MPL_PLOTTER_WINDOW_REFRESH_PERIOD = 0.1
 COLORS = itertools.cycle(("r", "g", "b", "c", "m", "y"))
 
 
-T = TypeVar("T")
-
-
-class BasePlotter(Recorder):
+class BasePlotter[T](Recorder[T]):
     def __init__(self, manager: "RecorderManager", options: BasePlotterOptions, data_func: Callable[[], T]):
         if options.show_window is None:
             options.show_window = has_display()
@@ -66,6 +64,7 @@ class BasePlotter(Recorder):
         super().__init__(manager, options, data_func)
         self._frames_buffer: list[np.ndarray] = []
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -229,7 +228,7 @@ class LinePlotHelper:
         return self._subplot_structure
 
 
-class BasePyQtPlotter(BasePlotter):
+class BasePyQtPlotter[T](BasePlotter[T]):
     """
     Base class for PyQt based plotters.
     """
@@ -239,6 +238,7 @@ class BasePyQtPlotter(BasePlotter):
         if threading.current_thread() is not threading.main_thread():
             gs.raise_exception("Impossible to run PyQtPlotter in background thread.")
 
+    @gs.assert_unbuilt
     def build(self):
         if not IS_PYQTGRAPH_AVAILABLE:
             gs.raise_exception(
@@ -297,6 +297,7 @@ class BasePyQtPlotter(BasePlotter):
 
 @register_recording(PyQtLinePlotterOptions)
 class PyQtLinePlotter(BasePyQtPlotter):
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -349,7 +350,7 @@ class PyQtLinePlotter(BasePyQtPlotter):
         self.curves.clear()
 
 
-class BaseMPLPlotter(BasePlotter):
+class BaseMPLPlotter[T](BasePlotter[T]):
     """
     Base class for matplotlib based plotters.
     """
@@ -359,6 +360,7 @@ class BaseMPLPlotter(BasePlotter):
         if threading.current_thread() is not threading.main_thread():
             gs.raise_exception("Impossible to run MPLPlotter in background thread.")
 
+    @gs.assert_unbuilt
     def build(self):
         if not IS_MATPLOTLIB_AVAILABLE:
             gs.raise_exception(
@@ -493,6 +495,7 @@ class BaseMPLPlotter(BasePlotter):
 
 @register_recording(MPLLinePlotterOptions)
 class MPLLinePlotter(BaseMPLPlotter):
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -660,6 +663,7 @@ class MPLImagePlotter(BaseMPLPlotter):
     The image data should be an array-like object with shape (H, W), (H, W, 1), (H, W, 3), or (H, W, 4).
     """
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -723,6 +727,7 @@ class MPLVectorFieldPlotter(BaseMPLPlotter):
     sweeps counter-clockwise; the arc is colored by signed twist on a diverging colorbar centered at zero.
     """
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 

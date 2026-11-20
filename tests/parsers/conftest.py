@@ -4,26 +4,25 @@ import os
 import xml.etree.ElementTree as ET
 from functools import partial, partialmethod
 
-import numpy as np
 import pygltflib
 import pytest
-import trimesh
 from PIL import Image
 
-import genesis as gs
-import genesis.utils.geom as gu
+from ..conftest import lazy_imports
 
-from genesis.utils.misc import get_assets_dir
-
-from ..utils.assertions import assert_allclose, assert_equal
-from ..utils.assets import get_hf_dataset
-
-try:
+# Imported on first use (see pytest_sessionstart in tests/conftest.py)
+with lazy_imports():
+    import numpy as np
+    import trimesh
     from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, UsdUtils
 
+    import genesis as gs
+    import genesis.utils.geom as gu
+    from genesis.utils.misc import get_assets_dir
     from genesis.utils.usd import UsdContext
-except ImportError:
-    pass
+
+    from ..utils.assertions import assert_allclose, assert_equal
+    from ..utils.assets import get_hf_dataset
 
 
 @pytest.fixture
@@ -196,7 +195,7 @@ def check_gs_surfaces(gs_surface1, gs_surface2, material_name):
     check_gs_textures(gs_surface1.emissive_texture, gs_surface2.emissive_texture, 0.0, material_name, "emissive")
 
 
-def to_array(s: str) -> np.ndarray:
+def to_array(s: str) -> "np.ndarray":
     """Convert a string of space-separated floats to a numpy array."""
     return np.array([float(x) for x in s.split()])
 
@@ -357,7 +356,7 @@ def compare_vgeoms(compared_vgeoms, usd_vgeoms, tol):
         check_gs_surfaces(compared_vgeom_surface, usd_vgeom_surface, mesh_name)
 
 
-def compare_scene(compared_scene: gs.Scene, usd_scene: gs.Scene, tol: float):
+def compare_scene(compared_scene: "gs.Scene", usd_scene: "gs.Scene", tol: float):
     """Compare structure and data between compared scene and USD scene."""
     compared_entities = compared_scene.entities
     usd_entities = usd_scene.entities
@@ -375,7 +374,7 @@ def compare_scene(compared_scene: gs.Scene, usd_scene: gs.Scene, tol: float):
     compare_links(compared_links, usd_links, tol=tol)
 
 
-def compare_mesh_scene(compared_scene: gs.Scene, usd_scene: gs.Scene, tol: float):
+def compare_mesh_scene(compared_scene: "gs.Scene", usd_scene: "gs.Scene", tol: float):
     """Compare mesh data between mesh scene and USD scene."""
     compared_entities = compared_scene.entities
     usd_entities = usd_scene.entities
@@ -414,7 +413,6 @@ def build_mjcf_scene(xml_path: str, scale: float):
 def build_usd_scene(
     usd_file: str,
     scale: float,
-    vis_mode: str = "collision",
     is_stage: bool = True,
     fixed: bool | None = None,
     show_viewer: bool = False,
@@ -441,7 +439,6 @@ def build_usd_scene(
         material=gs.materials.Rigid(
             rho=1000.0,
         ),
-        vis_mode=vis_mode,
     )
 
     # A stage is read as authored rather than through baked assets an earlier run left on disk
@@ -1155,7 +1152,7 @@ def all_joints_mjcf():
     ET.SubElement(free_box, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
     ET.SubElement(free_box, "joint", name="/worldbody/free_box_joint", type="free")
 
-    # Add actuators for PD controllers (prismatic and revolute only)
+    # Add actuators for PD controllers (prismatic, revolute and spherical)
     actuator = ET.SubElement(mjcf, "actuator")
     ET.SubElement(
         actuator,
@@ -1171,6 +1168,17 @@ def all_joints_mjcf():
         "general",
         name="/worldbody/base/revolute_box_joint_actuator",
         joint="/worldbody/base/revolute_box_joint",
+        biastype="affine",
+        gainprm="120.0 0 0",
+        biasprm="0 -120.0 -12.0",
+    )
+    # Genesis reads a ball joint actuator with a unit gear as the same PD gains on each of the three DOFs
+    ET.SubElement(
+        actuator,
+        "general",
+        name="/worldbody/base/spherical_box_joint_actuator",
+        joint="/worldbody/base/spherical_box_joint",
+        gear="1 1 1 0 0 0",
         biastype="affine",
         gainprm="120.0 0 0",
         biasprm="0 -120.0 -12.0",
@@ -1314,11 +1322,12 @@ def all_joints_usd(asset_tmp_path, all_joints_mjcf: ET.ElementTree, request):
     revolute_joint_prim.CreateUpperLimitAttr().Set(revolute_range[1])
     revolute_joint_prim.CreateLocalPos0Attr().Set(Gf.Vec3f(*(revolute_box_pos + revolute_anchor)))
     revolute_joint_prim.CreateLocalPos1Attr().Set(Gf.Vec3f(*revolute_anchor))
-    revolute_joint_prim.GetPrim().CreateAttribute("stiffness", Sdf.ValueTypeNames.Float).Set(50.0)
-    revolute_joint_prim.GetPrim().CreateAttribute("angular:damping", Sdf.ValueTypeNames.Float).Set(5.0)
+    # USD specifies every angular gain per degree, while the MJCF gains are per radian.
+    revolute_joint_prim.GetPrim().CreateAttribute("stiffness", Sdf.ValueTypeNames.Float).Set(np.deg2rad(50.0))
+    revolute_joint_prim.GetPrim().CreateAttribute("angular:damping", Sdf.ValueTypeNames.Float).Set(np.deg2rad(5.0))
     revolute_drive_api = UsdPhysics.DriveAPI.Apply(revolute_joint_prim.GetPrim(), "angular")
-    revolute_drive_api.CreateStiffnessAttr().Set(120.0)
-    revolute_drive_api.CreateDampingAttr().Set(12.0)
+    revolute_drive_api.CreateStiffnessAttr().Set(np.deg2rad(120.0))
+    revolute_drive_api.CreateDampingAttr().Set(np.deg2rad(12.0))
 
     # Create spherical box
     spherical_box = UsdGeom.Cube.Define(stage, "/worldbody/base/spherical_box")
@@ -1333,6 +1342,11 @@ def all_joints_usd(asset_tmp_path, all_joints_mjcf: ET.ElementTree, request):
     spherical_joint_prim.CreateBody1Rel().SetTargets([spherical_box.GetPrim().GetPath()])
     spherical_joint_prim.CreateLocalPos0Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
     spherical_joint_prim.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+    # Per-degree gains, as for the revolute drive, matching the ball joint actuator of the MJCF counterpart
+    for dof_name in ("rotX", "rotY", "rotZ"):
+        spherical_drive_api = UsdPhysics.DriveAPI.Apply(spherical_joint_prim.GetPrim(), dof_name)
+        spherical_drive_api.CreateStiffnessAttr().Set(np.deg2rad(120.0))
+        spherical_drive_api.CreateDampingAttr().Set(np.deg2rad(12.0))
 
     # Create fixed box
     fixed_box = UsdGeom.Cube.Define(stage, "/worldbody/base/fixed_box")
@@ -1637,8 +1651,9 @@ def collision_approximation_usd(asset_tmp_path):
 
 @pytest.fixture(scope="session")
 def collision_filtering_usd(asset_tmp_path):
-    """Two rigid bodies with in-model collision filtering: one via FilteredPairsAPI between its two
-    collision cubes, one via CollisionGroups (A filters B, plus an ungrouped collider)."""
+    """Two articulations whose child links overlap their base link, with in-model collision filtering: one via
+    FilteredPairsAPI between its two links, one via CollisionGroups (A filters B). Two child links of the latter carry
+    a second collider reaching into the base, only one of their two colliders being in group B."""
     usd_file = str(asset_tmp_path / "collision_filtering.usda")
     stage = Usd.Stage.CreateNew(usd_file)
     UsdGeom.SetStageUpAxis(stage, "Z")
@@ -1647,29 +1662,54 @@ def collision_filtering_usd(asset_tmp_path):
     root_prim = stage.DefinePrim("/root", "Xform")
     stage.SetDefaultPrim(root_prim)
 
-    pair_body = stage.DefinePrim("/root/pair_body", "Xform")
-    UsdPhysics.RigidBodyAPI.Apply(pair_body)
-    for name, x in (("col_a", 0.0), ("col_b", 0.3)):
-        cube = UsdGeom.Cube.Define(stage, f"/root/pair_body/{name}")
-        cube.GetSizeAttr().Set(0.2)
-        cube.AddTranslateOp().Set(Gf.Vec3d(x, 0.0, 0.1))
-        UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+    # Each link states its name, its position in the base frame, and the position of its second collider if any, which
+    # reaches 1 cm deep into the base as the first collider of the links beside it does.
+    for body_name, body_pos_y, links_spec in (
+        ("pair_body", 0.0, (("col_a", (0.0, 0.0), None), ("col_b", (0.19, 0.0), None))),
+        (
+            "group_body",
+            1.0,
+            (
+                ("col_c", (0.0, 0.0), None),
+                ("col_d", (0.19, 0.0), None),
+                ("col_e", (-0.19, 0.0), (0.05, 0.0)),
+                ("col_f", (0.0, 0.21), (0.0, -0.07)),
+            ),
+        ),
+    ):
+        base_path = f"/root/{body_name}/{links_spec[0][0]}"
+        for link_name, link_pos, extra_pos in links_spec:
+            link = UsdGeom.Xform.Define(stage, f"/root/{body_name}/{link_name}")
+            link.AddTranslateOp().Set(Gf.Vec3d(link_pos[0], body_pos_y + link_pos[1], 0.1))
+            UsdPhysics.RigidBodyAPI.Apply(link.GetPrim())
+            cube = UsdGeom.Cube.Define(stage, f"{link.GetPath()}/collider")
+            cube.GetSizeAttr().Set(0.2)
+            UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+            if extra_pos is not None:
+                cube = UsdGeom.Cube.Define(stage, f"{link.GetPath()}/collider_extra")
+                cube.GetSizeAttr().Set(0.1)
+                cube.AddTranslateOp().Set(Gf.Vec3d(*extra_pos, 0.0))
+                UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+            if link_name != links_spec[0][0]:
+                joint = UsdPhysics.RevoluteJoint.Define(stage, f"/root/{body_name}/{link_name}_joint")
+                joint.CreateBody0Rel().SetTargets([base_path])
+                joint.CreateBody1Rel().SetTargets([link.GetPath()])
+                joint.CreateAxisAttr().Set("Z")
+                joint.CreateLocalPos0Attr().Set(Gf.Vec3f(*link_pos, 0.0))
+                joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
     UsdPhysics.FilteredPairsAPI.Apply(stage.GetPrimAtPath("/root/pair_body/col_a")).CreateFilteredPairsRel().AddTarget(
         "/root/pair_body/col_b"
     )
 
-    group_body = stage.DefinePrim("/root/group_body", "Xform")
-    UsdPhysics.RigidBodyAPI.Apply(group_body)
-    UsdGeom.Xform(group_body).AddTranslateOp().Set(Gf.Vec3d(0.0, 1.0, 0.0))
-    for name, x in (("col_c", 0.0), ("col_d", 0.3), ("col_e", 0.6)):
-        cube = UsdGeom.Cube.Define(stage, f"/root/group_body/{name}")
-        cube.GetSizeAttr().Set(0.2)
-        cube.AddTranslateOp().Set(Gf.Vec3d(x, 0.0, 0.1))
-        UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
     group_a = UsdPhysics.CollisionGroup.Define(stage, "/root/collision_groups/A")
     group_b = UsdPhysics.CollisionGroup.Define(stage, "/root/collision_groups/B")
     group_a.GetCollidersCollectionAPI().CreateIncludesRel().AddTarget("/root/group_body/col_c")
-    group_b.GetCollidersCollectionAPI().CreateIncludesRel().AddTarget("/root/group_body/col_d")
+    for collider_path in (
+        "/root/group_body/col_d",
+        "/root/group_body/col_e/collider_extra",
+        "/root/group_body/col_f/collider",
+    ):
+        group_b.GetCollidersCollectionAPI().CreateIncludesRel().AddTarget(collider_path)
     group_a.CreateFilteredGroupsRel().AddTarget("/root/collision_groups/B")
 
     stage.Save()

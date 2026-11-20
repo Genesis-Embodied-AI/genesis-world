@@ -19,6 +19,7 @@ import pyglet
 import genesis as gs
 from genesis.utils.cache import get_cache_dir
 from genesis.utils.misc import get_default_screen
+from genesis.utils.video_encoder import VideoEncoder
 from genesis.vis.keybindings import Key, KeyAction, Keybind, Keybindings, KeyMod
 from genesis.vis.viewer_plugins import EVENT_HANDLE_STATE, EVENT_HANDLED, ViewerPlugin
 
@@ -36,6 +37,7 @@ from .constants import (
     TARGET_OPEN_GL_MINOR,
     TEXT_PADDING,
     RenderFlags,
+    ViewFlags,
     TextAlign,
 )
 from .light import DirectionalLight
@@ -172,6 +174,7 @@ class Viewer(pyglet.window.Window):
         plane_reflection=False,
         plugins=None,
         enable_help_text=True,
+        debug_view=False,
         **kwargs,
     ):
         #######################################################################
@@ -223,6 +226,8 @@ class Viewer(pyglet.window.Window):
             "rgb": True,
             "seg": False,
             "depth": False,
+            # Whether the view draws the markers and the debug representation of the entities
+            "debug_view": debug_view,
         }
         self._default_viewer_flags = {
             "mouse_pressed": False,
@@ -613,6 +618,8 @@ class Viewer(pyglet.window.Window):
             to save the video file.
         """
         self._video_recorder.close()
+        if not self._video_recorder.has_file:
+            return
         if filename is None:
             filename = self._get_save_filename(["mp4"])
         if filename is None:
@@ -626,16 +633,15 @@ class Viewer(pyglet.window.Window):
         Starting opens a fresh video writer and marks the window title; stopping closes it and prompts (via
         save_video) for a destination. Both the 'R' keybind and the overlay record button drive this one path."""
         if self.viewer_flags["record"]:
-            self.save_video()
+            # This runs in event handlers, where a failed encoding must not escape the event loop and leave recording on
+            try:
+                self.save_video()
+            except gs.GenesisException as e:
+                gs.logger.warning(f"{e}")
             self.set_caption(self.viewer_flags["window_title"])
         else:
-            # Importing moviepy is very slow and rarely needed, so defer it to the first recording.
-            from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
-
-            self._video_recorder = FFMPEG_VideoWriter(
-                filename=os.path.join(get_cache_dir(), "tmp_video.mp4"),
-                fps=self.viewer_flags["refresh_rate"],
-                size=self.viewport_size,
+            self._video_recorder = VideoEncoder(
+                os.path.join(get_cache_dir(), "tmp_video.mp4"), fps=self.viewer_flags["refresh_rate"], is_threaded=True
             )
             # Sentinel so the first frame is always captured regardless of the current step counter.
             self._last_recorded_t = -1
@@ -687,8 +693,12 @@ class Viewer(pyglet.window.Window):
 
         # Delete video recorder
         if self.viewer_flags["record"]:
-            self._video_recorder.close()
-            os.remove(self._video_recorder.filename)
+            try:
+                self._video_recorder.close()
+            except gs.GenesisException as e:
+                gs.logger.warning(f"{e}")
+            if self._video_recorder.has_file:
+                os.remove(self._video_recorder.filename)
 
         # Force clean-up of OpenGL context data
         try:
@@ -733,8 +743,9 @@ class Viewer(pyglet.window.Window):
         depth=False,
         seg=False,
         normal=False,
-        skip_markers=False,
         split_envs=False,
+        env_idx=None,
+        debug_view=True,
     ):
         if not self.is_active:
             # A viewer in its own thread stores what ended it rather than raising it where nobody waits, so the call
@@ -746,7 +757,7 @@ class Viewer(pyglet.window.Window):
         self.render_flags["rgb"] = rgb
         self.render_flags["seg"] = seg
         self.render_flags["depth"] = depth
-        self._offscreen_pending_render = (camera_node, render_target, normal, skip_markers, split_envs)
+        self._offscreen_pending_render = (camera_node, render_target, normal, split_envs, env_idx, debug_view)
         if self._run_in_thread:
             # Send offscreen request
             self._offscreen_event.set()
@@ -785,7 +796,7 @@ class Viewer(pyglet.window.Window):
 
             if self._offscreen_pending_render is not None:
                 # Extract request right away
-                camera, target, normal, skip_markers, split_envs = self._offscreen_pending_render
+                camera, target, normal, split_envs, env_idx, debug_view = self._offscreen_pending_render
                 self._offscreen_pending_render = None
 
                 # Update context, just in case is not already done before
@@ -793,8 +804,8 @@ class Viewer(pyglet.window.Window):
 
                 self._offscreen_results = []
                 self.render_flags["offscreen"] = True
-                self.render_flags["skip_markers"] = skip_markers
                 self.render_flags["split_envs"] = split_envs
+                self.render_flags["debug_view"] = debug_view
                 if target is self._renderer:
                     # The interactive window's own renderer tracks the OS window content area, which the OS may clamp
                     # below the requested resolution (e.g. a viewport larger than a macOS runner can allocate). Force
@@ -804,18 +815,18 @@ class Viewer(pyglet.window.Window):
                     target.viewport_width, target.viewport_height = self._offscreen_viewport_size
                     try:
                         self.clear()
-                        retval = self._render(camera, target, normal)
+                        retval = self._render(camera, target, normal, env_idx)
                     finally:
                         target.viewport_width, target.viewport_height = saved_viewport
                 else:
                     # A per-camera offscreen FBO is already sized to that camera's own resolution and is independent of
                     # the window, so its viewport is authoritative and must not be overridden with the window size.
                     self.clear()
-                    retval = self._render(camera, target, normal)
+                    retval = self._render(camera, target, normal, env_idx)
                 self._offscreen_result = retval if retval else (None, None)
                 self.render_flags["offscreen"] = False
-                self.render_flags["skip_markers"] = False
                 self.render_flags["split_envs"] = False
+                self.render_flags["debug_view"] = self._default_render_flags["debug_view"]
 
             if self._run_in_thread:
                 self._offscreen_semaphore.release()
@@ -836,7 +847,8 @@ class Viewer(pyglet.window.Window):
         if self._renderer is None:
             return
 
-        with self.render_lock if self._run_in_thread or not self.auto_start else nullcontext():
+        render_lock = self.render_lock if self._run_in_thread or not self.auto_start else nullcontext()
+        with render_lock:
             # Make OpenGL context current
             self.switch_to()
 
@@ -846,10 +858,13 @@ class Viewer(pyglet.window.Window):
             self.clear()
             self._render()
 
-        # Capture the recording frame right after the scene render, before any on-screen overlay (captions, help
-        # text, and the plugins' ImGui panel / gizmo) is drawn, so the video shows only the rendered scene.
-        if self.viewer_flags["record"]:
-            self._record()
+            # Capture the recording frame right after the scene render, before any on-screen overlay (captions, help
+            # text, and the plugins' ImGui panel / gizmo) is drawn, so the video shows only the rendered scene.
+            record_frame = self._read_record_frame() if self.viewer_flags["record"] else None
+
+        # The frame is encoded once the lock is released, so that a slow encoder does not hold up the simulation.
+        if record_frame is not None:
+            self._video_recorder.write(record_frame)
 
         if self.viewer_flags["caption"] is not None:
             for caption in self.viewer_flags["caption"]:
@@ -872,13 +887,20 @@ class Viewer(pyglet.window.Window):
         # configs before that point, and a rejected config must not leave a plugin's GL/ImGui state dangling for the
         # next attempt (e.g. an ImGui frame opened but never ended). _initialized_event is set at the end of start().
         if self._initialized_event.is_set():
-            for plugin in self.plugins:
-                plugin.on_draw()
+            # The plugins read the scene, so a threaded render loop draws them only while the scene is not updated
+            with render_lock:
+                for plugin in self.plugins:
+                    plugin.on_draw()
 
     def on_resize(self, width: int, height: int) -> EVENT_HANDLE_STATE:
         """Resize the camera and trackball when the window is resized."""
         if self._renderer is None:
             return
+
+        # Every frame of a video has the size of its first one, so a resize ends the recording
+        if self.viewer_flags["record"] and (width, height) != self._viewport_size:
+            gs.logger.warning("Viewer window resized while recording. Stopping the recording.")
+            self.toggle_recording()
 
         self._renderer._delete_shadow_framebuffer()
         self._renderer._delete_floor_framebuffer()
@@ -1039,23 +1061,24 @@ class Viewer(pyglet.window.Window):
             data = self._renderer.jit.read_color_buf(*self._viewport_size, rgba=False)
             cv2.imwrite(filename, np.flip(data, axis=-1))
 
-    def _record(self):
-        """Append the current frame to the video, unless the simulation has not advanced since the last recorded
-        frame (e.g. while paused) so the recording does not accumulate duplicate frozen frames."""
+    def _read_record_frame(self):
+        """Read the current frame to append to the video, or None if the simulation has not advanced since the last
+        recorded frame (e.g. while paused) so the recording does not accumulate duplicate frozen frames."""
         t = self.gs_context.scene.sim.cur_step_global
         if t == self._last_recorded_t:
-            return
+            return None
         self._last_recorded_t = t
         data = self._renderer.jit.read_color_buf(*self._viewport_size, rgba=False)
-        if not np.all(data == 0.0):
-            self._video_recorder.write_frame(data)
+        if np.all(data == 0.0):
+            return None
+        return data
 
     def _rotate(self):
         """Animate the scene by rotating the camera."""
         az = self.viewer_flags["rotate_rate"] / self.viewer_flags["refresh_rate"]
         self._trackball.rotate(az, self.viewer_flags["rotate_axis"])
 
-    def _render(self, camera_node=None, renderer=None, normal=False):
+    def _render(self, camera_node=None, renderer=None, normal=False, env_idx=None):
         """Render the scene into the framebuffer and flip."""
         scene = self.scene
         self._camera_node.matrix = self._trackball.pose.copy()
@@ -1109,10 +1132,12 @@ class Viewer(pyglet.window.Window):
 
         if self.render_flags["offscreen"]:
             flags |= RenderFlags.OFFSCREEN
-        if self.render_flags.get("skip_markers", False):
-            flags |= RenderFlags.SKIP_MARKERS
-        else:
+        # A debug view draws the markers, seen through what hides them, and the debug representation of the entities
+        if self.render_flags["debug_view"]:
             flags |= RenderFlags.MARKER_XRAY
+        else:
+            flags |= RenderFlags.SKIP_MARKERS
+        renderer.jit.view = ViewFlags.DEBUG if self.render_flags["debug_view"] else ViewFlags.NORMAL
 
         seg_node_map = None
         if self.render_flags["seg"]:
@@ -1126,7 +1151,7 @@ class Viewer(pyglet.window.Window):
 
         first_pass_done = False
         if self.render_flags["rgb"] or self.render_flags["depth"] or self.render_flags["seg"]:
-            retval = renderer.render(self.scene, flags, seg_node_map=seg_node_map)
+            retval = renderer.render(self.scene, flags, seg_node_map=seg_node_map, env_idx=env_idx)
             first_pass_done = True
         else:
             retval = ()
@@ -1138,10 +1163,10 @@ class Viewer(pyglet.window.Window):
             flags = RenderFlags.FLAT | RenderFlags.OFFSCREEN
             if self.render_flags.get("split_envs", False):
                 flags |= RenderFlags.ENV_SEPARATE
-            if self.render_flags.get("skip_markers", False):
+            if not self.render_flags["debug_view"]:
                 flags |= RenderFlags.SKIP_MARKERS
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-            normal_arr, *_ = renderer.render(scene, flags, is_first_pass=not first_pass_done)
+            normal_arr, *_ = renderer.render(scene, flags, is_first_pass=not first_pass_done, env_idx=env_idx)
             retval = (*retval, normal_arr)
 
             renderer._program_cache = old_cache

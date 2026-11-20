@@ -1,14 +1,27 @@
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
 from genesis.repr_base import RBC
 
 
+def _normalize_direction(direction):
+    direction = np.array(direction)
+    if direction.shape != (3,):
+        gs.raise_exception("direction must have shape (3,)")
+    direction_norm = np.linalg.norm(direction)
+    if not (np.isfinite(direction_norm) and direction_norm >= gs.EPS):
+        gs.raise_exception("direction must be finite and non-zero")
+    return direction / direction_norm
+
+
 @qd.data_oriented
 class ForceField(RBC):
     """
     Base class for all force fields. This class should not be used directly.
+
+    A force field is active once created, and `deactivate` and `activate` switch it off and back on at any time.
 
     Note
     ----
@@ -17,7 +30,7 @@ class ForceField(RBC):
 
     def __init__(self):
         self._active = qd.field(gs.qd_bool, shape=())
-        self._active[None] = False
+        self._active[None] = True
 
     def activate(self):
         """
@@ -61,11 +74,7 @@ class Constant(ForceField):
     def __init__(self, direction=(1, 0, 0), strength=1.0):
         super().__init__()
 
-        direction = np.array(direction)
-        if direction.shape != (3,):
-            raise ValueError("direction must have shape (3,)")
-
-        self._direction = direction / np.linalg.norm(direction)
+        self._direction = _normalize_direction(direction)
         self._strength = strength
         self._acc_qd = qd.Vector(self._direction * self._strength, dt=gs.qd_float)
 
@@ -101,16 +110,12 @@ class Wind(ForceField):
     def __init__(self, direction=(1, 0, 0), strength=1.0, radius=1, center=(0, 0, 0)):
         super().__init__()
 
-        direction = np.array(direction)
-        if direction.shape != (3,):
-            raise ValueError("direction must have shape (3,)")
-
         center = np.array(center)
         if center.shape != (3,):
             raise ValueError("center must have shape (3,)")
 
         self._center = center
-        self._direction = direction / np.linalg.norm(direction)
+        self._direction = _normalize_direction(direction)
         self._strength = strength
         self._radius = radius
 
@@ -173,11 +178,13 @@ class Point(ForceField):
         self._flow = flow
 
         self._position_qd = qd.Vector(self._position, dt=gs.qd_float)
+        self._eps = qd.field(gs.qd_float, shape=())
+        self._eps[None] = gs.EPS
 
     @qd.func
     def _get_acc(self, pos, vel, t, i):
         relative_pos = pos - self._position_qd
-        radius = relative_pos.norm(gs.EPS)
+        radius = relative_pos.norm(self._eps[None])
         direction = relative_pos / radius
         falloff = 1 / (radius + 1.0) ** self._falloff_pow
         acc = self._strength * direction
@@ -262,10 +269,12 @@ class Noise(ForceField):
 
 class Vortex(ForceField):
     """
-    Vortex force field revolving around z-axis.
+    Vortex force field revolving around the axis going through `center` along `direction`.
 
     Parameters:
     -----------
+    direction: array_like, shape=(3,)
+        The direction of the vortex axis. Will be normalized.
     strength_perpendicular: float
         The strength of the vortex flow in the perpendicular direction. Positive for counterclockwise, negative for clockwise.
     strength_radial: float
@@ -293,16 +302,12 @@ class Vortex(ForceField):
     ):
         super().__init__()
 
-        direction = np.array(direction)
-        if direction.shape != (3,):
-            raise ValueError("direction must have shape (3,)")
-
         center = np.array(center)
         if center.shape != (3,):
             raise ValueError("center must have shape (3,)")
 
         self._center = center
-        self._direction = direction / np.linalg.norm(direction)
+        self._direction = _normalize_direction(direction)
         self._damping = damping
 
         self._strength_perpendicular = strength_perpendicular
@@ -317,10 +322,11 @@ class Vortex(ForceField):
 
     @qd.func
     def _get_acc(self, pos, vel, t, i):
-        relative_pos = qd.Vector([pos[0] - self._center_qd[0], pos[1] - self._center_qd[1]])
-        radius = relative_pos.norm()
-        perpendicular = qd.Vector([-relative_pos[1], relative_pos[0], 0.0], dt=gs.qd_float)
-        radial = -qd.Vector([relative_pos[0], relative_pos[1], 0.0], dt=gs.qd_float)
+        relative_pos = pos - self._center_qd
+        radial_pos = relative_pos - relative_pos.dot(self._direction_qd) * self._direction_qd
+        radius = radial_pos.norm()
+        perpendicular = self._direction_qd.cross(radial_pos)
+        radial = -radial_pos
 
         falloff = gs.qd_float(0.0)
         if radius < self._falloff_min:
@@ -339,10 +345,6 @@ class Vortex(ForceField):
     @property
     def direction(self):
         return self._direction
-
-    @property
-    def radius(self):
-        return self._radius
 
     @property
     def center(self):
@@ -428,13 +430,35 @@ class Custom(ForceField):
     Parameters:
     -----------
     func: A callable Quadrants func (a python function wrapped by `@qd.func`)
-        The acceleration function. Must have the signature `f(pos: qd.types.vector(3), vel: qd.types.vector(3), t: qd.f32) -> qd.types.vector(3)`.
+        The acceleration function. Must have the signature
+        `f(pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i: int) -> qd.types.vector(3)`, its arguments
+        being those of `ForceFields.add_acc`.
     """
 
     def __init__(self, func):
         super().__init__()
 
-        self.get_acc = func
+        self._get_acc = func
+
+
+@qd.data_oriented
+class ForceFields:
+    """The force fields acting on the entities of a solver, which its kernels take as a template."""
+
+    def __init__(self) -> None:
+        self.fields: list[ForceField] = []
+
+    @qd.func
+    def add_acc(self, acc: qd.types.vector(3), pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i_p: int):
+        """
+        Return an acceleration plus those of the force fields at a point, added one field after the other.
+
+        `pos` and `vel` are the position and the velocity of the point at time `t`, `i_p` the index of the point among
+        the particles of the solver, -1 for a point of no particle.
+        """
+        for i_ff in qd.static(range(len(self.fields))):
+            acc += self.fields[i_ff].get_acc(pos, vel, t, i_p)
+        return acc
 
 
 @qd.data_oriented

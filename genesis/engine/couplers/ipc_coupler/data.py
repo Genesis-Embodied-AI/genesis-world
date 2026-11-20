@@ -64,7 +64,7 @@ class IPCCouplingData:
 
         self.links = links
         self.abd_body_idx_by_link = abd_body_idx_by_link
-        self.links_idx = [link.idx for link in links]
+        self.links_idx = np.array([link.idx for link in links], dtype=gs.np_int)
         self.link_to_idx_local = {link: i for i, link in enumerate(links)}
         self.links_mass = np.array([link.desc.mass for link in links], dtype=gs.np_float)
         if links:

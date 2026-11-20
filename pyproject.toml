@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "genesis-world"
-version = "1.4.5"
+version = "1.4.7"
 description = "A universal and generative physics engine"
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.12,<3.15"
 dependencies = [
     "psutil",
-    "quadrants==1.3.3",
+    "quadrants==1.4.0",
     # * 2.13.0 sets the private state of a model built by 'model_construct', which pickling reads.
     "pydantic>=2.13.0",
     "numpy>=1.26.4",
@@ -26,7 +26,6 @@ dependencies = [
     # Cross-platform library to get various kind of CPU information such as model name
     "py-cpuinfo",
     "mujoco>=3.2.5",
-    "moviepy>=2.0.0",
     # Streams video frames to file, for 'camera.start_recording' and the 'VideoFile' recorder
     "av",
     # Compresses the frames of trajectory files, fast enough for the writer thread to keep pace with stepping
@@ -47,15 +46,14 @@ dependencies = [
     # Optional `trimesh` dependency for loading `.dae` mesh files
     "pycollada",
     # Used for parsing `.glb` mesh files
-    "pygltflib==1.16.0",
+    "pygltflib",
     # Used for decoding Draco-compressed `.glb` mesh files
     "DracoPy",
     # Use by `PBD3DEntity.sample` to tetrahedralize a mesh
-    "tetgen==0.8.2",
+    "tetgen",
     # Used for some advanced mesh processing such as `skeletonization`
-    "PyGEL3D",
-    # Used to convert VTK output to numpy when converting volume to particles for PBS
-    "vtk",
+    # * 0.8.0 is the first release with native binaries for each platform, Linux ARM included.
+    "PyGEL3D>=0.8.0",
     # Used here and there to load and export images
     # * 11.0 dramatically improves performance when exporting images to PNG
     "Pillow>11.0",
@@ -64,13 +62,10 @@ dependencies = [
     # Use by `RigidGeom.visualize_sdf` to render SDF as level 0 marching cubes
     "scikit-image",
     # Convex decomposition library
-    "coacd",
+    # * 1.0.14 makes the decomposition independent of thread scheduling, so a fixed seed reproduces it
+    "coacd>=1.0.14",
     # Ray casting used in mesh to height field conversion
     "rtree",
-    # Constraint Satisfaction Solver.
-    # Used to compute contype and conaffinity bitmasks from complete list of excluded collision pairs.
-    # * >= 4.15.5.0 does not provide pre-compiled wheels on Linux
-    "z3-solver<4.15.5.0",
     # Used for loading raytracing special texture images used by LuisaRender
     "OpenEXR",
     # Native batch renderer specifically designed for Genesis
@@ -83,7 +78,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "black",
     # FIXME: Remove this cap once pytest-forked becomes compatible with newer versions (pytest-forked#112)
     "pytest<9.2.0",
     "pytest-xdist",
@@ -107,13 +101,16 @@ dev = [
     # * Mujoco 3.10.0 aligned the primal solvers with Genesis (Hager-Zhang CG update, shifted linesearch costs);
     #   the step-by-step solver consistency tests only hold when both engines run the same algorithm.
     "mujoco>=3.10.0,<3.11.0",
+    # Used by the locomotion environments to batch observations
+    "tensordict",
     # Used internally by 'MPLPlotter'
     # * 3.7.0: introduces Button blitting and 'outside' keyword legend location
-    "matplotlib>=3.7.0",
+    # * 3.11.0: changes text rasterization, which the 'MPLPlotter' snapshots are rendered with
+    "matplotlib>=3.11.0",
     # Used for ground truth validation in unit tests
     "scipy",
     # The ImGui overlay snapshots are rendered with imgui-bundle 1.93.0, which draws tab corners differently from 1.92
-    "imgui-bundle>=1.93.0; python_version >= '3.11'",
+    "imgui-bundle>=1.93.0",
     # Used for code formatting during commits
     "pre_commit",
 ]
@@ -138,14 +135,12 @@ docs = [
 ]
 render = [
     "pybind11[global]",
-    # Pre-compiled wheels are only published for cp38-cp312 on macOS (universal2), Linux x86_64, and Windows.
-    "open3d; python_version < '3.13' and platform_machine != 'aarch64'",
-    # No pre-compiled wheels are published for Python 3.10, and the source build needs CMake.
-    "imgui-bundle; python_version >= '3.11'",
+    "open3d",
+    "imgui-bundle",
 ]
 usd = [
     # Used for parsing `.usd` mesh files
-    "usd-core==25.11",
+    "usd-core",
     # Used to serialize concurrent omni-kit bake operations (concurrent bootstrapping causes segfaults)
     "filelock",
 ]
@@ -162,16 +157,7 @@ genesis = [
     "assets/*",
     "ext/pyrender/fonts/*",
     "ext/pyrender/shaders/*",
-    "ext/VolumeSampling",
 ]
-
-[tool.black]
-line-length = 120
-force-exclude = '''
-/(
-    genesis/ext
-)/
-'''
 
 [tool.ruff]
 line-length = 120

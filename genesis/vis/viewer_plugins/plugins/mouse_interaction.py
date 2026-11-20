@@ -1,8 +1,6 @@
-from threading import Lock
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import numpy as np
-from typing_extensions import override
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -60,7 +58,6 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
         self.spring_slack = float(spring_slack)
         self.color = tuple(color)
 
-        self._lock: Lock = Lock()
         self._held_link: RigidLink | None = None
         # The plugin is active only while the simulation advances. _last_step_t is the step counter seen at the
         # previous sim-step callback, and _sim_running caches whether it advanced, so that on_draw and the mouse
@@ -81,6 +78,12 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
         self._debug_normal_node: "Node | None" = None
         self._unit_cylinder_mesh = None
         self._plane_mesh = None
+
+    @property
+    def _lock(self):
+        # Moving a held link syncs the viewer, which takes its render lock, so the plugin shares that lock rather than
+        # holding one of its own while waiting for it: the render loop takes the render lock before drawing the plugin.
+        return self.viewer.render_lock
 
     def build(self, viewer, camera: "Node", scene: "Scene"):
         super().build(viewer, camera, scene)
@@ -215,7 +218,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
     @with_lock
     @override
     def on_draw(self) -> None:
-        if self.scene._visualizer is None or not self.scene._visualizer.is_built:
+        if self.scene.visualizer is None or not self.scene.visualizer.is_built:
             return
         # When detached at runtime, copy-on-write removal already dropped this plugin from viewer.plugins, but an
         # in-flight dispatch loop may still walk its pre-removal snapshot and call us once more. Skip drawing so we
@@ -298,7 +301,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
         # Release any held link and drop the debug visuals so detaching the plugin (or viewer teardown) leaves no
         # orphaned hover arrow or drag-plane nodes behind.
         self._held_link = None
-        if self.scene._visualizer is not None and self.scene._visualizer.is_built:
+        if self.scene.visualizer is not None and self.scene.visualizer.is_built:
             for node in self._debug_interact_nodes:
                 self.scene.clear_debug_object(node)
             if self._debug_normal_node is not None:

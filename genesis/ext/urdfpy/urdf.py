@@ -5,12 +5,19 @@ import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from typing import List
 
-import networkx as nx
 import numpy as np
+
+import networkx as nx
 import PIL
 import trimesh
 
+from genesis.utils.cache import OwnedCache
+
 from .utils import configure_origin, get_filename, load_meshes, parse_origin, unparse_origin
+
+# The meshes loaded from a file, keyed on its path and its modification time. The 'Mesh' objects referencing the file own
+# them, so that a URDF using one file in several links loads it once.
+_MESHES_CACHE = OwnedCache()
 
 
 class URDFType(object):
@@ -587,11 +594,15 @@ class Mesh(URDFType):
     _TAG = "mesh"
 
     def __init__(self, filename, scale=None, meshes=None):
-        if meshes is None:
-            meshes = load_meshes(filename)
         self.filename = filename
         self.scale = scale
-        self.meshes = meshes
+        # Meshes left unspecified are loaded on first access, since parsing the URDF tree alone does not need them
+        self._meshes = None
+        # The path is resolved now, so that the meshes load from the directory the mesh was constructed in
+        self._mesh_path = os.path.abspath(filename)
+        self._is_collision = False
+        if meshes is not None:
+            self.meshes = meshes
 
     @property
     def filename(self):
@@ -617,7 +628,26 @@ class Mesh(URDFType):
     def meshes(self):
         """list of :class:`~trimesh.base.Trimesh` : The triangular meshes
         that represent this object.
+
+        The meshes of a visual geometry loaded from its file are shared by every object referencing the same path. They
+        are read-only and must be copied before any in-place modification.
         """
+        if self._meshes is None:
+            # The path is kept as given, since the materials and textures of the file load from its directory
+            key = (self._mesh_path, os.path.getmtime(self._mesh_path))
+            meshes = _MESHES_CACHE.find(key)
+            if meshes is None:
+                meshes = load_meshes(self._mesh_path)
+                # Writing into the shared arrays raises rather than changing the meshes of every object referencing the file
+                for m in meshes:
+                    m.vertices.flags.writeable = False
+                    m.faces.flags.writeable = False
+            meshes = _MESHES_CACHE.own(self, key, meshes)
+            # Combine collision geometry meshes but keep visual ones separate to preserve colors and textures
+            if self._is_collision:
+                meshes = [m.copy(include_cache=True, include_visual=False) for m in meshes]
+                meshes = [meshes[0] + meshes[1:]]
+            self.meshes = meshes
         return self._meshes
 
     @meshes.setter
@@ -640,24 +670,14 @@ class Mesh(URDFType):
     @classmethod
     def _from_xml(cls, node, root, path):
         kwargs = cls._parse(node, root, path)
-
-        # Load the mesh, combining collision geometry meshes but keeping
-        # visual ones separate to preserve colors and textures
-        fn = get_filename(path, kwargs["filename"])
         parent = next((p for p in root.iter() if node in p))
         grandparent = next((p for p in root.iter() if parent in p))
         assert grandparent.tag in (Visual._TAG, Collision._TAG)
-        combine = grandparent.tag == Collision._TAG
 
-        meshes = load_meshes(fn)
-        if combine:
-            # Delete visuals for simplicity
-            for m in meshes:
-                m.visual = trimesh.visual.ColorVisuals(mesh=m)
-            meshes = [meshes[0] + meshes[1:]]
-        kwargs["meshes"] = meshes
-
-        return Mesh(**kwargs)
+        mesh = Mesh(**kwargs)
+        mesh._mesh_path = get_filename(path, kwargs["filename"])
+        mesh._is_collision = grandparent.tag == Collision._TAG
+        return mesh
 
     def _to_xml(self, parent):
         return self._unparse()
@@ -1462,7 +1482,7 @@ class JointLimit(URDFType):
 
     Parameters
     ----------
-    effort : float
+    effort : float, optional
         The maximum joint effort (N for prismatic joints, Nm for revolute).
     velocity : float
         The maximum joint velocity (m/s for prismatic joints, rad/s for
@@ -1482,9 +1502,6 @@ class JointLimit(URDFType):
     _TAG = "limit"
 
     def __init__(self, effort=None, velocity=None, lower=None, upper=None):
-        if effort is None:
-            effort = 0.0
-
         if velocity is None:
             velocity = 0.0
 
@@ -1500,7 +1517,9 @@ class JointLimit(URDFType):
 
     @effort.setter
     def effort(self, value):
-        self._effort = float(value)
+        if value is not None:
+            value = float(value)
+        self._effort = value
 
     @property
     def velocity(self):

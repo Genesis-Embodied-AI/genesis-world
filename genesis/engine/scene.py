@@ -1,4 +1,3 @@
-import collections.abc
 import dataclasses
 import gc
 import hashlib
@@ -10,8 +9,9 @@ import sys
 import weakref
 import zipfile
 from collections import Counter
+from collections.abc import Callable, Iterable, Sequence
 from functools import cached_property
-from typing import BinaryIO, Callable, Iterable, Literal, NamedTuple, TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, BinaryIO, Literal, NamedTuple, overload
 
 import numpy as np
 import torch
@@ -24,10 +24,20 @@ import genesis.utils.mesh as mu
 from genesis.engine.entities.base_entity import Entity, EntityDescription
 from genesis.engine.entities.rigid_entity import KinematicEntity
 from genesis.engine.force_fields import ForceField
-from genesis.engine.materials.base import EntityT, Material
+from genesis.engine.materials.base import Material
+from genesis.engine.render_context import (
+    ArrayRef,
+    Arrows,
+    Lines,
+    MeshGeometry,
+    Points,
+    RenderContext,
+    ScopedRenderContext,
+    Shape,
+    StaticMeshBatch,
+)
 from genesis.engine.states.solvers import SimState, SimulatorCheckpoint
 from genesis.options import (
-    SceneOptions,
     BaseCouplerOptions,
     FEMOptions,
     KinematicOptions,
@@ -35,12 +45,14 @@ from genesis.options import (
     PBDOptions,
     ProfilingOptions,
     RigidOptions,
-    SFOptions,
+    SceneOptions,
     SimOptions,
     SPHOptions,
+    ThinLens,
     ViewerOptions,
     VisOptions,
 )
+from genesis.options.entities import EntityT, get_entity_spec
 from genesis.options.morphs import Morph
 from genesis.options.recorders import RecorderOptions, TrajectoryFile
 from genesis.options.renderers import RendererOptions
@@ -48,9 +60,10 @@ from genesis.options.surfaces import Surface
 from genesis.recorders import RecorderManager
 from genesis.recorders.trajectory import Trajectory, save_checkpoint
 from genesis.repr_base import RBC
+from genesis.typing import IndexType
 from genesis.utils import serialization
-from genesis.utils.array_class import DataItem, check_data
-from genesis.utils.misc import sanitize_index, tensor_to_array
+from genesis.utils.data import Namespace, namespace
+from genesis.utils.misc import BuildableMixin, tensor_to_array
 from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME, pixel_less_textures
 from genesis.utils.tools import RunningMean
 from genesis.utils.warnings import warn_once
@@ -58,10 +71,11 @@ from genesis.vis import Visualizer
 
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity
+    from genesis.engine.entities.emitter import Emitter
     from genesis.engine.entities.rigid_entity import RigidEntity
     from genesis.engine.sensors.base_sensor import Sensor
     from genesis.engine.simulator import Simulator
-    from genesis.options.sensors.options import SensorOptions, SensorT
+    from genesis.options.sensors.options import SensorOptions
     from genesis.recorders import Recorder
 
 
@@ -138,7 +152,7 @@ def description_digest(desc: SceneDescription) -> str:
 
 
 @gs.assert_initialized
-class Scene(RBC):
+class Scene(BuildableMixin, RBC):
     """
     A ``genesis.Scene`` object wraps all components in a simulation environment, including a simulator (containing multiple physics solvers), entities, and a visualizer (controlling both the viewer and all the cameras).
     Basically, everything happens inside a scene.
@@ -148,17 +162,15 @@ class Scene(RBC):
     sim_options : gs.options.SimOptions
         The options configuring the overarching `simulator`, which in turn manages all the solvers.
     rigid_options : gs.options.RigidOptions
-        The options configuring the rigid_solver (``scene.sim.RigidSolver``).
+        The options configuring the rigid_solver (``scene.rigid_solver``).
     mpm_options : gs.options.MPMOptions
-        The options configuring the mpm_solver (``scene.sim.MPMSolver``).
+        The options configuring the mpm_solver (``scene.mpm_solver``).
     sph_options : gs.options.SPHOptions
-        The options configuring the sph_solver (``scene.sim.SPHSolver``).
+        The options configuring the sph_solver (``scene.sph_solver``).
     fem_options : gs.options.FEMOptions
-        The options configuring the fem_solver (``scene.sim.FEMSolver``).
-    sf_options : gs.options.SFOptions
-        The options configuring the sf_solver (``scene.sim.SFSolver``).
+        The options configuring the fem_solver (``scene.fem_solver``).
     pbd_options : gs.options.PBDOptions
-        The options configuring the pbd_solver (``scene.sim.PBDSolver``).
+        The options configuring the pbd_solver (``scene.pbd_solver``).
     coupler_options : gs.options.CouplerOptions
         The options configuring the `coupler` between different solvers.
     vis_options : gs.options.VisOptions
@@ -184,7 +196,6 @@ class Scene(RBC):
         mpm_options: MPMOptions | None = None,
         sph_options: SPHOptions | None = None,
         fem_options: FEMOptions | None = None,
-        sf_options: SFOptions | None = None,
         pbd_options: PBDOptions | None = None,
         coupler_options: BaseCouplerOptions | None = None,
         vis_options: VisOptions | None = None,
@@ -205,7 +216,6 @@ class Scene(RBC):
             mpm_options,
             sph_options,
             fem_options,
-            sf_options,
             pbd_options,
             coupler_options,
             vis_options,
@@ -225,7 +235,6 @@ class Scene(RBC):
                 mpm=mpm_options,
                 sph=sph_options,
                 fem=fem_options,
-                sf=sf_options,
                 pbd=pbd_options,
                 coupler=coupler_options,
                 vis=vis_options,
@@ -234,18 +243,23 @@ class Scene(RBC):
                 renderer=renderer,
             )
         if show_FPS is not None:
-            warn_once("Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
+            warn_once(self, "Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
             self.options.profiling.show_FPS = show_FPS
 
         # description
         self._desc = SceneDescription(options=self.options)
 
-        # simulator
-        self._sim = Simulator(scene=self, options=self.options)
+        # simulator, its components opting in the data of one another within the namespace of the scene (see Namespace)
+        self._namespace = Namespace("scene")
+        with namespace(self._namespace):
+            self._sim = Simulator(scene=self, options=self.options)
         # The smoothed step rate the log reports, and the steps and stepping time of the sample being gathered
         self._step_rate_mean = RunningMean(alpha=self.options.profiling.FPS_tracker_alpha)
         self._n_sample_steps = 0
         self._sample_periods_sum = 0.0
+
+        # The part of the render context holding the markers drawn with 'draw_debug_*', set as the scene builds
+        self._render_context: "SceneScopedRenderContext | None" = None
 
         # visualizer
         self._visualizer = Visualizer(
@@ -263,7 +277,6 @@ class Scene(RBC):
         self._emitters = gs.List()
 
         self._uid = gs.UID()
-        self._is_built = False
         self._pre_step_callbacks: list = []
 
         gs.logger.info(f"Scene ~~~<{self._uid}>~~~ created.")
@@ -284,6 +297,8 @@ class Scene(RBC):
             if getattr(self, "_recorder_manager", None) is not None and self._recorder_manager.is_recording:
                 self.stop_recording()
         finally:
+            if getattr(self, "_recorder_manager", None) is not None:
+                self._recorder_manager.destroy()
             self._recorder_manager = None
 
             if getattr(self, "_visualizer", None) is not None:
@@ -293,6 +308,11 @@ class Scene(RBC):
             if getattr(self, "_sim", None) is not None:
                 self._sim.destroy()
                 self._sim = None
+                # The opt-in requests of the namespace hold callables bound to the components of the simulator, and the
+                # scoped render context of the scene its render context, either of which would keep the data of the
+                # simulator alive with the scene (see 'opt_in').
+                self._namespace = None
+                self._render_context = None
 
                 # Reference cycles leave the Quadrants arrays of the simulator to a later garbage collection, which
                 # aborts the process if it runs on a thread without their CUDA context, e.g. the viewer render thread.
@@ -303,12 +323,18 @@ class Scene(RBC):
             self._is_built = False
 
     @overload
+    def add_entity(self, *, spec: gs.entities.Spec[EntityT]) -> EntityT: ...
+
+    @overload
+    def add_entity(self, *, spec: gs.entities.Spec) -> "Entity": ...
+
+    @overload
     def add_entity(
         self,
         morph: Morph | Iterable[Morph],
-        material: None = ...,
+        material: gs.materials.Rigid | None = ...,
         surface: Surface | None = ...,
-        visualize_contact: bool = ...,
+        visualize_contact: bool | None = ...,
         vis_mode: str | None = ...,
         name: str | None = ...,
     ) -> "RigidEntity": ...
@@ -317,25 +343,44 @@ class Scene(RBC):
     def add_entity(
         self,
         morph: Morph | Iterable[Morph],
-        material: Material[EntityT] = ...,
+        material: gs.materials.Kinematic,
         surface: Surface | None = ...,
-        visualize_contact: bool = ...,
+        visualize_contact: Literal[False] | None = ...,
         vis_mode: str | None = ...,
         name: str | None = ...,
-    ) -> EntityT: ...
+    ) -> KinematicEntity: ...
+
+    @overload
+    def add_entity[MaterialEntityT: "Entity"](
+        self,
+        morph: Morph | Iterable[Morph],
+        material: Material[MaterialEntityT],
+        surface: Surface | None = ...,
+        visualize_contact: Literal[False] | None = ...,
+        vis_mode: str | None = ...,
+        name: str | None = ...,
+    ) -> MaterialEntityT: ...
 
     @gs.assert_unbuilt
     def add_entity(
         self,
-        morph: Morph | Iterable[Morph],
+        morph: Morph | Iterable[Morph] | None = None,
         material: Material | None = None,
         surface: Surface | None = None,
-        visualize_contact: bool = False,
+        visualize_contact: bool | None = None,
         vis_mode: str | None = None,
         name: str | None = None,
+        *,
+        spec: gs.entities.Spec | None = None,
     ) -> "Entity":
-        """
-        Add an entity to the scene.
+        """Add an entity to the scene, constructed from an entity spec or from individual arguments.
+
+        The class of ``spec``, such as ``gs.entities.Rigid``, ``gs.entities.Kinematic`` or ``gs.entities.FEM``,
+        decides the kind of entity and the solver simulating it. The entity holds it as ``entity.spec``.
+
+        The individual arguments are a shorthand for the spec of the entities the material is given to, such as
+        ``spec=gs.entities.Rigid(...)`` for ``gs.materials.Rigid``, and stand for that spec alone. Passing
+        spec and individual arguments together raises an error.
 
         Parameters
         ----------
@@ -350,159 +395,163 @@ class Scene(RBC):
             The material of the entity. If None, use ``gs.materials.Rigid()``.
         surface : gs.surfaces.Surface | None, optional
             The surface of the entity. If None, use ``gs.surfaces.Default()``.
-        visualize_contact : bool
-            Whether to visualize contact forces applied to this entity as arrows in the viewer and rendered images.
-            Note that this will not be displayed in images rendered by camera using the `RayTracer` renderer.
+        visualize_contact : bool | None, optional
+            Whether the contacts of the entity are drawn as markers, arrows that the interactive viewer and the debug
+            cameras draw. Each contact is read back and drawn at every frame, so reserve it for the entities being
+            inspected. If None, defaults to False.
         vis_mode : str | None, optional
-            The visualization mode of the entity. This is a handy shortcut for setting `surface.vis_mode` without
-            explicitly creating a surface object.
+            Deprecated: the material decides how the entity is drawn. The shortcut of ``surface.vis_mode`` (see
+            ``Surface.vis_mode``).
         name : str | None, optional
             User-specified name for the entity. If not provided, an auto-generated name will be assigned
             based on the morph type and entity UID (e.g., "box_a1b2c3d4"). Must be unique within the scene.
+        spec : gs.entities.Spec | None, optional
+            The spec to construct the entity from, an instance of a subclass of ``gs.entities.Spec``.
 
         Returns
         -------
         entity : genesis.Entity
-            The created entity.
+            The created entity, of the kind its spec class decides.
         """
-        if material is None:
-            material = gs.materials.Rigid()
-
-        if surface is None:
-            # assign a local surface, otherwise modification will apply on global default surface
-            surface = gs.surfaces.Default()
-
-        # Handle heterogeneous morphs (any iterable of morphs, excluding Morph objects). Whether a morph, or several,
-        # can be built from is for the entity created from it to say.
-        if isinstance(morph, collections.abc.Iterable) and not isinstance(morph, Morph):
-            morph = tuple(morph)
+        if spec is None:
+            spec = get_entity_spec(morph, material, surface, visualize_contact, vis_mode, name)
+        elif any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode, name)):
+            gs.raise_exception("Pass either an entity spec or individual entity arguments, never both.")
+        if spec.morph is None:
+            gs.raise_exception("Entity construction requires a morph.")
+        material = spec.material
+        # The surface resolves on a copy, since other entities may share it. The morph resolves in place, as shared
+        # morphs rely on (see 'Entity.spec').
+        surface = gs.surfaces.Default() if spec.surface is None else spec.surface.model_copy()
 
         # some morph should not smooth surface normal
-        if isinstance(
-            morph[0] if isinstance(morph, tuple) else morph, (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)
-        ):
+        if isinstance(spec.morphs[0], (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)):
             surface.smooth = False
 
         if surface.double_sided is None:
             surface.double_sided = isinstance(material, (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth))
 
-        if vis_mode is not None:
-            surface.vis_mode = vis_mode
-        # validate and populate default surface.vis_mode considering morph type
-        if isinstance(material, gs.materials.Kinematic):
-            if surface.vis_mode is None:
-                surface.vis_mode = "visual"
-
-            if surface.vis_mode not in ("visual", "collision", "sdf"):
-                gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: "
-                    "['visual', 'collision', 'sdf']."
+        # The material decides how the entity is drawn (see 'Material.structure'). How the debug view draws the entity
+        # resolves here on a copy of its vis options (see 'Spec._check_vis'), the parts of a hybrid entity resolving
+        # their own. A deprecated 'vis_mode' naming a debug representation stays on the surface, the scoped contexts
+        # showing the entity in that representation in the scene as it looks too, and is cleared otherwise.
+        vis = gs.options.EntityVisOptions() if spec.vis is None else spec.vis.model_copy()
+        if surface.vis_mode is not None:
+            if surface.vis_mode in spec._debug_vis_modes:
+                # The default debug representation of the entity needs no 'debug_vis_mode'
+                vis_repr = "debug=True"
+                if surface.vis_mode != spec._debug_vis_modes[0]:
+                    vis_repr = f'debug=True, debug_vis_mode="{surface.vis_mode}"'
+                warn_once(
+                    self,
+                    f"'vis_mode=\"{surface.vis_mode}\"' is deprecated. Set "
+                    f"'vis=gs.options.EntityVisOptions({vis_repr})' on the entity spec instead, which the interactive "
+                    "viewer and the debug cameras show.",
                 )
-
-        elif isinstance(
-            material,
-            (
-                gs.materials.PBD.Liquid,
-                gs.materials.PBD.Particle,
-                gs.materials.MPM.Liquid,
-                gs.materials.MPM.Sand,
-                gs.materials.MPM.Snow,
-                gs.materials.SPH.Liquid,
-            ),
-        ):
-            if surface.vis_mode is None:
-                surface.vis_mode = "particle"
-
-            if surface.vis_mode not in ("particle", "recon"):
-                gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'recon']."
+                vis.debug_vis_mode = surface.vis_mode
+            else:
+                warn_once(
+                    self,
+                    f"'vis_mode=\"{surface.vis_mode}\"' is deprecated. Leave it unset, since the material decides how "
+                    "an entity is drawn.",
                 )
+                surface.vis_mode = None
+        if not isinstance(spec, gs.entities.Hybrid) and vis.debug_vis_mode is None and spec._debug_vis_modes:
+            vis.debug_vis_mode = spec._debug_vis_modes[0]
+        spec = spec._frozen_copy(update={"vis": vis})
 
-        elif isinstance(material, gs.materials.SF.Smoke):
-            if surface.vis_mode is None:
-                surface.vis_mode = "particle"
+        return self._sim.add_entity(surface, spec)
 
-            if surface.vis_mode not in ("particle",):
-                gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'recon']."
-                )
+    @overload
+    def add_stage(self, *, spec: gs.entities.Kinematic) -> list[KinematicEntity]: ...
 
-        elif isinstance(material, (gs.materials.PBD.Base, gs.materials.MPM.Base, gs.materials.SPH.Base)):
-            if surface.vis_mode is None:
-                surface.vis_mode = "visual"
+    @overload
+    def add_stage(self, *, spec: gs.entities.Rigid) -> list["RigidEntity"]: ...
 
-            if surface.vis_mode not in ("visual", "particle", "recon"):
-                gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['visual', 'particle', 'recon']."
-                )
+    @overload
+    def add_stage(
+        self,
+        morph: gs.morphs.USD,
+        material: gs.materials.Rigid | None = ...,
+        surface: Surface | None = ...,
+        visualize_contact: bool | None = ...,
+        vis_mode: Literal["visual", "collision"] | None = ...,
+    ) -> list["RigidEntity"]: ...
 
-        elif isinstance(material, gs.materials.FEM.Base):
-            if surface.vis_mode is None:
-                surface.vis_mode = "visual"
-
-            if surface.vis_mode not in ("visual",):
-                gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['visual']."
-                )
-
-        elif isinstance(material, gs.materials.Hybrid):  # determine the visual of the outer soft part
-            if surface.vis_mode is None:
-                surface.vis_mode = "particle"
-
-            if surface.vis_mode not in ("particle", "visual"):
-                gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'visual']."
-                )
-
-        else:
-            gs.raise_exception()
-
-        entity = self._sim._add_entity(morph, material, surface, visualize_contact, name)
-
-        return entity
+    @overload
+    def add_stage(
+        self,
+        morph: gs.morphs.USD,
+        material: gs.materials.Kinematic,
+        surface: Surface | None = ...,
+        visualize_contact: Literal[False] | None = ...,
+        vis_mode: Literal["visual", "collision"] | None = ...,
+    ) -> list[KinematicEntity]: ...
 
     @gs.assert_unbuilt
     def add_stage(
         self,
-        morph: gs.morphs.USD,
-        material: Material | None = None,
+        morph: gs.morphs.USD | None = None,
+        material: gs.materials.Rigid | gs.materials.Kinematic | None = None,
         surface: Surface | None = None,
-        visualize_contact: bool = False,
-        vis_mode: Literal["visual", "collision"] = "visual",
-    ):
-        """
-        Add a stage to the scene.
+        visualize_contact: bool | None = None,
+        vis_mode: Literal["visual", "collision"] | None = None,
+        *,
+        spec: gs.entities.Rigid | gs.entities.Kinematic | None = None,
+    ) -> list:
+        """Add a USD stage to the scene, as one entity per articulation or rigid body it holds.
+
+        The class of ``spec`` decides the kind of every entity of the stage, ``gs.entities.Rigid`` or
+        ``gs.entities.Kinematic``, its morph being the stage. The spec names no entity, since a stage
+        adds several. As for ``Scene.add_entity``, the individual arguments are a shorthand for the spec of the
+        entities their material is given to, and passing both raises an error.
 
         Parameters
         ----------
-        morph : gs.morphs.USD
+        morph : gs.morphs.USD | None, optional
             The stage to add to the scene.
         material : gs.materials.Material | None, optional
             The material of the stage. If None, use ``gs.materials.Rigid()`` for all morphs.
         surface : gs.surfaces.Surface | None, optional
             The surface of the stage. If None, use ``gs.surfaces.Default()`` for all morphs.
-        visualize_contact : bool
-            Whether to visualize contact forces applied to this stage as arrows in the viewer and rendered images.
-            Note that this will not be displayed in images rendered by camera using the `RayTracer` renderer.
+        visualize_contact : bool | None, optional
+            Whether the contacts of the entities of the stage are drawn as markers (see ``visualize_contact`` of
+            ``Scene.add_entity``). If None, defaults to False.
         vis_mode : str | None, optional
-            The visualization mode of the stage. This is a handy shortcut for setting `surface.vis_mode` without
-            explicitly creating a surface object.
+            Deprecated: the material decides how the entities are drawn (see ``vis_mode`` of ``Scene.add_entity``).
+        spec : gs.entities.Rigid | gs.entities.Kinematic | None, optional
+            The spec to construct the entities of the stage from.
 
         Returns
         -------
-        entities : List[genesis.Entity]
+        entities : list[genesis.Entity]
             The created entities.
         """
-        if not isinstance(morph, gs.morphs.USD):
-            gs.raise_exception(f"Unsupported morph: {morph}.")
+        if spec is None:
+            stage_spec = get_entity_spec(morph, material, surface, visualize_contact, vis_mode)
+        else:
+            if any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode)):
+                gs.raise_exception("Pass either an entity spec or individual entity arguments, never both.")
+            stage_spec = spec
+        if not isinstance(stage_spec, (gs.entities.Rigid, gs.entities.Kinematic)):
+            gs.raise_exception(
+                f"A stage holds rigid or kinematic entities, which gs.entities.{type(stage_spec).__name__} cannot "
+                "construct."
+            )
+        if stage_spec.name is not None:
+            gs.raise_exception("A stage adds several entities, so its spec takes no name.")
+        if stage_spec.patches:
+            gs.raise_exception("A stage adds entities of different links, so its spec selects no part.")
+        if not isinstance(stage_spec.morph, gs.morphs.USD):
+            gs.raise_exception(f"Unsupported morph: {stage_spec.morph}.")
         from genesis.utils.usd import parse_usd_stage
 
-        # One `gs.morphs.USD` per rigid entity of the stage, added while the stage it was split from stays open.
-        with parse_usd_stage(morph) as entity_morphs:
-            entities = []
-            for entity_morph in entity_morphs:
-                entities.append(self.add_entity(entity_morph, material, surface, visualize_contact, vis_mode))
-        return entities
+        # One `gs.morphs.USD` per entity of the stage, added while the stage it was split from stays open.
+        with parse_usd_stage(stage_spec.morph) as entity_morphs:
+            return [
+                self.add_entity(spec=stage_spec.model_copy(update={"morph": entity_morph}))
+                for entity_morph in entity_morphs
+            ]
 
     @gs.assert_unbuilt
     def add_mesh_light(
@@ -588,7 +637,7 @@ class Scene(RBC):
         self.visualizer.add_light(pos, dir, color, intensity, directional, castshadow, cutoff, attenuation)
 
     @gs.assert_unbuilt
-    def add_sensor(self, sensor_options: "SensorOptions[SensorT]") -> "SensorT":
+    def add_sensor[SensorT: "Sensor"](self, sensor_options: "SensorOptions[SensorT]") -> SensorT:
         """
         Add a sensor to the scene.
 
@@ -599,7 +648,8 @@ class Scene(RBC):
         sensor_options : SensorOptions
             The options for the sensor.
         """
-        return self._sim._sensor_manager.create_sensor(sensor_options)
+        with namespace(self._namespace):
+            return self._sim.sensor_manager.create_sensor(sensor_options)
 
     @gs.assert_built
     def read_sensors(self, envs_idx=None) -> "dict[type[Sensor], torch.Tensor]":
@@ -616,10 +666,10 @@ class Scene(RBC):
 
         Returns
         -------
-        dict[Type[Sensor], torch.Tensor]
+        dict[type[Sensor], torch.Tensor]
             For each sensor class present in the scene, a tensor of shape (B, [history,] class_cache_size).
         """
-        return self._sim._sensor_manager.read_sensors(entity_idx=None, envs_idx=envs_idx)
+        return self._sim.sensor_manager.read_sensors(entity_idx=None, envs_idx=envs_idx)
 
     @gs.assert_unbuilt
     def add_recorder(self, data_func: Callable, rec_options: "RecorderOptions") -> "Recorder":
@@ -678,7 +728,7 @@ class Scene(RBC):
         lookat=(0.5, 0.5, 0.5),
         up=(0.0, 0.0, 1.0),
         fov=30,
-        aperture=2.0,
+        aperture=None,
         focus_dist=None,
         GUI=False,
         spp=256,
@@ -687,25 +737,23 @@ class Scene(RBC):
         far=20.0,
         env_idx=None,
         debug=False,
+        lens=None,
     ):
         """
         Add a camera to the scene.
 
-        The camera model can be either 'pinhole', 'thinlens' or 'fisheye':
-        - The 'pinhole' model is a simple camera model that captures light rays from a single point in space.
-        - The 'thinlens' model is a more complex camera model that simulates a lens with a finite aperture size,
-          allowing for depth of field effects. It is only supported by the Raytracer.
+        The camera model can be either 'pinhole' or 'fisheye':
+        - The 'pinhole' model is a simple camera model that captures light rays from a single point in space. Given a
+          `lens`, it becomes a thin-lens camera simulating a lens of finite aperture, which blurs what lies away from
+          its focus distance (depth of field). A lens is only supported by the Raytracer.
         - The 'fisheye' model is a camera model that simulates a fisheye lens, allowing for wide-angle views. It is
           only supported by the BatchRenderer.
-
-        Warning
-        -------
-        When 'pinhole' is used, the `aperture` and `focal_len` parameters are ignored.
 
         Parameters
         ----------
         model : str
-            Specifies the camera model. Options are 'pinhole' or 'thinlens'.
+            The projection of the camera: 'pinhole' or 'fisheye'. Deprecated: 'thinlens' stands for a pinhole camera with
+            a `lens`.
         res : tuple of int, shape (2,)
             The resolution of the camera, specified as a tuple (width, height).
         pos : tuple of float, shape (3,)
@@ -716,10 +764,10 @@ class Scene(RBC):
             The up vector of the camera, defining its orientation, specified as (x, y, z).
         fov : float
             The vertical field of view of the camera in degrees.
-        aperture : float
-            The aperture size of the camera, controlling depth of field.
+        aperture : float | None
+            Deprecated: use `lens`. The f-number of the lens of a 'thinlens' camera, 2.0 if None.
         focus_dist : float | None
-            The focus distance of the camera. If None, it will be auto-computed using `pos` and `lookat`.
+            Deprecated: use `lens`. The focus distance of the lens of a 'thinlens' camera.
         GUI : bool
             Whether to display the camera's rendered image in a separate GUI window.
         spp : int, optional
@@ -741,43 +789,72 @@ class Scene(RBC):
             that this option is unrelated to which environment is being rendering on the scene. Default to None for
             batched renderers (ie BatchRender), 'rendered_envs_idx[0]' otherwise (ie Raytracer or Rasterizer).
         debug : bool
-            Whether to use the debug camera. It enables to create cameras that can used to monitor / debug the
-            simulation without being part of the "sensors". Their output is rendered by the usual simple Rasterizer
-            systematically, no matter if BatchRender and RayTracer is enabled. This way, it is possible to record the
-            simulation with arbitrary resolution and camera pose, without interfering with what robots can perceive
-            from their environment. Defaults to False.
+            Whether the camera is a debug camera, which draws what the interactive viewer draws without its
+            interaction: the markers, and each entity in its debug representation while the viewer shows it (see
+            ``VisOptions.debug``). The Rasterizer renders it whatever the renderer of the scene, so that it records the
+            simulation at any resolution and from any pose without interfering with what robots perceive from their
+            environment. Defaults to False.
+        lens : gs.options.ThinLens | None
+            The lens of a pinhole camera, which makes it a thin-lens camera, None for a sharp image. Defaults to None.
 
         Returns
         -------
         camera : genesis.Camera
             The created camera object.
         """
+        if model == "thinlens" or aperture is not None or focus_dist is not None:
+            gs.logger.warning(
+                "'model=\"thinlens\"', 'aperture' and 'focus_dist' are deprecated. Use 'lens=gs.options.ThinLens(...)' "
+                "instead."
+            )
+            if model == "thinlens":
+                if lens is not None:
+                    gs.raise_exception("'lens' and the deprecated 'model=\"thinlens\"' cannot be given together.")
+                lens = ThinLens(aperture=2.0 if aperture is None else aperture, focus_dist=focus_dist)
+                model = "pinhole"
         if denoise is None:
             denoise = sys.platform != "darwin"
         return self._visualizer.add_camera(
-            res, pos, lookat, up, model, fov, aperture, focus_dist, GUI, spp, denoise, near, far, env_idx, debug
+            res, pos, lookat, up, model, fov, lens, GUI, spp, denoise, near, far, env_idx, debug
         )
+
+    @overload
+    def add_emitter(
+        self, *, spec: gs.entities.MPM | gs.entities.SPH | gs.entities.PBD, max_particles: int = ...
+    ) -> "Emitter": ...
+
+    @overload
+    def add_emitter(
+        self,
+        material: gs.materials.MPM.Base | gs.materials.SPH.Base | gs.materials.PBD.Liquid | gs.materials.PBD.Particle,
+        max_particles: int = ...,
+        surface: Surface | None = ...,
+    ) -> "Emitter": ...
 
     @gs.assert_unbuilt
     def add_emitter(
         self,
-        material: Material,
-        max_particles=20000,
+        material: Material | None = None,
+        max_particles: int = 20000,
         surface: Surface | None = None,
-    ):
+        *,
+        spec: gs.entities.MPM | gs.entities.SPH | gs.entities.PBD | None = None,
+    ) -> "Emitter":
         """
         Add a fluid emitter to the scene.
 
         Parameters
         ----------
-        material : gs.materials.Material
+        material : gs.materials.Material | None, optional
             The material of the fluid to be emitted. Must be an instance of `gs.materials.MPM.Base`,
             `gs.materials.SPH.Base`, `gs.materials.PBD.Particle` or `gs.materials.PBD.Liquid`.
-        max_particles : int
-            The maximum number of particles that can be emitted by the emitter. Particles will be recycled once this
-            limit is reached.
+        max_particles : int, optional
+            The maximum number of particles the emitter holds at once, recycled once all are emitted. Each one costs
+            memory and simulation time from the start, emitted or not. Default is 20000.
         surface : gs.surfaces.Surface | None, optional
-            The surface of the emitter. If None, use `gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))`.
+            The surface of the emitted particles. Defaults to ``gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))``.
+        spec : gs.entities.MPM | gs.entities.SPH | gs.entities.PBD | None, optional
+            The entity spec of the emitted particles, which replaces the material and the surface.
 
         Returns
         -------
@@ -789,29 +866,32 @@ class Scene(RBC):
         if self.requires_grad:
             gs.raise_exception("Emitter is not supported in differentiable mode.")
 
-        if not isinstance(
-            material, (gs.materials.MPM.Base, gs.materials.SPH.Base, gs.materials.PBD.Particle, gs.materials.PBD.Liquid)
+        if spec is None:
+            if material is None:
+                gs.raise_exception("An emitter requires a material or an entity spec.")
+            emitter_spec = get_entity_spec(material=material, surface=surface)
+        else:
+            if material is not None or surface is not None:
+                gs.raise_exception("Pass either an entity spec or a material and a surface, never both.")
+            emitter_spec = spec
+        if not isinstance(emitter_spec, (gs.entities.MPM, gs.entities.SPH)) and not (
+            isinstance(emitter_spec, gs.entities.PBD)
+            and isinstance(emitter_spec.material, (gs.materials.PBD.Liquid, gs.materials.PBD.Particle))
         ):
             gs.raise_exception(
-                "Non-supported material for emitter. Supported materials are: `gs.materials.MPM.Base`, "
-                "`gs.materials.SPH.Base`, `gs.materials.PBD.Particle`, `gs.materials.PBD.Liquid`."
+                f"Non-supported entity spec class for emitter: gs.entities.{type(emitter_spec).__name__}. Supported "
+                "ones are gs.entities.MPM, gs.entities.SPH and gs.entities.PBD with a Liquid or a Particle material."
             )
+        if emitter_spec.morph is not None:
+            gs.raise_exception("The emitter sets the morph of its entity spec. Leave it None.")
 
+        surface = emitter_spec.surface
         if surface is None:
             surface = gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))
 
-        if surface.vis_mode is None:
-            surface.vis_mode = "particle"
-        if surface.vis_mode == "visual":
-            gs.raise_exception("surface.vis_mode='visual' is not supported for fluid emitters.")
-
-        emitter = Emitter(max_particles)
-        entity = self.add_entity(
-            morph=gs.morphs.Nowhere(n_particles=max_particles),
-            material=material,
-            surface=surface,
-        )
-        emitter.set_entity(entity)
+        morph = gs.morphs.Nowhere(n_particles=max_particles)
+        entity = self.add_entity(spec=emitter_spec.model_copy(update={"morph": morph, "surface": surface}))
+        emitter = Emitter(entity, max_particles)
         self._emitters.append(emitter)
         return emitter
 
@@ -831,7 +911,7 @@ class Scene(RBC):
             The added force field.
         """
         force_field.scene = self
-        self._sim._add_force_field(force_field)
+        self._sim.add_force_field(force_field)
         return force_field
 
     @gs.assert_unbuilt
@@ -870,88 +950,68 @@ class Scene(RBC):
 
         gs._scene_registry.append(weakref.ref(self, _destroy_callback))
 
-        with gs.logger.timer(f"Building scene ~~~<{self._uid}>~~~..."):
-            self._parallelize(n_envs, env_spacing, n_envs_per_row, center_envs_at_origin)
+        # A failed build destroys the scene, so that it never stays half built
+        is_done = False
+        try:
+            with gs.logger.timer(f"Building scene ~~~<{self._uid}>~~~..."):
+                self.env_spacing = env_spacing
+                self.n_envs_per_row = n_envs_per_row
+                self._center_envs_at_origin = center_envs_at_origin
 
-            # simulator
-            self._sim.build()
+                # A scene without parallel environments lays out one
+                n_envs_ = max(1, n_envs)
+                if self.n_envs_per_row is None:
+                    self.n_envs_per_row = math.ceil(math.sqrt(n_envs_))
 
-            # reset state
-            self._reset()
+                # compute offset values for visualizing each env
+                if not isinstance(env_spacing, (list, tuple)) or len(env_spacing) != 2:
+                    gs.raise_exception("`env_spacing` should be a tuple of length 2.")
+                self._layout = EnvironmentLayout(n_envs, tuple(env_spacing), self.n_envs_per_row, center_envs_at_origin)
+                offset_x = (np.arange(n_envs_) // self.n_envs_per_row) * self.env_spacing[0]
+                offset_y = (np.arange(n_envs_) % self.n_envs_per_row) * self.env_spacing[1]
+                offset_z = np.zeros((n_envs_,))
+                self.envs_offset = np.stack((offset_x, offset_y, offset_z), axis=-1, dtype=gs.np_float)
+
+                # move to center
+                if center_envs_at_origin:
+                    center = (np.max(self.envs_offset, axis=0) + np.min(self.envs_offset, axis=0)) / 2.0
+                    self.envs_offset -= center
+
+                with namespace(self._namespace):
+                    self._sim.build(n_envs)
+                self._render_context = self._sim.render_context.register(
+                    self, rendered_envs_idx=self.options.vis.rendered_envs_idx, n_envs=self._sim.n_envs
+                )
+
+                # reset state
+                self._reset()
+
+            with gs.logger.timer("Compiling simulation kernels..."):
+                self._sim.step()
+                try:
+                    self._sim.check_errno()
+                except gs.GenesisException as e:
+                    gs.logger.warning(
+                        "The initial state is invalid. Register a valid one with 'scene.reset(state)', or overwrite it "
+                        "manually following 'scene.build' and every call to 'scene.reset()', otherwise stepping will "
+                        f"fail with: {e}"
+                    )
+                self._sim.reset(self._init_state)
+                self._restart()
+
+            # visualizer
+            with gs.logger.timer("Building visualizer..."):
+                self._visualizer.build()
+
+            # recorders, which lay out the phases a step times once (see 'StepTimer.add_phases')
+            self._sim.step_timer.add_phases("recorders", "rendering", "video")
+            self._recorder_manager.build()
 
             self._is_built = True
-
-        with gs.logger.timer("Compiling simulation kernels..."):
-            self._sim.step()
-            try:
-                self._sim.check_errno()
-            except gs.GenesisException as e:
-                gs.logger.warning(
-                    "The initial state is invalid. Register a valid one with 'scene.reset(state)', or overwrite it "
-                    "manually following 'scene.build' and every call to 'scene.reset()', otherwise stepping will fail "
-                    f"with: {e}"
-                )
-            self._reset()
-
-        # visualizer
-        with gs.logger.timer("Building visualizer..."):
-            self._visualizer.build()
-
-        # recorders, which lay out the phases a step times once (see 'StepTimer.add_phases')
-        self._sim.step_timer.add_phases("recorders", "rendering", "video")
-        self._recorder_manager.build()
-
-    def _parallelize(
-        self,
-        n_envs: int,
-        env_spacing: tuple[float, float],
-        n_envs_per_row: int,
-        center_envs_at_origin: bool,
-    ):
-        self.n_envs = n_envs
-        self.env_spacing = env_spacing
-        self.n_envs_per_row = n_envs_per_row
-        self._center_envs_at_origin = center_envs_at_origin
-
-        # true batch size
-        self._B = max(1, self.n_envs)
-        self._envs_idx = torch.arange(self._B, dtype=gs.tc_int, device=gs.device)
-
-        if self.n_envs_per_row is None:
-            self.n_envs_per_row = math.ceil(math.sqrt(self._B))
-
-        # compute offset values for visualizing each env
-        if not isinstance(env_spacing, (list, tuple)) or len(env_spacing) != 2:
-            gs.raise_exception("`env_spacing` should be a tuple of length 2.")
-        self._layout = EnvironmentLayout(n_envs, tuple(env_spacing), self.n_envs_per_row, center_envs_at_origin)
-        offset_x = (np.arange(self._B) // self.n_envs_per_row) * self.env_spacing[0]
-        offset_y = (np.arange(self._B) % self.n_envs_per_row) * self.env_spacing[1]
-        offset_z = np.zeros((self._B,))
-        self.envs_offset = np.stack((offset_x, offset_y, offset_z), axis=-1, dtype=gs.np_float)
-
-        # move to center
-        if center_envs_at_origin:
-            center = (np.max(self.envs_offset, axis=0) + np.min(self.envs_offset, axis=0)) / 2.0
-            self.envs_offset -= center
-
-        """
-        Notes:
-        - When using gpu
-            - for non-batched env, we only parallelize certain loops that have big loop size
-            - for batched env, we parallelize all loops
-        - When using cpu, we serialize everything.
-            - Parallelization only provides a boost for n_envs >= num_threads.
-              It is always disabled by default but can be enforced by setting the env var `GS_PARA_LEVEL=2`.
-            - In order to exploit full cpu power, users are encouraged to launch multiple processes manually, so that
-              each process uses a single cpu thread.
-        """
-        if gs.backend == gs.cpu:
-            para_level = gs.PARA_LEVEL.NEVER
-        elif self.n_envs <= 1:
-            para_level = gs.PARA_LEVEL.PARTIAL
-        else:
-            para_level = gs.PARA_LEVEL.ALL
-        self._para_level = int(os.environ.get("GS_PARA_LEVEL", para_level))
+            is_done = True
+        finally:
+            if not is_done:
+                self.destroy()
 
     @gs.assert_built
     def reset(self, state: SimState | None = None, envs_idx=None):
@@ -974,7 +1034,7 @@ class Scene(RBC):
         self._recorder_manager.reset(envs_idx)
         self._reset(state, envs_idx=envs_idx)
 
-    def _reset(self, state: SimState | None = None, *, envs_idx=None, keep_init: bool = False):
+    def _reset(self, state: SimState | None = None, *, envs_idx: IndexType | None = None, keep_init: bool = False):
         if self._is_built:
             if state is None:
                 state = self._init_state
@@ -986,7 +1046,7 @@ class Scene(RBC):
                     self._init_state = state
             self._sim.reset(state, envs_idx)
         else:
-            self._init_state = self._get_state()
+            self._init_state = self._sim.get_state()
         self._restart()
 
     def _restart(self, refresh_viewer=True):
@@ -1027,27 +1087,23 @@ class Scene(RBC):
         """
         # Snapshot the current state before the backward pass rewinds the physics. The clocks go with it: the backward
         # pass of each step winds them down, and the restore below puts the physics back where they were.
-        snapshot = self._get_state()
-        steps = self._sim._steps.clone()
+        snapshot = self._sim.get_state()
+        steps = self._sim.steps.clone()
         # The autograd nodes of the steps unroll the rollout within this backward pass (see genesis.grad.bridge).
         torch.autograd.backward(loss, *args, **kwargs)
         # keep_init semantics: see _reset. Restoring the snapshot puts the physics back where the forward pass left
         # it, and the clocks snapshotted above with it.
         self._reset(snapshot, keep_init=True)
-        self._sim._steps[:] = steps
+        self._sim.steps.copy_(steps)
         return snapshot
-
-    def _get_state(self):
-        # The scene keeps this state for itself, outside of the autograd graph of a differentiable rollout
-        with torch.no_grad():
-            return self._sim.get_state()
 
     @gs.assert_built
     def get_state(self):
         """
-        Returns the current state of the scene.
+        Returns the current state of the scene, which 'reset' restores.
 
-        In a differentiable scene, the state tracks gradients, as the getters of the entities do.
+        It holds what every solver steps from, as a copy outside of the autograd graph of a differentiable rollout. The
+        getters of the entities query the state with gradients.
 
         Returns
         -------
@@ -1143,6 +1199,8 @@ class Scene(RBC):
         """
         Draws a line in the scene for visualization.
 
+        The line is a marker drawn by the interactive viewer and the debug cameras.
+
         Parameters
         ----------
         start : array_like, shape (3,)
@@ -1156,18 +1214,21 @@ class Scene(RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.Lines
             The created debug object.
         """
+        (start, end), is_shared = self._render_context.broadcast_to_envs((start, end), value_ndim=1, is_tiled=False)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_line(start, end, radius, color)
+            return self._render_context.add(
+                Lines(start[:, None], end[:, None], radius, tuple(color), is_shared=is_shared)
             )
 
     @gs.assert_built
     def draw_debug_arrow(self, pos, vec=(0, 0, 1), radius=0.01, color=(1.0, 0.0, 0.0, 0.5)):
         """
         Draws an arrow in the scene for visualization.
+
+        The arrow is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1182,19 +1243,23 @@ class Scene(RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
-            The created debug object.
+        marker : genesis.engine.render_context.Arrows | None
+            The created debug object, None for a vector of zero length.
         """
+        (pos, vec), is_shared = self._render_context.broadcast_to_envs((pos, vec), value_ndim=1, is_tiled=False)
+        if (torch.linalg.norm(vec, dim=-1) <= gs.EPS).all():
+            return None
         with self._visualizer.viewer_lock:
-            node = self._visualizer.context.make_debug_arrow(pos, vec, radius, color)
-            if node is not None:
-                self._visualizer.context.add_debug_node(node)
-            return node
+            return self._render_context.add(
+                Arrows(pos[:, None], vec[:, None], radius, tuple(color), is_shared=is_shared)
+            )
 
     @gs.assert_built
     def draw_debug_frame(self, T, axis_length=1.0, origin_size=0.015, axis_radius=0.01, color=None):
         """
         Draws a 3-axis coordinate frame in the scene for visualization.
+
+        The frame is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1211,18 +1276,19 @@ class Scene(RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.StaticMeshBatch
             The created debug object.
         """
+        (T,), _ = self._render_context.broadcast_to_envs((T,), value_ndim=2, is_tiled=True)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_frame(T, axis_length, origin_size, axis_radius, color)
-            )
+            return self._render_context.add_frames(T[:, None], axis_length, origin_size, axis_radius, color)
 
     @gs.assert_built
     def draw_debug_frames(self, Ts, axis_length=1.0, origin_size=0.015, axis_radius=0.01, color=None):
         """
         Draws 3-axis coordinate frames in the scene for visualization.
+
+        The frames are a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1239,18 +1305,19 @@ class Scene(RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.StaticMeshBatch
             The created debug object.
         """
+        (Ts,), is_shared = self._render_context.broadcast_to_envs((Ts,), value_ndim=3, is_tiled=False)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_frames(Ts, axis_length, origin_size, axis_radius, color)
-            )
+            return self._render_context.add_frames(Ts, axis_length, origin_size, axis_radius, color, is_shared)
 
     @gs.assert_built
     def draw_debug_mesh(self, mesh, pos=np.zeros(3), T=None):
         """
         Draws a mesh in the scene for visualization.
+
+        The mesh is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1259,20 +1326,26 @@ class Scene(RBC):
         pos : array_like, shape (3,), optional
             The position of the mesh in the scene.
         T : array_like, shape (4, 4) | None, optional
-            The transformation matrix of the mesh. If None, the mesh will be drawn at the position specified by `pos`. Otherwise, `T` has a higher priority than `pos`.
+            The transformation matrix of the mesh. If None, the mesh will be drawn at the position specified by `pos`.
+            Otherwise, `T` has a higher priority than `pos`.
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.StaticMeshBatch
             The created debug object.
         """
+        if T is None:
+            T = gu.trans_to_T(tensor_to_array(torch.as_tensor(pos, dtype=gs.tc_float)))
+        (T,), _ = self._render_context.broadcast_to_envs((T,), value_ndim=2, is_tiled=True)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(self._visualizer.context.make_debug_mesh(mesh, pos, T))
+            return self._render_context.add_meshes(mesh, T[:, None], is_shared=False)
 
     @gs.assert_built
     def draw_debug_sphere(self, pos, radius=0.01, color=(1.0, 0.0, 0.0, 0.5)):
         """
         Draws a sphere in the scene for visualization.
+
+        The sphere is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1285,18 +1358,24 @@ class Scene(RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.StaticMeshBatch
             The created debug object.
         """
+        (pos,), _ = self._render_context.broadcast_to_envs((pos,), value_ndim=1, is_tiled=True)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_sphere(pos, radius, color)
+            return self._render_context.add_meshes(
+                mu.create_sphere(radius=radius, color=color),
+                gu.trans_to_T(pos)[:, None],
+                is_shared=False,
+                is_smooth=True,
             )
 
     @gs.assert_built
     def draw_debug_spheres(self, poss, radius=0.01, color=(1.0, 0.0, 0.0, 0.5)):
         """
         Draws multiple spheres in the scene for visualization.
+
+        The spheres are a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1309,13 +1388,12 @@ class Scene(RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.Points
             The created debug object.
         """
+        (poss,), is_shared = self._render_context.broadcast_to_envs((poss,), value_ndim=2, is_tiled=False)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_spheres(poss, radius, color)
-            )
+            return self._render_context.add(Points(poss, radius, tuple(color), is_shared=is_shared))
 
     @gs.assert_built
     def draw_debug_box(
@@ -1327,6 +1405,8 @@ class Scene(RBC):
     ):
         """
         Draws a box in the scene for visualization.
+
+        The box is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1341,40 +1421,49 @@ class Scene(RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.StaticMeshBatch
             The created debug object.
         """
+        mesh = mu.create_box(
+            bounds=tensor_to_array(torch.as_tensor(bounds)),
+            wireframe=wireframe,
+            wireframe_radius=wireframe_radius,
+            color=color,
+        )
+        (T,), is_shared = self._render_context.broadcast_to_envs((np.eye(4),), value_ndim=2, is_tiled=False)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_box(
-                    bounds, color, wireframe=wireframe, wireframe_radius=wireframe_radius
-                )
-            )
+            return self._render_context.add_meshes(mesh, T[:, None], is_shared)
 
     @gs.assert_built
     def draw_debug_points(self, poss, colors=(1.0, 0.0, 0.0, 0.5)):
         """
         Draws points in the scene for visualization.
 
+        The points are a marker drawn by the interactive viewer and the debug cameras.
+
         Parameters
         ----------
         poss : array_like, shape (N, 3)
             The positions of the points.
-        colors : array_like, shape (4,), optional
-            The color of the points in RGBA format.
+        colors : array_like, shape (4,) | shape (N, 4), optional
+            The color of the points in RGBA format, one for all of them or one per point.
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.Points
             The created debug object.
         """
+        (poss,), is_shared = self._render_context.broadcast_to_envs((poss,), value_ndim=2, is_tiled=False)
+        colors = np.broadcast_to(colors, (poss.shape[1], 4)).astype(gs.np_float)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(self._visualizer.context.make_debug_points(poss, colors))
+            return self._render_context.add(Points(poss, radius=0.0, color=colors, is_shared=is_shared))
 
     @gs.assert_built
     def draw_debug_frustum(self, camera, color=(1.0, 1.0, 1.0, 0.3)):
         """
         Draws a camera frustum in the scene for visualization.
+
+        The frustum is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1386,19 +1475,17 @@ class Scene(RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.StaticMeshBatch
             The created debug object.
         """
-        with self._visualizer.viewer_lock:
-            mesh = mu.create_camera_frustum(camera, color)
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_mesh(mesh, T=camera.transform)
-            )
+        return self.draw_debug_mesh(mu.create_camera_frustum(camera, color), T=camera.transform)
 
     @gs.assert_built
     def draw_debug_trajectory(self, poss, radius=0.002, color=(1.0, 0.5, 0.0, 0.8)):
         """
         Draws a trajectory as a series of connected lines in the scene for visualization.
+
+        The trajectory is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1411,23 +1498,21 @@ class Scene(RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
-            The created debug object (a single merged mesh of all segments).
+        marker : genesis.engine.render_context.StaticMeshBatch | None
+            The created debug object (a single merged mesh of all segments), None for fewer than two points.
         """
-
-        poss = np.asarray(poss)
+        poss = tensor_to_array(torch.as_tensor(poss))
         if len(poss) < 2:
             return None
-
         segments = [mu.create_line(poss[i], poss[i + 1], radius, color) for i in range(len(poss) - 1)]
-        merged = trimesh.util.concatenate(segments)
-        with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(self._visualizer.context.make_debug_mesh(merged))
+        return self.draw_debug_mesh(trimesh.util.concatenate(segments))
 
     @gs.assert_built
     def draw_debug_path(self, qposs, entity, link_idx=-1, density=0.3, frame_scaling=1.0):
         """
         Draws a planned joint trajectory in the scene for visualization.
+
+        The path is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1447,7 +1532,7 @@ class Scene(RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.StaticMeshBatch
             The created debug object representing the visualized trajectory.
 
         Notes
@@ -1456,22 +1541,19 @@ class Scene(RBC):
         The density parameter reduces FK computational load by sampling fewer points, with 1.0 representing the whole
         trajectory.
         """
-        with self._visualizer.viewer_lock:
-            N = len(qposs)
-            density = np.clip(density, 0.0, 1.0)
-            N_new = int(N * density)
-            indices = torch.linspace(0, N - 2, N_new, dtype=int)
+        N = len(qposs)
+        density = np.clip(density, 0.0, 1.0)
+        N_new = int(N * density)
+        indices = torch.linspace(0, N - 2, N_new, dtype=int)
 
-            Ts = np.zeros((N_new, 4, 4))
-            for i in range(N_new):
-                pos, quat = self.rigid_solver.forward_kinematics_query(entity, qposs[indices[i]])
-                Ts[i] = tensor_to_array(gu.trans_quat_to_T(pos[link_idx], quat[link_idx]))
+        Ts = np.zeros((N_new, 4, 4))
+        for i in range(N_new):
+            pos, quat = self.rigid_solver.forward_kinematics_query(entity, qposs[indices[i]])
+            Ts[i] = tensor_to_array(gu.trans_quat_to_T(pos[link_idx], quat[link_idx]))
 
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_frames(
-                    Ts, axis_length=frame_scaling * 0.1, origin_size=0.001, axis_radius=frame_scaling * 0.005
-                )
-            )
+        return self.draw_debug_frames(
+            Ts, axis_length=frame_scaling * 0.1, origin_size=0.001, axis_radius=frame_scaling * 0.005
+        )
 
     @gs.assert_built
     def render_all_cameras(
@@ -1524,15 +1606,34 @@ class Scene(RBC):
 
         Parameters
         ----------
-        objs : tuple of genesis.ext.pyrender.mesh.Mesh
-            The debug objects to update, i.e. visualizer nodes returned by ``draw_debug_*`` methods. Currently only
-            individual sphere, frame, mesh, and arrow objects (returned by ``draw_debug_sphere``, ``draw_debug_frame``,
-            ``draw_debug_mesh``, and ``draw_debug_arrow`` respectively) are supported.
+        objs : tuple of genesis.engine.render_context.Shape
+            The debug objects to update, as returned by ``draw_debug_*`` methods. Only individual sphere, frame, mesh,
+            and arrow objects (returned by ``draw_debug_sphere``, ``draw_debug_frame``, ``draw_debug_mesh``, and
+            ``draw_debug_arrow`` respectively) are supported.
         poses : tuple of array_like, each of shape (4, 4)
-            The new transformation matrices for each debug object.
+            The new transformation matrices for each debug object, scale and shear included, one for every environment
+            or one per rendered environment, an object drawn once for every environment taking a single one. An arrow
+            takes the length its transform scales along its axis, its shaft and its head keeping their size, its length
+            standing for the magnitude it shows.
         """
         with self._visualizer.viewer_lock:
-            self._visualizer.context.update_debug_objects(objs, poses)
+            for marker, pose in zip(objs, poses):
+                (poses_T,), is_shared = self._render_context.broadcast_to_envs(
+                    (pose,), value_ndim=2, is_tiled=not marker.is_shared
+                )
+                if is_shared != marker.is_shared:
+                    gs.raise_exception("A marker shared by every environment takes a single transform.")
+                if isinstance(marker, StaticMeshBatch) and len(marker) == 1:
+                    marker.pos[:, 0], marker.quat[:, 0], marker.scale[:, 0] = gu.T_to_trans_quat_scale(poses_T)
+                elif isinstance(marker, Arrows) and marker.pos.shape[1] == 1:
+                    # The arrow keeps its length along the z axis of its new transform
+                    marker.vec[:, 0] = poses_T[:, :3, 2] * torch.linalg.norm(marker.vec[:, 0], dim=-1, keepdim=True)
+                    marker.pos[:, 0] = poses_T[:, :3, 3]
+                else:
+                    gs.raise_exception(
+                        "This method is only supported by individual spheres, frames, meshes, and arrows."
+                    )
+            self._sim.render_context.invalidate((self._render_context,))
 
     @gs.assert_built
     def clear_debug_object(self, obj):
@@ -1540,7 +1641,7 @@ class Scene(RBC):
         Clears the specified debug object from the scene.
         """
         with self._visualizer.viewer_lock:
-            self._visualizer.context.clear_debug_object(obj)
+            self._render_context.remove(obj)
 
     @gs.assert_built
     def clear_debug_objects(self):
@@ -1548,15 +1649,14 @@ class Scene(RBC):
         Clears all the debug objects in the scene.
         """
         with self._visualizer.viewer_lock:
-            self._visualizer.context.clear_debug_objects()
+            self._render_context.remove()
 
     @gs.assert_built
     def get_time(self, envs_idx=None):
         """
         Get the simulated time of each environment, in seconds.
 
-        Environments are stepped and reset independently, so each one carries its own simulated time. The number of
-        `scene.step()` calls is a separate scalar, `Simulator.cur_step_global`.
+        Environments are stepped and reset independently, so each one carries its own simulated time.
 
         Parameters
         ----------
@@ -1583,13 +1683,19 @@ class Scene(RBC):
         # callback. Every solver holds the same force fields, so one solver names them all.
         rejected_kinds = Counter(type(entity).__name__ for entity in self.entities if entity.desc is None)
         rejected_kinds.update(type(emitter).__name__ for emitter in self._emitters)
-        rejected_kinds.update(type(force_field).__name__ for force_field in self._sim.solvers[0].force_fields)
-        omitted_kinds = Counter(type(sensor).__name__ for sensor in self._sim._sensor_manager.sensors)
+        rejected_kinds.update(type(force_field).__name__ for force_field in self._sim.solvers[0].force_fields.fields)
+        omitted_kinds = Counter(type(sensor).__name__ for sensor in self.sensors)
         if self._visualizer is not None:
             omitted_kinds.update(type(camera).__name__ for camera in self._visualizer.cameras)
         if self._pre_step_callbacks:
             omitted_kinds["pre_step_callback"] += len(self._pre_step_callbacks)
         surfaces = [entity.surface for entity in self.entities]
+        surfaces += [
+            patch.options.surface
+            for entity in self.entities
+            for patch in entity.spec.patches
+            if isinstance(patch.options, gs.options.VGeom) and patch.options.surface is not None
+        ]
         if isinstance(self.options.renderer, gs.renderers.RayTracer) and self.options.renderer.env_surface is not None:
             surfaces.append(self.options.renderer.env_surface)
         omitted_kinds.update(name for surface in surfaces for name in pixel_less_textures(surface))
@@ -1704,7 +1810,7 @@ class Scene(RBC):
         # 'add_entity' would resolve a material and a surface the description already holds, and read the asset it
         # replaces.
         for desc in described.entities:
-            scene._sim._add_entity(desc=desc)
+            scene._sim.add_entity(desc=desc)
         return scene
 
     @gs.assert_built
@@ -1844,17 +1950,9 @@ class Scene(RBC):
             )
         if state.digest != self._desc_digest:
             gs.raise_exception("The state was read from another scene: its entities or physics options differ.")
-        # Every solver checks its record before anything is touched, so a record from another scene leaves this one as
-        # it was, the recorders included
-        solvers = {type(solver).__name__: solver for solver in self._sim.active_solvers}
-        if set(state.sim.solvers) != set(solvers):
-            gs.raise_exception(
-                f"The checkpoint holds {sorted(state.sim.solvers)} where this scene simulates {sorted(solvers)}."
-            )
-        for name, solver in solvers.items():
-            record = state.sim.solvers[name]
-            items = (item for item in solver.data if isinstance(item, DataItem) and item.kind in record.kinds)
-            check_data(items, record.arrays)
+        # The record is checked before anything is touched, so a record from another scene leaves this one as it was,
+        # the recorders included
+        self._sim.check_checkpoint(state.sim)
         # The recorders finish the run first (see 'reset'), and the restart follows the state, so the visualizer draws
         # the state put back.
         self._recorder_manager.record(self._sim.cur_step_global)
@@ -1862,33 +1960,6 @@ class Scene(RBC):
         self._sim.__setstate__(state.sim)
         # The restored state is rendered at the scheduled framerate without forcing immediate refresh, as after a step
         self._restart(refresh_viewer=False)
-
-    def _sanitize_envs_idx(
-        self, envs_idx: int | range | slice | tuple[int, ...] | list[int] | torch.Tensor | np.ndarray | None
-    ) -> torch.Tensor:
-        if envs_idx is None:
-            return self._envs_idx
-
-        if self.n_envs == 0:
-            gs.raise_exception("`envs_idx` is not supported for non-parallelized scene.")
-
-        if isinstance(envs_idx, slice):
-            if envs_idx.step is not None and envs_idx.step < 0:
-                return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
-            return self._envs_idx[envs_idx]
-        if isinstance(envs_idx, range):
-            if envs_idx.step < 0:
-                return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
-            return self._envs_idx[envs_idx]
-        if isinstance(envs_idx, (int, np.integer)):
-            n_envs = self.n_envs
-            if not -n_envs <= envs_idx < n_envs:
-                gs.raise_exception(f"`envs_idx` out of range: {envs_idx} not in [{-n_envs}, {n_envs}).")
-            if envs_idx < 0:
-                envs_idx = envs_idx + n_envs
-            return self._envs_idx[envs_idx : envs_idx + 1]
-
-        return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -1908,6 +1979,11 @@ class Scene(RBC):
     def substeps(self):
         """The number of substeps per simulation step."""
         return self._sim.substeps
+
+    @property
+    def n_envs(self) -> int:
+        """The number of parallel environments, 0 for a scene without a batch dimension."""
+        return self._sim.n_envs
 
     @property
     def timings(self):
@@ -1946,7 +2022,7 @@ class Scene(RBC):
     @property
     def show_FPS(self):
         """Whether to print the frames per second (FPS) in the terminal."""
-        warn_once("Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
+        warn_once(self, "Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
         return self.options.profiling.show_FPS
 
     @property
@@ -1970,14 +2046,14 @@ class Scene(RBC):
         return self._sim.solvers
 
     @property
-    def active_solvers(self):
-        """All the active solvers managed by the scene's simulator."""
-        return self._sim.active_solvers
-
-    @property
     def entities(self) -> list["Entity"]:
         """All the entities in the scene."""
         return self._sim.entities
+
+    @property
+    def sensors(self) -> list["Sensor"]:
+        """All the sensors in the scene."""
+        return self._sim.sensor_manager.sensors
 
     @property
     def entity_names(self) -> tuple[str, ...]:
@@ -2022,20 +2098,7 @@ class Scene(RBC):
         Entity
             The matching entity.
         """
-        if not ((name is None) ^ (uid is None)):
-            gs.raise_exception("Please specify either one argument between `name` or `uid`.")
-
-        if name is not None:
-            try:
-                return next(entity for entity in self.entities if entity.name == name)
-            except StopIteration as e:
-                gs.raise_exception_from(f"Entity not found for name: '{name}'.", e)
-        else:  # uid is not None
-            matches = [entity for entity in self.entities if entity.uid.match(uid, short_only=True)]
-            if matches:
-                (match,) = matches
-                return match
-            gs.raise_exception(f"Entity not found for uid: '{uid}'.")
+        return self._sim.get_entity(name, uid=uid)
 
     @property
     def emitters(self):
@@ -2086,3 +2149,150 @@ class Scene(RBC):
           depending on the material type and the configured segmentation level.
         """
         return self._visualizer.segmentation_idx_dict
+
+
+class SceneScopedRenderContext(ScopedRenderContext[Scene]):
+    """The markers drawn with ``scene.draw_debug_*`` (see 'Scene.draw_debug_line'), until cleared.
+
+    A marker given once is shared by every environment, drawn once where it stands (see 'Shape.is_shared'), except a
+    single sphere, frame or mesh, drawn in every environment. A marker given per rendered environment (see
+    ``VisOptions.rendered_envs_idx``) is drawn in each of them (see 'broadcast_to_envs').
+
+    `rendered_envs_idx` are the environments the renderers draw, all of them if None, and `n_envs` is the number of
+    parallel environments of the scene.
+    """
+
+    def __init__(
+        self, scene: Scene, context: RenderContext, rendered_envs_idx: "Sequence[int] | None", n_envs: int
+    ) -> None:
+        super().__init__(scene, context)
+        self._markers: list[Shape] = []
+        self._n_envs_ = max(n_envs, 1)
+        self._rendered_envs_idx = list(range(self._n_envs_) if rendered_envs_idx is None else rendered_envs_idx)
+
+    def broadcast_to_envs(
+        self, values: "Sequence[np.typing.ArrayLike]", value_ndim: int, is_tiled: bool
+    ) -> tuple[list[torch.Tensor], bool]:
+        """Broadcast the values a user passes to ``scene.draw_debug_*`` over the environments of a marker.
+
+        Parameters
+        ----------
+        values : Sequence[array_like]
+            The values, each given once, or once per rendered environment with a leading dimension (see
+            ``VisOptions.rendered_envs_idx``).
+        value_ndim : int
+            The number of dimensions of a value given once.
+        is_tiled : bool
+            Whether values all given once are repeated in every environment, rather than making a marker shared by every
+            environment.
+
+        Returns
+        -------
+        tuple[list[torch.Tensor], bool]
+            The values, holding a single row for a marker shared by every environment, a row per environment otherwise,
+            the environments left out of the renders repeating the first. Then whether the marker is shared by every
+            environment, which values all given once make unless `is_tiled`.
+        """
+        # The rows are on the device from the start, since 'Scene.update_debug_objects' writes them in place
+        values = [torch.as_tensor(value, dtype=gs.tc_float, device=gs.device) for value in values]
+        is_shared = not is_tiled and all(value.ndim == value_ndim for value in values)
+        values_rows = []
+        for value in values:
+            rows = value.new_empty((1 if is_shared else self._n_envs_, *value.shape[value.ndim - value_ndim :]))
+            if value.ndim > value_ndim:
+                if len(value) != len(self._rendered_envs_idx):
+                    gs.raise_exception(
+                        f"A value per rendered environment holds {len(self._rendered_envs_idx)} rows, got {len(value)}."
+                    )
+                rows[:] = value[0]
+                rows[self._rendered_envs_idx] = value
+            else:
+                rows[:] = value
+            values_rows.append(rows)
+        return values_rows, is_shared
+
+    @property
+    def sources(self) -> tuple[()]:
+        return ()
+
+    def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:
+        return tuple(self._markers)
+
+    def add(self, marker: Shape | None) -> Shape | None:
+        """Draw a marker until it is removed, and return it, nothing for None."""
+        if marker is not None:
+            self._markers.append(marker)
+            self._context.invalidate((self,))
+        return marker
+
+    def add_meshes(
+        self, mesh: trimesh.Trimesh, poses_T: torch.Tensor, is_shared: bool, is_smooth: bool = False
+    ) -> StaticMeshBatch:
+        """Draw copies of a mesh at some transforms, scale and shear included.
+
+        Parameters
+        ----------
+        mesh : trimesh.Trimesh
+            The mesh.
+        poses_T : torch.Tensor
+            The transform of each copy in each environment, or in all of them.
+        is_shared : bool
+            Whether `poses_T` holds the transforms of every environment at once.
+        is_smooth : bool, optional
+            Whether the copies are drawn smooth. Defaults to False.
+        """
+        geometry = MeshGeometry(
+            surface=None,
+            visual=mesh.visual,
+            verts_ref=ArrayRef(mesh.vertices),
+            normals_ref=ArrayRef(mesh.vertex_normals),
+            faces_ref=ArrayRef(mesh.faces),
+            is_smooth=is_smooth,
+        )
+        pos, quat, scale = gu.T_to_trans_quat_scale(poses_T)
+        return self.add(
+            StaticMeshBatch(
+                geometries=(geometry,) * poses_T.shape[1], pos=pos, quat=quat, scale=scale, is_shared=is_shared
+            )
+        )
+
+    def add_frames(
+        self,
+        poses_T: torch.Tensor,
+        axis_length: float,
+        origin_size: float,
+        axis_radius: float,
+        color: "Sequence[float] | None",
+        is_shared: bool = False,
+    ) -> StaticMeshBatch:
+        """Draw coordinate frames at some transforms (see 'add_meshes').
+
+        Parameters
+        ----------
+        poses_T : torch.Tensor
+            The transform of each frame (see 'add_meshes').
+        axis_length : float
+            The length of the axes.
+        origin_size : float
+            The size of the sphere at the origin.
+        axis_radius : float
+            The radius of the axes.
+        color : Sequence[float] | None
+            The RGBA color of every axis, None for the colors of the axes.
+        is_shared : bool, optional
+            See 'add_meshes'. Defaults to False.
+        """
+        mesh = trimesh.creation.axis(origin_size=origin_size, axis_radius=axis_radius, axis_length=axis_length)
+        if color is not None:
+            visual = trimesh.visual.ColorVisuals()
+            visual._data["vertex_colors"] = np.tile(mu.color_f32_to_u8(color), (len(mesh.vertices), 1))
+            mesh.visual = visual
+        return self.add_meshes(mesh, poses_T, is_shared)
+
+    def remove(self, marker: Shape | None = None) -> None:
+        """Stop drawing a marker, every marker if None."""
+        if marker is None:
+            self._markers.clear()
+        elif marker in self._markers:
+            self._markers.remove(marker)
+        self._context.invalidate((self,))

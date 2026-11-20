@@ -52,6 +52,9 @@ def main():
         rigid_options=gs.options.RigidOptions(
             enable_neutral_collision=True,  # Enable so articulated parts (e.g. dishwasher) don't clip
         ),
+        vis_options=gs.options.VisOptions(
+            debug=args.collision,
+        ),
         profiling_options=gs.options.ProfilingOptions(
             show_FPS=False,
         ),
@@ -87,7 +90,6 @@ def main():
                 file=usd_file,
                 fixed=fixed,
             ),
-            vis_mode="collision" if args.collision else "visual",
         )
         for entity in entities:
             gs.logger.info(

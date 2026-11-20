@@ -8,17 +8,16 @@ loaded from USD files match equivalent scenes loaded from compared files.
 import os
 import xml.etree.ElementTree as ET
 import zipfile
+from importlib.util import find_spec
 
 import numpy as np
 import pytest
 
-try:
-    from pxr import Usd
-except ImportError as e:
+if find_spec("pxr") is None:
     pytest.skip("USD is not supported because 'pxr' module is not available.", allow_module_level=True)
 
-from pxr import Gf, Sdf, UsdGeom, UsdPhysics
-from genesis.utils.usd import UsdContext, HAS_OMNIVERSE_KIT_SUPPORT
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
+from genesis.utils.usd import HAS_OMNIVERSE_KIT_SUPPORT
 from ..conftest import SKIP_NO_OMNIVERSE_KIT
 
 import genesis as gs
@@ -72,7 +71,7 @@ def test_visual_parse(model_name):
     usd_file = os.path.join(usd_asset_path, f"{model_name}.usdz")
 
     mesh_scene = build_mesh_scene(glb_file, scale=1.0)
-    usd_scene = build_usd_scene(usd_file, scale=1.0, vis_mode="visual", is_stage=False)
+    usd_scene = build_usd_scene(usd_file, scale=1.0, is_stage=False)
 
     compare_mesh_scene(mesh_scene, usd_scene, tol=5e-6)
 
@@ -83,7 +82,7 @@ def test_parse_nodegraph(usd_file):
     asset_path = get_hf_dataset(pattern=usd_file)
     usd_file = os.path.join(asset_path, usd_file)
 
-    usd_scene = build_usd_scene(usd_file, scale=1.0, vis_mode="visual", is_stage=False)
+    usd_scene = build_usd_scene(usd_file, scale=1.0, is_stage=False)
 
     texture0 = usd_scene.entities[0].vgeoms[0].vmesh.surface.diffuse_texture
     texture1 = usd_scene.entities[0].vgeoms[1].vmesh.surface.diffuse_texture
@@ -96,7 +95,7 @@ def test_parse_nodegraph(usd_file):
 @pytest.mark.required
 def test_usdz_packaged_texture_resolution(usdz_packaged_texture_usd):
     scene_file, texture_image = usdz_packaged_texture_usd
-    usd_scene = build_usd_scene(scene_file, scale=1.0, vis_mode="visual", fixed=True)
+    usd_scene = build_usd_scene(scene_file, scale=1.0, fixed=True)
     texture = usd_scene.entities[0].vgeoms[0].vmesh.surface.diffuse_texture
     assert isinstance(texture, gs.textures.ImageTexture)
     assert_equal(texture.image_array, texture_image)
@@ -117,7 +116,6 @@ def test_bake(usd_file, tmp_path):
     usd_scene = build_usd_scene(
         usd_fullpath,
         scale=1.0,
-        vis_mode="visual",
         is_stage=is_stage,
         fixed=True,
     )
@@ -274,7 +272,7 @@ def test_uv_size_mismatch_no_crash(asset_tmp_path):
     stage.Save()
 
     # This should NOT raise an exception — it should warn and discard UVs
-    usd_scene = build_usd_scene(usd_file, scale=1.0, vis_mode="collision", fixed=True)
+    usd_scene = build_usd_scene(usd_file, scale=1.0, fixed=True)
     assert len(usd_scene.entities) > 0
 
 
@@ -539,48 +537,70 @@ def test_collision_approximations(usd_scene, collision_approximation_usd):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("model_name", ["collision_filtering_usd"])
-def test_collision_filtering_masks(usd_scene):
-    assert len(usd_scene.entities) == 2
-    entities = {entity.links[0].name: entity for entity in usd_scene.entities}
-
-    # Masks synthesized from in-model filtering only apply within the entity, so collision against
-    # other entities (e.g. a ground plane) is preserved.
-    for entity in usd_scene.entities:
-        assert entity.is_local_collision_mask
-        for geom in entity.geoms:
-            assert geom.contype or geom.conaffinity
-
-    col_a, col_b = entities["/root/pair_body"].geoms
-    assert ((col_a.contype & col_b.conaffinity) | (col_b.contype & col_a.conaffinity)) == 0
-
-    col_c, col_d, col_e = entities["/root/group_body"].geoms
-    assert ((col_c.contype & col_d.conaffinity) | (col_d.contype & col_c.conaffinity)) == 0
-    assert ((col_c.contype & col_e.conaffinity) | (col_e.contype & col_c.conaffinity)) != 0
-    assert ((col_d.contype & col_e.conaffinity) | (col_e.contype & col_d.conaffinity)) != 0
-
-
-@pytest.mark.required
-def test_filtered_entity_still_collides_with_ground(collision_filtering_usd, show_viewer):
+def test_collision_filtering(collision_filtering_usd, show_viewer, caplog):
     scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_neutral_collision=True,
+            enable_adjacent_collision=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, -1.5, 1.0),
+            camera_lookat=(0.0, 0.5, 0.0),
+        ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
-    entities = scene.add_stage(
-        morph=gs.morphs.USD(
-            file=collision_filtering_usd,
-            pos=(0.0, 0.0, 0.05),
+    plane = scene.add_entity(gs.morphs.Plane())
+    with caplog.at_level("WARNING"):
+        entities = scene.add_stage(
+            morph=gs.morphs.USD(
+                file=collision_filtering_usd,
+                pos=(0.0, 0.0, 0.05),
+            ),
+        )
+    # The link pairs whose colliders are filtered in part alone are reported together, once
+    partial_records = [record.getMessage() for record in caplog.records if "but not all of them" in record.getMessage()]
+    assert len(partial_records) == 1
+    assert "col_e" in partial_records[0] and "col_f" in partial_records[0]
+
+    ghosts = scene.add_stage(
+        spec=gs.entities.Kinematic(
+            morph=gs.morphs.USD(
+                file=collision_filtering_usd,
+                pos=(0.0, 0.0, 0.5),
+            ),
         ),
     )
+    stage_spec = gs.entities.Rigid(morph=gs.morphs.USD(file=collision_filtering_usd))
+    stage_spec.select(gs.indices.Link.named("base")).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="selects no part"):
+        scene.add_stage(spec=stage_spec)
     scene.build()
+    ghosts_pos = [tensor_to_array(ghost.get_pos()) for ghost in ghosts]
 
     for _ in range(50):
         scene.step()
 
     # Both filtered bodies must be stopped by the ground plane, resting on it without penetration.
     for entity in entities:
-        aabb_min, _aabb_max = tensor_to_array(entity.get_AABB())
+        aabb_min, _aabb_max = entity.get_AABB()
         assert -5e-4 < aabb_min[-1] < 0.0
+    # The same stage constructed from a kinematic spec keeps its pose, neither falling nor colliding
+    assert len(ghosts) == len(entities)
+    for ghost, pos in zip(ghosts, ghosts_pos):
+        assert_allclose(ghost.get_pos(), pos, tol=gs.EPS)
+
+    # Every link rests on the ground. Among the links overlapping their base, those whose colliders are all filtered
+    # against it never collide with it, and those filtered in part alone keep colliding.
+    links_idx = {link.name: link.idx for entity in entities for link in entity.links}
+    contacts = scene.rigid_solver.collider.get_contacts(to_torch=False)
+    contact_link_pairs = {frozenset(link_pair) for link_pair in zip(contacts["link_a"], contacts["link_b"])}
+    assert contact_link_pairs == {
+        *[frozenset((plane.base_link_idx, i_l)) for i_l in links_idx.values()],
+        *[
+            frozenset((links_idx["/root/group_body/col_c"], links_idx[f"/root/group_body/{link_name}"]))
+            for link_name in ("col_e", "col_f")
+        ],
+    }
 
 
 @pytest.mark.required
@@ -626,9 +646,7 @@ def test_oriented_capsule(oriented_capsule_usd, show_viewer, tol):
     for _ in range(50):
         scene.step()
 
-    capsule_aabb_min, _capsule_aabb_max = tensor_to_array(
-        scene.rigid_solver.get_AABB(entities_idx=(capsule.idx,))[..., 0, :]
-    )
+    capsule_aabb_min, _capsule_aabb_max = capsule.get_AABB()
     capsule_aabb_min_z = float(capsule_aabb_min[-1])
     assert -5e-4 < capsule_aabb_min_z < 0.0
 
@@ -661,6 +679,6 @@ def test_ant_capsule_axis_collision(show_viewer):
     for _ in range(50):
         scene.step()
 
-    ant_aabb_min, _capsule_aabb_max = tensor_to_array(ant.get_AABB())
+    ant_aabb_min, _capsule_aabb_max = ant.get_AABB()
     ant_aabb_min_z = float(ant_aabb_min[-1])
     assert -0.001 < ant_aabb_min_z < 0.001

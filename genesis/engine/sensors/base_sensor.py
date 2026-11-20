@@ -5,24 +5,33 @@ from typing import TYPE_CHECKING, ClassVar, Generic, NamedTuple, TypeVar, get_ar
 
 import numpy as np
 import torch
+
 from typing_extensions import TypeVar as TypeVarWithDefault
 
+import quadrants as qd
+
 import genesis as gs
+from genesis.engine.render_context import RenderContext, ScopedRenderContext, Shape
+from genesis.engine.solvers.rigid.data import LinksState
 from genesis.engine.state_change import StateChange
 from genesis.repr_base import RBC
 from genesis.typing import NumArrayType, NumericType
 from genesis.utils.geom import euler_to_quat
-from genesis.utils.misc import broadcast_tensor, concat_with_tensor, make_tensor_field
+from genesis.utils.misc import (
+    BuildableMixin,
+    broadcast_tensor,
+    concat_with_tensor,
+    make_tensor_field,
+)
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
     from genesis.engine.solvers import RigidSolver
+    from genesis.engine.solvers.base_solver import Solver
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
-    from genesis.ext.pyrender.mesh import Mesh
     from genesis.options.sensors.options import SensorOptions
     from genesis.recorders.base_recorder import Recorder, RecorderOptions
     from genesis.utils.ring_buffer import TensorRingBuffer
-    from genesis.vis.rasterizer_context import RasterizerContext
 
     from .sensor_manager import SensorManager
 
@@ -158,7 +167,7 @@ DataT = TypeVarWithDefault("DataT", default=tuple, covariant=True)
 SharedSensorContextT = TypeVar("SharedSensorContextT")
 
 
-class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT, DataT]):
+class Sensor(BuildableMixin, RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT, DataT]):
     """
     Base class for all types of sensors.
 
@@ -175,6 +184,9 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
     in a cache in SensorManager. Cache size is inferred from the return format and cache length of each sensor.
     `read()` and `read_ground_truth()`, the public-facing methods of every Sensor, automatically handles indexing into
     the shared cache to return the correct data.
+
+    A sensor class overriding `build` calls `super().build()` before reading its own guarded accessors, since the build
+    of the base class marks the sensor built.
     """
 
     _options_cls: ClassVar[type]
@@ -188,9 +200,6 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
     # Subclasses whose `_update_shared_cache` bypasses the rings (e.g. cameras handling rendering lazily) explicitly set
     # this to ``False``.
     uses_ring_pipeline: ClassVar[bool] = True
-    # The changes of state, made outside of a step, that make the data of this sensor stale until the next step updates
-    # it. Every kind of change by default, which a sensor depending on part of the state only may narrow.
-    invalidated_by: ClassVar[frozenset[StateChange]] = frozenset(StateChange)
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -247,7 +256,8 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         # instance methods (build / debug); the per-step classmethod hooks receive it as the ``shared_context`` argument.
         self._shared_context: SharedSensorContextT = shared_context
         self._shared_metadata: SharedSensorMetadataT = shared_metadata
-        self._is_built = False
+        # The part of the render context the sensor draws, its markers when 'draw_debug' asks for them, set as it builds
+        self.render_context: ScopedRenderContext | None = None
 
         # Classes that opt out of the ring pipeline (e.g. cameras handling rendering lazily on read) cannot honor delay
         # / jitter / history because those features depend on the per-class return-space ring. Reject the inputs at
@@ -263,7 +273,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
                     f"history_length={options.history_length}."
                 )
 
-        self._dt = self._manager._sim.dt
+        self._dt = self._manager.sim.dt
         self._delay_ts = round(self._options.delay / self._dt)
 
         self._cache_slices: list[slice] = []
@@ -296,6 +306,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
 
     # =============================== methods to implement ===============================
 
+    @gs.assert_unbuilt
     def build(self):
         """
         Build the sensor.
@@ -303,13 +314,19 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         This method is called by SensorManager during the scene build phase. This is where any shared metadata should be
         initialized.
         """
+        # Set first, since the builds of the derived sensors call their own guarded accessors
+        self._is_built = True
         self._shared_metadata.delays_ts = concat_with_tensor(
-            self._shared_metadata.delays_ts, self._delay_ts, expand=(self._manager._sim._B, 1), dim=1
+            self._shared_metadata.delays_ts, self._delay_ts, expand=(self._manager.n_envs_, 1), dim=1
         )
         self._shared_metadata.cache_sizes.append(self._cache_size)
         self._shared_metadata.history_lengths.append(self._options.history_length)
         if self._delay_ts > 0:
             self._shared_metadata.has_any_delay = True
+        self.render_context = self._manager.sim.render_context.register(self, is_empty=not self._options.draw_debug)
+
+    def destroy(self) -> None:
+        self._is_built = False
 
     @classmethod
     def reset(cls, shared_metadata: SharedSensorMetadataT, shared_ground_truth_cache: torch.Tensor, envs_idx):
@@ -468,16 +485,19 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         """
         return tensor
 
-    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[int | None, "Mesh", None]]:
-        """Make the debug nodes of the sensor in the rendered environments 'envs_idx', without adding them to the scene.
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
+        """Return the markers showing the readings of the sensor, written in the environments `envs_idx`.
 
-        The nodes are made with the 'make_debug_*' methods of 'context'. Returns one (env_idx, node, None) triple per
-        node, 'env_idx' being the rendered environment the node belongs to, or None for a node spanning several of
-        them. The nodes are drawn anew at every sync of the visualizer, and a change of state in 'invalidated_by'
-        of a rigid or kinematic solver, which makes the data they show stale, hides them in the environments it touches
-        until the next step (see TrackedNodeList).
+        `markers` are those the latest call returned, none at the first call. The sensor makes its markers as it needs
+        them, with arrays over every environment and their style set, writes the readings of the environments
+        `envs_idx` into their arrays in place, adds or removes markers as needed, and returns them all (see
+        'ScopedRenderContext.update_markers'). `envs_idx` is None for a scene without parallel environments, which
+        indexes the single row of the arrays.
+
+        A change of state of a source of the sensor (see '_sources') makes the markers stale in the environments it
+        touches, where they are drawn hidden until the next step.
         """
-        raise NotImplementedError(f"{type(self).__name__} has not implemented `draw_debug()`.")
+        raise NotImplementedError(f"{type(self).__name__} draws no marker.")
 
     # =============================== public shared methods ===============================
 
@@ -511,13 +531,19 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         rec_options : RecorderOptions
             The options for the recording.
         """
-        return self._manager._sim._scene._recorder_manager.add_recorder(self.read, rec_options)
-
-    @property
-    def is_built(self) -> bool:
-        return self._is_built
+        return self._manager.sim.scene.add_recorder(self.read, rec_options)
 
     # =============================== private shared methods ===============================
+
+    @property
+    def _sources(self) -> "tuple[Solver, ...]":
+        """The solvers whose changes of state make the readings of the sensor stale.
+
+        The solver of the entity the sensor is attached to by default, none for a static sensor.
+        """
+        if self._options.entity_idx < 0:
+            return ()
+        return (self._manager.sim.entities[self._options.entity_idx].solver,)
 
     def _get_formatted_data(self, tensor: torch.Tensor, envs_idx=None) -> torch.Tensor:
         """
@@ -533,7 +559,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         for i, shape in enumerate(self._return_shapes):
             sl = self._read_flat_slices[i]
             field_data = tensor_chunk[..., sl].reshape((len(envs_idx), *shape))
-            if self._manager._sim.n_envs == 0:
+            if self._manager.n_envs == 0:
                 field_data = field_data[0]
             return_values.append(field_data)
 
@@ -542,7 +568,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         return self._return_data_cls(*return_values)
 
     def _sanitize_envs_idx(self, envs_idx) -> torch.Tensor:
-        return self._manager._sim._scene._sanitize_envs_idx(envs_idx)
+        return self._manager.sim.sanitize_envs_idx(envs_idx)
 
     def _set_metadata_field(self, value, field, field_start, field_size, envs_idx=None):
         envs_idx = self._sanitize_envs_idx(envs_idx)
@@ -555,6 +581,29 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
             index_slice = field_start
 
         field[:, index_slice] = broadcast_tensor(value, field.dtype, (len(envs_idx), field_size), ("envs_idx", ""))
+
+
+class SensorScopedRenderContext(ScopedRenderContext[Sensor]):
+    """The markers of the readings of a sensor drawing them (see 'Sensor._update_markers')."""
+
+    # Any change of state may make the readings of a sensor stale, which the markers show as the latest step computed
+    # them until the next one.
+    stale_on = frozenset(StateChange)
+    markers_stale_on = frozenset(StateChange)
+
+    @property
+    def sources(self) -> "tuple[Solver, ...]":
+        return self.owner._sources
+
+    def __init__(self, sensor: Sensor, context: RenderContext) -> None:
+        super().__init__(sensor, context)
+        # The markers the sensor returned last (see 'Sensor._update_markers')
+        self._markers: tuple[Shape, ...] = ()
+
+    def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:
+        envs_idx = envs_idx if self.owner._manager.n_envs > 0 else None
+        self._markers = self.owner._update_markers(self._markers, envs_idx)
+        return self._markers
 
 
 class _SolverLinkGroup(NamedTuple):
@@ -596,11 +645,40 @@ class RigidSensorMetadataMixin:
     offsets_quat: torch.Tensor = make_tensor_field((0, 0, 4))
 
 
-RigidSensorMetadataMixinT = TypeVar("RigidSensorMetadataMixinT", bound=RigidSensorMetadataMixin)
-KinematicSensorMetadataMixinT = TypeVar("KinematicSensorMetadataMixinT", bound=KinematicSensorMetadataMixin)
+@qd.func
+def func_sensor_link_pose(i_l: int, i_b: int, links_state: LinksState):
+    """Return the world position and orientation of the link a sensor is attached to, the identity for a sensor
+    attached to no entity (link -1), which sits in the world frame."""
+    pos = qd.Vector.zero(gs.qd_float, 3)
+    quat = qd.Vector([1.0, 0.0, 0.0, 0.0], dt=gs.qd_float)
+    if i_l >= 0:
+        pos = links_state.pos[i_l, i_b]
+        quat = links_state.quat[i_l, i_b]
+    return pos, quat
 
 
-class _LinkAttachedSensorMixin:
+@qd.func
+def func_sensor_link_motion(i_l: int, i_b: int, links_state: LinksState):
+    """Return the spatial velocity and acceleration of the link a sensor is attached to, as the kinematic tree states
+    them at the center of mass of its root: (cd_vel, cd_ang, cacc_lin, cacc_ang, root_COM).
+
+    A sensor attached to no entity (link -1) is at rest in the world frame, every term being zero.
+    """
+    cd_vel = qd.Vector.zero(gs.qd_float, 3)
+    cd_ang = qd.Vector.zero(gs.qd_float, 3)
+    cacc_lin = qd.Vector.zero(gs.qd_float, 3)
+    cacc_ang = qd.Vector.zero(gs.qd_float, 3)
+    root_com = qd.Vector.zero(gs.qd_float, 3)
+    if i_l >= 0:
+        cd_vel = links_state.cd_vel[i_l, i_b]
+        cd_ang = links_state.cd_ang[i_l, i_b]
+        cacc_lin = links_state.cacc_lin[i_l, i_b]
+        cacc_ang = links_state.cacc_ang[i_l, i_b]
+        root_com = links_state.root_COM[i_l, i_b]
+    return cd_vel, cd_ang, cacc_lin, cacc_ang, root_com
+
+
+class _LinkAttachedSensorMixin(BuildableMixin):
     """
     Common boilerplate for sensors attached to a link.
 
@@ -612,12 +690,13 @@ class _LinkAttachedSensorMixin:
 
     _link: "RigidLink | None" = None
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
-        batch_size = self._manager._sim._B
+        batch_size = self._manager.n_envs_
         if self._options.entity_idx >= 0:
-            entity = self._manager._sim.entities[self._options.entity_idx]
+            entity = self._manager.sim.entities[self._options.entity_idx]
             self._link = entity.links[self._options.link_idx_local]
             link_idx = self._options.link_idx_local + entity.link_start
             self._register_link(entity, link_idx)
@@ -644,19 +723,24 @@ class _LinkAttachedSensorMixin:
         self._set_metadata_field(quat_offset, self._shared_metadata.offsets_quat, self._idx, 4, envs_idx)
 
 
-class RigidSensorMixin(_LinkAttachedSensorMixin, Generic[RigidSensorMetadataMixinT]):
+class RigidSensorMixin[RigidSensorMetadataMixinT: RigidSensorMetadataMixin](_LinkAttachedSensorMixin):
     """Base sensor class for sensors that are attached to a RigidEntity."""
 
+    @gs.assert_unbuilt
     def build(self):
         if self._shared_metadata.solver is None:
-            self._shared_metadata.solver = self._manager._sim.rigid_solver
+            self._shared_metadata.solver = self._manager.sim.rigid_solver
         super().build()
+        # A sensor attached to no entity takes link -1, which the kernels read as the world frame at rest, see
+        # 'func_sensor_link_pose'.
+        if self._options.entity_idx < 0:
+            self._register_link(entity=None, link_idx=-1)
 
     def _register_link(self, entity, link_idx: int):
         self._shared_metadata.links_idx = concat_with_tensor(self._shared_metadata.links_idx, link_idx)
 
 
-class KinematicSensorMixin(_LinkAttachedSensorMixin, Generic[KinematicSensorMetadataMixinT]):
+class KinematicSensorMixin[KinematicSensorMetadataMixinT: KinematicSensorMetadataMixin](_LinkAttachedSensorMixin):
     """
     Base sensor class for sensors that may attach to entities across solvers (rigid or kinematic).
 
@@ -763,6 +847,7 @@ class SimpleSensor(Sensor[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         # setters are not hot path. The check covers partial envs_idx writes and other sensors.
         self._shared_metadata.has_any_jitter = bool((self._shared_metadata.jitter_ts > gs.EPS).any().item())
 
+    @gs.assert_unbuilt
     def build(self):
         """
         Initialize all shared metadata needed to update all noisy sensors.
@@ -773,7 +858,7 @@ class SimpleSensor(Sensor[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         super().build()
         to_tuple = partial(_to_tuple, length_per_value=self._cache_size)
 
-        batch_size = self._manager._sim._B
+        batch_size = self._manager.n_envs_
 
         # Jitter must not exceed the step, so a read shifts by at most one extra ring slot - the margin the return-space
         # ring is sized for (see `cls_delay_depth` in sensor_manager.py). An EPS slack lets `jitter == dt` pass cleanly

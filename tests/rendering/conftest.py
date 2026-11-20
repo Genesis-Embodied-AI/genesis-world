@@ -1,13 +1,18 @@
 import enum
+from importlib.util import find_spec
 
-import numpy as np
 import pytest
-import trimesh
 from PIL import Image
 
-import genesis as gs
 
-from ..conftest import SKIP_NO_LUISA, SKIP_NO_MADRONA
+from ..conftest import SKIP_NO_LUISA, SKIP_NO_MADRONA, lazy_imports
+
+# Imported on first use (see pytest_sessionstart in tests/conftest.py)
+with lazy_imports():
+    import numpy as np
+    import trimesh
+
+    import genesis as gs
 
 
 class RENDERER_TYPE(enum.IntEnum):
@@ -63,12 +68,11 @@ def backend(pytestconfig, renderer_type):
 @pytest.fixture(scope="function", autouse=True)
 def skip_if_not_installed(renderer_type):
     if renderer_type in (RENDERER_TYPE.BATCHRENDER_RASTERIZER, RENDERER_TYPE.BATCHRENDER_RAYTRACER):
-        pytest.importorskip("gs_madrona", reason=SKIP_NO_MADRONA)
+        if find_spec("gs_madrona") is None:
+            pytest.skip(SKIP_NO_MADRONA)
     if renderer_type == RENDERER_TYPE.RAYTRACER:
-        # Cannot rely on 'pytest.importorskip' because LuisaRenderPy is not cleanly installed
-        try:
-            import LuisaRenderPy
-        except ImportError:
+        # LuisaRenderPy is found through the path that genesis appends as it is imported, which the test module has done
+        if find_spec("LuisaRenderPy") is None:
             pytest.skip(SKIP_NO_LUISA)
 
 

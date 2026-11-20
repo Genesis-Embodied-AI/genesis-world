@@ -26,8 +26,10 @@ H264_CODEC_CANDIDATES = (
 )
 
 # Tuned for latency rather than compression ratio, so that encoding never becomes the bottleneck of a simulation.
+# VideoToolbox gets 'prio_speed' rather than 'realtime': in real-time mode it drops frames when encoding falls behind,
+# and ffmpeg discards a dropped frame silently, leaving a video shorter than the recording.
 H264_CODEC_OPTIONS = {
-    "h264_videotoolbox": {"realtime": "1"},
+    "h264_videotoolbox": {"prio_speed": "1"},
     "h264_nvenc": {"preset": "p1", "tune": "ull"},
     "h264_vaapi": {},
     "h264_qsv": {"preset": "veryfast"},
@@ -85,7 +87,7 @@ class VideoEncoder:
 
     The container is created when the first frame is written rather than upfront, because hardware encoders reject
     some resolutions and the codec can only be validated against the true frame size. A video that never receives a
-    frame therefore leaves no file behind.
+    frame therefore leaves no file behind. Every later frame must have the shape of the first one.
 
     Parameters
     ----------
@@ -128,7 +130,9 @@ class VideoEncoder:
         self._stream = None
         self._frame = None
         self._buffer = None
-        self._row_bytes = 0
+        # Shape of the first frame of the video, set by the calling thread so that a mismatch raises there
+        self._frame_shape = None
+        self._has_file = False
 
         self._queue = queue.Queue(maxsize=ENCODER_QUEUE_SIZE) if is_threaded else None
         self._thread = None
@@ -181,6 +185,7 @@ class VideoEncoder:
 
         os.makedirs(os.path.abspath(os.path.dirname(self._filename)), exist_ok=True)
         self._container = av.open(self._filename, mode="w")
+        self._has_file = True
         self._container.metadata["title"] = self._name
 
         # ffmpeg expresses the framerate as a rational, so a fractional rate such as the one induced by a step size
@@ -197,7 +202,6 @@ class VideoEncoder:
         self._frame = av.VideoFrame(width_even, height_even, "rgb24" if is_color else "gray8")
         frame_plane = self._frame.planes[0]
         self._buffer = np.asarray(memoryview(frame_plane)).reshape((height_even, frame_plane.line_size))
-        self._row_bytes = width * (3 if is_color else 1)
         # The padding is written once, since every frame only ever fills the leading rows and columns
         self._buffer[...] = 0
 
@@ -205,7 +209,7 @@ class VideoEncoder:
         if self._buffer is None:
             self._open(frame)
 
-        self._buffer[: frame.shape[0], : self._row_bytes] = frame.reshape((frame.shape[0], -1))
+        self._buffer[: frame.shape[0], : frame[0].size] = frame.reshape((frame.shape[0], -1))
         for packet in self._stream.encode(self._frame):
             self._container.mux(packet)
 
@@ -223,6 +227,14 @@ class VideoEncoder:
         is_color = frame.ndim == 3 and frame.shape[-1] == 3
         if frame.ndim != 2 + is_color or not np.issubdtype(frame.dtype, np.integer):
             gs.raise_exception("Frames must be either grayscale [H, W] or color [H, W, RGB] of integer type.")
+        # The encoder is reusable once closed, which starts a new video
+        if self._frame_shape is None:
+            self._frame_shape = frame.shape
+            self._has_file = False
+        elif frame.shape != self._frame_shape:
+            gs.raise_exception(
+                f"Frame of shape {frame.shape} differs from the shape {self._frame_shape} of the first frame of the video."
+            )
 
         if self._is_threaded:
             if self._thread is None:
@@ -241,6 +253,16 @@ class VideoEncoder:
         else:
             self._encode(frame)
 
+    @property
+    def filename(self):
+        """Path of the output video file."""
+        return self._filename
+
+    @property
+    def has_file(self):
+        """Whether the current video created its file, which it does on its first encoded frame."""
+        return self._has_file
+
     def close(self):
         """
         Flush the frames still held by the encoder and finalize the video file. Does nothing if already closed.
@@ -258,6 +280,7 @@ class VideoEncoder:
             self._thread.join()
             self._thread = None
             is_encoding_lost = not self._is_encoding_over
+        self._frame_shape = None
 
         if self._container is not None:
             # 'stream' is None if no frame was ever written, in which case there is nothing to flush.

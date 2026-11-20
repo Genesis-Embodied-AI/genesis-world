@@ -1,20 +1,18 @@
+import enum
 import logging
 import re
 
-from genesis.constants import IntEnum
 
-
-# TODO: Switch to 'enum.StrEnum' once Python 3.10 is dropped, so that the name of a theme needs no conversion.
-class THEME(IntEnum):
+class THEME(enum.StrEnum):
     """Theme of the text Genesis prints.
 
     'dark' and 'light' color the text for a terminal of that background. 'raw' prints plain text with a compact prefix
     and no decoration, for log files, continuous integration and coding agents, at the cost of the visual cues.
     """
 
-    dark = 0
-    light = 1
-    raw = 2
+    dark = enum.auto()
+    light = enum.auto()
+    raw = enum.auto()
 
 
 # Kinds of markup, in the order of their short forms: '~<...>~' is a value, '~~<...>~~' a name, and so on.

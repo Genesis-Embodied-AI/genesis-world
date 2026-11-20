@@ -6,29 +6,23 @@ import functools
 import hashlib
 import marshal
 import os
-import pickle as pkl
 import sys
 import types
 import weakref
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
+import numba as nb
+from pydantic import BaseModel
+
 import genesis as gs
 
-# Largest coordinate discrepancy, as a fraction of the bounding-box diagonal, under which two meshes are considered
-# identical by the on-disk caches. Orders of magnitude below the spacing of genuinely distinct geometry, and orders of
-# magnitude above the last-significant-digit noise separating two exports of the same model.
-MESH_CACHE_MATCH_RTOL = 1e-6
-# Bumped when watertighten output changes for a fixed (mesh, aggressiveness): forces a cache miss on stale entries.
-WT_CACHE_VERSION = 7
-# Bumped when the wall-thickness estimate changes for a fixed (mesh, quantile): forces a cache miss on stale entries.
-WTH_CACHE_VERSION = 2
-# Bumped when the particles sampled for a fixed key change or when the layout of an entry does: forces a cache miss on
-# stale entries.
-PTC_CACHE_VERSION = 2
+# Bumped when the layout of the entries of the on-disk caches changes: forces a cache miss on entries of another layout.
+CACHE_FORMAT_VERSION = 1
 
 
 def get_cache_dir():
@@ -288,10 +282,10 @@ def _release_collected_owner(cache_ref: weakref.ReferenceType[OwnedCache], owner
 
 
 def get_gsd_path(verts, faces, sdf_res, sdf_cell_size):
-    # The mesh, the resolution and the cell size determine the grid. The schema tag is bumped whenever the layout of a
-    # file changes, which forces a cache miss on stale entries.
-    schema = "v4-sdf-grid"
-    hashkey = get_hashkey(verts, faces, sdf_res, sdf_cell_size, schema)
+    # The mesh, the resolution and the cell size determine the grid. The schema tag is bumped whenever the values of a
+    # file change, which forces a cache miss on stale entries.
+    schema = "v5-fast-winding"
+    hashkey = get_hashkey(verts, faces, sdf_res, sdf_cell_size, schema, CACHE_FORMAT_VERSION)
     return os.path.join(get_gsd_cache_dir(), f"{hashkey}.gsd")
 
 
@@ -299,33 +293,16 @@ def get_gnd_path(
     name, subterrain_types, subterrain_size, horizontal_scale, vertical_scale, n_subterrains, subterrain_parameters
 ):
     hashkey = get_hashkey(
-        name, subterrain_types, subterrain_size, horizontal_scale, vertical_scale, n_subterrains, subterrain_parameters
+        name,
+        subterrain_types,
+        subterrain_size,
+        horizontal_scale,
+        vertical_scale,
+        n_subterrains,
+        subterrain_parameters,
+        CACHE_FORMAT_VERSION,
     )
     return os.path.join(get_gnd_cache_dir(), f"{hashkey}.gnd")
-
-
-def get_cvx_cache(verts, faces, coacd_options):
-    return MeshCache(get_cvx_cache_dir(), "cvx", verts, faces, coacd_options.__dict__)
-
-
-def get_ptc_cache(verts, faces, p_size, sampler, random_state):
-    return MeshCache(get_ptc_cache_dir(), "ptc", verts, faces, p_size, sampler, random_state, PTC_CACHE_VERSION)
-
-
-def get_tet_cache(verts, faces, tet_cfg):
-    return MeshCache(get_tet_cache_dir(), "tet", verts, faces, tet_cfg)
-
-
-def get_remesh_cache(verts, faces, edge_len_abs, edge_len_ratio, fix):
-    return MeshCache(get_remesh_cache_dir(), "rm", verts, faces, edge_len_abs, edge_len_ratio, fix)
-
-
-def get_wt_cache(verts, faces, aggressiveness):
-    return MeshCache(get_wt_cache_dir(), "wt", verts, faces, aggressiveness, WT_CACHE_VERSION)
-
-
-def get_wth_cache(verts, faces, quantile):
-    return MeshCache(get_wth_cache_dir(), "wth", verts, faces, quantile, WTH_CACHE_VERSION)
 
 
 def get_exr_path(file_path):
@@ -343,10 +320,90 @@ def get_usd_bake_path(file_path):
     return os.path.join(get_usd_cache_dir(), "bake", hashkey)
 
 
+# Primes of the 64-bit xxHash (XXH64)
+_XXH64_PRIME_1 = np.uint64(0x9E3779B185EBCA87)
+_XXH64_PRIME_2 = np.uint64(0xC2B2AE3D27D4EB4F)
+_XXH64_PRIME_3 = np.uint64(0x165667B19E3779F9)
+_XXH64_PRIME_4 = np.uint64(0x85EBCA77C2B2AE63)
+_XXH64_PRIME_5 = np.uint64(0x27D4EB2F165667C5)
+
+
+@nb.jit(nopython=True, cache=True)
+def xxh64(data):
+    """Compute the 64-bit xxHash (XXH64) digest of a byte array, with seed zero.
+
+    XXH64 is a non-cryptographic hash running close to memory bandwidth, with a negligible accidental collision rate.
+    'data' is a contiguous one-dimensional array of bytes. Returns the digest as an unsigned 64-bit integer, which
+    matches the reference implementation on little-endian machines.
+    """
+    n_bytes = data.shape[0]
+    n_stripes = n_bytes // 32
+    words = data[: n_stripes * 32].view(np.uint64)
+    # The four lanes are scalars, so that they stay in registers
+    lane_0 = _XXH64_PRIME_1 + _XXH64_PRIME_2
+    lane_1 = _XXH64_PRIME_2
+    lane_2 = np.uint64(0)
+    lane_3 = np.uint64(0) - _XXH64_PRIME_1
+    for i_stripe in range(n_stripes):
+        acc = lane_0 + words[4 * i_stripe] * _XXH64_PRIME_2
+        lane_0 = ((acc << np.uint64(31)) | (acc >> np.uint64(33))) * _XXH64_PRIME_1
+        acc = lane_1 + words[4 * i_stripe + 1] * _XXH64_PRIME_2
+        lane_1 = ((acc << np.uint64(31)) | (acc >> np.uint64(33))) * _XXH64_PRIME_1
+        acc = lane_2 + words[4 * i_stripe + 2] * _XXH64_PRIME_2
+        lane_2 = ((acc << np.uint64(31)) | (acc >> np.uint64(33))) * _XXH64_PRIME_1
+        acc = lane_3 + words[4 * i_stripe + 3] * _XXH64_PRIME_2
+        lane_3 = ((acc << np.uint64(31)) | (acc >> np.uint64(33))) * _XXH64_PRIME_1
+
+    if n_stripes > 0:
+        acc = (
+            ((lane_0 << np.uint64(1)) | (lane_0 >> np.uint64(63)))
+            + ((lane_1 << np.uint64(7)) | (lane_1 >> np.uint64(57)))
+            + ((lane_2 << np.uint64(12)) | (lane_2 >> np.uint64(52)))
+            + ((lane_3 << np.uint64(18)) | (lane_3 >> np.uint64(46)))
+        )
+        for lane in (lane_0, lane_1, lane_2, lane_3):
+            lane *= _XXH64_PRIME_2
+            lane = ((lane << np.uint64(31)) | (lane >> np.uint64(33))) * _XXH64_PRIME_1
+            acc = (acc ^ lane) * _XXH64_PRIME_1 + _XXH64_PRIME_4
+    else:
+        acc = _XXH64_PRIME_5
+    acc += np.uint64(n_bytes)
+
+    # The bytes past the last stripe go by words of 8, then 4, then one by one, read in little-endian order
+    i_byte = n_stripes * 32
+    for _ in range((n_bytes - i_byte) // 8):
+        word = np.uint64(0)
+        for k in range(8):
+            word |= np.uint64(data[i_byte + k]) << np.uint64(8 * k)
+        word *= _XXH64_PRIME_2
+        word = ((word << np.uint64(31)) | (word >> np.uint64(33))) * _XXH64_PRIME_1
+        acc ^= word
+        acc = ((acc << np.uint64(27)) | (acc >> np.uint64(37))) * _XXH64_PRIME_1 + _XXH64_PRIME_4
+        i_byte += 8
+    if n_bytes - i_byte >= 4:
+        word = np.uint64(0)
+        for k in range(4):
+            word |= np.uint64(data[i_byte + k]) << np.uint64(8 * k)
+        acc ^= word * _XXH64_PRIME_1
+        acc = ((acc << np.uint64(23)) | (acc >> np.uint64(41))) * _XXH64_PRIME_2 + _XXH64_PRIME_3
+        i_byte += 4
+    for i_byte_ in range(i_byte, n_bytes):
+        acc ^= np.uint64(data[i_byte_]) * _XXH64_PRIME_5
+        acc = ((acc << np.uint64(11)) | (acc >> np.uint64(53))) * _XXH64_PRIME_1
+
+    acc ^= acc >> np.uint64(33)
+    acc *= _XXH64_PRIME_2
+    acc ^= acc >> np.uint64(29)
+    acc *= _XXH64_PRIME_3
+    acc ^= acc >> np.uint64(32)
+    return acc
+
+
 def get_hashkey(*args):
     # Containers are replaced by the tuples of their items, sorted for sets and for dicts other than OrderedDict since
-    # equal ones may iterate in different orders (string hashes are salted per process). Items are replaced before their
-    # container, so that sorting compares canonical representations, which order items of any type.
+    # equal ones may iterate in different orders (string hashes are salted per process). A pydantic model is replaced by
+    # its type and the values of its fields, which leaves out the values cached on the instance. Items are replaced
+    # before their container, so that sorting compares canonical representations, which order items of any type.
     values, nodes = [], [(args, False)]
     while nodes:
         node, is_expanded = nodes.pop()
@@ -355,87 +412,27 @@ def get_hashkey(*args):
             if isinstance(node, (set, frozenset)) or (isinstance(node, dict) and not isinstance(node, OrderedDict)):
                 items.sort(key=repr)
             values.append(tuple(items))
+        elif isinstance(node, BaseModel):
+            fields = type(node).model_fields
+            nodes.append(([type(node).__qualname__, *[value for name, value in node if name in fields]], False))
         elif isinstance(node, (dict, list, tuple, set, frozenset)):
             nodes.append((node, True))
-            nodes.extend((item, False) for item in (node.items() if isinstance(node, dict) else node))
+            nodes.extend([(item, False) for item in (node.items() if isinstance(node, dict) else node)])
         else:
+            if isinstance(node, Path):
+                file_stats = node.stat()
+                node = (str(node), file_stats.st_size, file_stats.st_mtime)
+            if isinstance(node, str):
+                node = node.encode()
+            elif not isinstance(node, bytes):
+                try:
+                    buffer = memoryview(node)
+                except TypeError:
+                    node = marshal.dumps(node)
+                else:
+                    # A buffer is hashed in place, sparing a copy of a large array, together with its layout so that
+                    # the same bytes read with another shape or item type give another key.
+                    data = np.frombuffer(buffer if buffer.c_contiguous else buffer.tobytes(), dtype=np.uint8)
+                    node = marshal.dumps((buffer.format, buffer.shape, xxh64(data)))
             values.append(node)
-
-    hasher = hashlib.sha256()
-    for arg in (*values[0], gs.__version__.encode()):
-        if isinstance(arg, Path):
-            file_stats = arg.stat()
-            arg = (str(arg).encode(), file_stats.st_size, file_stats.st_mtime)
-        if isinstance(arg, str):
-            arg = arg.encode()
-        elif not isinstance(arg, bytes):
-            try:
-                arg = bytes(memoryview(arg))
-            except TypeError:
-                arg = marshal.dumps(arg)
-        hasher.update(arg)
-    return hasher.hexdigest()
-
-
-class MeshCache:
-    """On-disk cache of data derived from a mesh, keyed on its geometry up to the noise of a re-export.
-
-    Exporting the same model twice from an authoring tool perturbs its coordinates in the last significant digits,
-    which changes any exact hash of them and forces every derived artifact to be recomputed from scratch. Rounding
-    the coordinates onto a grid before hashing does not fix this: a coordinate lying near a grid boundary changes
-    bucket under an arbitrarily small perturbation, and a single such coordinate out of the tens of thousands of a
-    mesh already changes the key. Entries are therefore grouped into buckets keyed on what is exactly reproducible -
-    the vertex count, the face connectivity and the generation parameters - and a lookup that misses the exact vertex
-    key scans its bucket, accepting the first candidate matching within 'MESH_CACHE_MATCH_RTOL'. Both arms compare
-    the vertices, so a hit is always verified rather than inferred from a key.
-
-    An entry stores its reference vertices ahead of the payload in the same file, so the scan deserializes only that
-    leading record for the candidates it rejects.
-
-    Parameters
-    ----------
-    cache_dir : str
-        Directory holding the buckets of this kind of derived data.
-    ext : str
-        Extension of the cache files, identifying the kind of derived data they hold.
-    verts : np.ndarray
-        Vertices identifying the mesh, in the frame the derived data is expressed in. Pass them normalized whenever
-        the derived data is invariant to a transform, so that meshes related by one share a single entry.
-    faces : np.ndarray
-        Face connectivity identifying the mesh.
-    *params
-        Every generation parameter the derived data depends on. Must be exactly reproducible across runs.
-    """
-
-    def __init__(self, cache_dir: str, ext: str, verts: np.ndarray, faces: np.ndarray, *params):
-        self._verts = np.ascontiguousarray(verts)
-        bucket_key = get_hashkey(len(self._verts), np.ascontiguousarray(faces), *params)
-        self._bucket_dir = os.path.join(cache_dir, bucket_key)
-        self._filename = f"{get_hashkey(self._verts)}.{ext}"
-
-    def load(self):
-        """Return the payload of the matching entry, or None if this bucket holds none."""
-        if not os.path.isdir(self._bucket_dir):
-            return None
-        atol = MESH_CACHE_MATCH_RTOL * np.linalg.norm(self._verts.max(axis=0) - self._verts.min(axis=0))
-        # Trying the exact key first keeps an unchanged asset from ever paying for the scan.
-        for filename in sorted(os.listdir(self._bucket_dir), key=lambda name: name != self._filename):
-            try:
-                with open(os.path.join(self._bucket_dir, filename), "rb") as file:
-                    # Each record needs its own unpickler: one reused across both would carry its memo from the
-                    # vertices into the payload and misread it.
-                    verts_ref = pkl.load(file)
-                    if verts_ref.shape != self._verts.shape or (np.abs(self._verts - verts_ref) > atol).any():
-                        continue
-                    return pkl.load(file)
-            except (EOFError, ModuleNotFoundError, pkl.UnpicklingError, TypeError, MemoryError):
-                gs.logger.info("Ignoring corrupted cache.")
-        return None
-
-    def save(self, payload) -> None:
-        """Store the payload as the entry of this mesh. It must not be None, which 'load' reserves for a miss."""
-        assert payload is not None
-        os.makedirs(self._bucket_dir, exist_ok=True)
-        with open(os.path.join(self._bucket_dir, self._filename), "wb") as file:
-            pkl.dump(self._verts, file, protocol=pkl.HIGHEST_PROTOCOL)
-            pkl.dump(payload, file, protocol=pkl.HIGHEST_PROTOCOL)
+    return hashlib.sha256(marshal.dumps((values[0], gs.__version__))).hexdigest()

@@ -1,13 +1,12 @@
-import platform
 import re
-import sys
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 import quadrants as qd
 from pydantic import BeforeValidator, Field, PrivateAttr
 from pydantic_core import PydanticCustomError
 
 import genesis as gs
+from genesis.constants import STRUCTURE
 from genesis.typing import PositiveFloat, StrictInt, ValidFloat
 
 from ..base import Material
@@ -22,14 +21,13 @@ def _validate_sampler(v: str) -> str:
     if not isinstance(v, str) or not _SAMPLER_PATTERN.match(v):
         raise PydanticCustomError(
             "invalid_sampler",
-            "Input should be 'pbs', 'pbs-<seed>', 'random', or 'regular'",
+            "Input should be 'pbs', 'pbs-<res>', 'random', or 'regular'",
             {"value": v},
         )
     return v
 
 
 SamplerType = Annotated[str, BeforeValidator(_validate_sampler)]
-DEFAULT_SAMPLER = "pbs" if (sys.platform == "linux" and platform.machine() == "x86_64") else "random"
 
 
 @qd.data_oriented
@@ -54,15 +52,19 @@ class Base(Material["MPMEntity"]):
     mu : float, optional
         The second Lame's parameter. Default is None, computed from E and nu.
     sampler : str, optional
-        Particle sampler ('pbs', 'regular', 'random'). Default is platform-dependent.
+        Particle sampler. Defaults to 'pbs', which relaxes the particles to a uniform density inside the shape, at the
+        cost of a slower first sampling of each shape, cached afterwards. 'regular' places them on a grid, which leaves
+        the surface stair-stepped. 'random' draws them uniformly, which leaves local density fluctuations.
     """
+
+    structure: ClassVar[STRUCTURE] = STRUCTURE.TEARABLE
 
     E: PositiveFloat = 1e6
     nu: Annotated[ValidFloat, Field(gt=-1.0, lt=0.5)] = 0.2
     rho: PositiveFloat = 1000.0
     lam: ValidFloat | None = None
     mu: ValidFloat | None = None
-    sampler: SamplerType = DEFAULT_SAMPLER
+    sampler: SamplerType = "pbs"
 
     # Dispatch fields - set by subclass model_post_init, not user-specified. needs_svd flips the solver's forward-mode
     # SVD kernel off when no material in the scene reads U/V/S from SVD(F_tmp) (e.g. non-viscous liquid, neohooken
@@ -91,7 +93,7 @@ class Base(Material["MPMEntity"]):
             self.update_stress = self._update_stress_default
 
     @qd.func
-    def _update_F_S_Jp_noop(self, J, F_tmp, U, S, V, Jp):
+    def _update_F_S_Jp_noop(self, J, F_tmp, U, S, V, Jp, eps):
         raise NotImplementedError
 
     @qd.func

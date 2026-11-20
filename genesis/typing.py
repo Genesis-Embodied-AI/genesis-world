@@ -1,10 +1,12 @@
 import math
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import PurePath
-from typing import TYPE_CHECKING, Annotated, Any, Mapping, Sequence, TypeVar, get_args
+from typing import TYPE_CHECKING, Annotated, Any, TypeVar, get_args
 
 import numpy as np
 import torch
+
 from frozendict import frozendict
 from pydantic import BeforeValidator, Field, GetCoreSchemaHandler, GetPydanticSchema
 from pydantic_core import PydanticCustomError, core_schema
@@ -92,6 +94,7 @@ if TYPE_CHECKING:
     NonNegativeFloat = ValidFloat
     PositiveFloat = ValidFloat
     StrictInt = int | np.integer
+    StrictBool = bool | np.bool_
     NonNegativeInt = StrictInt
     PositiveInt = StrictInt
     NumericType = int | float | bool | np.number
@@ -140,6 +143,9 @@ else:
     NonNegativeFloat = Annotated[float, Field(ge=0, allow_inf_nan=False, strict=False)]
     PositiveFloat = Annotated[float, Field(gt=0, allow_inf_nan=False, strict=False)]
     StrictInt = Annotated[int, BeforeValidator(_coerce_int), Field(strict=True)]
+    StrictBool = Annotated[
+        bool, BeforeValidator(lambda v: bool(v) if isinstance(v, np.bool_) else v), Field(strict=True)
+    ]
     NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
     PositiveInt = Annotated[StrictInt, Field(gt=0)]
     NumericType = int | float | bool
@@ -226,3 +232,7 @@ else:
     FGridArrayType = Annotated[NDArrayType, BeforeValidator(_to_float_grid)]
     PathType = Annotated[str, BeforeValidator(lambda v: str(v) if isinstance(v, PurePath) else v)]
     FrozenDictType = Annotated[frozendict[_K, _V], _FrozenDictValidator]
+
+
+# An index of environments, or of the elements of an entity, as the runtime getters and setters take it
+IndexType = int | range | slice | Sequence[int] | np.ndarray | torch.Tensor

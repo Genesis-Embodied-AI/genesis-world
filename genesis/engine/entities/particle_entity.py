@@ -1,5 +1,7 @@
 import functools
+import textwrap
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -12,13 +14,37 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
+from genesis.options.surfaces import Surface
 from genesis.utils.misc import broadcast_tensor
 
 from .base_entity import Entity
 
-# Number of vvert-particle distances computed at once when searching the supports of the vverts. Their difference
-# vectors take 24 MiB in double precision, while chunks of this size still amortize the per-chunk overhead of numpy.
-VVERTS_DIST2_MAX_SIZE = 2**20
+if TYPE_CHECKING:
+    from genesis.engine.scene import Scene
+    from genesis.engine.solvers.particle_solver import ParticleSolver
+
+
+def check_particles_inside_boundary(
+    particles_pos: np.ndarray, boundary_lower: np.ndarray, boundary_upper: np.ndarray
+) -> None:
+    """Raise if any of the given particle positions lies outside the boundary of a particle solver."""
+    is_inside = (particles_pos > boundary_lower) & (particles_pos < boundary_upper)
+    if not is_inside.all():
+        gs.raise_exception(
+            textwrap.dedent(
+                f"""\
+                Particles outside the solver boundary. Note that for MPMSolver, boundary is slightly tighter than the
+                specified domain due to safety padding.
+
+                Current boundary:
+                lower: {boundary_lower}
+                upper: {boundary_upper}
+
+                Particles to be added:
+                min: {particles_pos.min(0)}
+                max: {particles_pos.max(0)}"""
+            )
+        )
 
 
 def assert_active(method):
@@ -42,10 +68,8 @@ class ParticleEntity(Entity):
         The scene object that this entity belongs to.
     solver : Solver
         The physics solver responsible for simulating the entity's particles.
-    material : Material
-        The material definition, including sampling strategy and physical properties.
-    morph : Morph
-        Geometry or volumetric shape used for sampling particles (e.g., mesh, primitive).
+    spec : gs.entities.MPM | gs.entities.SPH | gs.entities.PBD
+        The entity spec the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface material or texture information associated with the entity.
     particle_size : float
@@ -54,41 +78,27 @@ class ParticleEntity(Entity):
         Index of this entity in the simulation.
     particle_start : int
         Global index offset for this entity's particles in the solver.
-    vvert_start : int, optional
-        Global index offset for vertex-based rendering, used for skinning.
-    vface_start : int, optional
-        Global index offset for visual faces, used for skinning.
     need_skinning : bool, default=True
         Whether to enable skinning for rendering this entity's mesh.
     """
 
     def __init__(
         self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        particle_size,
-        idx,
-        particle_start,
-        vvert_start=None,
-        vface_start=None,
-        need_skinning=True,
-        name: str | None = None,
-    ):
-        super().__init__(idx, scene, morph, solver, material, surface, name=name)
+        scene: "Scene",
+        solver: "ParticleSolver",
+        surface: Surface,
+        particle_size: float,
+        idx: int,
+        particle_start: int,
+        spec: "gs.entities.MPM | gs.entities.SPH | gs.entities.PBD",
+        need_skinning: bool = True,
+    ) -> None:
+        super().__init__(idx, scene, solver, surface, spec)
 
         self._particle_size = particle_size
         self._particle_start = particle_start
 
         self._need_skinning = need_skinning
-        if need_skinning:
-            self._vvert_start = vvert_start
-            self._vface_start = vface_start
-        else:
-            self._vvert_start = -1
-            self._vface_start = -1
 
         # visual mesh
         if isinstance(self._morph, gs.options.morphs.MeshSet):
@@ -120,7 +130,7 @@ class ParticleEntity(Entity):
         GenesisException
             If the specified sampler is not supported or incorrectly formatted.
         """
-        self.sampler = self._material.sampler
+        self.sampler = self.material.sampler
 
         match self.sampler.split("-"):
             case ["regular"]:
@@ -145,39 +155,11 @@ class ParticleEntity(Entity):
         self.active = not isinstance(self._morph, gs.options.morphs.Nowhere)
 
         self._add_particles_to_solver()
-        if self._need_skinning:
-            self._add_vverts_to_solver()
+
+        self._is_built = True
 
     def _add_particles_to_solver(self):
         raise NotImplementedError
-
-    def _add_vverts_to_solver(self):
-        """Compute the supports of the vverts among their neighboring particles, for rendering.
-
-        The vverts are processed by chunks whose distances to all the particles take a bounded memory. A chunk holds one
-        vvert at least, whose distances take as much memory as the positions of the particles.
-        """
-        n_supports = self.solver.n_vvert_supports
-        chunk_size = max(VVERTS_DIST2_MAX_SIZE // len(self._particles), 1)
-        support_idxs = np.empty((len(self._vverts), n_supports), dtype=gs.np_int)
-        for i_vv_start in range(0, len(self._vverts), chunk_size):
-            vverts_chunk = self._vverts[i_vv_start : i_vv_start + chunk_size]
-            dist2 = np.sum(np.square(vverts_chunk[:, None, :] - self._particles), axis=-1)
-            chunk_support_idxs = np.argpartition(dist2, n_supports - 1, axis=1)[:, :n_supports]
-            chunk_support_dist2 = np.take_along_axis(dist2, chunk_support_idxs, axis=1)
-            sorted_order = np.lexsort((chunk_support_idxs, chunk_support_dist2))
-            support_idxs[i_vv_start : i_vv_start + chunk_size] = np.take_along_axis(
-                chunk_support_idxs, sorted_order, axis=1
-            )
-        support_idxs = np.clip(support_idxs, 0, len(self._particles) - 1)
-
-        all_ps = self._particles[support_idxs]
-        Ps = all_ps[:, :-1].swapaxes(-2, -1) - np.expand_dims(all_ps[:, -1], axis=-1)
-        P_invs = np.linalg.pinv(Ps)
-
-        self._solver.add_vverts(
-            self._vvert_start, self._particle_start, self._vverts, self._particles, P_invs, support_idxs
-        )
 
     def sample(self):
         """
@@ -219,13 +201,6 @@ class ParticleEntity(Entity):
                 [np.full((len(v),), fill_value=i, dtype=gs.np_int) for i, v in enumerate(particles)]
             )
             particles = np.concatenate(particles, dtype=gs.np_float)
-            if not self._solver.boundary.is_inside(particles):
-                gs.raise_exception(
-                    "Entity has particles outside solver boundary. Note that for MPMSolver, boundary is slightly "
-                    "tighter than the specified domain due to safety padding.\n\nCurrent boundary:\n"
-                    f"{self._solver.boundary}\n\nEntity to be added:\nmin: {particles.min(0)}\nmax: {particles.max(0)}\n"
-                )
-
             combined_verts, combined_faces = trimesh.util.append_faces(
                 [v.verts for v in self._vmesh],
                 [v.faces for v in self._vmesh],
@@ -257,14 +232,6 @@ class ParticleEntity(Entity):
             # transform particles
             particles = gu.transform_by_trans_quat(particles, pos, quat)
 
-            if not self._solver.boundary.is_inside(particles):
-                gs.raise_exception(
-                    "Entity has particles outside solver boundary. Note that for MPMSolver, boundary is slightly "
-                    "tighter than the specified domain due to safety padding.\n\n"
-                    f"Current boundary:\n{self._solver.boundary}\n\nEntity to be added:\nmin: {particles.min(0)}\n"
-                    f"max: {particles.max(0)}\n"
-                )
-
             if self._need_skinning:
                 self._vverts = np.asarray(self._vmesh.verts, dtype=gs.np_float)
                 self._vfaces = np.asarray(self._vmesh.faces, dtype=gs.np_int)
@@ -272,6 +239,9 @@ class ParticleEntity(Entity):
                 self._vverts = np.zeros((0, 3), dtype=gs.np_float)
                 self._vfaces = np.zeros((0, 3), dtype=gs.np_int)
             origin = pos
+
+        if not isinstance(self._morph, gs.options.morphs.Nowhere):
+            check_particles_inside_boundary(particles, self._solver.boundary_lower, self._solver.boundary_upper)
 
         self._particles = np.asarray(particles, dtype=gs.np_float, order="C")
         self._init_particles_offset = torch.tensor(self._particles - origin, dtype=gs.tc_float, device=gs.device)
@@ -493,12 +463,12 @@ class ParticleEntity(Entity):
         closest_idx : torch.Tensor, shape (M,)
             The index of the closest particle.
         """
-        pos = broadcast_tensor(pos, gs.tc_float, (self._scene._B, 3), ("envs_idx", ""))
+        pos = broadcast_tensor(pos, gs.tc_float, (self._solver.n_envs_, 3), ("envs_idx", ""))
 
         cur_particles = self.get_particles_pos(envs_idx)
         distances = torch.linalg.norm(cur_particles - pos[:, None], dim=-1)
         closest_idx = torch.argmin(distances, dim=-1).to(dtype=gs.tc_int)
-        if self._scene.n_envs == 0:
+        if self._solver.n_envs == 0:
             closest_idx = closest_idx[0]
         return closest_idx
 
@@ -571,26 +541,6 @@ class ParticleEntity(Entity):
         return self._particle_start + self._n_particles
 
     @property
-    def vvert_start(self):
-        """Starting index for visual mesh vertices."""
-        return self._vvert_start
-
-    @property
-    def vvert_end(self):
-        """Ending index (exclusive) for visual mesh vertices."""
-        return self._vvert_start + self.n_vverts
-
-    @property
-    def vface_start(self):
-        """Starting index for visual mesh faces."""
-        return self._vface_start
-
-    @property
-    def vface_end(self):
-        """Ending index (exclusive) for visual mesh faces."""
-        return self._vface_start + self.n_vfaces
-
-    @property
     def particle_size(self):
         """Diameter of individual particles."""
         return self._particle_size
@@ -599,11 +549,6 @@ class ParticleEntity(Entity):
     def init_particles(self):
         """Initial sampled particle positions."""
         return self._particles
-
-    @property
-    def material(self):
-        """Material of this entity."""
-        return self._material
 
     @property
     def surface(self):
