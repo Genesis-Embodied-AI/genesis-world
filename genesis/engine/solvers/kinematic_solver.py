@@ -343,17 +343,6 @@ class KinematicSolver(Solver):
         self.n_joints_ = max(1, self.n_joints)
         self.n_entities_ = max(1, self.n_entities)
 
-        # The link of each configuration entry and of each dof, to restart the integral term of every dof of a link on
-        # a write of its configuration (see ctrl_force_int in rigid/data.py). The dofs are padded like the state, which
-        # leaves the padding slot unset, since a scene without dofs has no configuration entry either.
-        qs_link_idx = np.empty((self.n_qs,), dtype=gs.np_int)
-        dofs_link_idx = np.zeros((self.n_dofs_,), dtype=gs.np_int)
-        for link in self.links:
-            qs_link_idx[link.q_start : link.q_end] = link.idx
-            dofs_link_idx[link.dof_start : link.dof_end] = link.idx
-        self._qs_link_idx = torch.from_numpy(qs_link_idx).to(device=gs.device)
-        self._dofs_link_idx = torch.from_numpy(dofs_link_idx).to(device=gs.device)
-
         # The kinematic roots and trees, see roots_link_idx and trees_root_idx in rigid/data.py. A link no dof moves,
         # its own or an ancestor's, is static and belongs to no tree. A moving link roots the tree of its parent, or its
         # own when its parent is static or absent. The parents precede the children.
@@ -458,10 +447,11 @@ class KinematicSolver(Solver):
             sparse_solve=False,
             integrator=gs.integrator.approximate_implicitfast,
             solver_type=gs.constraint_solver.CG,
+            has_dynamics=False,
         )
 
     def _create_data_manager(self):
-        self.data_manager = RigidData(self, kinematic_only=True)
+        self.data_manager = RigidData(self)
         self._errno = self.data_manager.errno
         self.rigid_info = self.data_manager.rigid_info
         self.dyn_info = self.data_manager.dyn_info
@@ -909,17 +899,10 @@ class KinematicSolver(Solver):
 
     @mutates
     def set_qpos(self, qpos, qs_idx=None, envs_idx=None):
-        # Restart the integral term on a pose write, for every dof of each link with a configuration entry set
-        is_link_set = torch.zeros((self.n_links_,), dtype=gs.tc_bool, device=gs.device)
-        is_link_set[self._qs_link_idx[indices_to_mask(qs_idx)]] = True
-        is_dof_set = is_link_set[self._dofs_link_idx]
         if gs.use_zerocopy:
             data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
             mask = (0, *indices_to_mask(qs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, qs_idx)
             assign_indexed_tensor(data, mask, qpos)
-            ctrl_force_int = qd_to_torch(self.dyn_state.dofs.ctrl_force_int, transpose=True, copy=False)
-            envs_mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
-            ctrl_force_int[envs_mask] = torch.where(is_dof_set, 0.0, ctrl_force_int[envs_mask])
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -928,6 +911,8 @@ class KinematicSolver(Solver):
             )
             if self.n_envs == 0:
                 qpos = qpos[None]
+            # The solver has no controller, whose integral term the mask restarts (see kernel_set_qpos)
+            is_dof_set = torch.empty((0,), dtype=gs.tc_bool, device=gs.device)
             kernel_set_qpos(qs_idx, is_dof_set, envs_idx, qpos, self.dyn_state, self.rigid_info, self.rigid_config)
 
     @mutates

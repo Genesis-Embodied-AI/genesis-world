@@ -400,6 +400,17 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if not self._enable_mujoco_compatibility:
                 self._options.tolerance *= 0.1
 
+        # The link of each configuration entry and of each dof, to restart the integral term of every dof of a link on
+        # a write of its configuration (see ctrl_force_int in rigid/data.py). The dofs are padded like the state, which
+        # leaves the padding slot unset, since a scene without dofs has no configuration entry either.
+        qs_link_idx = np.empty((self.n_qs,), dtype=gs.np_int)
+        dofs_link_idx = np.zeros((max(1, self.n_dofs),), dtype=gs.np_int)
+        for link in self.links:
+            qs_link_idx[link.q_start : link.q_end] = link.idx
+            dofs_link_idx[link.dof_start : link.dof_end] = link.idx
+        self._qs_link_idx = torch.from_numpy(qs_link_idx).to(device=gs.device)
+        self._dofs_link_idx = torch.from_numpy(dofs_link_idx).to(device=gs.device)
+
         super().build(n_envs)
 
         self._init_vert_fields()
@@ -897,7 +908,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def _create_data_manager(self):
         # We initialize data even if the solver is not active because the coupler needs arguments like
         # rigid_solver.dyn_state.links, etc. regardless of the solver is active or not.
-        self.data_manager = RigidData(self, kinematic_only=False)
+        self.data_manager = RigidData(self)
         self._errno = self.data_manager.errno
         self._is_external_wrench_exact = is_opted_in(RigidData.dyn_state.links.cfrc_external_sums)
 
