@@ -474,10 +474,8 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
     # Small emissions fill just over half of the emitter, then a source of twice the radius emits eight times as many
     # particles, more than the emitter has left.
     particle_size = emitter.entity.particle_size
-    emitter.emit_omni(source_radius=5.0 * particle_size)
-    for _ in range(emitter.max_particles // (2 * emitter.next_particle)):
+    while emitter.next_particle <= emitter.max_particles // 2:
         emitter.emit_omni(source_radius=5.0 * particle_size)
-    assert emitter.next_particle > emitter.max_particles // 2
     box_pos = box.get_particles_pos()
     emitter.emit_omni(source_radius=10.0 * particle_size)
     assert_equal(box.get_particles_pos(), box_pos)
@@ -490,8 +488,9 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
         scene.step()
     scene.step()
 
-    # Each step lengthens the pending droplet by 0.4 particle size, so a droplet reaches one particle size and is
-    # released on the third step (0.4, 0.8, 1.2). A reset drops the 0.8 left by two steps, so release waits three more.
+    # The pending droplet grows by 0.4 particle size per step and is released at one particle size. Any growth between
+    # 1/3 and 1/2 holds two steps back and releases on the third, and 0.4 stays clear of both bounds against rounding.
+    # A reset drops the 0.8 held back, so the release waits three more steps.
     speed = 0.4 * particle_size / scene.dt
     for _ in range(2):
         emitter.emit(droplet_shape="circle", droplet_size=0.25, speed=speed)
