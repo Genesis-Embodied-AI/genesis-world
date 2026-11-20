@@ -1,0 +1,23 @@
+examples/deformable/pbd_jelly_delivery.py
+  s_6331e9b5eb051b::t_00dece03d2602e 44-47,50-51
+  s_6331e9b5eb051b::t_d7aafcd1ff5d23 94
+  s_6331e9b5eb051b::t_604254d9f6982b 49,52,170-171,202,242-243
+  s_6331e9b5eb051b::t_49ab5b7dcc1ae9 117,119-120,172-173,244
+  s_6331e9b5eb051b::t_d7b93a6463a67d 118
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "dadc926dbf3166048df9f5454eff9e974216cfe7",
+  "prompts": {},
+  "sessions": {
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
