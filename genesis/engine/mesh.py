@@ -751,11 +751,11 @@ class Mesh(RBC, serialization.SerializationMixin):
         # A face whose corners merge into fewer than three positions has no area, so it closes nothing.
         is_face_valid = (faces != faces_rolled).all(axis=1)
         faces, faces_rolled = faces[is_face_valid], faces_rolled[is_face_valid]
-        # Each edge is keyed by its two position indices, as in 'get_unique_edges'. A closed surface shares each edge
-        # between two faces, or four where closed parts touch along it.
+        # Each edge is keyed by its two position indices, as in 'get_unique_edges'.
+        # A closed surface shares each edge between exactly two faces.
         edges_key = np.minimum(faces, faces_rolled) * len(verts_pos) + np.maximum(faces, faces_rolled)
         _, edges_count = np.unique(edges_key, return_counts=True)
-        return (edges_count % 2 == 0).all()
+        return (edges_count == 2).all()
 
     @property
     def metadata(self):
