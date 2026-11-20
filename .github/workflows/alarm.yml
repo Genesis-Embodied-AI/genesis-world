@@ -150,7 +150,7 @@ jobs:
 
       - name: Publish report and PR status
         id: publish_check
-        # Publish the status even after an earlier failure, unless the workflow run was cancelled.
+        # GitHub normally skips steps after a failure; !cancelled() lets this reporting step run after a failure.
         if: ${{ !cancelled() }}
         uses: actions/github-script@v8
         env:
