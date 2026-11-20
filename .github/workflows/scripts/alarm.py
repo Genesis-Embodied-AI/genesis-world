@@ -274,14 +274,11 @@ class Alarm:
         self.dev_skip_speed = args.dev_skip_speed
         self.dev_allow_all_branches = args.dev_allow_all_branches
 
-        self.baseline_artifacts_dir = args.baseline_artifacts_dir
-        self.baseline_revision = args.baseline_revision
-        if self.baseline_artifacts_dir is None:
-            assert "WANDB_API_KEY" in os.environ
-            self.wandb_entity = os.environ["WANDB_ENTITY"]
-        else:
-            self.wandb_entity = ""
-            self.max_valid_revisions = 1
+        assert "WANDB_API_KEY" in os.environ
+
+        self.wandb_entity = os.environ["WANDB_ENTITY"]
+        self.wandb_project = args.wandb_project
+        self.wandb_filters = args.wandb_filters
 
     def fetch_wandb_data(
         self,
@@ -289,23 +286,12 @@ class Alarm:
         run_name_prefix: str | None,
         wandb_parser: WandbParser,
     ) -> dict[str, dict[frozendict[str, str], dict[str, float | int]]]:
-        if self.baseline_artifacts_dir is not None:
-            baseline = BenchmarkRunUnderTest(
-                artifacts_dir=Path(self.baseline_artifacts_dir),
-                metric_keys=benchmark_under_test.metric_keys,
-                filename_glob=f"{run_name_prefix.rstrip('-')}_test*.txt",
-            )
-            for config, metrics in benchmark_under_test.results.items():
-                if not metrics or not metrics.keys() <= baseline.results.get(config, {}).keys():
-                    raise ValueError(f"Baseline lacks benchmark measurements for {dict(config)}.")
-                for metric in metrics:
-                    value = baseline.results[config][metric]
-                    if not math.isfinite(value) or value <= 0 or not math.isfinite(metrics[metric]):
-                        raise ValueError(f"Invalid measurement for {metric} in {dict(config)}.")
-            return {self.baseline_revision: baseline.results}
-
         api = wandb.Api()
-        runs_iter: Iterable[Run] = api.runs(f"{self.wandb_entity}/{wandb_parser.project}", order="-created_at")
+        runs_iter: Iterable[Run] = api.runs(
+            f"{self.wandb_entity}/{self.wandb_project or wandb_parser.project}",
+            filters=self.wandb_filters,
+            order="-created_at",
+        )
 
         commit_hashes = set()
         records_by_commit_hash: dict[str, dict[frozendict[str, str], dict[str, float | int]]] = defaultdict(
@@ -368,6 +354,10 @@ class Alarm:
                 summary=summary,
                 commit_hash=commit_hash,
             )
+        if self.wandb_filters and not any(
+            benchmark_under_test.all_config_param_fdicts.issubset(record) for record in records_by_commit_hash.values()
+        ):
+            raise ValueError("No complete baseline matches the W&B filters.")
         return records_by_commit_hash
 
     def build_table(
@@ -480,8 +470,8 @@ class Alarm:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--baseline-artifacts-dir", type=Path)
-    parser.add_argument("--baseline-revision", default="explicit baseline")
+    parser.add_argument("--wandb-project")
+    parser.add_argument("--wandb-filters", type=json.loads, default={})
     parser.add_argument("--speed-artifacts-dir", type=str, required=True)
     parser.add_argument("--mem-artifacts-dir", type=str, required=True)
     parser.add_argument(
@@ -566,12 +556,8 @@ if __name__ == "__main__":
             "### Memory usage",
             *table_by_metric_name[alarm.metric_max_mem_mb],
             "",
-            (
-                "- (*1) baseline: the explicitly selected main revision."
-                if alarm.baseline_artifacts_dir is not None
-                else f"- (*1) last: last main revision, mean/std over {alarm.max_valid_revisions} commits if available."
-            ),
-            "- (*2) Δ: relative difference between PR and selected baseline, i.e. (PR - baseline) / baseline * 100%.",
+            f"- (*1) last: last commit on main, mean/std: stats over commit hashes {alarm.max_valid_revisions} commits if available.",
+            "- (*2) Δ: relative difference between PR and last commit on main, i.e. (PR - main) / main * 100%.",
         ]
     )
 
