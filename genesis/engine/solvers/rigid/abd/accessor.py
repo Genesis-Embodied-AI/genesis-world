@@ -54,9 +54,8 @@ def kernel_set_links_pos(
                 dyn_state.fixed_roots.pos[i_fr, i_b][j] = pos[i_b_, i_l_, j]
         else:
             q_start = dyn_info.links.q_start[I_l]
-            # See ctrl_force_int in rigid/data.py
             for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
-                dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0
+                dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0  # Restart the integral term on a pose write
             for j in qd.static(range(3)):
                 rigid_info.qpos[q_start + j, i_b] = pos[i_b_, i_l_, j]
 
@@ -225,9 +224,8 @@ def kernel_set_links_quat(
                 dyn_state.fixed_roots.quat[i_fr, i_b][j] = quat[i_b_, i_l_, j]
         else:
             q_start = dyn_info.links.q_start[I_l]
-            # See ctrl_force_int in rigid/data.py
             for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
-                dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0
+                dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0  # Restart the integral term on a pose write
             for j in qd.static(range(4)):
                 rigid_info.qpos[q_start + j + 3, i_b] = quat[i_b_, i_l_, j]
 
@@ -771,9 +769,8 @@ def kernel_set_dofs_position(
             if is_dof_set[i_d]:
                 has_dof_set = True
         if has_dof_set:
-            # See ctrl_force_int in rigid/data.py
             for i_d in range(dof_start, dof_end):
-                dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0
+                dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0  # Restart the integral term on a pose write
             q_start = dyn_info.links.q_start[I_l]
             i_j = dyn_info.links.joint_start[I_l]
             I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
