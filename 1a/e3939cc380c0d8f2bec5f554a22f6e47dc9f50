@@ -1,0 +1,22 @@
+genesis/engine/entities/base_entity.py
+  s_4d969401aad039::t_e625ccca9e2508 238,250-251
+  s_4d969401aad039::t_471dc595cf15f3 252
+tests/rigid/test_kinematics.py
+  s_4d969401aad039::t_c19ae2abde98aa 844
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1ae3939cc380c0d8f2bec5f554a22f6e47dc9f50",
+  "prompts": {},
+  "sessions": {
+    "s_4d969401aad039": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f2e3b45b-a76a-4a65-841d-9b42f7f8c42c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
