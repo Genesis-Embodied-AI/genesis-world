@@ -246,7 +246,7 @@ def parse_prim_geoms(
 
             geom_data = None
             gs_type = gs.GEOM_TYPE.MESH
-            is_scale_uniform = True
+            is_data_exact = True
 
         else:  # primitive geometries
             # Reflection from negative xformOp:scale is carried by geom_ST; collision sizes stay positive.
@@ -314,6 +314,10 @@ def parse_prim_geoms(
             else:
                 gs.raise_exception(f"Unsupported geometry type: {prim.GetTypeName()}")
 
+            # A plane normal ignores the scale and box extents take it per axis, while the size of the other
+            # primitives comes from the first axis alone
+            is_data_exact = is_scale_uniform or gs_type in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.BOX)
+
             # Mesh stays Z-aligned; axis orientation is handled by the quat (matching MuJoCo pattern).
             # axis_T is NOT baked into mesh vertices — it goes into geom_Q instead.
             tmesh.apply_transform(geom_ST)
@@ -345,9 +349,9 @@ def parse_prim_geoms(
                         quat=geom_quat,
                         contype=0,
                         conaffinity=0,
-                        # The primitive data approximate a non-uniform scale, while the visual mesh carries it exactly
-                        type=gs_type if is_scale_uniform else gs.GEOM_TYPE.MESH,
-                        data=geom_data if is_scale_uniform else None,
+                        # Primitive data that approximate the scale give way to the visual mesh, which carries it exactly
+                        type=gs_type if is_data_exact else gs.GEOM_TYPE.MESH,
+                        data=geom_data if is_data_exact else None,
                     )
                 )
         if is_collision:
