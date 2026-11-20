@@ -480,8 +480,9 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
     emitter.emit_omni(source_radius=10.0 * particle_size)
     assert_equal(box.get_particles_pos(), box_pos)
 
-    with pytest.raises(gs.GenesisException):
-        emitter.emit_omni(source_radius=0.0)
+    for source_radius in (0.0, float("nan"), float("inf")):
+        with pytest.raises(gs.GenesisException):
+            emitter.emit_omni(source_radius=source_radius)
 
     for i in range(5):
         emitter.emit(droplet_shape="circle", droplet_size=0.25)
