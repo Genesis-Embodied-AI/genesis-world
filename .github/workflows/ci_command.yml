@@ -1,7 +1,7 @@
 name: CI Command
 
 # A comment '/ci' on a pull request, or marking it ready for review, re-runs its workflows that skipped the latest
-# commit for being a draft (see the production workflow). A workflow that already ran on the commit is never run again,
+# commit for being a draft (see the production workflow). A workflow that tested the commit already is never run again,
 # since each run of the whole CI is expensive. The re-run keeps the event and permissions of the pull request, so this
 # workflow, which runs from the default branch with a write token, never checks out the code of the pull request.
 on:
@@ -40,6 +40,9 @@ jobs:
         uses: actions/github-script@v8
         env:
           PRECOMMIT_WORKFLOW: .github/workflows/format.yml
+          NYX_WORKFLOW: nyx_plugin.yml
+          NYX_RUN_NAME: Nyx Plugin
+          NYX_TESTS_JOB: nyx_plugin-unit_tests
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -83,7 +86,13 @@ jobs:
             // skips the first job of a gated run as soon as the run starts, so a run with a job started or completed
             // otherwise is testing the commit. A queued job tells nothing, since the jobs that follow a skipped one
             // through 'needs' are queued until skipped in turn. The bound of 30 minutes is far above the lint duration.
+            const isTesting = (job) => job.status === 'in_progress'
+              || (job.status === 'completed' && job.conclusion !== 'skipped');
+            const nyxRunName = `${process.env.NYX_RUN_NAME} ${pull.head.sha}`;
             let runsLatest = [];
+            let runPrecommit = undefined;
+            let runNyx = undefined;
+            let jobNyxTests = undefined;
             let isSettled = false;
             for (let i_poll = 0; i_poll < 180; i_poll++) {
               const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
@@ -97,7 +106,9 @@ jobs:
                 && run.head_repository.full_name === pull.head.repo.full_name);
               runsLatest = runsPull.filter(
                 (run, i_run) => runsPull.findIndex(({ path }) => path === run.path) === i_run);
-              isSettled = runsLatest.some((run) => run.path === process.env.PRECOMMIT_WORKFLOW);
+              runPrecommit = runsLatest.find((run) => run.path === process.env.PRECOMMIT_WORKFLOW);
+              isSettled = runPrecommit !== undefined
+                && (runPrecommit.status === 'completed' || runPrecommit.run_attempt > 1);
               for (const run of runsLatest) {
                 if (!isSettled) {
                   break;
@@ -108,8 +119,31 @@ jobs:
                 const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
                   owner, repo, run_id: run.id,
                 });
-                isSettled = jobs.some((job) => job.status === 'in_progress'
-                  || (job.status === 'completed' && job.conclusion !== 'skipped'));
+                isSettled = jobs.some(isTesting);
+              }
+              // The Nyx Plugin run that the completion of the first precommit run starts decides on its gate when its
+              // test job starts, from the draft flag the API reports then, so that run is found through its name (see
+              // that workflow) and waited for until it has decided. It is created within seconds of that completion,
+              // so a minute later, a first precommit run with no Nyx Plugin run of that name is re-run as if the run
+              // had skipped its tests.
+              runNyx = undefined;
+              jobNyxTests = undefined;
+              if (isSettled && runPrecommit.run_attempt === 1) {
+                const runsNyx = await github.paginate(github.rest.actions.listWorkflowRuns, {
+                  owner, repo, workflow_id: process.env.NYX_WORKFLOW, event: 'workflow_run',
+                  created: `>=${runPrecommit.created_at}`,
+                });
+                runNyx = runsNyx.find((run) => run.display_title === nyxRunName);
+                if (runNyx === undefined) {
+                  isSettled = runPrecommit.status === 'completed'
+                    && Date.now() - Date.parse(runPrecommit.updated_at) > 60000;
+                } else if (runNyx.run_attempt === 1) {
+                  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                    owner, repo, run_id: runNyx.id,
+                  });
+                  jobNyxTests = jobs.find((job) => job.name === process.env.NYX_TESTS_JOB);
+                  isSettled = runNyx.status === 'completed' || (jobNyxTests !== undefined && isTesting(jobNyxTests));
+                }
               }
               if (isSettled) {
                 break;
@@ -118,28 +152,37 @@ jobs:
             }
             if (!isSettled) {
               await react('confused');
-              core.setFailed(`The runs of ${pull.head.sha} did not complete in time. Comment /ci again once they do.`);
+              core.setFailed(`The runs of ${pull.head.sha} did not complete in time. Comment /ci once they do.`);
               return;
             }
             // A run from a fork that needs a maintainer's approval waits as 'action_required', and is approved on the
-            // pull request page before '/ci' can re-run it.
+            // pull request page before '/ci' can re-run it. Once approved, it still carries the draft event and skips.
             if (runsLatest.some((run) => run.conclusion === 'action_required')) {
-              core.notice('The workflows of the pull request wait for approval. Approve them, then comment /ci.');
               await react('confused');
+              core.setFailed('The workflows of the pull request wait for approval. Approve them, then comment /ci.');
               return;
             }
-            // A run skips as a whole only through a draft gate (see the production workflow).
-            const runsSkipped = runsLatest.filter((run) => run.conclusion === 'skipped');
-            if (runsSkipped.length === 0) {
+            // A run skips as a whole only through a draft gate (see the production workflow). Re-running the precommit
+            // run starts a Nyx Plugin run past its draft gate (see that workflow).
+            const isNyxSkipped = runPrecommit.run_attempt === 1 && (runNyx === undefined
+              || (runNyx.run_attempt === 1 && jobNyxTests !== undefined && jobNyxTests.conclusion === 'skipped'));
+            const runsRerun = runsLatest.filter((run) => run.conclusion === 'skipped' && run.run_attempt === 1);
+            if (isNyxSkipped) {
+              runsRerun.push(runPrecommit);
+            }
+            if (runsRerun.length === 0) {
               core.notice(`Commit ${pull.head.sha} has no skipped run to re-run.`);
               await react('confused');
               return;
             }
-            // Re-running the precommit run starts the Nyx Plugin workflow past its draft gate (see that workflow). A
-            // precommit run re-run already has started a Nyx Plugin run that passes the gate too.
-            const runPrecommit = runsLatest.find((run) => run.path === process.env.PRECOMMIT_WORKFLOW);
-            const runsRerun = [...runsSkipped, runPrecommit].filter(
-              (run) => run.status === 'completed' && run.run_attempt === 1);
+            // A push while the runs were polled starts the CI of the new commit, which a re-run of the previous commit
+            // would cancel, its runs sharing the concurrency groups of the pull request.
+            const { data: pullLatest } = await github.rest.pulls.get({ owner, repo, pull_number: pull.number });
+            if (pullLatest.head.sha !== pull.head.sha) {
+              core.notice(`Commit ${pullLatest.head.sha} replaced ${pull.head.sha}, which is left untested.`);
+              await react('confused');
+              return;
+            }
             for (const run of runsRerun) {
               await github.rest.actions.reRunWorkflow({ owner, repo, run_id: run.id });
               core.notice(`Re-running ${run.html_url}`);
