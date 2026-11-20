@@ -301,7 +301,11 @@ jobs:
             echo "::error::Run ${{ inputs.quadrants_run_id }} holds no wheel."
             exit 1
           fi
-          echo "quadrants==$(basename "${WHEELS[0]}" | cut -d- -f2)" > overrides.txt
+          if ${{ inputs.quadrants_artifact_id != 0 }} ; then
+            echo "quadrants @ file:///root/workspace/quadrants_wheels/$(basename "${WHEELS[0]}")" > overrides.txt
+          else
+            echo "quadrants==$(basename "${WHEELS[0]}" | cut -d- -f2)" > overrides.txt
+          fi
 
       - name: Spawn Slurm job
         if: env.HAS_UNIT_TESTS == 'true'
@@ -446,7 +450,11 @@ jobs:
             echo "::error::Run ${{ inputs.quadrants_run_id }} holds no wheel."
             exit 1
           fi
-          echo "quadrants==$(basename "${WHEELS[0]}" | cut -d- -f2)" > overrides.txt
+          if ${{ inputs.quadrants_artifact_id != 0 }} ; then
+            echo "quadrants @ file:///root/workspace/quadrants_wheels/$(basename "${WHEELS[0]}")" > overrides.txt
+          else
+            echo "quadrants==$(basename "${WHEELS[0]}" | cut -d- -f2)" > overrides.txt
+          fi
 
       - name: Spawn Slurm job
         run: |
