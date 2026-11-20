@@ -191,8 +191,7 @@ def test_reset_control(n_envs, robot_path):
     scene.step()
     old_control_force = robot.get_dofs_control_force()
     old_box_control_force = box.get_dofs_control_force()
-    for _ in range(5):
-        scene.step()
+    scene.step()
     late_control_force = robot.get_dofs_control_force()
 
     # The integral term restarts from zero on reset and on any write of the pose, so the first step after either
@@ -203,8 +202,7 @@ def test_reset_control(n_envs, robot_path):
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
     robot.control_dofs_velocity(0.01, dofs_idx_local=[6])
     box.control_dofs_position((0.0, 1.0, 1.01, 0.0, 0.0, 0.0))
-    for _ in range(5):
-        scene.step()
+    scene.step()
     scene.reset(envs_idx=envs_idx)
     robot.set_dofs_position(qpos, envs_idx=envs_idx, zero_velocity=False)
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
@@ -215,8 +213,7 @@ def test_reset_control(n_envs, robot_path):
     assert_allclose(control_force[envs_idx], old_control_force[envs_idx], tol=gs.EPS)
     if n_envs > 0:
         assert_allclose(control_force[1], late_control_force[1], tol=gs.EPS)
-    for _ in range(5):
-        scene.step()
+    scene.step()
     robot.set_qpos(qpos, envs_idx=envs_idx, zero_velocity=False)
     robot.set_dofs_velocity(0.0, envs_idx=envs_idx)
     box.set_pos((0.0, 1.0, 1.0), envs_idx=envs_idx, zero_velocity=False)
@@ -231,17 +228,21 @@ def test_reset_control(n_envs, robot_path):
     assert old_control_force.abs().max() > gs.EPS
     assert_allclose(new_control_force, 0, tol=gs.EPS)
 
-    # Writing one dof of a free joint restarts the integral term of every dof of its link, as writing its whole pose does
+    # Writing one dof of a free joint or its orientation restarts the integral term of every dof of its link, as writing
+    # its position does
     if n_envs > 0:
         box.control_dofs_position((0.01, 1.0, 1.01, 0.01, 0.0, 0.0))
-        for _ in range(5):
+        for i_write in range(2):
             scene.step()
-        box_dofs_pos = box.get_dofs_position()
-        box.set_dofs_position(box_dofs_pos[0, 2:3], dofs_idx_local=[2], envs_idx=[0], zero_velocity=False)
-        box.set_pos(box.get_pos()[1], envs_idx=[1], zero_velocity=False)
-        scene.step()
-        box_control_force = box.get_dofs_control_force()
-        assert_allclose(box_control_force[0], box_control_force[1], tol=gs.EPS)
+            if i_write == 0:
+                box_dofs_pos = box.get_dofs_position()
+                box.set_dofs_position(box_dofs_pos[0, 2:3], dofs_idx_local=[2], envs_idx=[0], zero_velocity=False)
+            else:
+                box.set_quat(box.get_quat(), zero_velocity=False)
+            box.set_pos(box.get_pos()[1], envs_idx=[1], zero_velocity=False)
+            scene.step()
+            box_control_force = box.get_dofs_control_force()
+            assert_allclose(box_control_force[0], box_control_force[1], tol=gs.EPS)
 
 
 @pytest.mark.required
