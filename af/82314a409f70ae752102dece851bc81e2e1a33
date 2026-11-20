@@ -1,0 +1,21 @@
+genesis/utils/particle.py
+  s_4d969401aad039::t_7037c3a5713063 259
+  s_4d969401aad039::t_8d91baf31ad87d 292-294,297-299,302,305-306,308,311-327
+  s_4d969401aad039::t_299bab08357261 755
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "af82314a409f70ae752102dece851bc81e2e1a33",
+  "prompts": {},
+  "sessions": {
+    "s_4d969401aad039": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f2e3b45b-a76a-4a65-841d-9b42f7f8c42c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
