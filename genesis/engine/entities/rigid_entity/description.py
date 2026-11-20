@@ -58,9 +58,7 @@ POSE_EPS = 1e-9
 PRIMITIVE_SDF_MAX_RES = 32
 
 # Friction coefficients of a geom whose options and asset both leave them unset
-_DEFAULT_FRICTION = 1.0
-_DEFAULT_FRICTION_TORSIONAL = 0.005
-_DEFAULT_FRICTION_ROLLING = 0.0001
+DEFAULT_FRICTION_COEFFICIENTS = {"friction": 1.0, "friction_torsional": 0.005, "friction_rolling": 0.0001}
 
 
 @dataclass(kw_only=True)
@@ -1777,11 +1775,6 @@ class RigidEntityDescription(KinematicEntityDescription):
                 parts_repr=f"collision geom of {morph}",
             )
             patches_values = [patch.options.model_dump() for patch in patches]
-            default_coefficients = {
-                "friction": _DEFAULT_FRICTION,
-                "friction_torsional": _DEFAULT_FRICTION_TORSIONAL,
-                "friction_rolling": _DEFAULT_FRICTION_ROLLING,
-            }
             for name, geoms_patch_idx in fields_patch_idx.items():
                 for i_g in np.flatnonzero(geoms_patch_idx >= 0):
                     value = patches_values[geoms_patch_idx[i_g]][name]
@@ -1800,7 +1793,7 @@ class RigidEntityDescription(KinematicEntityDescription):
                     else:
                         # The coefficient of the asset, or the solver default when it states none
                         asset_value = geoms_asset_values[i_g][name]
-                        g_info[name] = default_coefficients[name] if asset_value is None else asset_value
+                        g_info[name] = DEFAULT_FRICTION_COEFFICIENTS[name] if asset_value is None else asset_value
         super()._resolve_geoms_values(morph, links_path, links_g_infos, resolution)
 
     def _resolve_inertial(
@@ -1843,13 +1836,13 @@ class RigidEntityDescription(KinematicEntityDescription):
         cg_descs = []
         for g_info in cg_infos:
             coefficients = []
-            for name, material_coefficient, default_coefficient in (
-                ("friction", self.spec.material.friction, _DEFAULT_FRICTION),
-                ("friction_torsional", self.spec.material.friction_torsional, _DEFAULT_FRICTION_TORSIONAL),
-                ("friction_rolling", self.spec.material.friction_rolling, _DEFAULT_FRICTION_ROLLING),
+            for name, material_coefficient in (
+                ("friction", self.spec.material.friction),
+                ("friction_torsional", self.spec.material.friction_torsional),
+                ("friction_rolling", self.spec.material.friction_rolling),
             ):
                 coefficient = g_info.get(name, material_coefficient)
-                coefficients.append(default_coefficient if coefficient is None else coefficient)
+                coefficients.append(DEFAULT_FRICTION_COEFFICIENTS[name] if coefficient is None else coefficient)
             friction, friction_torsional, friction_rolling = coefficients
             cg_descs.append(
                 RigidGeomDescription(
