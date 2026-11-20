@@ -1,0 +1,51 @@
+examples/rigid/stack_rings.py
+  s_6331e9b5eb051b::t_d5865dad99e800 20,30,54-64,98-99
+  s_6331e9b5eb051b::t_88d1cb3996892d 5-7
+  s_6331e9b5eb051b::t_4a18a20b0c8d2a 158
+  s_6331e9b5eb051b::t_47afdec706e6f1 31
+  s_6331e9b5eb051b::t_fb59a74646619e 74-75,97,100-101,105,117,156,193,210,219
+  s_6331e9b5eb051b::t_d70149bbfbf418 159-162
+examples/rigid/jenga.py
+  s_6331e9b5eb051b::t_9085d737be05df 55
+  s_6331e9b5eb051b::t_081a882c38ec79 109
+  s_6331e9b5eb051b::t_d5865dad99e800 56
+  s_6331e9b5eb051b::t_b3daf53e6bffe5 5-6
+  s_6331e9b5eb051b::t_9f6b97eb536483 54
+  s_6331e9b5eb051b::t_6af01becb447cf 4,23,40-45,57-66,79-80,105-108,112,116-117
+examples/interaction/keyboard_teleop.py
+  s_6331e9b5eb051b::t_581d0c827df648 25,34-49,59-60,85-86,99,131,151,187,192,194
+  s_6331e9b5eb051b::t_4461d8c5a650d6 84,87
+  s_6331e9b5eb051b::t_ae5ef4411fa3a0 88
+examples/sensors/tactile_peg_insertion.py
+  s_6331e9b5eb051b::t_c61cc6439938bf 47,76,132-133,161,164-165,185,329,399
+  s_6331e9b5eb051b::t_581d0c827df648 45,63-71,74,162-163
+  s_6331e9b5eb051b::t_7e5a4122275865 46
+  s_6331e9b5eb051b::t_e491dcb1b22bdb 72
+  s_6331e9b5eb051b::t_58c06786474b35 109-111
+  s_6331e9b5eb051b::t_11ae8f64a7da1a 73
+examples/parallel/franka_heterogeneous_grasp.py
+  s_6331e9b5eb051b::t_f0c906f1f650ae 122,137
+  s_6331e9b5eb051b::t_2b024d0c9ca44b 83,114
+  s_6331e9b5eb051b::t_1586bce199a168 37,43-55,69-70,84-85,92-95,156
+examples/rigid/bin_picking.py
+  s_6331e9b5eb051b::t_a6912f05d5cca1 67-68
+  s_6331e9b5eb051b::t_d5865dad99e800 23,35,46-56,89-90
+  s_6331e9b5eb051b::t_47afdec706e6f1 36
+  s_6331e9b5eb051b::t_fb59a74646619e 37,39,88,91-92,142,258,260,263,271
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e9894dd7a8d9e939b325fa60ba4f1e0ae597e4f9",
+  "prompts": {},
+  "sessions": {
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
