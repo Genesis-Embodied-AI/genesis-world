@@ -595,7 +595,7 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
         self.render_context: "ScopedRenderContext | None" = None
 
     def _add_force_field(self, force_field: ForceField) -> None:
-        self._force_fields.fields.append(force_field)
+        self._force_fields.fields += (force_field,)
 
     def subscribe(self, subscriber: Subscriber):
         """Register a Subscriber to be notified after any @mutates-tagged method whose change is in its filter, after
