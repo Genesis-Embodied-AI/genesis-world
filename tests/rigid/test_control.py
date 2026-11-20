@@ -79,8 +79,9 @@ def test_position_control(show_viewer):
     robot.set_dofs_kv(MOTORS_KD, envs_idx=0)
     robot.set_dofs_ki(MOTORS_KI, envs_idx=0)
     assert_allclose(robot.get_dofs_ki(envs_idx=0), MOTORS_KI, tol=gs.EPS)
-    with pytest.raises(gs.GenesisException, match="must be non-negative"):
-        robot.set_dofs_ki(-MOTORS_KI, envs_idx=0)
+    for ki in (-MOTORS_KI, float("nan")):
+        with pytest.raises(gs.GenesisException, match="must be non-negative"):
+            robot.set_dofs_ki(ki, envs_idx=0)
     robot.set_dofs_ki(tensor_to_array(MOTORS_KI.flip(0))[::-1], envs_idx=0)
     assert_allclose(robot.get_dofs_ki(envs_idx=0), MOTORS_KI, tol=gs.EPS)
     robot.control_dofs_position(MOTORS_POS_TARGET, envs_idx=0)
