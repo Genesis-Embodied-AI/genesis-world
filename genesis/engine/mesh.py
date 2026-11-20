@@ -741,17 +741,21 @@ class Mesh(RBC, serialization.SerializationMixin):
     @cached_by_tmesh
     def is_watertight(self) -> bool:
         """
-        Whether the mesh is a closed manifold surface.
+        Whether the mesh is a closed surface.
         """
-        # Every edge must be shared by exactly two faces, counted on the sorted edge keys (see 'get_unique_edges').
-        # Bracketing the keys by values out of their range makes each group of equal keys start at a change, and leaves
-        # a mesh without faces watertight, as trimesh has it.
-        n_verts = len(self.verts)
-        faces_rolled = np.roll(self.faces, 1, axis=1)
-        edges_key = np.minimum(self.faces, faces_rolled) * n_verts + np.maximum(self.faces, faces_rolled)
-        edges_key = np.sort(edges_key, axis=None)
-        is_edge_start = np.diff(edges_key, prepend=-1, append=n_verts * n_verts) != 0
-        return (np.diff(np.flatnonzero(is_edge_start)) == 2).all()
+        # Edges join vertex positions rather than vertex indices, since a closed mesh may split its vertices along
+        # normal and texture seams, and an STL file stores one vertex per face corner.
+        verts_pos, verts_pos_idx = np.unique(self.verts, axis=0, return_inverse=True)
+        faces = verts_pos_idx[self.faces]
+        faces_rolled = np.roll(faces, 1, axis=1)
+        # A face whose corners merge into fewer than three positions has no area, so it closes nothing.
+        is_face_valid = (faces != faces_rolled).all(axis=1)
+        faces, faces_rolled = faces[is_face_valid], faces_rolled[is_face_valid]
+        # Each edge is keyed by its two position indices, as in 'get_unique_edges'. A closed surface shares each edge
+        # between two faces, or four where closed parts touch along it.
+        edges_key = np.minimum(faces, faces_rolled) * len(verts_pos) + np.maximum(faces, faces_rolled)
+        _, edges_count = np.unique(edges_key, return_counts=True)
+        return (edges_count % 2 == 0).all()
 
     @property
     def metadata(self):

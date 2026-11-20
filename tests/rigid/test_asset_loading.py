@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pytest
 import torch
+import trimesh
 from PIL import Image
 
 import genesis as gs
@@ -228,6 +229,7 @@ def test_parsing_inertia_defaults(
     degenerate_inertials,
     zero_density_marker_mjcf,
     implicit_inertial_origin_chain,
+    asset_tmp_path,
     show_viewer,
     tol,
     caplog,
@@ -372,6 +374,20 @@ def test_parsing_inertia_defaults(
             align=False,
         ),
     )
+    # A closed mesh encloses its volume even when it splits its vertices, as an STL file does at every face corner
+    torus = trimesh.creation.torus(major_radius=0.2, minor_radius=0.05)
+    torus_path = str(asset_tmp_path / "torus.stl")
+    torus.export(torus_path)
+    entity_torus = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=torus_path,
+            pos=(8.0, 0.0, 1.0),
+            collision=False,
+        ),
+        material=gs.materials.Rigid(
+            rho=1000.0,
+        ),
+    )
     # An entity attached beneath another shares its root, so attaching that one onto a moving link makes both bases
     # movable at once. Each is estimated at the density of its own entity. The three stand consecutively, since an
     # entity created between attached ones is rejected.
@@ -412,6 +428,8 @@ def test_parsing_inertia_defaults(
     # A 0.1 m cube of each entity's own density, rather than both taking the density of the one they hang from.
     assert_allclose(stacked_middle.base_link.get_mass(), 2000.0 * 0.1**3, tol=gs.EPS)
     assert_allclose(stacked_tip.base_link.get_mass(), 8000.0 * 0.1**3, tol=gs.EPS)
+
+    assert_allclose(entity_torus.base_link.desc.mass, 1000.0 * torus.volume, rtol=1e-6)
 
     # The link 'no_inertial' has no inertial element, so its whole inertial is the geometry estimate. Every link carries
     # the same sphere, so this mass is the reference for the recovered masses below.
