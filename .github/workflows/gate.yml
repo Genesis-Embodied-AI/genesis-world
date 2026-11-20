@@ -1,0 +1,33 @@
+name: Gate
+# Every pull request is linted, whatever its draft flag. The Nyx Plugin workflow follows this one through
+# 'workflow_run', which never sees the draft flag of the pull request event, so the run name carries the draft gate of
+# the production workflow for it, and for the CI Command workflow, which re-runs the run of a draft. The name starts
+# with the gate whatever the title, which therefore cannot mimic it.
+run-name: ${{ github.event.pull_request.draft && 'Draft' || 'Ready' }} - ${{ github.event.pull_request.title }}
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+
+# Pull requests come from forks, whose branch names collide across contributors (see the Nyx Plugin workflow).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name }} ${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-24.04
+    name: precommit-checks
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run pre-commit hooks
+        uses: pre-commit/action@v3.0.1

@@ -1,7 +1,4 @@
 name: Nyx Plugin
-# The commit under test names the run, which the CI Command workflow looks it up by, since the run itself lists the
-# commit of the default branch.
-run-name: Nyx Plugin ${{ github.event.workflow_run.head_sha }}
 
 # Checking out the internal plugin repository needs a token, and a pull request coming from a fork is never given
 # one. 'workflow_run' runs in the context of the base repository, where secrets are available, hence the only trigger
@@ -9,7 +6,7 @@ run-name: Nyx Plugin ${{ github.event.workflow_run.head_sha }}
 # outcome has to be published as a check on the commit under test to show up on it at all.
 on:
   workflow_run:
-    workflows: ["Precommit Checks (Lint and Format)"]
+    workflows: ["Gate"]
     types: [completed]
 
 # Pull requests come from forks, whose branch names collide across contributors, so the repository they live in is
@@ -29,51 +26,21 @@ env:
   GS_PRECISION: "32"
 
 jobs:
-  setup:
-    name: nyx_plugin-setup
-
-    # Only a pull request is worth checking, the plugin being validated before a change lands rather than after.
-    if: github.event.workflow_run.event == 'pull_request'
-
-    runs-on: ubuntu-24.04
-
-    permissions:
-      pull-requests: read
-
-    outputs:
-      IS_SKIPPED: ${{ steps.check.outputs.is_skipped }}
-
-    steps:
-      # The pull request is asked of the API as in the setup job of the production workflow, the event never listing
-      # its draft flag. The API gives the flag when this job runs, where the other gated workflows read it from their
-      # event. A ready one among the pull requests sharing the commit asks for it to be tested.
-      - name: Check the pull request
-        id: check
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const run = context.payload.workflow_run;
-            const { data } = await github.rest.pulls.list({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              head: `${run.head_repository.owner.login}:${run.head_branch}`,
-            });
-            const pulls = data.filter((pull) => pull.head.sha === run.head_sha);
-            core.setOutput('is_skipped', pulls.every((pull) => pull.draft));
-
   unit-tests:
     name: nyx_plugin-unit_tests
-
-    needs: setup
 
     # The renderer bridges to Genesis through CUDA device pointers, so a GPU runner is required even though the
     # simulation itself could run on CPU. This is the runner the plugin's own CI uses, which additionally makes its
     # reference images comparable.
     runs-on: gpu-t4-4-core
 
-    # A draft pull request is gated as in the production workflow. Re-running the precommit run, which the CI Command
-    # workflow does, starts a new run of this workflow that passes the gate.
-    if: needs.setup.outputs.IS_SKIPPED == 'false' || github.event.workflow_run.run_attempt > 1 || github.run_attempt > 1
+    # A draft pull request is gated as in the production workflow, through the name of the gate run that started this
+    # one. Re-running that run, which the CI Command workflow does with the other gated runs, starts a run that passes.
+    # A gate run cancelled by a newer commit, or waiting for approval, starts none.
+    if: >-
+      contains(fromJSON('["success", "failure"]'), github.event.workflow_run.conclusion)
+      && (startsWith(github.event.workflow_run.display_title, 'Ready ')
+        || github.event.workflow_run.run_attempt > 1 || github.run_attempt > 1)
 
     permissions:
       contents: read

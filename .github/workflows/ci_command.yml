@@ -39,10 +39,7 @@ jobs:
       - name: Re-run the skipped workflows of the pull request
         uses: actions/github-script@v8
         env:
-          PRECOMMIT_WORKFLOW: .github/workflows/format.yml
-          NYX_WORKFLOW: nyx_plugin.yml
-          NYX_RUN_NAME: Nyx Plugin
-          NYX_TESTS_JOB: nyx_plugin-unit_tests
+          GATE_WORKFLOW: .github/workflows/gate.yml
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -80,19 +77,17 @@ jobs:
               return;
             }
             // The runs of the commit may not exist yet right after a push, and a run can be re-run only once completed,
-            // so they are polled until they settle. The precommit run is never gated, so its presence shows that the
-            // push created its runs. A run re-run already, by hand or by an earlier command, is never waited for, and
-            // neither is a run testing the commit, started while the pull request was ready for review. The gate
-            // skips the first job of a gated run as soon as the run starts, so a run with a job started or completed
-            // otherwise is testing the commit. A queued job tells nothing, since the jobs that follow a skipped one
-            // through 'needs' are queued until skipped in turn. The bound of 30 minutes is far above the lint duration.
-            const isTesting = (job) => job.status === 'in_progress'
-              || (job.status === 'completed' && job.conclusion !== 'skipped');
-            const nyxRunName = `${process.env.NYX_RUN_NAME} ${pull.head.sha}`;
+            // so they are polled until they settle. The gate run is never skipped, so its presence shows that the push
+            // created its runs. A run re-run already, by hand or by an earlier command, is never waited for, and
+            // neither is a run testing the commit, started while the pull request was ready for review. A job exists
+            // once its gate is evaluated, and a job the gate skips is created completed, so any other job, queued for a
+            // runner included, shows a run testing the commit. The gate run lints the commit whatever the draft flag,
+            // and carries the draft gate of the Nyx Plugin workflow in its name instead (see the gate workflow), so the
+            // run of a draft is re-run like a skipped run, once completed. The bound of 30 minutes is far above lint
+            // duration.
+            const isDraftGate = (run) => run.path === process.env.GATE_WORKFLOW
+              && run.display_title.startsWith('Draft ');
             let runsLatest = [];
-            let runPrecommit = undefined;
-            let runNyx = undefined;
-            let jobNyxTests = undefined;
             let isSettled = false;
             for (let i_poll = 0; i_poll < 180; i_poll++) {
               const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
@@ -106,44 +101,22 @@ jobs:
                 && run.head_repository.full_name === pull.head.repo.full_name);
               runsLatest = runsPull.filter(
                 (run, i_run) => runsPull.findIndex(({ path }) => path === run.path) === i_run);
-              runPrecommit = runsLatest.find((run) => run.path === process.env.PRECOMMIT_WORKFLOW);
-              isSettled = runPrecommit !== undefined
-                && (runPrecommit.status === 'completed' || runPrecommit.run_attempt > 1);
+              isSettled = runsLatest.some((run) => run.path === process.env.GATE_WORKFLOW);
               for (const run of runsLatest) {
                 if (!isSettled) {
                   break;
                 }
-                if (run.status === 'completed' || run.conclusion === 'action_required' || run.run_attempt > 1) {
+                if (run.status === 'completed' || run.run_attempt > 1) {
+                  continue;
+                }
+                if (run.path === process.env.GATE_WORKFLOW) {
+                  isSettled = !isDraftGate(run);
                   continue;
                 }
                 const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
                   owner, repo, run_id: run.id,
                 });
-                isSettled = jobs.some(isTesting);
-              }
-              // The Nyx Plugin run that the completion of the first precommit run starts decides on its gate when its
-              // test job starts, from the draft flag the API reports then, so that run is found through its name (see
-              // that workflow) and waited for until it has decided. It is created within seconds of that completion,
-              // so a minute later, a first precommit run with no Nyx Plugin run of that name is re-run as if the run
-              // had skipped its tests.
-              runNyx = undefined;
-              jobNyxTests = undefined;
-              if (isSettled && runPrecommit.run_attempt === 1) {
-                const runsNyx = await github.paginate(github.rest.actions.listWorkflowRuns, {
-                  owner, repo, workflow_id: process.env.NYX_WORKFLOW, event: 'workflow_run',
-                  created: `>=${runPrecommit.created_at}`,
-                });
-                runNyx = runsNyx.find((run) => run.display_title === nyxRunName);
-                if (runNyx === undefined) {
-                  isSettled = runPrecommit.status === 'completed'
-                    && Date.now() - Date.parse(runPrecommit.updated_at) > 60000;
-                } else if (runNyx.run_attempt === 1) {
-                  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
-                    owner, repo, run_id: runNyx.id,
-                  });
-                  jobNyxTests = jobs.find((job) => job.name === process.env.NYX_TESTS_JOB);
-                  isSettled = runNyx.status === 'completed' || (jobNyxTests !== undefined && isTesting(jobNyxTests));
-                }
+                isSettled = jobs.some((job) => job.status !== 'completed' || job.conclusion !== 'skipped');
               }
               if (isSettled) {
                 break;
@@ -152,24 +125,20 @@ jobs:
             }
             if (!isSettled) {
               await react('confused');
-              core.setFailed(`The runs of ${pull.head.sha} did not complete in time. Comment /ci once they do.`);
+              core.setFailed(`The runs of ${pull.head.sha} did not settle in time. Re-run this command once they do.`);
               return;
             }
-            // A run from a fork that needs a maintainer's approval waits as 'action_required', and is approved on the
-            // pull request page before '/ci' can re-run it. Once approved, it still carries the draft event and skips.
+            // A run from a fork that needs a maintainer's approval waits as 'action_required'. Once approved, it still
+            // carries the draft event and skips, so this command is re-run then: re-running this job replays its event
+            // and turns its check on the pull request green.
             if (runsLatest.some((run) => run.conclusion === 'action_required')) {
               await react('confused');
-              core.setFailed('The workflows of the pull request wait for approval. Approve them, then comment /ci.');
+              core.setFailed('The workflows wait for approval. Approve them, then re-run this job.');
               return;
             }
-            // A run skips as a whole only through a draft gate (see the production workflow). Re-running the precommit
-            // run starts a Nyx Plugin run past its draft gate (see that workflow).
-            const isNyxSkipped = runPrecommit.run_attempt === 1 && (runNyx === undefined
-              || (runNyx.run_attempt === 1 && jobNyxTests !== undefined && jobNyxTests.conclusion === 'skipped'));
-            const runsRerun = runsLatest.filter((run) => run.conclusion === 'skipped' && run.run_attempt === 1);
-            if (isNyxSkipped) {
-              runsRerun.push(runPrecommit);
-            }
+            // A run skips as a whole only through a draft gate (see the production workflow).
+            const runsRerun = runsLatest.filter(
+              (run) => run.run_attempt === 1 && (run.conclusion === 'skipped' || isDraftGate(run)));
             if (runsRerun.length === 0) {
               core.notice(`Commit ${pull.head.sha} has no skipped run to re-run.`);
               await react('confused');
