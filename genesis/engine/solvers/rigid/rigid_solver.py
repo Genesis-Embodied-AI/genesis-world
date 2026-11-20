@@ -1823,7 +1823,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             for target in targets:
                 assign_indexed_tensor(target, mask, pos)
             if not link.is_fixed:
-                # See ctrl_force_int in rigid/data.py
+                # Restart the integral term on a pose write
                 ctrl_force_int = qd_to_torch(self.dyn_state.dofs.ctrl_force_int, transpose=True, copy=False)
                 assign_indexed_tensor(ctrl_force_int[:, link.dof_start : link.dof_end], mask, value=0.0)
             if gs.backend == gs.metal:
@@ -1956,7 +1956,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             for target in targets:
                 assign_indexed_tensor(target, mask, quat)
             if not link.is_fixed:
-                # See ctrl_force_int in rigid/data.py
+                # Restart the integral term on a pose write
                 ctrl_force_int = qd_to_torch(self.dyn_state.dofs.ctrl_force_int, transpose=True, copy=False)
                 assign_indexed_tensor(ctrl_force_int[:, link.dof_start : link.dof_end], mask, value=0.0)
             if gs.backend == gs.metal:
@@ -2255,7 +2255,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
             kernel_set_qpos(qs_idx, envs_idx, qpos, self.rigid_info, self.rigid_config)
 
-        # See ctrl_force_int in rigid/data.py
+        # Restart the integral term on a pose write
         is_q_set = torch.zeros((self.n_qs_,), dtype=gs.tc_bool, device=gs.device)
         is_q_set[indices_to_mask(qs_idx)] = True
         is_env_set = torch.zeros((self.n_envs_,), dtype=gs.tc_bool, device=gs.device)
