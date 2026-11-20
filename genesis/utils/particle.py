@@ -885,6 +885,7 @@ class FoamGenerator:
         # TODO: Document where these constants come from.
         is_crest = (velocities_dir * normals).sum(axis=-1) >= 0.6
         kinetic_energy = 0.5 * m * speeds**2
+        # The threshold scales with the particle mass, so that foam starts at the same speed in fluids of every density.
         ke_min = 0.1 * m * 2.5**2
         i_ta = np.clip((trapped_air - 0.05) / (0.5 - 0.05), 0.0, 1.0)
         i_wc = np.clip((is_crest * curvature - 0.05) / (0.5 - 0.05), 0.0, 1.0)
