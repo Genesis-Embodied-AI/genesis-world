@@ -798,13 +798,19 @@ class ArrayItem(NamedTuple):
 class ScalarItem(NamedTuple):
     """A Python native scalar of a solver, such as a flag, under the name of its attribute (see 'iter_data').
 
-    It is the attribute 'attr' of 'owner', a property with a setter included, which a restore sets back.
+    It is the attribute 'attr' of 'owner', a property with a setter included, which a restore sets back, or the value a
+    function of 'owner' computes, read-only, which its owner restores itself.
     """
 
     name: str
     kind: DataKind
     owner: object
-    attr: str
+    attr: str | Callable[[Any], bool | int | float]
+
+    @property
+    def value(self) -> bool | int | float:
+        """The current value of the scalar."""
+        return getattr(self.owner, self.attr) if isinstance(self.attr, str) else self.attr(self.owner)
 
 
 # What a solver yields among its data, which a checkpoint or a trajectory reads and writes back (see 'iter_data')
@@ -921,7 +927,7 @@ def check_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torc
             shape, dtype = (*array.shape, *element_shape), array.dtype
             is_item_real = dtype in qd.types.primitive_types.real_types
         else:
-            scalar = getattr(item.owner, item.attr)
+            scalar = item.value
             shape, dtype = (), type(scalar).__name__
             is_item_real = isinstance(scalar, float)
         if tuple(value.shape) != shape:
@@ -945,7 +951,7 @@ def copy_data(items: Iterable[DataItem], *, to_torch: bool) -> dict[str, np.ndar
     values = {}
     for item in items:
         if isinstance(item, ScalarItem):
-            values[item.name] = np.array(getattr(item.owner, item.attr))
+            values[item.name] = np.array(item.value)
         else:
             values[item.name] = data_to_array(item.array, to_torch=to_torch, copy=True)
     return values
@@ -962,8 +968,9 @@ def fill_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch
     for item in check_data(items, values):
         value = values[item.name]
         if isinstance(item, ScalarItem):
+            assert isinstance(item.attr, str), f"'{item.name}' is read-only: its owner restores it."
             # 'check_data' admits a boolean record for an integer, so the value takes the native type of the attribute
-            setattr(item.owner, item.attr, type(getattr(item.owner, item.attr))(value.item()))
+            setattr(item.owner, item.attr, type(item.value)(value.item()))
             continue
         view = None
         if isinstance(item.array, torch.Tensor):

@@ -512,7 +512,7 @@ def two_link_fixed_urdf():
 
 
 @pytest.mark.required
-def test_solver_state_change_subscribers(show_viewer, two_link_fixed_urdf):
+def test_solver_state_change_trackers(show_viewer, two_link_fixed_urdf):
     # Imported lazily: the solver package pulls in quadrants kernels that need gs.qd_float, set only by gs.init.
     from genesis.engine.state_change import StateChange, Subscriber
 
@@ -545,110 +545,67 @@ def test_solver_state_change_subscribers(show_viewer, two_link_fixed_urdf):
 
     solver = scene.rigid_solver
 
-    # Eager mode: a callback fires immediately on each matching change and nothing is retained.
+    # An eager subscriber is called back inside the setter, with the environments it was given
     eager_events = []
-    eager = Subscriber(
-        to=frozenset({StateChange.GEOMETRY}),
-        callback=lambda change, envs_idx: eager_events.append((change, envs_idx)),
+    solver.changelog.subscribe(
+        Subscriber(
+            to=frozenset({StateChange.GEOMETRY}),
+            callback=lambda change, **indices: eager_events.append((change, indices["envs_idx"])),
+        )
     )
-    solver.subscribe(eager)
-    # Lazy mode: matching changes accumulate on the Subscriber handle until cleared.
-    lazy = Subscriber(to=frozenset({StateChange.GEOMETRY}))
-    solver.subscribe(lazy)
-    # A DYNAMICS-only subscriber must stay silent on GEOMETRY changes (filter).
-    dynamics = Subscriber(to=frozenset({StateChange.DYNAMICS}))
-    solver.subscribe(dynamics)
+    # A tracker reports the changes of its categories since its consumer last caught up, where they happened
+    geometry_tracker = solver.changelog.track(StateChange.GEOMETRY)
+    dynamics_tracker = solver.changelog.track(StateChange.DYNAMICS)
+    assert geometry_tracker.take() is None
 
-    # zero_velocity=False isolates the pure GEOMETRY change (a default set_pos also zeroes velocity; see below).
     cube.set_pos([[0.0, 0.0, 1.0], [0.0, 0.0, 2.0]], zero_velocity=False)
-    # Eager fired once with the right category; envs_idx forwarded verbatim (None == every env).
-    assert len(eager_events) == 1
-    assert eager_events[0][0] is StateChange.GEOMETRY
-    assert eager_events[0][1] is None
-    # Lazy accumulated the category; the DYNAMICS subscriber saw nothing; eager retains nothing.
-    assert lazy.pending == frozenset({StateChange.GEOMETRY})
-    assert dynamics.pending == frozenset()
-    assert eager.pending == frozenset()
+    assert eager_events == [(StateChange.GEOMETRY, None)]
+    record = geometry_tracker.take()
+    assert record.changes == frozenset({StateChange.GEOMETRY})
+    assert record.axes_is_changed.envs is None
+    assert_equal(tensor_to_array(record.axes_is_changed.links).nonzero()[0], [cube.base_link_idx])
+    assert dynamics_tracker.take() is None
+    assert geometry_tracker.take() is None
 
-    # A targeted setter forwards the exact env subset to the eager callback.
+    # A setter targeting some environments reports them alone
     cube.set_pos([[0.0, 0.0, 3.0]], envs_idx=[1], zero_velocity=False)
-    assert len(eager_events) == 2
-    forwarded = eager_events[1][1]
-    assert forwarded is not None
-    assert int(np.atleast_1d(tensor_to_array(forwarded))[0]) == 1
+    assert eager_events[1] == (StateChange.GEOMETRY, [1])
+    assert_equal(tensor_to_array(geometry_tracker.take().axes_is_changed.envs), [False, True])
 
-    # Lazy state is idempotent across repeated changes and resets on clear().
-    assert lazy.pending == frozenset({StateChange.GEOMETRY})
-    lazy.clear()
-    assert lazy.pending == frozenset()
+    # A velocity setter changes DYNAMICS alone, and a default set_pos both categories
+    cube.set_dofs_velocity(0.0)
+    assert geometry_tracker.take() is None
+    assert dynamics_tracker.take().changes == frozenset({StateChange.DYNAMICS})
 
-    # A velocity setter is a DYNAMICS change only: it wakes the DYNAMICS subscriber, not the GEOMETRY ones (setting a
-    # velocity does not move the surface).
-    cube.set_dofs_velocity([0.0] * cube.n_dofs)
-    assert dynamics.pending == frozenset({StateChange.DYNAMICS})
-    assert lazy.pending == frozenset()
-    assert len(eager_events) == 2
-
-    # Reads never notify.
+    # Reads record nothing
     solver.get_links_pos()
-    solver.get_links_quat()
-    assert len(eager_events) == 2
-    assert lazy.pending == frozenset()
+    assert geometry_tracker.take() is None
 
-    # Physics integration mutates state through kernels, not a tagged method, so it never notifies.
-    scene.step()
-    assert len(eager_events) == 2
-    assert lazy.pending == frozenset()
-
-    # A default set_pos both moves the link and zeroes its velocity, so a subscriber listening for either category
-    # receives both - the accumulated union of every change the call produced.
-    both = Subscriber(to=frozenset({StateChange.GEOMETRY, StateChange.DYNAMICS}))
-    solver.subscribe(both)
+    geometry_dynamics_tracker = solver.changelog.track(StateChange.GEOMETRY, StateChange.DYNAMICS)
     cube.set_pos([[0.0, 0.0, 4.0], [0.0, 0.0, 5.0]])
-    assert both.pending == frozenset({StateChange.GEOMETRY, StateChange.DYNAMICS})
+    assert geometry_dynamics_tracker.take().changes == frozenset({StateChange.GEOMETRY, StateChange.DYNAMICS})
 
-    # A link-filtered subscriber only wakes on changes that can affect its links. The plane's base link is fixed, so
-    # the cube's base-pose setter (an explicit, disjoint link selection) and its configuration-space setters (which
-    # can never displace a link without degrees of freedom) both stay silent.
-    plane_watcher = Subscriber(to=frozenset({StateChange.GEOMETRY}), links_filter=[plane.base_link_idx])
-    solver.subscribe(plane_watcher)
-    cube.set_pos([[0.0, 0.0, 6.0], [0.0, 0.0, 7.0]], zero_velocity=False)
-    cube.set_qpos([[0.0, 0.0, 8.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 9.0, 1.0, 0.0, 0.0, 0.0]])
-    assert plane_watcher.pending == frozenset()
-    # A base-pose setter naming a watched link wakes it.
-    plane.set_pos((0.0, 0.0, -0.1))
-    assert plane_watcher.pending == frozenset({StateChange.GEOMETRY})
-    plane_watcher.clear()
-    # A base-pose setter with the implicit selection (every base link, the watched fixed one included) wakes it
-    # too. The pose is env-agnostic: an env-specific pose on a fixed link would require batch_fixed_verts.
-    solver.set_base_links_pos(solver.get_links_pos(links_idx=solver._base_links_idx)[0])
-    assert plane_watcher.pending == frozenset({StateChange.GEOMETRY})
-    plane_watcher.clear()
-    # A base-pose setter reaches the named links' whole kinematic subtree (forward kinematics carries the new pose
-    # to every descendant): teleporting the fixed tower through its base link wakes a watcher of its fixed child
-    # link, where the collision geometry lives.
+    # A step records a change of every environment and link
+    scene.step()
+    record = geometry_tracker.take()
+    assert record.axes_is_changed.envs is None and record.axes_is_changed.links is None
+
+    # A base-pose setter reaches the links it names and their kinematic subtrees: teleporting the fixed tower through
+    # its base link reaches its fixed child, where its collision geometry lives, and never the plane.
     child_link = next(link for link in tower.links if link.name == "child")
-    child_watcher = Subscriber(to=frozenset({StateChange.GEOMETRY}), links_filter=[child_link.idx])
-    solver.subscribe(child_watcher)
-    cube.set_pos([[0.0, 0.0, 10.0], [0.0, 0.0, 11.0]], zero_velocity=False)
-    assert child_watcher.pending == frozenset()
     tower.set_pos((2.0, 1.0, 0.0))
-    assert child_watcher.pending == frozenset({StateChange.GEOMETRY})
-
-    # A configuration setter reaches the links holding the configuration entries it writes and their kinematic
-    # subtrees: writing the configuration of the floating tower wakes a watcher of its fixed child link, while writing
-    # that of the cube leaves it silent.
+    links_is_changed = tensor_to_array(geometry_tracker.take().axes_is_changed.links)
+    assert links_is_changed[child_link.idx] and not links_is_changed[plane.base_link_idx]
+    # A configuration setter reaches the links holding the entries it writes and their subtrees
     floating_child = next(link for link in floating_tower.links if link.name == "child")
-    floating_watcher = Subscriber(to=frozenset({StateChange.GEOMETRY}), links_filter=[floating_child.idx])
-    solver.subscribe(floating_watcher)
     cube.set_qpos([[0.0, 0.0, 12.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 13.0, 1.0, 0.0, 0.0, 0.0]])
-    assert floating_watcher.pending == frozenset()
+    assert not tensor_to_array(geometry_tracker.take().axes_is_changed.links)[floating_child.idx]
     floating_tower.set_qpos([[4.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0], [4.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0]])
-    assert floating_watcher.pending == frozenset({StateChange.GEOMETRY})
+    assert tensor_to_array(geometry_tracker.take().axes_is_changed.links)[floating_child.idx]
 
-    # A whole-state restore may move any link, so the unbounded reach always passes the filter.
+    # A whole-state restore reaches every link
     scene.reset()
-    assert plane_watcher.pending == frozenset({StateChange.GEOMETRY})
+    assert geometry_tracker.take().axes_is_changed.links is None
 
 
 @pytest.mark.parametrize("backend", [None])

@@ -48,13 +48,10 @@ def kernel_set_links_pos(
         i_l = links_idx[i_l_]
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
 
-        # The link takes the pose of a fixed root at once, as forward kinematics would, for a setter leaving forward
-        # kinematics to the next step, whose update of the cartesian space skips the fixed links.
         i_fr = dyn_info.links.fixed_root_idx[I_l]
         if i_fr != -1:
             for j in qd.static(range(3)):
                 dyn_state.fixed_roots.pos[i_fr, i_b][j] = pos[i_b_, i_l_, j]
-                dyn_state.links.pos[i_l, i_b][j] = pos[i_b_, i_l_, j]
         else:
             q_start = dyn_info.links.q_start[I_l]
             for j in qd.static(range(3)):
@@ -219,12 +216,10 @@ def kernel_set_links_quat(
         i_l = links_idx[i_l_]
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
 
-        # See kernel_set_links_pos
         i_fr = dyn_info.links.fixed_root_idx[I_l]
         if i_fr != -1:
             for j in qd.static(range(4)):
                 dyn_state.fixed_roots.quat[i_fr, i_b][j] = quat[i_b_, i_l_, j]
-                dyn_state.links.quat[i_l, i_b][j] = quat[i_b_, i_l_, j]
         else:
             q_start = dyn_info.links.q_start[I_l]
             for j in qd.static(range(4)):
@@ -283,8 +278,6 @@ def kernel_set_links_mass(
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_inertia_scaled: qd.template(),
-    refresh_position: qd.template(),
-    refresh_velocity: qd.template(),
 ):
     # Waking here rather than from a kernel of its own: a setter that reaches a sleeping body is one launch, and the
     # weighing below reads the tree at its neutral configuration, which the sleeping bodies are not carried to.
@@ -315,9 +308,7 @@ def kernel_set_links_mass(
         dyn_info,
         rigid_info,
         rigid_config,
-        force_update=True,
-        refresh_position=refresh_position,
-        refresh_velocity=refresh_velocity,
+        refresh_velocity=True,
     )
 
 
@@ -331,8 +322,6 @@ def kernel_set_links_COM(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
-    refresh_position: qd.template(),
-    refresh_velocity: qd.template(),
 ):
     func_wakeup_links_island(links_idx, envs_idx, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
@@ -359,9 +348,7 @@ def kernel_set_links_COM(
         dyn_info,
         rigid_info,
         rigid_config,
-        force_update=True,
-        refresh_position=refresh_position,
-        refresh_velocity=refresh_velocity,
+        refresh_velocity=True,
     )
 
 
@@ -375,7 +362,6 @@ def kernel_set_links_inertia(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
-    refresh_position: qd.template(),
 ):
     func_wakeup_links_island(links_idx, envs_idx, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
@@ -402,8 +388,6 @@ def kernel_set_links_inertia(
         dyn_info,
         rigid_info,
         rigid_config,
-        force_update=True,
-        refresh_position=refresh_position,
         # An inertia moves no center of mass, so every velocity stands where it stood.
         refresh_velocity=False,
     )

@@ -989,7 +989,6 @@ class IPCCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC)
         self.rigid_solver.set_dofs_velocity(
             envs_vel if self.n_envs > 0 else envs_vel[0],
             dofs_idx=slice(entity.dof_start, entity.dof_start + 6),
-            skip_forward=True,
         )
 
     def _pre_advance_external_articulation(self):
@@ -1067,8 +1066,9 @@ class IPCCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC)
             self.rigid_solver.set_qpos(
                 qpos_new if self.n_envs > 0 else qpos_new[0],
                 qs_idx=slice(entity.q_start, entity.q_end),
-                skip_forward=False,
             )
+            # The poses of the links are read from the solver state below
+            self.rigid_solver.update_forward_pos()
 
             # Set base link velocities from IPC if available
             if not entity.base_link.is_fixed:
@@ -1104,14 +1104,11 @@ class IPCCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC)
             self.rigid_solver.set_qpos(
                 envs_qpos if self.n_envs > 0 else envs_qpos[0],
                 qs_idx=slice(entity.q_start, entity.q_start + 7),
-                skip_forward=True,
             )
 
             # FIXME: It is currently necessary to enforce zero velocity to avoid double time integration by Rigid solver
             # self._apply_base_link_velocity_from_ipc(entity)
-            self.rigid_solver.set_dofs_velocity(
-                velocity=None, dofs_idx=slice(entity.dof_start, entity.dof_start + 6), skip_forward=True
-            )
+            self.rigid_solver.set_dofs_velocity(velocity=None, dofs_idx=slice(entity.dof_start, entity.dof_start + 6))
 
     def _retrieve_fem_states(self):
         # IPC world advance/retrieve is handled at Scene level

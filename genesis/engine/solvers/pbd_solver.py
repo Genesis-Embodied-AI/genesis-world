@@ -1092,9 +1092,6 @@ class PBDScopedRenderContext(ParticleScopedRenderContext, ScopedRenderContext[PB
     """The particles of the PBD solver as drawn (see 'ParticleScopedRenderContext'), and the marker of its fixed
     particles, as its visual options ask."""
 
-    # Fixing and releasing particles changes the dynamics of the solver
-    stale_on = frozenset((StateChange.GEOMETRY, StateChange.DYNAMICS))
-
     def build(self) -> None:
         super().build()
         solver = self.owner
@@ -1106,6 +1103,7 @@ class PBDScopedRenderContext(ParticleScopedRenderContext, ScopedRenderContext[PB
                 radius=solver.particle_radius * FIXED_PARTICLE_SIZE_SCALE,
                 color=CONSTRAINT_COLOR,
                 is_active=torch.zeros((solver.n_envs_, solver.n_particles), dtype=gs.tc_bool, device=gs.device),
+                invalidated_by={solver: (StateChange.GEOMETRY, StateChange.MODEL)},
             )
 
     def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:

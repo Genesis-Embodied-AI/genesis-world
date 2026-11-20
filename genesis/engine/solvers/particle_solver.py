@@ -16,10 +16,10 @@ from genesis.engine.render_context import (
     Lines,
     ParticlesPhysics,
     Points,
-    ScopedRenderContext,
     SegmentationKeys,
     Shape,
     ShapeRoles,
+    SolverScopedRenderContext,
     select_view_shapes,
 )
 from genesis.engine.state_change import StateChange, mutates
@@ -237,7 +237,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         return self._upper_bound - self.boundary_padding
 
 
-class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
+class ParticleScopedRenderContext(SolverScopedRenderContext[ParticleSolver]):
     """The particles of a particle-based solver as drawn, the visual meshes they skin, and the surfaces reconstructed
     from the active particles of the entities drawn as such.
 
@@ -437,8 +437,8 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
                     arrays = [array.view(is_per_env=True)[envs_shown_idx] for array in arrays]
                 pos, vel, is_active = arrays
                 surfaces_points.append(
-                    dataclasses.replace(
-                        points,
+                    points.fork(
+                        uid=gs.UID(),
                         pos=pos,
                         surface=recon_surface,
                         vel=vel,
@@ -485,8 +485,8 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
                     torch.from_numpy(mesh.vertices[None]),
                     seg_keys=points.seg_keys,
                     roles=points.roles,
-                    particles=dataclasses.replace(
-                        points,
+                    particles=points.fork(
+                        uid=gs.UID(),
                         pos=points.pos[i_r : i_r + 1],
                         vel=points.vel[i_r : i_r + 1],
                         is_active=points.is_active[i_r : i_r + 1],

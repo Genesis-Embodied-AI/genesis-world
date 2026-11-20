@@ -805,16 +805,15 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
 
     box_pos.set_dofs_position([1.0, 0.0, 0.5, 0.0, 0.0, 0.0])
     assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_pos.idx).all()
-    # A body moved by a setter loses the contacts found at its previous pose, with their forces, while a body still
-    # asleep keeps those it rests on
-    assert not box_pos.get_contacts(is_padded=True)["valid_mask"].any()
-    assert_allclose(box_pos.get_links_net_contact_force(), 0.0, tol=gs.EPS)
-    assert box_vel.get_contacts(is_padded=True)["valid_mask"].any()
-    assert (box_vel.get_links_net_contact_force()[..., 2] > 0.5 * box_vel.get_mass() * G).all()
+    assert box_pos.get_contacts() is None and box_pos.get_links_net_contact_force() is None
     z0 = box_pos.get_pos()[..., 2]
     for _ in range(n_fall):
         scene.step()
     assert_allclose(z0 - box_pos.get_pos()[..., 2], free_fall_drop, tol=tol)
+    # A body moved by a setter loses the contacts found at its previous pose, with their forces, while a body still
+    # asleep keeps those it rests on
+    assert box_vel.get_contacts(is_padded=True)["valid_mask"].any()
+    assert (box_vel.get_links_net_contact_force()[..., 2] > 0.5 * box_vel.get_mass() * G).all()
     assert qd_to_numpy(
         solver.dyn_state.entities.is_hibernated,
         [box.idx for box in (box_vel, box_qpos, box_cforce, box_cvel, box_cpos)],
@@ -822,6 +821,7 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
 
     box_vel.set_dofs_velocity([0.0, 0.0, 2.0, 0.0, 0.0, 0.0])
     assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_vel.idx).all()
+    assert box_vel.get_contacts(is_padded=True)["valid_mask"].any() and box_vel.get_contacts()["force_a"] is None
     z0 = box_vel.get_pos()[..., 2]
     for _ in range(5):
         scene.step()
@@ -832,21 +832,17 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
 
     box_qpos.set_qpos([3.0, 0.0, 0.6, 1.0, 0.0, 0.0, 0.0])
     assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_qpos.idx).all()
-    assert not box_qpos.get_contacts(is_padded=True)["valid_mask"].any()
-    assert_allclose(box_qpos.get_links_net_contact_force(), 0.0, tol=gs.EPS)
-    assert (box_base_pos.get_links_net_contact_force()[..., 2] > 0.5 * box_base_pos.get_mass() * G).all()
     z0 = box_qpos.get_pos()[..., 2]
     for _ in range(n_fall):
         scene.step()
     assert_allclose(z0 - box_qpos.get_pos()[..., 2], free_fall_drop, tol=tol)
+    assert (box_base_pos.get_links_net_contact_force()[..., 2] > 0.5 * box_base_pos.get_mass() * G).all()
     assert qd_to_numpy(
         solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_cforce, box_cvel, box_cpos)]
     ).all()
 
     box_base_pos.set_pos([9.0, 0.0, 0.6])
     assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_base_pos.idx).all()
-    assert not box_base_pos.get_contacts(is_padded=True)["valid_mask"].any()
-    assert_allclose(box_base_pos.get_links_net_contact_force(), 0.0, tol=gs.EPS)
     z0 = box_base_pos.get_pos()[..., 2]
     for _ in range(n_fall):
         scene.step()
@@ -935,9 +931,8 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
 
     # The mean inertia the constraint solve is quoted on is the mean of the mass-matrix diagonal, so a mass written on
     # a woken tree is in it; a tree left asleep would hold its contribution at whatever it last ran with.
-    mass_mat = solver.get_mass_mat()
-    diagonal = mass_mat.diagonal(dim1=-2, dim2=-1) if mass_mat.ndim > 2 else mass_mat.diagonal()
-    assert_allclose(qd_to_numpy(solver.rigid_info.meaninertia), diagonal.mean(dim=-1), tol=tol)
+    diagonal = qd_to_numpy(solver.rigid_info.mass_mat, transpose=True).diagonal(axis1=-2, axis2=-1)
+    assert_allclose(qd_to_numpy(solver.rigid_info.meaninertia), diagonal.mean(axis=-1), tol=tol)
 
     invweight_before = box_armature.get_dofs_invweight()
     box_armature.set_dofs_armature([ARMATURE] * 6)

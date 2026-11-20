@@ -216,17 +216,17 @@ class GraspEnv:
         goal_yaw = transform_quat_by_quat(q_yaw, q_downward)
         goal_pose = torch.cat([random_pos, goal_yaw], dim=-1)
 
-        # Reset object - set_pos/set_quat with skip_forward, then FK runs once for everything
+        # Reset object
         if envs_idx is None:
             self.goal_pose.copy_(goal_pose)
-            self.object.set_pos(random_pos, skip_forward=True)
-            self.object.set_quat(goal_yaw, skip_forward=False)
+            self.object.set_pos(random_pos)
+            self.object.set_quat(goal_yaw)
             self.episode_length_buf.zero_()
             self.reset_buf.fill_(True)
         else:
             torch.where(envs_idx[:, None], goal_pose, self.goal_pose, out=self.goal_pose)
-            self.object.set_pos(random_pos, envs_idx=envs_idx, skip_forward=True)
-            self.object.set_quat(goal_yaw, envs_idx=envs_idx, skip_forward=False)
+            self.object.set_pos(random_pos, envs_idx=envs_idx)
+            self.object.set_quat(goal_yaw, envs_idx=envs_idx)
             self.episode_length_buf.masked_fill_(envs_idx, 0)
             self.reset_buf.masked_fill_(envs_idx, True)
 
@@ -455,13 +455,8 @@ class Manipulator:
         dls_lam_device = "cpu" if self._dls_solve_on_cpu else self._device
         self._dls_lambda_matrix = (0.01**2) * torch.eye(6, device=dls_lam_device)
 
-    def reset(self, envs_idx=None, skip_forward=True):
-        self._robot_entity.set_qpos(
-            self._init_qpos,
-            envs_idx=envs_idx,
-            zero_velocity=True,
-            skip_forward=skip_forward,
-        )
+    def reset(self, envs_idx=None):
+        self._robot_entity.set_qpos(self._init_qpos, envs_idx=envs_idx, zero_velocity=True)
 
     def apply_action(self, action: torch.Tensor, open_gripper: bool) -> None:
         """Apply the action to the robot."""

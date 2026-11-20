@@ -764,8 +764,9 @@ def test_sap_equality_constraints(show_viewer, xml_path, n_envs, is_batched, tol
         qpos[..., follower_joint.qs_idx_local[0]] = 0.0
     qpos[..., i_target_q] = 0.0
     entity.set_qpos(qpos)
-    mass_mat = entity.get_mass_mat()
     scene.step()
+    # The mass matrix of the step is the one of the configuration it starts from
+    mass_mat = entity.get_mass_mat()
 
     qpos_after = entity.get_qpos()
     for driver_joint, follower_joint, driver_scale, follower_scale in joints_pairs:
@@ -1131,11 +1132,12 @@ def test_sap_coupler_implicit_damping(integrator, show_viewer):
     cube.set_dofs_damping(dofs_damping)
     vel = np.array([0.5, -0.5, 0.5, 0.0, 0.0, 5.0])
     cube.set_dofs_velocity(vel)
-    mass_diag = np.diag(tensor_to_array(cube.get_mass_mat()))
     for _ in range(N_STEPS):
         scene.step()
-        # The implicit damping of a free cube spinning about a principal axis decouples its dofs: (M + hD) v' = M v
-        vel = vel * mass_diag / (mass_diag + DT * np.array(dofs_damping))
+    # The implicit damping of a free cube spinning about a principal axis decouples its dofs: (M + hD) v' = M v, with a
+    # mass matrix its rotation leaves as it is
+    mass_diag = np.diag(tensor_to_array(cube.get_mass_mat()))
+    vel = vel * (mass_diag / (mass_diag + DT * np.array(dofs_damping))) ** N_STEPS
     # Each SAP solve leaves the velocities within its relative tolerance of the velocities of the scene, which the
     # spinning cube dominates, an error the steps add up. Single precision stops that solve at its round-off.
     tol = N_STEPS * SAP_RTOL * np.abs(vel).max() if gs.np_float == np.float64 else 2e-7

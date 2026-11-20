@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+from operator import attrgetter
 from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
@@ -34,7 +35,7 @@ from genesis.engine.solvers.rigid.collider.data import ColliderState
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
 from genesis.engine.solvers.rigid.constraint.solver import cholesky_tile_size_for
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidConfig, RigidData, RigidErrorCode, RigidInfo
-from genesis.engine.state_change import StateChange, mutates
+from genesis.engine.state_change import StateChange, depends_on, mutates
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
@@ -114,6 +115,7 @@ from .abd.forward_dynamics import (
     kernel_integrate,
     kernel_refresh_invweight_and_meaninertia,
     kernel_update_acc,
+    kernel_update_mass_mat,
     update_qacc_from_qvel_delta,
     update_qvel,
 )
@@ -1303,28 +1305,40 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def _init_constraint_solver(self):
         self.constraint_solver = ConstraintSolver(self)
 
-    @mutates(derived=True)
-    def update_forward_pos(self):
-        """Run forward kinematics over links and geoms if they are not already up to date for the current pose.
+    def update_forward_pos(self, *, mass_mat: bool = False):
+        """Run forward kinematics in the environments whose state changed, and assemble the mass matrix on demand.
 
-        Geoms are refreshed alongside links, unlike the geom-less base solver: the flag this sets also authorizes the
-        next step to skip its own Cartesian-space update, which covers geoms too. Refreshing links alone would leave
-        collision (and any raycast deriving its vertices from geom poses) reading a one-step-stale pose.
+        See 'KinematicSolver.update_forward_pos'.
+
+        Parameters
+        ----------
+        mass_mat : bool, optional
+            Whether to also assemble and factorize the mass matrix of every environment at its current configuration,
+            which 'get_mass_mat' returns from then on, until the configuration or the model changes. Otherwise,
+            'get_mass_mat' returns the matrix the last step assembled at the configuration it started from, and None
+            after a change until the next step. Defaults to False.
         """
-        if not self._is_forward_pos_updated:
-            self._update_forward_kinematics(self._envs_idx)
+        if mass_mat:
+            self._update_mass_mat()
+        else:
+            super().update_forward_pos()
 
-    def _update_forward_kinematics(self, envs_idx):
-        """Update the cartesian space and the velocities of the links of the given environments from their state."""
-        if not isinstance(envs_idx, torch.Tensor):
-            envs_idx = self._sim.sanitize_envs_idx(envs_idx)
+    @mutates(derived=True)
+    def _update_mass_mat(self) -> None:
+        # The mass matrix is assembled from the poses of the links
+        super().update_forward_pos()
+        kernel_update_mass_mat(self._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
+
+    @mutates(derived=True)
+    def _update_forward_kinematics(self, envs_idx: torch.Tensor) -> None:
+        # The geoms are refreshed alongside the links: the flags this sets let the next step skip its own update of the
+        # cartesian space, which covers the geoms too, and collision and ray casting read the poses of the geoms.
         if envs_idx.dtype == torch.bool:
             fn = kernel_masked_forward_kinematics_links_geoms
         else:
             fn = kernel_forward_kinematics_links_geoms
         fn(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
-        self._is_forward_pos_updated = True
-        self._is_forward_vel_updated = True
+        self._is_forward_pos_updated = self._is_forward_vel_updated = self._is_static_pose_updated = True
 
     def substep(self):
         from genesis.engine.couplers import IPCCoupler, SAPCoupler
@@ -1333,8 +1347,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # recomputes the cartesian space as the substep before did. It launches every stage on its own, reversed by the
         # autodiff of its kernel or by the backward given to it (see LaunchRecorder), where the forward pass fuses them.
         is_recording = self._requires_grad and is_recording_launches()
+        # The substep refreshes the cartesian space at its start once a setter left it stale, the static links included
+        # once a setter moved them (see 'func_update_cartesian_space'). MuJoCo recomputes it at the start of each
+        # substep all the same.
         is_forward_pos_updated, is_forward_vel_updated = self._is_forward_pos_updated, self._is_forward_vel_updated
-        if is_recording:
+        if is_recording or self._enable_mujoco_compatibility:
             is_forward_pos_updated = is_forward_vel_updated = False
 
         # The wrenches the other solvers summed exactly over the previous substep join the external wrench of the links
@@ -1390,6 +1407,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.rigid_config,
                 is_forward_pos_updated,
                 is_forward_vel_updated,
+                self._is_static_pose_updated,
             )
             if isinstance(self.sim.coupler, SAPCoupler):
                 update_qvel(self.dyn_state, self.rigid_info, self.rigid_config)
@@ -1412,8 +1430,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,
-                self._is_forward_pos_updated,
-                self._is_forward_vel_updated,
+                is_forward_pos_updated,
+                is_forward_vel_updated,
+                self._is_static_pose_updated,
                 not self._disable_constraint,
             )
             if self._enable_collision:
@@ -1448,11 +1467,15 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self._errno,
             )
 
+        self._is_static_pose_updated = True
+        # Under MuJoCo compatibility the cartesian space stays as the substep computed it at its start until the state
+        # is written again, as MuJoCo leaves it after a step.
         if not isinstance(self.sim.coupler, SAPCoupler):
-            self._is_forward_pos_updated = not self._enable_mujoco_compatibility
-            self._is_forward_vel_updated = not self._enable_mujoco_compatibility
+            self._is_forward_pos_updated = self._is_forward_vel_updated = True
 
     def _kernel_detect_collision(self):
+        # The poses of the geoms derive from the state the setters write (see 'KinematicSolver.update_forward_pos')
+        self.update_forward_pos()
         self.collider.clear()
         self.collider.detection()
 
@@ -1631,6 +1654,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
 
         # The moment arm and the local axes of the wrench follow the link poses, which derive from the state
+        self.update_forward_pos()
         if pos is None:
             kernel_apply_links_external_wrench(
                 links_idx, envs_idx, force, torque, self.dyn_state, self.rigid_config, ref_frame, local
@@ -1696,10 +1720,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         Write back the state 'get_state' returned, for the given environments, all of them if None.
 
         A restored state resumes fully awake (see kernel_reset_hibernation), without the contacts of the bodies it moved
-        unless `partial`, and with the warm starts of the collision detection and of the constraint solve it holds as
-        saved. The forward kinematics follows the wake-up, which it depends on.
+        unless `partial`, and with the warm starts of the collision detection and of the constraint solve as saved.
         """
-        super().set_state(state, envs_idx, partial=True)
+        super().set_state(state, envs_idx)
         if self._use_hibernation and gs.use_zerocopy:
             envs_mask = indices_to_mask(envs_idx)
             links_state = self.dyn_state.links
@@ -1733,8 +1756,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if not partial:
                 self.collider.clear(envs_idx, reset_warm_start=False)
                 self.constraint_solver.clear(envs_idx)
-                # FIXME: quadrants#1086 - see 'KinematicSolver.set_state'
-                self._update_forward_kinematics(envs_idx)
         self._restart()
 
     @property
@@ -1765,8 +1786,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def set_links_pos(self, pos, links_idx=None, envs_idx=None):
         raise DeprecationError("This method has been removed. Please use 'set_base_links_pos' instead.")
 
-    @mutates(StateChange.GEOMETRY, links="links_idx")
-    def set_base_links_pos(self, pos, links_idx=None, envs_idx=None, *, relative=False, skip_forward=False):
+    @mutates(StateChange.GEOMETRY)
+    def set_base_links_pos(self, pos, links_idx=None, envs_idx=None, *, relative=False):
         if self.constraint_solver is not None:
             self.constraint_solver.reset(envs_idx)
 
@@ -1796,15 +1817,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # hibernated entities, which is required whenever hibernation is enabled.
         if gs.use_zerocopy and not relative and isinstance(links_idx, int) and not self._use_hibernation:
             link = self.links[links_idx]
-            # See kernel_set_links_pos
+            has_fixed_links = link.is_fixed
             i_fr = self._links_fixed_root_idx[links_idx]
             if i_fr >= 0:
                 fixed_roots_pos = qd_to_torch(self.dyn_state.fixed_roots.pos, transpose=True, copy=False)
-                links_pos = qd_to_torch(self.dyn_state.links.pos, transpose=True, copy=False)
-                targets = (fixed_roots_pos[:, i_fr], links_pos[:, links_idx])
+                target = fixed_roots_pos[:, i_fr]
             else:
                 qpos = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
-                targets = (qpos[:, link.q_start : link.q_start + 3],)
+                target = qpos[:, link.q_start : link.q_start + 3]
             # Fixed links with at least one geom and non-batched vertices cannot take env-specific positions
             if link.is_fixed and link.geoms and not link.entity._batch_fixed_verts:
                 pos = torch.as_tensor(pos, dtype=gs.tc_float, device=gs.device)
@@ -1818,8 +1838,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                         "setting morph option 'batch_fixed_verts=True'."
                     )
             mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
-            for target in targets:
-                assign_indexed_tensor(target, mask, pos)
+            assign_indexed_tensor(target, mask, pos)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -1832,6 +1851,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if relative:
                 # Compose the body-frame offset onto the authored position, keeping the current orientation, then set
                 # the resulting world position absolutely.
+                self.update_forward_pos()
                 cur_quat = self._read_data(self.dyn_state.links.quat, envs_idx, links_idx)
                 offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
                 offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
@@ -1853,6 +1873,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
             # Wake up the entities of the links before moving them, and for a fixed link, which never sleeps, the links
             # resting on or constrained to it, which would stay asleep where it was otherwise
+            has_fixed_links = any(self.links[i_l].is_fixed for i_l in links_idx)
             if self._use_hibernation:
                 if not all(self.links[i_l].is_fixed for i_l in links_idx):
                     kernel_wake_up_entities_by_links(
@@ -1864,7 +1885,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                         self.rigid_info,
                         self.rigid_config,
                     )
-                if any(self.links[i_l].is_fixed for i_l in links_idx):
+                if has_fixed_links:
                     kernel_wake_up_entities_held_by_links(
                         links_idx,
                         envs_idx,
@@ -1880,11 +1901,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 links_idx, envs_idx, pos, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
             )
 
-        if not skip_forward:
-            self._update_forward_kinematics(envs_idx)
-        else:
-            self._is_forward_pos_updated = False
-            self._is_forward_vel_updated = False
+        self._is_forward_pos_updated = self._is_forward_vel_updated = False
+        if has_fixed_links:
+            self._is_static_pose_updated = False
 
         # See 'set_qpos'
         if self.collider is not None:
@@ -1893,8 +1912,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def set_links_quat(self, quat, links_idx=None, envs_idx=None):
         raise DeprecationError("This method has been removed. Please use 'set_base_links_quat' instead.")
 
-    @mutates(StateChange.GEOMETRY, links="links_idx")
-    def set_base_links_quat(self, quat, links_idx=None, envs_idx=None, *, relative=False, skip_forward=False):
+    @mutates(StateChange.GEOMETRY)
+    def set_base_links_quat(self, quat, links_idx=None, envs_idx=None, *, relative=False):
         if self.constraint_solver is not None:
             self.constraint_solver.reset(envs_idx)
 
@@ -1926,15 +1945,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # hibernated entities, which is required whenever hibernation is enabled.
         if gs.use_zerocopy and not relative and isinstance(links_idx, int) and not self._use_hibernation:
             link = self.links[links_idx]
-            # See kernel_set_links_pos
+            has_fixed_links = link.is_fixed
             i_fr = self._links_fixed_root_idx[links_idx]
             if i_fr >= 0:
                 fixed_roots_quat = qd_to_torch(self.dyn_state.fixed_roots.quat, transpose=True, copy=False)
-                links_quat = qd_to_torch(self.dyn_state.links.quat, transpose=True, copy=False)
-                targets = (fixed_roots_quat[:, i_fr], links_quat[:, links_idx])
+                target = fixed_roots_quat[:, i_fr]
             else:
                 qpos = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
-                targets = (qpos[:, link.q_start + 3 : link.q_start + 7],)
+                target = qpos[:, link.q_start + 3 : link.q_start + 7]
             # Fixed links with at least one geom and non-batched vertices cannot take env-specific orientations
             if link.is_fixed and link.geoms and not link.entity._batch_fixed_verts:
                 quat = torch.as_tensor(quat, dtype=gs.tc_float, device=gs.device)
@@ -1947,8 +1965,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                         "Impossible to set env-specific quat for fixed links with at least one geometry."
                     )
             mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
-            for target in targets:
-                assign_indexed_tensor(target, mask, quat)
+            assign_indexed_tensor(target, mask, quat)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -1963,6 +1980,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 if not relative_pos_passthrough:
                     # The offset position rotates with the orientation, so keep the authored-frame position fixed by
                     # rewriting the world position from the current authored position and the new authored orientation.
+                    self.update_forward_pos()
                     cur_pos, cur_quat = self._read_data(
                         (self.dyn_state.links.pos, self.dyn_state.links.quat), envs_idx, links_idx
                     )
@@ -1991,6 +2009,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 gs.raise_exception("Impossible to set env-specific quat for fixed links with at least one geometry.")
 
             # Wake up the entities of the links before rotating them (see 'set_base_links_pos')
+            has_fixed_links = any(self.links[i_l].is_fixed for i_l in links_idx)
             if self._use_hibernation:
                 if not all(self.links[i_l].is_fixed for i_l in links_idx):
                     kernel_wake_up_entities_by_links(
@@ -2002,7 +2021,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                         self.rigid_info,
                         self.rigid_config,
                     )
-                if any(self.links[i_l].is_fixed for i_l in links_idx):
+                if has_fixed_links:
                     kernel_wake_up_entities_held_by_links(
                         links_idx,
                         envs_idx,
@@ -2018,11 +2037,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 links_idx, envs_idx, quat, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
             )
 
-        if not skip_forward:
-            self._update_forward_kinematics(envs_idx)
-        else:
-            self._is_forward_pos_updated = False
-            self._is_forward_vel_updated = False
+        self._is_forward_pos_updated = self._is_forward_vel_updated = False
+        if has_fixed_links:
+            self._is_static_pose_updated = False
 
         # See 'set_qpos'
         if self.collider is not None:
@@ -2110,6 +2127,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         envs_idx = envs_idx if self._options.batch_links_info else self._envs_idx
         if not self._options.batch_links_info or self.n_envs == 0:
             values = values[None]
+        # The weights are solved at the neutral configuration, after which the kernel brings back the current one, which
+        # forward kinematics has to have computed for every environment the kernel overwrites
+        self.update_forward_pos()
         # The weights are solved again rather than scaled by the mass ratio: a weight follows the mass alone for a body
         # whose degrees of freedom carry no armature, which a model loaded from a file has.
         if name == "mass":
@@ -2123,8 +2143,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.rigid_info,
                 self.rigid_config,
                 scale_inertia,
-                self._is_forward_pos_updated,
-                self._is_forward_vel_updated,
             )
         elif name == "COM":
             kernel_set_links_COM(
@@ -2136,8 +2154,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,
-                self._is_forward_pos_updated,
-                self._is_forward_vel_updated,
             )
         else:
             kernel_set_links_inertia(
@@ -2149,7 +2165,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,
-                refresh_position=self._is_forward_pos_updated,
             )
 
     def set_links_mass(self, mass, links_idx=None, envs_idx=None, scale_inertia=False):
@@ -2204,14 +2219,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             friction_ratio = friction_ratio[None]
         kernel_set_geoms_friction_ratio(geoms_idx, envs_idx, friction_ratio, self.dyn_state, self.rigid_config)
 
-    @mutates(StateChange.GEOMETRY, links="qs_idx")
+    @mutates(StateChange.GEOMETRY)
     def set_qpos(
         self,
         qpos: torch.Tensor | FArrayType,
         qs_idx: IndexType | None = None,
         envs_idx: IndexType | None = None,
-        *,
-        skip_forward: bool = False,
     ) -> None:
         if self.constraint_solver is not None:
             self.constraint_solver.reset(envs_idx)
@@ -2246,11 +2259,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             kernel_set_qpos(qs_idx, envs_idx, qpos, self.rigid_info, self.rigid_config)
         self.clear_errno(envs_idx)
 
-        if not skip_forward:
-            self._update_forward_kinematics(envs_idx)
-        else:
-            self._is_forward_pos_updated = False
-            self._is_forward_vel_updated = False
+        self._is_forward_pos_updated = self._is_forward_vel_updated = False
 
         # The contacts and their forces were found at the previous pose, so they are cleared, the sleepers alone keeping
         # theirs (see 'Collider.clear')
@@ -2392,6 +2401,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             kernel_set_dofs_stiffness(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
         elif name == "armature":
             kernel_set_dofs_armature(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
+            # See '_set_links_info'
+            self.update_forward_pos()
             self._refresh_invweight_and_meaninertia(envs_idx=envs_idx, force_update=True)
         elif name == "damping":
             kernel_set_dofs_damping(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
@@ -2436,7 +2447,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def set_dofs_limit(self, lower, upper, dofs_idx=None, envs_idx=None):
         self._set_dofs_info([lower, upper], dofs_idx, "limit", envs_idx)
 
-    @mutates(StateChange.GEOMETRY, links="dofs_idx")
+    @mutates(StateChange.GEOMETRY)
     def set_dofs_position(self, position, dofs_idx=None, envs_idx=None):
         self.constraint_solver.reset(envs_idx)
 
@@ -2449,6 +2460,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._wake_dofs(dofs_idx, envs_idx)
 
         # See 'KinematicSolver.set_dofs_position'
+        self.update_forward_pos()
         positions = self._read_data(self.dyn_state.dofs.pos, envs_idx, None, copy=True)
         positions[:, dofs_idx] = position
         is_dof_set = torch.zeros((self.n_dofs,), dtype=gs.tc_bool, device=gs.device)
@@ -2457,7 +2469,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         self.clear_errno(envs_idx)
 
-        self._update_forward_kinematics(envs_idx)
+        self._is_forward_pos_updated = self._is_forward_vel_updated = False
 
         # See 'set_qpos'
         if self.collider is not None:
@@ -2478,15 +2490,15 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.rigid_config,
             )
 
-    @mutates(StateChange.DYNAMICS, links="dofs_idx")
-    def set_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None, *, skip_forward=False):
+    @mutates(StateChange.DYNAMICS)
+    def set_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None):
         # Wake the owning entities before delegating to the base setter, which re-sanitizes and applies the write.
         if self._use_hibernation:
             _, wake_dofs_idx, wake_envs_idx = self._sanitize_io_variables(
                 velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
             )
             self._wake_dofs(wake_dofs_idx, wake_envs_idx)
-        super().set_dofs_velocity(velocity, dofs_idx, envs_idx, skip_forward=skip_forward)
+        super().set_dofs_velocity(velocity, dofs_idx, envs_idx)
 
     @mutates()
     def control_dofs_force(self, force, dofs_idx=None, envs_idx=None):
@@ -2614,6 +2626,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             gs.raise_exception(f"'ref' must be one of {refs}.")
         return int(ref)
 
+    @depends_on(refresh=attrgetter("update_forward_pos"))
     def get_links_pos(
         self,
         links_idx=None,
@@ -2647,6 +2660,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         return tensor[0] if self.n_envs == 0 else tensor
 
+    @depends_on(refresh=attrgetter("update_forward_vel"))
     def get_links_vel(
         self, links_idx=None, envs_idx=None, *, ref: link_ref_frame = link_ref_frame.link_origin, relative=False
     ):
@@ -2693,6 +2707,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         )
         return _tensor
 
+    # The accelerations and the forces are what the last step computed, which any change of the state or the model
+    # outdates until the next step
+    @depends_on(StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL, recover=False)
     def get_links_acc(self, links_idx=None, envs_idx=None, *, relative=False):
         idx = links_idx if isinstance(links_idx, int) else slice(None)
         _tensor, links_idx, envs_idx = self._sanitize_io_variables(
@@ -2711,10 +2728,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         )
         return _tensor
 
+    @depends_on(StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL, recover=False)
     def get_links_acc_ang(self, links_idx=None, envs_idx=None):
         tensor = qd_to_torch(self.dyn_state.links.cacc_ang, envs_idx, links_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
 
+    @depends_on(refresh=attrgetter("update_forward_pos"))
     def get_links_root_COM(self, links_idx=None, envs_idx=None):
         """
         Returns the center of mass (COM) of the entire kinematic tree to which the specified links belong.
@@ -2761,6 +2780,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         tensor = qd_to_torch(self.dyn_state.geoms.friction_ratio, envs_idx, geoms_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
 
+    @depends_on(refresh=attrgetter("update_forward_pos"))
     def get_geoms_pos(self, geoms_idx=None, envs_idx=None, *, relative=False):
         tensor = qd_to_torch(self.dyn_state.geoms.pos, envs_idx, geoms_idx, transpose=True, copy=True)
         if relative and self._geoms_offset_pos is not None:
@@ -2770,6 +2790,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             tensor = tensor - _offset_world_shift(offset_pos, offset_quat, quat)
         return tensor[0] if self.n_envs == 0 else tensor
 
+    @depends_on(refresh=attrgetter("update_forward_pos"))
     def get_geoms_quat(self, geoms_idx=None, envs_idx=None, *, relative=False):
         tensor = qd_to_torch(self.dyn_state.geoms.quat, envs_idx, geoms_idx, transpose=True, copy=True)
         if relative and self._geoms_offset_quat is not None:
@@ -2777,10 +2798,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             tensor = gu.transform_quat_by_quat(gu.inv_quat(offset_quat), tensor)
         return tensor[0] if self.n_envs == 0 else tensor
 
+    @depends_on(StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL, recover=False)
     def get_dofs_control_force(self, dofs_idx=None, envs_idx=None):
         tensor = self._read_data(self.dyn_state.dofs.qf_applied, envs_idx, dofs_idx, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
 
+    @depends_on(StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL, recover=False)
     def get_dofs_actuator_force(self, dofs_idx=None, envs_idx=None):
         """
         Generalized effort transmitted to each DOF at the actuator output (torque for revolute DOFs, force for
@@ -2821,10 +2844,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             actuator_force = actuator_force[indices_to_mask(None, dofs_idx)]
         return actuator_force[0] if self.n_envs == 0 else actuator_force
 
+    @depends_on(StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL, recover=False)
     def get_dofs_force(self, dofs_idx=None, envs_idx=None):
         tensor = self._read_data(self.dyn_state.dofs.force, envs_idx, dofs_idx, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
 
+    @depends_on(StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL, recover=False)
     def get_dofs_acc(self, dofs_idx=None, envs_idx=None):
         tensor = self._read_data(self.dyn_state.dofs.acc, envs_idx, dofs_idx, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
@@ -2919,6 +2944,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         tensor = qd_to_torch(self.dyn_info.dofs.frictionloss, envs_idx, dofs_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 and self._options.batch_dofs_info else tensor
 
+    # The mass matrix is the one the last step assembled, or the one 'update_forward_pos' assembled on demand
+    @depends_on(StateChange.GEOMETRY, StateChange.MODEL, refresh=attrgetter("_update_mass_mat"), recover=False)
     def get_mass_mat(self, dofs_idx=None, envs_idx=None, decompose=False):
         tensor = qd_to_torch(self.mass_mat_L if decompose else self.mass_mat, envs_idx, transpose=True, copy=True)
         if dofs_idx is not None:
@@ -2934,6 +2961,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         return tensor
 
+    @depends_on(refresh=attrgetter("update_forward_vel"))
     def get_kinetic_energy(self, links_idx=None, dofs_idx=None, envs_idx=None):
         """Get the kinetic energy of the specified links and DOFs in Joules [J] (translational + rotational).
 
@@ -3049,6 +3077,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def get_geoms_friction_rolling(self, geoms_idx=None):
         return qd_to_torch(self.dyn_info.geoms.friction_rolling, geoms_idx, copy=True)
 
+    @depends_on(refresh=attrgetter("update_forward_pos"))
     def get_AABB(self, entities_idx=None, envs_idx=None):
         aabb_min = qd_to_torch(self.dyn_state.geoms.aabb_min, envs_idx, transpose=True)
         aabb_max = qd_to_torch(self.dyn_state.geoms.aabb_max, envs_idx, transpose=True)
@@ -3113,6 +3142,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     @mutates(StateChange.MODEL)
     def add_weld_constraint(self, link1_idx, link2_idx, envs_idx=None):
+        # The constraint holds the relative pose of the links, which derives from the state
+        self.update_forward_pos()
         # The only type-specific entry is the torque scale of the rotation rows.
         self.constraint_solver.add_dynamic_constraint(
             gs.EQUALITY_TYPE.WELD,
@@ -3223,6 +3254,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             torch.as_tensor(axis / axis_norm, dtype=gs.tc_float, device=gs.device), link1_offset_quat
         )
         pitch_params = torch.tensor((pitch_cos, pitch_sin, *limit, frictionloss), dtype=gs.tc_float, device=gs.device)
+        # See 'add_weld_constraint'
+        self.update_forward_pos()
         self.constraint_solver.add_dynamic_constraint(
             gs.EQUALITY_TYPE.SCREW,
             link1_idx,
@@ -3257,11 +3290,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     @mutates(differentiable=False)
     def set_drone_rpm(self, propellers_link_idx, kf, km, propellers_rpm, propellers_spin, invert):
-        # The backward pass of a step stops at the speed of the propellers, an input without gradient
+        # The backward pass of a step stops at the speed of the propellers, an input without gradient. The thrust
+        # follows the frame of the center of mass of each propeller, which derives from the state.
+        self.update_forward_pos()
         kernel_set_drone_rpm(
             propellers_link_idx, kf, km, propellers_rpm, propellers_spin, self.dyn_state, self.rigid_config, invert
         )
 
+    @depends_on(refresh=attrgetter("update_forward_pos"))
     def update_verts_for_geoms(self, geoms_idx):
         _, geoms_idx, _ = self._sanitize_io_variables(
             None, geoms_idx, self.n_geoms, "geoms_idx", envs_idx=None, skip_allocation=True
@@ -3324,11 +3360,17 @@ def func_step_1(
     rigid_config: qd.template(),
     is_forward_pos_updated: qd.template(),
     is_forward_vel_updated: qd.template(),
+    is_static_pose_updated: qd.template(),
     is_backward: qd.template(),
 ):
     if qd.static(not is_forward_pos_updated):
         func_update_cartesian_space(
-            dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=is_backward
+            dyn_state,
+            dyn_info,
+            rigid_info,
+            rigid_config,
+            force_update_all_geoms=not is_static_pose_updated,
+            is_backward=is_backward,
         )
 
     if qd.static(not is_forward_vel_updated):
@@ -3346,6 +3388,7 @@ def kernel_step_1(
     rigid_config: qd.template(),
     is_forward_pos_updated: qd.template(),
     is_forward_vel_updated: qd.template(),
+    is_static_pose_updated: qd.template(),
 ):
     """Run the first half of a substep on its own (see func_step_1).
 
@@ -3360,6 +3403,7 @@ def kernel_step_1(
         rigid_config,
         is_forward_pos_updated,
         is_forward_vel_updated,
+        is_static_pose_updated,
         is_backward=False,
     )
     func_clear_links_constrained(dyn_state.links, rigid_config)
@@ -3405,6 +3449,7 @@ def kernel_substep_dynamics(
     rigid_config: qd.template(),
     is_forward_pos_updated: qd.template(),
     is_forward_vel_updated: qd.template(),
+    is_static_pose_updated: qd.template(),
     enable_constraint: qd.template(),
 ):
     """Run the forward dynamics of a substep, then assemble its equality constraints, captured as one graph.
@@ -3419,6 +3464,7 @@ def kernel_substep_dynamics(
         rigid_config,
         is_forward_pos_updated,
         is_forward_vel_updated,
+        is_static_pose_updated,
         is_backward=False,
     )
     if qd.static(enable_constraint):
@@ -3479,8 +3525,6 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
     """
 
     debug_vis_modes = ("collision", "sdf")
-    # The equality constraints added at runtime are part of the model
-    stale_on = frozenset((StateChange.GEOMETRY, StateChange.MODEL))
 
     def _get_geoms_batch(
         self, debug_vis_mode: str, geometries: tuple[MeshGeometry, ...], is_looks: bool, geom_start: int = 0
@@ -3524,6 +3568,8 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
             )
         # The size of each link, which scales the arrows of its contacts, computed once they are first drawn
         self._links_init_aabb_size: torch.Tensor | None = None
+        # The arrows of the normals and of the forces of the contacts, made as they are first drawn
+        self._contacts_markers: tuple[Arrows, Arrows] | None = None
         # The collision geoms as drawn
         self._geoms_collision: list[MeshGeometry] = []
         # The representations whose read makes the surfaces of the SDF of the collision geoms, until one is read: the
@@ -3596,9 +3642,15 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
             self._constraints_anchors = torch.as_tensor(anchors, dtype=gs.tc_float, device=gs.device)
             # The lines join the two ends of each constraint, which the points mark
             ends = torch.zeros((solver.n_envs_, 2, solver.n_equalities, 3), dtype=gs.tc_float, device=gs.device)
+            invalidated_by = {solver: (StateChange.GEOMETRY,)}
             self._constraints_markers = (
-                Lines(ends[:, 0], ends[:, 1], CONSTRAINT_LINE_RADIUS, CONSTRAINT_COLOR),
-                Points(ends.reshape((solver.n_envs_, -1, 3)), CONSTRAINT_POINT_RADIUS, CONSTRAINT_COLOR),
+                Lines(ends[:, 0], ends[:, 1], CONSTRAINT_LINE_RADIUS, CONSTRAINT_COLOR, invalidated_by=invalidated_by),
+                Points(
+                    ends.reshape((solver.n_envs_, -1, 3)),
+                    CONSTRAINT_POINT_RADIUS,
+                    CONSTRAINT_COLOR,
+                    invalidated_by=invalidated_by,
+                ),
             )
 
     def update_shapes(self, envs_idx: torch.Tensor | None, view: str) -> tuple[Shape, ...]:
@@ -3653,9 +3705,10 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
             self._geoms_is_contact_shown = torch.zeros(self.owner.n_geoms + 1, dtype=torch.bool, device=gs.device)
         is_shown = self._geoms_is_contact_shown
         is_shown[entity.geom_start : entity.geom_end] = visualize_contact
-        # The contacts are read back only while some geom shows them
+        # The contacts are read back only while some geom shows them, and their arrows are made anew
         if not is_shown.any():
             self._geoms_is_contact_shown = None
+        self._contacts_markers = None
         self._context.invalidate((self,))
 
     def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:
@@ -3663,13 +3716,13 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
 
         Each constraint added at runtime is a line joining the origins of the links it binds, alive while the
         constraint exists in some environment and of zero length in the others. The arrows of the contacts are those
-        the latest step computed, wrong once the state, the dynamics or the model changes until the next step (see
-        'Shape.stale_on').
+        the latest step computed, while the contacts still hold: the forces are hidden after a change of the velocities
+        or of the model, and the contacts altogether after a change of the configuration (see 'Collider.get_contacts').
         """
-        # The contacts of the geoms showing none, and the padding of the environments holding fewer contacts, are
-        # arrows of zero length.
         link_frames = super().update_markers(envs_idx)
         solver = self.owner
+        # The link frames and the constraints view the poses of the links, which derive from the state
+        solver.update_forward_pos()
         n_envs = len(envs_idx)
         markers: list = []
         if solver.options.vis.constraints:
@@ -3692,7 +3745,13 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
                     marker = self._dynamic_constraints_marker.get((link_a, link_b))
                     if marker is None:
                         ends = torch.zeros((solver.n_envs_, 1, 3), dtype=gs.tc_float, device=gs.device)
-                        marker = Lines(ends, ends.clone(), CONSTRAINT_LINE_RADIUS, CONSTRAINT_COLOR)
+                        marker = Lines(
+                            ends,
+                            ends.clone(),
+                            CONSTRAINT_LINE_RADIUS,
+                            CONSTRAINT_COLOR,
+                            invalidated_by={solver: (StateChange.GEOMETRY, StateChange.MODEL)},
+                        )
                         self._dynamic_constraints_marker[(link_a, link_b)] = marker
                     is_bound = (objs_idx == torch.tensor((link_a, link_b), device=gs.device)).all(dim=-1).any(dim=-1)
                     marker.start[envs_idx, 0] = links_pos[:, link_a]
@@ -3719,29 +3778,58 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
                     )
                     links_init_aabb_size[link.idx] = np.linalg.norm(corners.max(axis=0) - corners.min(axis=0))
             self._links_init_aabb_size = torch.as_tensor(links_init_aabb_size, dtype=gs.tc_float, device=gs.device)
-        contacts = solver.collider.get_contacts(as_tensor=True, to_torch=True)
-        if solver.n_envs == 0:
-            contacts = {key: value[None] for key, value in contacts.items()}
-        if contacts["geom_a"].shape[1] == 0:
-            return tuple(markers)
-        contacts = {key: value[envs_idx] for key, value in contacts.items()}
-        arrows_scale = torch.minimum(
-            self._links_init_aabb_size[contacts["link_a"]], self._links_init_aabb_size[contacts["link_b"]]
-        )
-        radius = torch.clamp(arrows_scale * 0.04, max=0.005)
-        normals = contacts["normal"] * arrows_scale[..., None]
-        forces = contacts["force"] * solver.options.vis.contact_force_scale
-        arrows_force, arrows_normal = [], []
-        for geoms_idx, sign in ((contacts["geom_a"], -1.0), (contacts["geom_b"], 1.0)):
-            is_shown = self._geoms_is_contact_shown[geoms_idx][..., None]
-            arrows_force.append(torch.where(is_shown, sign * forces, 0.0))
-            arrows_normal.append(torch.where(is_shown, -sign * normals, 0.0))
-        arrows_pos = torch.cat((contacts["position"], contacts["position"]), dim=1)
-        arrows_radius = torch.cat((radius, radius), dim=1)
-        # The contacts the latest step computed no longer hold once the state, the dynamics or the model changes
-        stale_on = frozenset((StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL))
-        contacts_markers = tuple(
-            Arrows(arrows_pos, torch.cat(arrows_vec, dim=1), arrows_radius, color, envs_idx=envs_idx, stale_on=stale_on)
-            for arrows_vec, color in ((arrows_force, CONTACT_FORCE_COLOR), (arrows_normal, CONTACT_NORMAL_COLOR))
-        )
-        return (*markers, *contacts_markers)
+        if self._contacts_markers is None:
+            pos = torch.zeros((solver.n_envs_, 0, 3), dtype=gs.tc_float, device=gs.device)
+            radius = torch.zeros(pos.shape[:-1], dtype=gs.tc_float, device=gs.device)
+            is_active = torch.zeros(pos.shape[:-1], dtype=gs.tc_bool, device=gs.device)
+            self._contacts_markers = (
+                Arrows(
+                    pos,
+                    pos.clone(),
+                    radius,
+                    CONTACT_NORMAL_COLOR,
+                    is_active,
+                    invalidated_by={solver: (StateChange.GEOMETRY,)},
+                ),
+                Arrows(
+                    pos.clone(),
+                    pos.clone(),
+                    radius.clone(),
+                    CONTACT_FORCE_COLOR,
+                    is_active.clone(),
+                    invalidated_by={solver: (StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL)},
+                ),
+            )
+        normals_marker, forces_marker = self._contacts_markers
+        # The contacts are drawn anew once the solver changed, for every environment at once
+        if solver.changelog.is_dirty_since(normals_marker):
+            solver.changelog.mark_clean(normals_marker)
+            contacts = solver.collider.get_contacts(as_tensor=True, to_torch=True)
+            if contacts is None:
+                n_contacts, has_forces = 0, False
+            else:
+                if solver.n_envs == 0:
+                    contacts = {key: None if value is None else value[None] for key, value in contacts.items()}
+                n_contacts, has_forces = contacts["geom_a"].shape[1], contacts["force"] is not None
+            normals_marker = self.resize_marker(normals_marker, 2 * n_contacts)
+            forces_marker = self.resize_marker(forces_marker, 2 * n_contacts if has_forces else 0)
+            self._contacts_markers = (normals_marker, forces_marker)
+            if n_contacts > 0:
+                arrows_scale = torch.minimum(
+                    self._links_init_aabb_size[contacts["link_a"]], self._links_init_aabb_size[contacts["link_b"]]
+                )
+                radius = torch.clamp(arrows_scale * 0.04, max=0.005)
+                # Each arrow of a contact points along the vector at its geom A, and the opposite way at its geom B,
+                # the arrows of the geoms showing no contact and of the padding being inactive
+                is_active = torch.cat(
+                    [self._geoms_is_contact_shown[contacts[name]] for name in ("geom_a", "geom_b")], dim=1
+                )
+                markers_vec = [(normals_marker, contacts["normal"] * arrows_scale[..., None])]
+                if has_forces:
+                    markers_vec.append((forces_marker, -contacts["force"] * solver.options.vis.contact_force_scale))
+                for marker, vec in markers_vec:
+                    marker.pos[:] = torch.cat((contacts["position"], contacts["position"]), dim=1)
+                    marker.vec[:] = torch.cat((vec, -vec), dim=1)
+                    marker.radius[:] = torch.cat((radius, radius), dim=1)
+                    marker.is_active[:] = is_active
+        return (*markers, normals_marker, forces_marker)

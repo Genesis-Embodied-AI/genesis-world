@@ -12,6 +12,7 @@ import genesis.utils.geom as gu
 from genesis.engine.bvh import func_bvh_traverse
 from genesis.engine.render_context import Lines, Points, Shape
 from genesis.engine.solvers.rigid.data import DynState
+from genesis.engine.state_change import StateChange
 from genesis.options.sensors import SurfaceDistanceProbe as SurfaceDistanceProbeOptions
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
 from genesis.utils.misc import concat_with_tensor, make_tensor_field
@@ -343,16 +344,32 @@ class SurfaceDistanceProbeSensor(
         measured.copy_(measured_cols_b.T)
 
     def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
-        # The probes, their nearest surface points and the lines joining them
-        probes_markers = self._update_probes_markers(markers[:-2], envs_idx, is_contact=None)
+        # The probes, their nearest surface points and the lines joining them, which follow the configuration
+        invalidated_by = {self._shared_metadata.solver: (StateChange.GEOMETRY,), self: (StateChange.MODEL,)}
+        probes_markers = self._update_probes_markers(
+            markers[:-2], envs_idx, is_contact=None, invalidated_by=invalidated_by
+        )
         if markers:
             nearest_marker, lines_marker = markers[-2:]
         else:
             radius = self._options.debug_probe_center_radius
             color = (*self._options.debug_probe_color, 1.0)
             pos = torch.zeros_like(probes_markers[0].pos)
-            nearest_marker = Points(pos, radius, color)
-            lines_marker = Lines(probes_markers[0].pos, pos, radius=radius / 4.0, color=color)
+            nearest_marker = Points(
+                pos,
+                radius,
+                color,
+                is_active=torch.ones(pos.shape[:-1], dtype=gs.tc_bool, device=gs.device),
+                invalidated_by=invalidated_by,
+            )
+            lines_marker = Lines(
+                probes_markers[0].pos,
+                pos,
+                radius=radius / 4.0,
+                color=color,
+                is_active=torch.ones(pos.shape[:-1], dtype=gs.tc_bool, device=gs.device),
+                invalidated_by=invalidated_by,
+            )
         nearest_pos = nearest_marker.pos
         nearest_pos[envs_idx] = self._shared_metadata.nearest_positions_measured[
             self._sanitize_envs_idx(envs_idx), self._nearest_points_slice

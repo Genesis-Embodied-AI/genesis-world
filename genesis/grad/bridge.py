@@ -42,6 +42,7 @@ from genesis.utils.misc import qd_from_torch, qd_to_torch
 if TYPE_CHECKING:
     from genesis.engine.solvers.base_solver import Solver
     from genesis.engine.state_change import StateChange
+    from genesis.typing import IndexType
 
 
 class Operation:
@@ -197,7 +198,7 @@ class RolloutGraph:
         if self._requires_grad and not self._is_running_operation:
             increment_version(self._state_handle)
 
-    def invalidate(self, change: "StateChange | None" = None, envs_idx=None):
+    def invalidate(self, change: "StateChange | None" = None, **indices: "IndexType | None") -> None:
         """
         Invalidate every operation of the rollout, for a change of the model, which alters the replay of every step.
 

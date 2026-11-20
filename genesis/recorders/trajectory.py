@@ -30,7 +30,7 @@ import zstandard
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.state_change import StateChange, Subscriber
+from genesis.engine.state_change import StateChange
 from genesis.engine.states.solvers import SimulatorCheckpoint, SolverCheckpoint
 from genesis.options.recorders import TrajectoryFile
 from genesis.utils import serialization
@@ -246,7 +246,7 @@ def _scalars_fields(sim: "Simulator", kinds: frozenset[DataKind], offset: int) -
     fields = []
     for item in sim.data(kinds):
         if isinstance(item, ScalarItem):
-            dtype = np.dtype(type(getattr(item.owner, item.attr)))
+            dtype = np.dtype(type(item.value))
             fields.append(FrameField(item.name, item.kind, (), dtype.str, offset, dtype.itemsize, ()))
             offset += dtype.itemsize
     return fields
@@ -258,7 +258,7 @@ def _write_scalars(scalars: list[ScalarItem], scalars_fields: list[FrameField], 
     A frame is laid out once, so a scalar whose type changed since raises.
     """
     for item, field in zip(scalars, scalars_fields):
-        scalar = np.array(getattr(item.owner, item.attr))
+        scalar = np.array(item.value)
         if scalar.dtype.str != field.dtype:
             gs.raise_exception(
                 f"'{field.name}' holds a {scalar.dtype} value, where a {np.dtype(field.dtype)} one was laid out."
@@ -554,9 +554,8 @@ class TrajectoryFileWriter(BaseFileWriter):
         self._info_scalars = [item for item in info_items if isinstance(item, ScalarItem)]
         self._info_size = sum(field.nbytes for field in self._info_fields)
         self._has_info = self._info_size > 0
-        self._info_subscriber = Subscriber(frozenset((StateChange.MODEL,)))
-        for solver in sim.active_solvers:
-            solver.subscribe(self._info_subscriber)
+        # A frame records the info of the solvers once their model changed since the last frame recording it
+        self._solvers = sim.active_solvers
         self._i_frame = 0
         self._steps_field = next(field for field in self._fields if field.name == STEPS_FIELD)
         # The scalars and the step timings close the frame (see '_frame_fields'). They live on the host, so a frame copy
@@ -759,8 +758,9 @@ class TrajectoryFileWriter(BaseFileWriter):
         # On Metal, the arrays are written by a queue torch does not wait for
         if self._frame_views is not None and gs.backend == gs.metal:
             qd.sync()
-        if self._has_info and (self._i_frame == 0 or self._info_subscriber.pending):
-            self._info_subscriber.clear()
+        if self._has_info and any(solver.changelog.is_dirty_since(self, StateChange.MODEL) for solver in self._solvers):
+            for solver in self._solvers:
+                solver.changelog.mark_clean(self)
             info_arrays = _read_arrays(self._info_arrays, self._info_fields)
             info = np.empty((self._info_size,), dtype=np.uint8)
             info[: info_arrays.size] = info_arrays
@@ -1257,13 +1257,16 @@ class Trajectory:
         values = self.frame(index, kinds)
         arrays: dict[str, dict[str, np.ndarray]] = {}
         for name, value in values.items():
-            if name != STEPS_FIELD and not name.startswith(TIMINGS_PREFIX):
-                solver_name, array_name = name.split(".", 1)
-                arrays.setdefault(solver_name, {})[array_name] = value
+            if not name.startswith(TIMINGS_PREFIX):
+                owner_name, array_name = name.split(".", 1)
+                arrays.setdefault(owner_name, {})[array_name] = value
+        sim_values = arrays.pop("Simulator")
         solvers = {
             solver_name: SolverCheckpoint(solver_arrays, {}, kinds) for solver_name, solver_arrays in arrays.items()
         }
-        sim = SimulatorCheckpoint(steps=values[STEPS_FIELD], solvers=solvers)
+        # A minimal frame holds no results of the step (see 'Simulator.data')
+        solvers_is_dirty = {solver_name: sim_values.get(f"{solver_name}.is_dirty", True) for solver_name in solvers}
+        sim = SimulatorCheckpoint(sim_values["steps"], solvers, solvers_is_dirty)
         self._scene.__setstate__(
             self._checkpoint_class(scene=self._scene.desc, digest=self._digest, layout=self._layout, sim=sim)
         )

@@ -1146,11 +1146,11 @@ def func_update_cartesian_space(
     under enable_level_sweep (see func_sweep_links_by_level). The geoms of the step take one thread each, and the
     centers of mass one thread per link and one per root.
 
-    A static link moves only when a setter writes the pose of its fixed root, so the step sweep walks the awake trees
-    alone (see trees_root_idx in rigid/data.py), whose static parents hold still, and a tree sleeps as a unit, so a
-    hibernated tree keeps the poses of its last awake step. The initial placement and the backward replay cover the
-    static links too and walk each root whole (see func_update_kinematics_root): the manual reverse reads the
-    per-joint pose cache of every link of a root. Autodiff takes a kernel made of loops alone, so the loops are the
+    A static link moves only when a setter writes the pose of its fixed root, so the sweep ending a substep walks the
+    awake trees alone (see trees_root_idx in rigid/data.py), whose static parents hold still, and a tree sleeps as a
+    unit, so a hibernated tree keeps the poses of its last awake step. The refresh after setters, the initial placement
+    and the backward replay cover the static links too and walk each root whole (see func_update_kinematics_root): the
+    manual reverse reads the per-joint pose cache of every link of a root. Autodiff takes a kernel made of loops alone, so the loops are the
     outermost ones of their kernel.
     """
     if qd.static(force_update_all_geoms or is_backward):

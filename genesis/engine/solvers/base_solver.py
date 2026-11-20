@@ -12,7 +12,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.force_fields import ForceField, ForceFields
-from genesis.engine.state_change import StateChange, Subscriber, mutates
+from genesis.engine.state_change import ChangeLog, StateChange, TrackableMixin, mutates
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import RolloutGraph, no_grad
 from genesis.repr_base import RBC
@@ -42,7 +42,6 @@ from genesis.utils.misc import (
     qd_from_torch,
     qd_to_numpy,
     qd_to_torch,
-    sanitize_index,
     sanitize_indexed_tensor,
     tensor_to_array,
 )
@@ -552,7 +551,7 @@ class GravityMixin(BuildableMixin):
         return tensor[0] if self.n_envs == 0 else tensor
 
 
-class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
+class Solver(TrackableMixin, BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
     # Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must
     is_differentiable: bool = False
     # The entity spec class whose entities the solver simulates, which the simulator dispatches on
@@ -571,54 +570,11 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
         # The force fields acting on the entities of the solver, which its kernels take as a template
         self._force_fields = ForceFields()
 
-        # Registered Subscribers, notified after @mutates-tagged methods run; see subscribe(). The re-entrancy guard
-        # below defers notification to the outermost tagged call, accumulating every change that occurred in between,
-        # so a setter calling other tagged setters notifies once rather than per nested call. The order of subscription
-        # is kept, so that a consumer of the render context, which subscribes after it, finds the change recorded there.
-        self._subscribers: list[Subscriber] = []
-        self._is_mutating = False
-        self._mutation_changes: set[StateChange] = set()
-        self._mutation_links_idx_list: list[np.ndarray] | None = None
-        # The kinematic structure resolving the reach of the notifications (see 'mutates'): the links holding a degree
-        # of freedom, the parent of each link (-1 for a root), and the link holding each degree of freedom and each
-        # configuration entry, by name of index argument. Set at build by the solvers exposing a kinematic structure
-        # (see KinematicSolver), the notifications staying unbounded otherwise.
-        self._articulated_links_idx: np.ndarray | None = None
-        self._links_parent_idx: np.ndarray | None = None
-        self._indices_link_idx: dict[str, np.ndarray] = {}
-        # The links whose change can move a link of the filter of each link-filtered subscriber, its filtered links and
-        # their ancestors, which a notification of a change of other links skips.
-        self._subscribers_links_watched: dict[Subscriber, np.ndarray] = {}
-        # The changes some link-filtered subscriber listens to, the only ones whose reach a notification resolves
-        self._links_watched_changes: frozenset[StateChange] = frozenset()
         # The part of the render context the solver draws, set as it builds
         self.render_context: "ScopedRenderContext | None" = None
 
     def _add_force_field(self, force_field: ForceField) -> None:
         self._force_fields.fields.append(force_field)
-
-    def subscribe(self, subscriber: Subscriber):
-        """Register a Subscriber to be notified after any @mutates-tagged method whose change is in its filter, after
-        the subscribers registered before it."""
-        # A change of a link moves its whole kinematic subtree, so the filter closes over the ancestors of its links
-        # once, here, rather than over the subtrees of the links of each change.
-        if subscriber.links_filter is not None and self._links_parent_idx is not None:
-            links_filter = tensor_to_array(
-                sanitize_index(
-                    subscriber.links_filter, expected_size=-1, max_size=self.n_links, dim=0, name="links_filter"
-                )
-            )
-            links_watched = np.zeros(len(self._links_parent_idx), dtype=np.bool_)
-            links_watched[links_filter] = True
-            while True:
-                parents_idx = self._links_parent_idx[links_watched]
-                parents_idx = parents_idx[parents_idx >= 0]
-                if links_watched[parents_idx].all():
-                    break
-                links_watched[parents_idx] = True
-            self._subscribers_links_watched[subscriber] = links_watched
-            self._links_watched_changes |= subscriber.to
-        self._subscribers.append(subscriber)
 
     def _sanitize_io_variables(
         self,
@@ -713,6 +669,8 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
         """
         super().build(n_envs)
 
+        if self.changelog is None:
+            self.changelog = ChangeLog(self.n_envs_)
         self.build_errno(self.n_envs_)
         if self._requires_grad:
             self._error_reports = {

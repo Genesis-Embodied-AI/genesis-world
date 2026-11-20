@@ -954,6 +954,7 @@ class LegacyCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, R
 
     def attach_pbd_particles_to_link(self, particles_idx: torch.Tensor, envs_idx: torch.Tensor, link_idx: int) -> None:
         """Animate some PBD particles by a rigid link, keeping their current offset to it."""
+        self.rigid_solver.update_forward_pos()
         kernel_attach_pbd_to_rigid_link(
             particles_idx,
             envs_idx,

@@ -31,12 +31,13 @@ class SolverCheckpoint:
 class SimulatorCheckpoint:
     """The state a simulation stands in.
 
-    How many steps each environment has run, and what every active solver reads from one step to the next, under the
-    name of its class.
+    How many steps each environment has run, what every active solver reads from one step to the next, and whether each
+    one changed since it last computed the quantities deriving from its state, all under the name of its class.
     """
 
     steps: np.ndarray | torch.Tensor
     solvers: dict[str, SolverCheckpoint]
+    solvers_is_dirty: dict[str, bool]
 
 
 class SimState(RBC):
