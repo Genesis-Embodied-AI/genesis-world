@@ -13,6 +13,8 @@ from genesis.options.sensors import IMU as IMUOptions, CrossCouplingAxisType
 from genesis.utils.misc import concat_with_tensor, make_tensor_field
 
 from .base_sensor import (
+    OffsettableSensorMetadataMixin,
+    OffsettableSensorMixin,
     RigidSensorMetadataMixin,
     RigidSensorMixin,
     SimpleSensor,
@@ -104,7 +106,7 @@ def _get_cross_axis_coupling_to_alignment_matrix(
 
 
 @dataclass
-class IMUSharedMetadata(RigidSensorMetadataMixin, SimpleSensorMetadata):
+class IMUSharedMetadata(OffsettableSensorMetadataMixin, RigidSensorMetadataMixin, SimpleSensorMetadata):
     """
     Shared metadata between all IMU sensors.
     """
@@ -122,7 +124,11 @@ class IMUReturnType(NamedTuple):
     mag: torch.Tensor  # added magnetometer to complete 9-axis IMU
 
 
-class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, None, IMUSharedMetadata, IMUReturnType]):
+class IMUSensor(
+    OffsettableSensorMixin,
+    RigidSensorMixin[IMUSharedMetadata],
+    SimpleSensor[IMUOptions, None, IMUSharedMetadata, IMUReturnType],
+):
     def __init__(
         self,
         options: IMUOptions,
@@ -225,13 +231,8 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
                 (options.debug_acc_color, options.debug_gyro_color, options.debug_mag_color), dtype=gs.tc_float
             )
             markers = (Arrows(pos, torch.zeros_like(pos), radius, colors),)
-        link_pos = self._link.get_pos(envs_idx, relative=False)
-        link_quat = self._link.get_quat(envs_idx, relative=False)
-        # The offsets hold a row in a scene without parallel environments too
-        sensor_envs_idx = self._sanitize_envs_idx(envs_idx)
-        offset_pos = self._shared_metadata.offsets_pos[sensor_envs_idx, self._idx]
-        offset_quat = self._shared_metadata.offsets_quat[sensor_envs_idx, self._idx]
-        pos = link_pos + gu.transform_by_quat(offset_pos, link_quat)
+        # The readings are stated in the frame of the sensor
+        sensor_pos, sensor_quat = self._get_world_pose(envs_idx)
 
         data = self.read(envs_idx)
         vecs = torch.stack(
@@ -242,9 +243,7 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
             ),
             dim=-2,
         )
-        # The readings are stated in the frame of the sensor
-        sensor_quat = gu.transform_quat_by_quat(offset_quat, link_quat)
         arrows_pos, arrows_vec = markers[0].pos, markers[0].vec
-        arrows_pos[envs_idx] = pos[..., None, :]
+        arrows_pos[envs_idx] = sensor_pos[..., None, :]
         arrows_vec[envs_idx] = gu.transform_by_quat(vecs, sensor_quat[..., None, :])
         return markers

@@ -7,13 +7,15 @@ import torch
 import genesis as gs
 from genesis.engine.render_context import Points, Shape
 from genesis.options.sensors import RaycastPattern, Raycaster as RaycasterOptions
-from genesis.utils.geom import normalize, transform_by_quat, transform_by_trans_quat
+from genesis.utils.geom import normalize, transform_by_trans_quat, transform_quat_by_quat
 from genesis.utils.misc import concat_with_tensor, make_tensor_field
 from genesis.utils.raycast_qd import RaycastTarget, RaycastWorldTarget, get_raycast_targets, kernel_cast_rays
 
 from .base_sensor import (
     KinematicSensorMetadataMixin,
     KinematicSensorMixin,
+    OffsettableSensorMetadataMixin,
+    OffsettableSensorMixin,
     SharedSensorContext,
     SimpleSensor,
     SimpleSensorMetadata,
@@ -79,7 +81,7 @@ class RaycastContext(SharedSensorContext):
 
 
 @dataclass
-class RaycasterSharedMetadata(KinematicSensorMetadataMixin, SimpleSensorMetadata):
+class RaycasterSharedMetadata(OffsettableSensorMetadataMixin, KinematicSensorMetadataMixin, SimpleSensorMetadata):
     # The targets cast against each frame live on the shared RaycastContext (see get_raycast_targets), so a Raycaster
     # and a DepthCamera share one set of trees. The casts chain into the output cache (see kernel_cast_rays). The link
     # poses of the sensors are gathered per solver (see KinematicSensorMetadataMixin.solver_groups).
@@ -116,7 +118,9 @@ class RaycasterReturnType(NamedTuple):
 
 
 class RaycasterSensor(
-    KinematicSensorMixin, SimpleSensor[RaycasterOptions, RaycastContext, RaycasterSharedMetadata, RaycasterReturnType]
+    OffsettableSensorMixin,
+    KinematicSensorMixin,
+    SimpleSensor[RaycasterOptions, RaycastContext, RaycasterSharedMetadata, RaycasterReturnType],
 ):
     def __init__(self, options: RaycasterOptions, idx: int, shared_context, shared_metadata, manager: "SensorManager"):
         super().__init__(options, idx, shared_context, shared_metadata, manager)
@@ -143,14 +147,9 @@ class RaycasterSensor(
 
         self._shared_metadata.patterns.append(self._options.pattern)
 
-        ray_starts = self._options.pattern.ray_starts.reshape(-1, 3)
-        self.ray_starts = transform_by_trans_quat(
-            ray_starts, self._shared_metadata.offsets_pos[0, -1, :], self._shared_metadata.offsets_quat[0, -1, :]
-        )
+        self.ray_starts = self._options.pattern.ray_starts.reshape(-1, 3)
         self._shared_metadata.ray_starts = torch.cat([self._shared_metadata.ray_starts, self.ray_starts])
-
-        ray_dirs = self._options.pattern.ray_dirs.reshape(-1, 3)
-        self.ray_dirs = transform_by_quat(ray_dirs, self._shared_metadata.offsets_quat[0, -1, :])
+        self.ray_dirs = self._options.pattern.ray_dirs.reshape(-1, 3)
         self._shared_metadata.ray_dirs = torch.cat([self._shared_metadata.ray_dirs, self.ray_dirs])
 
         num_rays = math.prod(self._options.pattern.return_shape)
@@ -211,17 +210,13 @@ class RaycasterSensor(
         # The targets were already refreshed once this step by SensorManager (see RaycastContext.update)
         targets = shared_context.targets
 
-        # Allocate the link-pose scratch buffers on first cast (B and n_sensors are known here). Identity quat is baked
-        # into the initial allocation so static sensors (entity_idx<0) leave their rows at identity, letting the cast
-        # kernel apply pos_offset / euler_offset in world frame.
+        # Allocate the link-pose buffers on first cast, once B is known. Static sensors (entity_idx<0) keep identity
+        # rows, which places their mounting offsets in world frame.
         if shared_metadata.links_pos is None:
             B = raw_data_T.shape[-1]
-            shared_metadata.links_pos = torch.zeros(
-                B, shared_metadata.n_sensors, 3, device=gs.device, dtype=gs.tc_float
-            )
-            shared_metadata.links_quat = torch.zeros(
-                B, shared_metadata.n_sensors, 4, device=gs.device, dtype=gs.tc_float
-            )
+            n_sensors = len(shared_metadata.patterns)
+            shared_metadata.links_pos = torch.zeros(B, n_sensors, 3, device=gs.device, dtype=gs.tc_float)
+            shared_metadata.links_quat = torch.zeros(B, n_sensors, 4, device=gs.device, dtype=gs.tc_float)
             shared_metadata.links_quat[:, :, 0] = 1.0
 
         # Gather link poses per sensor. Sensors are pre-bucketed into shared_metadata.solver_groups at build time so
@@ -236,15 +231,18 @@ class RaycasterSensor(
                 quat = quat[None]
             links_pos[:, group.sensor_cols, :] = pos
             links_quat[:, group.sensor_cols, :] = quat
+        sensors_pos = transform_by_trans_quat(shared_metadata.offsets_pos, links_pos, links_quat)
+        sensors_quat = transform_quat_by_quat(shared_metadata.offsets_quat, links_quat)
 
         # The targets cast in one launch each, chained into one output buffer (see kernel_cast_rays)
         for i_target, target in enumerate(targets):
             kernel_cast_rays(
                 shared_metadata.points_to_sensor_idx,
-                links_pos,
-                links_quat,
+                sensors_pos,
+                sensors_quat,
                 shared_metadata.ray_starts,
                 shared_metadata.ray_dirs,
+                shared_metadata.min_ranges,
                 shared_metadata.max_ranges,
                 shared_metadata.no_hit_values,
                 shared_metadata.return_world_frame,
@@ -275,22 +273,22 @@ class RaycasterSensor(
                 Points(torch.zeros_like(pos), radius, self._options.debug_ray_hit_color),
             )
         data = self.read(envs_idx)
-        link_pos = self._link.get_pos(envs_idx, relative=False)[..., None, :]
-        link_quat = self._link.get_quat(envs_idx, relative=False)[..., None, :]
+        sensor_pos, sensor_quat = self._get_world_pose(envs_idx)
+        sensor_pos, sensor_quat = sensor_pos[..., None, :], sensor_quat[..., None, :]
         if self._options.return_points:
-            points = data.points.reshape((*link_pos.shape[:-2], -1, 3))
+            points = data.points.reshape((*sensor_pos.shape[:-2], -1, 3))
             if not self._options.return_world_frame:
-                points = transform_by_trans_quat(pos=points + self.ray_starts, trans=link_pos, quat=link_quat)
+                points = transform_by_trans_quat(pos=points + self.ray_starts, trans=sensor_pos, quat=sensor_quat)
         else:
             # Reconstruct the local-frame hit points as distance * unit ray_dir. Missed rays carry exactly
             # no_hit_value as distance (which may lie below max_range, so an ordering test cannot discriminate) and
             # collapse onto the ray start, matching the (0, 0, 0) stored for them when points are enabled.
-            distances = data.distances.reshape((*link_pos.shape[:-2], -1, 1))
+            distances = data.distances.reshape((*sensor_pos.shape[:-2], -1, 1))
             hit_points_local = torch.where(
                 distances != self._options.no_hit_value, distances * normalize(self.ray_dirs), 0.0
             )
-            points = transform_by_trans_quat(pos=hit_points_local + self.ray_starts, trans=link_pos, quat=link_quat)
+            points = transform_by_trans_quat(pos=hit_points_local + self.ray_starts, trans=sensor_pos, quat=sensor_quat)
         starts_pos, hits_pos = markers[0].pos, markers[1].pos
-        starts_pos[envs_idx] = transform_by_trans_quat(self.ray_starts, link_pos, link_quat)
+        starts_pos[envs_idx] = transform_by_trans_quat(self.ray_starts, sensor_pos, sensor_quat)
         hits_pos[envs_idx] = points
         return markers
