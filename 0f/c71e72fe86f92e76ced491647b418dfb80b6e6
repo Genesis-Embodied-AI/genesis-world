@@ -1,0 +1,21 @@
+.github/workflows/generic.yml
+  s_bd03de55a8e2ea::t_68310ee2a36c0b 140-146
+genesis/logging/time_elapser.py
+  s_bd03de55a8e2ea::t_68310ee2a36c0b 12-13,47,58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0fc71e72fe86f92e76ced491647b418dfb80b6e6",
+  "prompts": {},
+  "sessions": {
+    "s_bd03de55a8e2ea": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "913814ec-208b-4803-874b-4ea1fef1f8b3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
