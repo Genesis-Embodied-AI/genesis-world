@@ -1,0 +1,24 @@
+.github/workflows/draft_gate.yml
+  s_5fc6074bbf013e::t_acf2120d7a96c6 6-7,14,16
+.github/workflows/production.yml
+  s_5fc6074bbf013e::t_acf2120d7a96c6 10
+.github/workflows/ci_command.yml
+  s_5fc6074bbf013e::t_85f282a311d062 42-46
+  s_5fc6074bbf013e::t_acf2120d7a96c6 84-91,103,105-107,132,138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ea9ce042acdef841898ba8c5cc390c536e17a500",
+  "prompts": {},
+  "sessions": {
+    "s_5fc6074bbf013e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0750133c-395a-4c7a-b9b5-6181504ce9e8",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
