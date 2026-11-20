@@ -8,24 +8,7 @@ from skimage.measure import marching_cubes
 
 import genesis as gs
 
-from . import geom as gu
 from .mesh import get_ptc_cache
-
-
-def n_particles_vol(p_size=0.01, volume=1.0):
-    return max(1, round(volume / p_size**3))
-
-
-def n_particles_3D(p_size=0.01, size=(1.0, 1.0, 1.0)):
-    return max(1, round(size[0] / p_size)) * max(1, round(size[1] / p_size)) * max(1, round(size[2] / p_size))
-
-
-def n_particles_1D(p_size=0.01, length=1.0):
-    return max(1, round(length / p_size))
-
-
-def nowhere_particles(n):
-    return np.tile(gu.nowhere(), (n, 1))
 
 
 def trimesh_to_particles_simple(mesh, p_size, sampler):
@@ -65,7 +48,7 @@ def trimesh_to_particles_simple(mesh, p_size, sampler):
     return positions
 
 
-def trimesh_to_particles_pbs(mesh, p_size, sampler, pos=(0, 0, 0)):
+def trimesh_to_particles_pbs(mesh, p_size, sampler):
     """Sample particles uniformly in the volume of a mesh, following Kugelstadt et al. 2021.
 
     Particles are seeded on a lattice inside the mesh, then relaxed by a few smoothed-particle hydrodynamics (SPH) steps
@@ -117,7 +100,7 @@ def trimesh_to_particles_pbs(mesh, p_size, sampler, pos=(0, 0, 0)):
             positions = _relax_volume_sampling(positions, sdf, origin, cell_size, radius, n_steps=100)
             cache.save(positions)
 
-    return positions + pos
+    return positions
 
 
 @nb.jit(nopython=True, cache=True)
@@ -264,199 +247,86 @@ def _relax_volume_sampling(positions, sdf, origin, cell_size, radius, n_steps):
 
 
 def _box_to_particles(p_size, pos, size, sampler):
-    """
-    Private function to sample particles from a box. This function only supports `random` and `regular` samplers.
-    This is a private function that does not consider additional mesh offset or scale.
-    """
-    size = np.array(size)
-    pos = np.array(pos)
     lower = pos - size / 2
     upper = pos + size / 2
 
+    n_particles_axes = np.maximum(np.round(size / p_size).astype(gs.np_int), 1)
     if sampler == "random":
-        n_particles = n_particles_3D(p_size, size)
+        n_particles = np.prod(n_particles_axes)
         # The draws are scaled by separate numpy operations, each rounded exactly, so that every platform samples the
         # same positions. The compiled scaling of 'np.random.uniform' rounds differently from one platform to another.
         positions = lower + np.random.random((n_particles, 3)) * (upper - lower)
-
-    elif sampler == "regular":
-        n_x = n_particles_1D(p_size, size[0])
-        n_y = n_particles_1D(p_size, size[1])
-        n_z = n_particles_1D(p_size, size[2])
+    else:
         p_lower = lower + 0.5 * p_size
         p_upper = upper - 0.5 * p_size
-        x = np.linspace(p_lower[0], p_upper[0], n_x)
-        y = np.linspace(p_lower[1], p_upper[1], n_y)
-        z = np.linspace(p_lower[2], p_upper[2], n_z)
+        x, y, z = (np.linspace(p_lower[i], p_upper[i], n_particles_axes[i]) for i in range(3))
         positions = np.stack(np.meshgrid(x, y, z, indexing="ij"), -1).reshape((-1, 3))
+    return positions
 
+
+def primitive_to_particles(primitive, p_size, sampler):
+    """
+    Sample particles inside a trimesh box, cylinder or sphere primitive centered at the origin.
+
+    The 'pbs' samplers sample the mesh of the primitive. The 'random' and 'regular' samplers fill the bounding box of
+    the exact primitive, keeping what lies inside it.
+    """
+    assert isinstance(primitive, (trimesh.primitives.Box, trimesh.primitives.Cylinder, trimesh.primitives.Sphere))
+    # The random and regular samplers test the exact primitive rather than going through 'trimesh_to_particles_simple',
+    # whose signed distance is slower and whose cache would store one entry per emission of the random sampler.
+    if "pbs" in sampler:
+        positions = trimesh_to_particles_pbs(primitive, p_size, sampler)
+    elif isinstance(primitive, trimesh.primitives.Box):
+        positions = _box_to_particles(p_size=p_size, pos=np.zeros(3), size=primitive.primitive.extents, sampler=sampler)
     else:
-        gs.raise_exception(f"Unsupported sampler method: {sampler}.")
-
-    return positions
-
-
-def box_to_particles(p_size=0.01, pos=(0, 0, 0), size=(1, 1, 1), sampler="random"):
-    if "pbs" in sampler:
-        mesh = trimesh.creation.box(extents=size)
-
-        try:
-            positions = trimesh_to_particles_pbs(mesh, p_size, sampler, pos=pos)
-        except gs.GenesisException:
-            sampler = "random"
-
-    if sampler in ("random", "regular"):
-        positions = _box_to_particles(
-            p_size=p_size,
-            pos=pos,
-            size=size,
-            sampler=sampler,
-        )
-
-    return positions
-
-
-def cylinder_to_particles(p_size=0.01, pos=(0, 0, 0), radius=0.5, height=1.0, sampler="random"):
-    if "pbs" in sampler:
-        mesh = trimesh.creation.cylinder(radius=radius, height=height)
-        try:
-            positions = trimesh_to_particles_pbs(mesh, p_size, sampler, pos=pos)
-        except gs.GenesisException:
-            sampler = "random"
-
-    if sampler in ("random", "regular"):
-        # sample a cube first
-        size = np.array([2 * radius, 2 * radius, height])
-        positions = _box_to_particles(
-            p_size=p_size,
-            pos=pos,
-            size=size,
-            sampler=sampler,
-        )
-        # reject out-of-boundary particles
-        positions_r = np.linalg.norm(positions[:, [0, 1]] - np.array(pos)[[0, 1]], axis=1)
-        positions = positions[positions_r <= radius]
-
-    return positions
-
-
-def sphere_to_particles(p_size=0.01, pos=(0, 0, 0), radius=0.5, sampler="random"):
-    if "pbs" in sampler:
-        mesh = trimesh.creation.icosphere(radius=radius)
-        try:
-            positions = trimesh_to_particles_pbs(mesh, p_size, sampler, pos=pos)
-        except gs.GenesisException:
-            sampler = "random"
-
-    if sampler in ("random", "regular"):
-        # sample a cube first
-        size = np.array([2 * radius, 2 * radius, 2 * radius])
-        positions = _box_to_particles(
-            p_size=p_size,
-            pos=pos,
-            size=size,
-            sampler=sampler,
-        )
-        # reject out-of-boundary particles
-        positions_r = np.linalg.norm(positions - np.array(pos), axis=1)
-        positions = positions[positions_r <= radius]
-
-    return positions
-
-
-def shell_to_particles(p_size=0.01, pos=(0, 0, 0), inner_radius=0.5, outer_radius=0.7, sampler="random"):
-    if "pbs" in sampler:
-        mesh = trimesh.creation.icosphere(radius=outer_radius)
-        try:
-            positions = trimesh_to_particles_pbs(mesh, p_size, sampler, pos=pos)
-        except gs.GenesisException:
-            sampler = "random"
-
-    if sampler in ("random", "regular"):
-        # sample a cube first
-        size = np.array([2 * outer_radius, 2 * outer_radius, 2 * outer_radius])
-        positions = _box_to_particles(
-            p_size=p_size,
-            pos=pos,
-            size=size,
-            sampler=sampler,
-        )
-        # reject out-of-boundary particles
-        positions_r = np.linalg.norm(positions - np.array(pos), axis=1)
-        positions = positions[positions_r <= outer_radius]
-
-    # reject inner particles
-    positions_r = np.linalg.norm(positions - np.array(pos), axis=1)
-    positions = positions[positions_r >= inner_radius]
-
+        # The cylinder rejects particles by their distance to the z axis, the sphere by their distance to the origin
+        radius = primitive.primitive.radius
+        if isinstance(primitive, trimesh.primitives.Cylinder):
+            size, n_axes = np.array((2.0 * radius, 2.0 * radius, primitive.primitive.height)), 2
+        else:
+            size, n_axes = np.full(3, 2.0 * radius), 3
+        positions = _box_to_particles(p_size=p_size, pos=np.zeros(3), size=size, sampler=sampler)
+        positions = positions[np.linalg.norm(positions[:, :n_axes], axis=-1) <= radius]
     return positions
 
 
 def particles_to_mesh(positions, radius, backend):
-    def parse_args(backend):
-        args_dict = dict()
-        args_list = backend.split("-")
-        if len(args_list) >= 2:
-            args_dict["rscale"] = float(args_list[1])
-            args_list = args_list[2:]
-            for i in range(0, len(args_list), 2):
-                args_dict[args_list[i]] = float(args_list[i + 1])
-        return args_dict
-
-    if positions.shape[0] == 0:
+    """Reconstruct the surface of a set of particles sharing one radius, with the 'levelset' or 'splashsurf' backend."""
+    assert backend in ("levelset", "splashsurf")
+    if len(positions) == 0:
         return trimesh.Trimesh(vertices=np.zeros((0, 3)), faces=np.zeros((0, 3)))
 
-    if isinstance(radius, np.ndarray):
-        radii = radius
-        radius = np.min(radius)
-        if "splashsurf" in backend:
-            gs.logger.warning(
-                "Backend 'splashsurf' does not support specifying individual radius for each particle. Switching to "
-                "backend 'levelset' as a fallback."
-            )
-            backend = "levelset"
-    else:
-        radii = np.array([])
-
-    args_dict = parse_args(backend)
-
-    if "levelset" in backend:
-        radius_scale = args_dict.get("rscale", 2.0)
-        if radii.size == 0:
-            radii = np.full(len(positions), radius, dtype=positions.dtype)
-        radii = radii * radius_scale
-        voxel_size = radius * radius_scale * args_dict.get("vscale", 1.0)
-        isovalue = args_dict.get("isovalue", 0.0)
+    if backend == "levelset":
+        sphere_radius = 2.0 * radius
+        radii = np.full(len(positions), sphere_radius, dtype=positions.dtype)
         # The surface is extracted from the distance at the corners of the cells it crosses, which lie within one cell
         # diagonal of it, so the distance only has to be exact within that band around the iso-surface.
-        sdf, origin = _rasterize_spheres(positions, radii, voxel_size, band=abs(isovalue) + 2.0 * voxel_size)
+        sdf, origin = _rasterize_spheres(positions, radii, sphere_radius, band=2.0 * sphere_radius)
         vertices, faces, _, _ = marching_cubes(
             sdf,
-            level=isovalue,
-            spacing=(voxel_size,) * 3,
+            level=0.0,
+            spacing=(sphere_radius,) * 3,
             gradient_direction="descent",
-            mask=np.abs(sdf - isovalue) < 2.0 * voxel_size,
+            mask=np.abs(sdf) < 2.0 * sphere_radius,
         )
         return trimesh.Trimesh(origin + vertices, faces, process=False)
-    elif "splashsurf" in backend:
-        # FIXME: genesis-world#2173 - The memory of the process grows from one reconstruction to the next. See also
-        # genesis-world#1531 (comment 3220880318) on the copies the getters of the mesh make.
-        mesh_with_data, _ = pysplashsurf.reconstruction_pipeline(
-            positions,
-            particle_radius=radius * args_dict.get("rscale", 1.0),
-            smoothing_length=2.0,
-            cube_size=0.8,
-            iso_surface_threshold=0.6,
-            mesh_smoothing_weights=True,
-            mesh_smoothing_iters=int(args_dict.get("smooth", 25)),
-            mesh_cleanup=True,
-            multi_threading=True,
-        )
-        mesh = trimesh.Trimesh(mesh_with_data.mesh.vertices, mesh_with_data.mesh.triangles, process=False)
-        gs.logger.debug(f"[splashsurf]: reconstruct vertices: {mesh.vertices.shape}, {mesh.faces.shape}")
-        return mesh
-    else:
-        gs.raise_exception(f"Unsupported backend: {backend}.")
+
+    # FIXME: genesis-world#2173 - The memory of the process grows from one reconstruction to the next. See also
+    # genesis-world#1531 (comment 3220880318) on the copies the getters of the mesh make.
+    mesh_with_data, _ = pysplashsurf.reconstruction_pipeline(
+        positions,
+        particle_radius=radius,
+        smoothing_length=2.0,
+        cube_size=0.8,
+        iso_surface_threshold=0.6,
+        mesh_smoothing_weights=True,
+        mesh_smoothing_iters=25,
+        mesh_cleanup=True,
+        multi_threading=True,
+    )
+    mesh = trimesh.Trimesh(mesh_with_data.mesh.vertices, mesh_with_data.mesh.triangles, process=False)
+    gs.logger.debug(f"[splashsurf]: reconstruct vertices: {mesh.vertices.shape}, {mesh.faces.shape}")
+    return mesh
 
 
 @nb.jit(nopython=True, cache=True, parallel=True)
@@ -925,9 +795,3 @@ class FoamGenerator:
             self.bubble_decay,
         )
         return self.foams_pos
-
-
-def filter_surface(positions, particle_radius):
-    """Return whether each particle lies at the surface of the set, which a particle with few neighbors does."""
-    neighbors_start, _ = _find_neighbors(positions, positions, 4.0 * particle_radius)
-    return np.diff(neighbors_start) < 20

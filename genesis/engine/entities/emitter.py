@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 
+import trimesh
+
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.particle as pu
@@ -109,39 +111,19 @@ class Emitter(RBC):
 
         if droplet_length > 0.0:
             if droplet_shape == "circle":
-                positions = pu.cylinder_to_particles(
-                    p_size=p_size,
-                    radius=droplet_size / 2,
-                    height=droplet_length,
-                    sampler=self._entity.sampler,
-                )
+                droplet = trimesh.primitives.Cylinder(radius=0.5 * droplet_size, height=droplet_length)
             elif droplet_shape == "sphere":  # sphere droplet ignores droplet_length
-                positions = pu.sphere_to_particles(
-                    p_size=p_size,
-                    radius=droplet_size / 2,
-                    sampler=self._entity.sampler,
-                )
+                droplet = trimesh.primitives.Sphere(radius=0.5 * droplet_size)
             elif droplet_shape == "square":
-                positions = pu.box_to_particles(
-                    p_size=p_size,
-                    size=np.array([droplet_size, droplet_size, droplet_length]),
-                    sampler=self._entity.sampler,
-                )
-            elif droplet_shape == "rectangle":
-                positions = pu.box_to_particles(
-                    p_size=p_size,
-                    size=np.array([droplet_size[0], droplet_size[1], droplet_length]),
-                    sampler=self._entity.sampler,
-                )
+                droplet = trimesh.primitives.Box(extents=(droplet_size, droplet_size, droplet_length))
             else:
-                gs.raise_exception(f"Unsupported droplet shape '{droplet_shape}'")
-
+                droplet = trimesh.primitives.Box(extents=(droplet_size[0], droplet_size[1], droplet_length))
+            positions = pu.primitive_to_particles(droplet, p_size, self._entity.sampler)
             positions = gu.transform_by_trans_R(
                 positions.astype(gs.np_float, copy=False),
                 np.asarray(pos, dtype=gs.np_float),
                 gu.z_up_to_R(direction) @ gu.axis_angle_to_R(np.array([0.0, 0.0, 1.0], dtype=gs.np_float), theta),
             )
-
             self._emit_particles(positions, speed * direction)
         else:
             gs.logger.debug("Droplet length is too short for current step. Skipping to next step.")
@@ -153,8 +135,8 @@ class Emitter(RBC):
         Parameters:
         ----------
         source_radius: float, optional
-            The radius of the sphere source. Particles will be emitted from a shell with inner radius using
-            '0.8 * source_radius' and outer radius using source_radius.
+            The radius of the sphere source. Particles are emitted from the shell between '0.4 * source_radius' and
+            source_radius.
         pos: array_like, shape=(3,)
             The center of the sphere source.
         speed: float
@@ -175,16 +157,12 @@ class Emitter(RBC):
         if particle_size is None:
             particle_size = self._entity.particle_size
 
-        positions_ = pu.shell_to_particles(
-            p_size=particle_size,
-            outer_radius=source_radius,
-            inner_radius=source_radius * 0.4,
-            sampler=self._entity.sampler,
-        )
-        positions = pos + positions_
-        dists = np.linalg.norm(positions_, axis=1)
-        positions[dists < gs.EPS] = gs.EPS
-        self._emit_particles(positions, (speed / (dists[:, None] + gs.EPS)) * positions_)
+        source = trimesh.primitives.Sphere(radius=source_radius)
+        positions = pu.primitive_to_particles(source, particle_size, self._entity.sampler)
+        dists = np.linalg.norm(positions, axis=-1)
+        is_in_shell = dists >= 0.4 * source_radius
+        positions, dists = positions[is_in_shell], dists[is_in_shell]
+        self._emit_particles(pos + positions, (speed / dists[:, None]) * positions)
 
     def _emit_particles(self, positions, vels):
         check_particles_inside_boundary(positions, self.solver.boundary_lower, self.solver.boundary_upper)
