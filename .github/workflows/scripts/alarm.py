@@ -428,8 +428,7 @@ class Alarm:
                         if len(values_prev) > 1
                         else math.nan
                     )
-                    if len(values_prev) > 1:
-                        stats_repr += f" ({fmt_num(value_ref, is_int)} ± {fmt_num(value_ci95, is_int)})"
+                    stats_repr += f" ({fmt_num(value_ref, is_int)} ± {fmt_num(value_ci95, is_int)})"
                     if sign * delta < -self.metrics_tol[metric]:
                         row_data["status"] = "regression"
 

@@ -18,10 +18,6 @@ on:
         description: JSON filters selecting baseline runs.
         type: string
         default: '{}'
-      max_valid_revisions:
-        description: Number of baseline revisions required for regression detection.
-        type: number
-        default: 5
     secrets:
       WANDB_API_KEY:
         required: false
@@ -103,7 +99,6 @@ jobs:
           WANDB_SILENT: "true"
           BASELINE_PROJECT: ${{ inputs.wandb_project || 'genesis-benchmarks-2' }}
           BASELINE_FILTERS: ${{ inputs.wandb_filters || '{}' }}
-          BASELINE_REVISIONS: ${{ inputs.max_valid_revisions || 5 }}
         run: |
           mkdir -p /tmp
           set +e
@@ -112,7 +107,7 @@ jobs:
             --mem-artifacts-dir ${{ steps.dl_mem.outputs.download-path }} \
             --wandb-project "$BASELINE_PROJECT" \
             --wandb-filters "$BASELINE_FILTERS" \
-            --max-valid-revisions "$BASELINE_REVISIONS" \
+            --max-valid-revisions 5 \
             --max-fetch-revisions 40 \
             --runtime-fps-regression-tolerance-pct 8 \
             --compile-time-regression-tolerance-pct 30 \
