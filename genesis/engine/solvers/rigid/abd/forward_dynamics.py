@@ -1614,14 +1614,9 @@ def func_ctrl_force_int_next(
 ):
     """Integrate the integral term of the controller of a dof over one substep.
 
-    `err` is the position error under position control and the velocity error under velocity control, `force_int` the
-    integral term so far, which is the time integral of the integral gain times the error, and `force` the actuation
-    force of the other terms of the controller. The integral term is a force, so it carries over a switch between
-    position and velocity control, and it stays continuous when the gain changes. It stays zero while the integral gain
-    is zero, so that setting a gain later starts from a clean integral. It keeps its value instead of integrating
-    whenever the actuation force, `force` plus the integral term, falls outside the force range of the dof on the side
-    the error pushes it to. This conditional integration keeps the integral from winding up while the actuator
-    saturates.
+    The integral term is stored as a force, the time integral of the gain times the error, so that it stays continuous
+    when the gain changes or the control mode switches between position and velocity. It stops integrating while the
+    total force exceeds the force range on the side the error pushes it to, which keeps it from winding up.
     """
     I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
     ki = dyn_info.dofs.act_ki[I_d]
