@@ -156,13 +156,16 @@ def test_position_control(show_viewer):
 @pytest.mark.parametrize("n_envs", [0, 2])
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 @pytest.mark.parametrize("robot_path", ["xml/franka_emika_panda/panda.xml"])
-def test_reset_control(n_envs, robot_path):
+# Hibernation routes the pose setters through their kernels instead of zero-copy writes
+@pytest.mark.parametrize("use_hibernation", [False, True])
+def test_reset_control(n_envs, robot_path, use_hibernation):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
         ),
         rigid_options=gs.options.RigidOptions(
             enable_collision=False,
+            use_hibernation=use_hibernation,
         ),
         show_viewer=False,
         show_FPS=False,
