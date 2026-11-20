@@ -1,0 +1,31 @@
+genesis/engine/entities/emitter.py
+  s_bd03de55a8e2ea::t_51af6c03e657ee 111,113,115,117,120,186,188-189,191
+genesis/engine/entities/particle_entity.py
+  s_bd03de55a8e2ea::t_5fd3c882dc54a2 187
+genesis/utils/particle.py
+  s_bd03de55a8e2ea::t_b9544cbdccb8ca 263,265,273,282-284,286-287,290-291,293-298,301-305,307-308
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6ba71391b989fc50d7cae861331675d22e1a875b",
+  "prompts": {},
+  "sessions": {
+    "s_4d969401aad039": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f2e3b45b-a76a-4a65-841d-9b42f7f8c42c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_bd03de55a8e2ea": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "913814ec-208b-4803-874b-4ea1fef1f8b3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
