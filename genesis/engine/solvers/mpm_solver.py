@@ -654,6 +654,28 @@ Please decrease the simulation timestep or adjust the material parameters."""
         tensor = self._read_data(self.mpm_state.particles.actu, envs_idx, particles_idx, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
 
+    def get_particles_stress(self, material, particles_idx=None, envs_idx=None):
+        """Read Cauchy stress for particles of one elastic material."""
+        if type(material) is not gs.materials.MPM.Elastic:
+            gs.raise_exception("Stress readout is only supported for MPM.Elastic material.")
+        stress, particles_idx, envs_idx = self._sanitize_io_variables(
+            None, particles_idx, self.n_particles, "particles_idx", envs_idx, element_shape=(3, 3), batched_idx=True
+        )
+        errno = torch.zeros(1, dtype=gs.tc_int, device=gs.device)
+        kernel_get_particles_stress(
+            particles_idx,
+            envs_idx,
+            stress,
+            self.mpm_state,
+            self.mpm_info,
+            material.update_stress,
+            has_svd=material.needs_svd,
+            errno=errno,
+        )
+        if errno.item():
+            gs.raise_exception("Cauchy stress requires positive volume for every active particle.")
+        return stress[0] if self.n_envs == 0 else stress
+
     @mutates(StateChange.MODEL)
     def set_particles_muscle_group(self, muscle_group, particles_idx=None) -> None:
         """Set the muscle group of some particles, shared by every environment."""
@@ -883,6 +905,51 @@ def func_quadratic_bspline_stencil(pos: qd.types.vector(3), mpm_info: MPMInfo):
     fx = pos * inv_dx - base.cast(gs.qd_float)
     w = qd.Matrix.rows([0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2])
     return base, fx, w
+
+
+@qd.kernel
+def kernel_get_particles_stress(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    stress: qd.types.ndarray(),
+    mpm_state: MPMState,
+    mpm_info: MPMInfo,
+    update_stress: qd.template(),
+    has_svd: qd.template(),
+    errno: qd.types.ndarray(),
+):
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        stress_cauchy = qd.Matrix.zero(gs.qd_float, 3, 3)
+        if mpm_state.particles.is_active[i_p, i_b]:
+            F = mpm_state.particles.F[i_p, i_b]
+            J = F.determinant()
+            if J > 0.0:
+                U = qd.Matrix.identity(gs.qd_float, 3)
+                S = qd.Matrix.identity(gs.qd_float, 3)
+                V = qd.Matrix.identity(gs.qd_float, 3)
+                if qd.static(has_svd):
+                    U, S, V = gu.qd_svd(F)
+                # The elastic constitutive function returns Kirchhoff stress, tau = J * sigma
+                stress_cauchy = (
+                    update_stress(
+                        U=U,
+                        S=S,
+                        V=V,
+                        F_tmp=F,
+                        F_new=F,
+                        J=J,
+                        Jp=mpm_state.particles.Jp[i_p, i_b],
+                        actu=mpm_state.particles.actu[i_p, i_b],
+                        m_dir=mpm_info.particles.muscle_direction[i_p],
+                    )
+                    / J
+                )
+            else:
+                qd.atomic_max(errno[0], 1)
+        for i, j in qd.static(qd.ndrange(3, 3)):
+            stress[i_b_, i_p_, i, j] = stress_cauchy[i, j]
 
 
 @qd.kernel(fastcache=True)

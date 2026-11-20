@@ -9,6 +9,136 @@ from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("model", ["corotation", "neohooken"])
+def test_particles_stress(model, n_envs, show_viewer, tol):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.001,
+            substeps=2,
+            requires_grad=True,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            grid_density=32,
+            lower_bound=(-0.3, -0.3, 0.0),
+            upper_bound=(0.3, 0.3, 0.6),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, -0.6, 0.65),
+            camera_lookat=(-0.04, 0.05, 0.3),
+            camera_fov=35,
+        ),
+        show_viewer=show_viewer,
+    )
+    liquid = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.15, 0.0, 0.3),
+            size=(0.04, 0.04, 0.04),
+        ),
+        material=gs.materials.MPM.Liquid(
+            sampler="regular",
+        ),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.15, 0.1, 0.3),
+            size=(0.04, 0.04, 0.04),
+        ),
+        material=liquid.material,
+    )
+    elastic = scene.add_entity(
+        spec=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0.1, 0.0, 0.3),
+                size=(0.06, 0.06, 0.06),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=1200.0,
+                nu=0.25,
+                sampler="regular",
+                model=model,
+            ),
+            vis=gs.options.EntityVisOptions(debug=True),
+        ),
+    )
+    scene.build(n_envs=n_envs)
+    snapshot_initial = scene.get_state()
+    assert_equal(elastic.get_particles_stress(), 0.0)
+    with pytest.raises(gs.GenesisException, match="MPM.Elastic"):
+        liquid.get_particles_stress()
+
+    snapshot = scene.get_state()
+    state = snapshot.solvers["MPMSolver"].arrays
+    particles_slice = slice(elastic.particle_start, elastic.particle_start + elastic.n_particles)
+    rotation = torch.tensor(
+        [
+            [0.8, -0.6, 0.0],
+            [0.6, 0.8, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=gs.tc_float,
+        device=gs.device,
+    )
+    stretches = torch.tensor([1.2, 0.8, 1.1], dtype=gs.tc_float, device=gs.device)
+    deformation = torch.diag(stretches)
+    with torch.no_grad():
+        for i_b in range(max(n_envs, 1)):
+            state["mpm_state.particles.F"][particles_slice, i_b] = (1.0 - 0.1 * i_b) * deformation
+            state["mpm_state.particles.F"][
+                elastic.particle_start + elastic.n_particles // 2 : particles_slice.stop, i_b
+            ] = (1.0 - 0.1 * i_b) * rotation @ deformation
+    scene.reset(state=snapshot)
+    stress_before = elastic.get_particles_stress()
+    assert stress_before.shape == ((n_envs,) if n_envs else ()) + (elastic.n_particles, 3, 3)
+    assert stress_before.device == stretches.device
+    assert stress_before.dtype == stretches.dtype
+    stress_saved = stress_before.clone()
+    stress_diagonal = stress_before[..., 0, :, :]
+    stress_rotated = stress_before[..., -1, :, :]
+    assert_allclose(stress_rotated / 1200.0, rotation @ stress_diagonal @ rotation.T / 1200.0, tol=tol)
+
+    # Differentiate the strain energy independently of the solver's constitutive stress function
+    for _ in range(2):
+        deformation = scene.mpm_solver.get_state().arrays["mpm_state.particles.F"][particles_slice].transpose(0, 1)
+        deformation = (deformation if n_envs else deformation[0]).detach().requires_grad_(True)
+        volume_ratio = torch.linalg.det(deformation)
+        if model == "corotation":
+            energy = 480.0 * (torch.linalg.svdvals(deformation) - 1.0).square().sum(dim=-1)
+            energy += 240.0 * (volume_ratio - 1.0).square()
+        else:
+            energy = 240.0 * (deformation.square().sum(dim=(-2, -1)) - 3.0)
+            energy += -480.0 * volume_ratio.log() + 240.0 * volume_ratio.log().square()
+        piola = torch.autograd.grad(energy.sum(), deformation)[0]
+        stress_reference = (piola @ deformation.transpose(-2, -1) / volume_ratio[..., None, None]).detach()
+        stress = elastic.get_particles_stress()
+        assert_allclose(stress / 1200.0, stress_reference / 1200.0, tol=tol)
+        assert not stress.requires_grad
+        if n_envs:
+            assert_equal(elastic.get_particles_stress(envs_idx=[1, 0]), stress.flip(0))
+            assert_equal(elastic.get_particles_stress(envs_idx=-1), stress[-1:])
+            assert_equal(elastic.get_particles_stress(envs_idx=[]), stress[:0])
+            assert elastic.get_particles_stress(envs_idx=[]).shape == (0, elastic.n_particles, 3, 3)
+        scene.step()
+
+    assert_equal(stress_before, stress_saved)
+    scene.reset(state=snapshot_initial)
+    assert_equal(elastic.get_particles_stress(), 0.0)
+    state = snapshot_initial.solvers["MPMSolver"].arrays
+    with torch.no_grad():
+        state["mpm_state.particles.F"][particles_slice] = rotation
+    scene.reset(state=snapshot_initial)
+    assert_allclose(elastic.get_particles_stress() / 1200.0, 0.0, tol=tol)
+    with torch.no_grad():
+        state["mpm_state.particles.F"][elastic.particle_start, :, 0, 0] = -1.0
+    scene.reset(state=snapshot_initial)
+    with pytest.raises(gs.GenesisException, match="positive"):
+        elastic.get_particles_stress()
+    state["mpm_state.particles.is_active"][elastic.particle_start] = 0
+    scene.reset(state=snapshot_initial)
+    assert_allclose(elastic.get_particles_stress() / 1200.0, 0.0, tol=tol)
+
+
+@pytest.mark.required
 def test_particle_constraints(show_viewer, tol):
     GRAVITY = 9.81
     N_STEPS = 5
