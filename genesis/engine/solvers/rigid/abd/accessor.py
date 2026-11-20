@@ -415,14 +415,24 @@ def kernel_set_geoms_friction_ratio(
 @qd.kernel(fastcache=True)
 def kernel_set_qpos(
     qs_idx: qd.types.ndarray(),
+    is_dof_set: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     qpos: qd.types.ndarray(),
+    dyn_state: DynState,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
+    """Set the given configuration entries, and restart the integral term of the dofs flagged by the mask."""
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_q_, i_b_ in qd.ndrange(qs_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(rigid_info.qpos))):
         rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]] = qpos[i_b_, i_q_]
+
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+    for i_d, i_b_ in qd.ndrange(
+        is_dof_set.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_state.dofs.ctrl_force_int))
+    ):
+        if is_dof_set[i_d]:
+            dyn_state.dofs.ctrl_force_int[i_d, envs_idx[i_b_]] = 0.0  # Restart the integral term on a pose write
 
 
 @qd.kernel(fastcache=True)
@@ -713,30 +723,6 @@ def kernel_set_dofs_zero_velocity(
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_state.dofs.vel))):
         dyn_state.dofs.vel[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
-
-
-@qd.kernel(fastcache=True)
-def kernel_clear_qs_ctrl_force_int(
-    is_q_set: qd.types.ndarray(),
-    is_env_set: qd.types.ndarray(),
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
-):
-    """Restart the integral term of the controller of the dofs of each link whose configuration is set."""
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_l, i_b in qd.ndrange(
-        dyn_info.links.q_start.shape[0], is_env_set.shape[0], axes=qd.static(eoa(dyn_state.dofs.ctrl_force_int))
-    ):
-        if is_env_set[i_b]:
-            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-            has_q_set = False
-            for i_q in range(dyn_info.links.q_start[I_l], dyn_info.links.q_end[I_l]):
-                if is_q_set[i_q]:
-                    has_q_set = True
-            if has_q_set:
-                for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
-                    dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0
 
 
 @qd.kernel(fastcache=True)

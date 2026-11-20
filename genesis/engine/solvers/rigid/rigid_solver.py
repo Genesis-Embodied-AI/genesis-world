@@ -70,7 +70,6 @@ from ..kinematic_solver import (
 )
 from .abd.accessor import (
     ConstraintType,
-    kernel_clear_qs_ctrl_force_int,
     kernel_control_dofs_force,
     kernel_control_dofs_position,
     kernel_control_dofs_position_velocity,
@@ -2295,10 +2294,17 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.constraint_solver is not None:
             self.constraint_solver.reset(envs_idx)
 
+        # Restart the integral term on a pose write, for every dof of each link with a configuration entry set
+        is_link_set = torch.zeros((self.n_links_,), dtype=gs.tc_bool, device=gs.device)
+        is_link_set[self._qs_link_idx[indices_to_mask(qs_idx)]] = True
+        is_dof_set = is_link_set[self._dofs_link_idx]
         if gs.use_zerocopy:
             data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
             mask = (0, *indices_to_mask(qs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, qs_idx)
             assign_indexed_tensor(data, mask, qpos)
+            ctrl_force_int = qd_to_torch(self.dyn_state.dofs.ctrl_force_int, transpose=True, copy=False)
+            envs_mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
+            ctrl_force_int[envs_mask] = torch.where(is_dof_set, 0.0, ctrl_force_int[envs_mask])
             if mask and isinstance(mask[0], torch.Tensor):
                 envs_idx = mask[0].reshape((-1,))
             if gs.backend == gs.metal:
@@ -2322,14 +2328,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     self.rigid_config,
                 )
 
-            kernel_set_qpos(qs_idx, envs_idx, qpos, self.rigid_info, self.rigid_config)
+            kernel_set_qpos(qs_idx, is_dof_set, envs_idx, qpos, self.dyn_state, self.rigid_info, self.rigid_config)
 
-        # Restart the integral term on a pose write
-        is_q_set = torch.zeros((self.n_qs_,), dtype=gs.tc_bool, device=gs.device)
-        is_q_set[indices_to_mask(qs_idx)] = True
-        is_env_set = torch.zeros((self.n_envs_,), dtype=gs.tc_bool, device=gs.device)
-        is_env_set[indices_to_mask(envs_idx)] = True
-        kernel_clear_qs_ctrl_force_int(is_q_set, is_env_set, self.dyn_state, self.dyn_info, self.rigid_config)
         self.clear_errno(envs_idx)
 
         # The warm start of the detection was found at the previous pose. The contacts found there are not fresh until
