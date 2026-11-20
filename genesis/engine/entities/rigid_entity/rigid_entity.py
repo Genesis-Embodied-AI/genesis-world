@@ -2446,8 +2446,7 @@ class RigidEntity(KinematicEntity):
         kp : array_like
             The position gains to set.
         dofs_idx_local : None | array_like, optional
-            The indices of the dofs to set. If None, all dofs will be set. Note that here this uses the local `q_idx`,
-            not the scene-level one. Defaults to None.
+            The indices of the dofs to set. If None, all dofs will be set. Defaults to None.
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         """
@@ -2466,8 +2465,7 @@ class RigidEntity(KinematicEntity):
         kv : array_like
             The velocity gains to set.
         dofs_idx_local : None | array_like, optional
-            The indices of the dofs to set. If None, all dofs will be set. Note that here this uses the local `q_idx`,
-            not the scene-level one. Defaults to None.
+            The indices of the dofs to set. If None, all dofs will be set. Defaults to None.
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         """
@@ -2490,8 +2488,7 @@ class RigidEntity(KinematicEntity):
         ki : array_like
             The integral gains to set, non-negative.
         dofs_idx_local : None | array_like, optional
-            The indices of the dofs to set. If None, all dofs will be set. Note that here this uses the local `q_idx`,
-            not the scene-level one. Defaults to None.
+            The indices of the dofs to set. If None, all dofs will be set. Defaults to None.
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         """
@@ -2843,8 +2840,7 @@ class RigidEntity(KinematicEntity):
         Parameters
         ----------
         dofs_idx_local : None | array_like, optional
-            The indices of the dofs to get. If None, all dofs will be returned. Note that here this uses the local
-            `q_idx`, not the scene-level one. Defaults to None.
+            The indices of the dofs to get. If None, all dofs will be returned. Defaults to None.
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
 
@@ -2864,8 +2860,7 @@ class RigidEntity(KinematicEntity):
         Parameters
         ----------
         dofs_idx_local : None | array_like, optional
-            The indices of the dofs to get. If None, all dofs will be returned. Note that here this uses the local
-            `q_idx`, not the scene-level one. Defaults to None.
+            The indices of the dofs to get. If None, all dofs will be returned. Defaults to None.
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
 
@@ -2885,8 +2880,7 @@ class RigidEntity(KinematicEntity):
         Parameters
         ----------
         dofs_idx_local : None | array_like, optional
-            The indices of the dofs to get. If None, all dofs will be returned. Note that here this uses the local
-            `q_idx`, not the scene-level one. Defaults to None.
+            The indices of the dofs to get. If None, all dofs will be returned. Defaults to None.
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
 
