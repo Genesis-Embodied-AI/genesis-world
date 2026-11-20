@@ -2437,14 +2437,18 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def set_dofs_kp(self, kp, dofs_idx_local=None, envs_idx=None):
         """
-        Set the entity's dofs' positional gains for the PD controller.
+        Set the position gains (kp) of the entity's dofs, used by position control.
+
+        Position control applies the force kp * (q_target - q) + kv * (v_target - v), so kp is a force per unit of
+        position (N/m, or N*m/rad for a rotational dof).
 
         Parameters
         ----------
         kp : array_like
-            The positional gains to set.
+            The position gains to set.
         dofs_idx_local : None | array_like, optional
-            The indices of the dofs to set. If None, all dofs will be set. Note that here this uses the local `q_idx`, not the scene-level one. Defaults to None.
+            The indices of the dofs to set. If None, all dofs will be set. Note that here this uses the local `q_idx`,
+            not the scene-level one. Defaults to None.
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         """
@@ -2454,14 +2458,18 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def set_dofs_kv(self, kv, dofs_idx_local=None, envs_idx=None):
         """
-        Set the entity's dofs' velocity gains for the PD controller.
+        Set the velocity gains (kv) of the entity's dofs, used by position and velocity control.
+
+        The velocity term is kv * (v_target - v), so kv is a force per unit of velocity (N*s/m, or N*m*s/rad for a
+        rotational dof).
 
         Parameters
         ----------
         kv : array_like
             The velocity gains to set.
         dofs_idx_local : None | array_like, optional
-            The indices of the dofs to set. If None, all dofs will be set. Note that here this uses the local `q_idx`, not the scene-level one. Defaults to None.
+            The indices of the dofs to set. If None, all dofs will be set. Note that here this uses the local `q_idx`,
+            not the scene-level one. Defaults to None.
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         """
@@ -2471,14 +2479,12 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def set_dofs_ki(self, ki, dofs_idx_local=None, envs_idx=None):
         """
-        Set the entity's dofs' integral gains for the position and velocity controllers. Zero by default.
+        Set the integral gains (ki) of the entity's dofs, used by position and velocity control. Zero by default.
 
-        The integral term is the gain times the time integral of the error, a force. Under position control it
-        integrates the position error, so the gain is a force per unit of position and time (N/(m*s), or N*m/(rad*s) for
-        a rotational dof). Under velocity control it integrates the velocity error, so the gain is a stiffness (N/m, or
-        N*m/rad). The integral term restarts from zero on `scene.reset`, on any write of the pose of the link of the dof
-        (`set_pos`, `set_quat`, `set_qpos`, `set_dofs_position`), and on any step under force control or with a zero
-        gain. It carries over a switch between position and velocity control.
+        The integral term is ki times the time integral of the error, so ki is in N/(m*s) under position control and in
+        N/m under velocity control (N*m/(rad*s) and N*m/rad for a rotational dof). It restarts from zero on
+        `scene.reset`, on any pose write of the link of the dof (`set_pos`, `set_quat`, `set_qpos`,
+        `set_dofs_position`), and on any step under force control or with a zero gain.
 
         Parameters
         ----------
@@ -2833,19 +2839,20 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def get_dofs_kp(self, dofs_idx_local=None, envs_idx=None):
         """
-        Get the positional gain (kp) for the entity's dofs used by the PD controller.
+        Get the position gains (kp) of the entity's dofs, used by position control.
 
         Parameters
         ----------
         dofs_idx_local : None | array_like, optional
-            The indices of the dofs to get. If None, all dofs will be returned. Note that here this uses the local `q_idx`, not the scene-level one. Defaults to None.
+            The indices of the dofs to get. If None, all dofs will be returned. Note that here this uses the local
+            `q_idx`, not the scene-level one. Defaults to None.
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
 
         Returns
         -------
         kp : torch.Tensor, shape (n_dofs,) or (n_envs, n_dofs)
-            The positional gain (kp) for the entity's dofs.
+            The position gains (kp) of the entity's dofs.
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_dofs_kp(dofs_idx, envs_idx)
@@ -2853,19 +2860,20 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def get_dofs_kv(self, dofs_idx_local=None, envs_idx=None):
         """
-        Get the velocity gain (kv) for the entity's dofs used by the PD controller.
+        Get the velocity gains (kv) of the entity's dofs, used by position and velocity control.
 
         Parameters
         ----------
         dofs_idx_local : None | array_like, optional
-            The indices of the dofs to get. If None, all dofs will be returned. Note that here this uses the local `q_idx`, not the scene-level one. Defaults to None.
+            The indices of the dofs to get. If None, all dofs will be returned. Note that here this uses the local
+            `q_idx`, not the scene-level one. Defaults to None.
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
 
         Returns
         -------
         kv : torch.Tensor, shape (n_dofs,) or (n_envs, n_dofs)
-            The velocity gain (kv) for the entity's dofs.
+            The velocity gains (kv) of the entity's dofs.
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_dofs_kv(dofs_idx, envs_idx)
@@ -2873,7 +2881,7 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def get_dofs_ki(self, dofs_idx_local=None, envs_idx=None):
         """
-        Get the integral gain (ki) for the entity's dofs used by the position and velocity controllers.
+        Get the integral gains (ki) of the entity's dofs, used by position and velocity control.
 
         Parameters
         ----------
@@ -2886,7 +2894,7 @@ class RigidEntity(KinematicEntity):
         Returns
         -------
         ki : torch.Tensor, shape (n_dofs,) or (n_envs, n_dofs)
-            The integral gain (ki) for the entity's dofs.
+            The integral gains (ki) of the entity's dofs.
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_dofs_ki(dofs_idx, envs_idx)
