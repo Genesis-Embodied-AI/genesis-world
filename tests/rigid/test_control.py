@@ -119,7 +119,7 @@ def test_position_control(show_viewer):
         vel_err = MOTORS_VEL_TARGET - dofs_vel
         err = torch.where(is_vel_ctrl, vel_err, pos_err)
         dofs_torque_base = torch.where(is_vel_ctrl, 0.0, MOTORS_KP * pos_err) + MOTORS_KD * vel_err
-        force_int_next = force_int + MOTORS_KI * err * scene.sim._substep_dt
+        force_int_next = force_int + MOTORS_KI * err * scene.sim.substep_dt
         dofs_torque = dofs_torque_base + force_int_next
         is_winding_up = ((dofs_torque > robot_force_range[:, 1]) & (err > 0.0)) | (
             (dofs_torque < robot_force_range[:, 0]) & (err < 0.0)
