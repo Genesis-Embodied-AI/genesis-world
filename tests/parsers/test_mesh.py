@@ -1058,6 +1058,8 @@ def test_convex_decompose_cache(monkeypatch, tmp_path, asset_tmp_path):
         for part, cached_part in zip(parts, cached_parts):
             assert_allclose(part.vertices, cached_part.vertices * (scale / SCALES[0]), rtol=1e-6)
             assert_equal(part.faces, cached_part.faces)
+            # Native code reading a cached array, such as the IPC backend, requires the alignment of any NumPy array.
+            assert part.vertices.ctypes.data % 16 == 0 and part.faces.ctypes.data % 16 == 0
 
     # A decomposition computed by another coacd release is never reused.
     real_version = importlib.metadata.version
