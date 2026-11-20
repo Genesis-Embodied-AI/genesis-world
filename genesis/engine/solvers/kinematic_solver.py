@@ -424,10 +424,11 @@ class KinematicSolver(Solver):
             sparse_solve=False,
             integrator=gs.integrator.approximate_implicitfast,
             solver_type=gs.constraint_solver.CG,
+            has_dynamics=False,
         )
 
     def _create_data_manager(self):
-        self.data_manager = RigidData(self, kinematic_only=True)
+        self.data_manager = RigidData(self)
         self._errno = self.data_manager.errno
         self.rigid_info = self.data_manager.rigid_info
         self.dyn_info = self.data_manager.dyn_info
@@ -965,7 +966,9 @@ class KinematicSolver(Solver):
             )
             if self.n_envs == 0:
                 qpos = qpos[None]
-            kernel_set_qpos(qs_idx, envs_idx, qpos, self.rigid_info, self.rigid_config)
+            # The solver has no controller, whose integral term the mask restarts (see kernel_set_qpos)
+            is_dof_set = torch.empty((0,), dtype=gs.tc_bool, device=gs.device)
+            kernel_set_qpos(qs_idx, is_dof_set, envs_idx, qpos, self.dyn_state, self.rigid_info, self.rigid_config)
 
         if not skip_forward:
             if not isinstance(envs_idx, torch.Tensor):
@@ -1027,7 +1030,9 @@ class KinematicSolver(Solver):
         positions[:, dofs_idx] = position
         is_dof_set = torch.zeros((self.n_dofs,), dtype=gs.tc_bool, device=gs.device)
         is_dof_set[dofs_idx] = True
-        kernel_set_dofs_position(is_dof_set, envs_idx, positions, self.dyn_info, self.rigid_info, self.rigid_config)
+        kernel_set_dofs_position(
+            is_dof_set, envs_idx, positions, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
+        )
 
         kernel_forward_kinematics(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         self._is_forward_pos_updated = True

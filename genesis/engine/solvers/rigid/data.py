@@ -185,6 +185,7 @@ class DofsInfo(Data, kind=DataKind.INFO, shape=(DOFS, DOFS_INFO_ENVS)):
     limit: qd.Tensor = field((float, 2))
     act_gain: qd.Tensor = field(float)
     act_bias: qd.Tensor = field((float, 3))
+    act_ki: qd.Tensor = field(float, labels=DYNAMICS)
     force_range: qd.Tensor = field((float, 2))
     dof_length: qd.Tensor = field(float)
 
@@ -221,6 +222,10 @@ class DofsState(Data, kind=DataKind.DERIVED, shape=(DOFS, ENVS)):
     ctrl_vel: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
     ctrl_mode: qd.Tensor = field(int, kind=DataKind.STATE)
     is_hibernated: qd.Tensor = field(int, kind=DataKind.STATE)
+    # The integral term of the position or velocity controller, a force (see func_ctrl_force_int_next). A write of the
+    # pose of a link restarts it for the dofs of the link, since the error accumulated before the jump is meaningless.
+    ctrl_force_int: qd.Tensor = field(float, kind=DataKind.STATE, labels=DYNAMICS, grad=True)
+    ctrl_force_int_next: qd.Tensor = field(float, kind=DataKind.SCRATCH, labels=DYNAMICS, grad=True)
 
 
 class LinksInfo(Data, kind=DataKind.INFO, shape=(LINKS, LINKS_INFO_ENVS)):
@@ -491,6 +496,8 @@ class RigidConfig(Config):
     integrator: gs.integrator
     solver_type: gs.constraint_solver
     requires_grad: bool
+    # Whether the solver simulates dynamics. The arrays labelled 'dynamics' are placeholders otherwise (see RigidData).
+    has_dynamics: bool = True
     # -1 to let the dispatch pick, 0 or 1 to force it
     prefer_decomposed_solver: int = -1
     # Whether the Hessian without its cone blocks persists in the mirror slots of nt_H (see nt_H in ConstraintState)
@@ -602,9 +609,9 @@ class RigidData(Data):
     kinematics_scratch: KinematicsScratch
     errno: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
 
-    def __init__(self, solver, kinematic_only: bool):
-        is_dynamic = not kinematic_only
+    def __init__(self, solver):
         config, options = solver.rigid_config, solver._options
+        is_dynamic = config.has_dynamics
         entities = solver.entities
         entity_dofs = max([entity.n_dofs for entity in entities], default=0)
         sizes = dict(
@@ -661,7 +668,7 @@ class RigidData(Data):
                 else None
             },
             unused=dict(
-                dynamics=kinematic_only,
+                dynamics=not is_dynamic,
                 level_sweep=not (is_dynamic and config.enable_level_sweep),
                 tiled_mass=not (is_dynamic and config.enable_register_tiled_mass),
                 midpoint=not (is_dynamic and config.integrator != gs.integrator.Euler),
