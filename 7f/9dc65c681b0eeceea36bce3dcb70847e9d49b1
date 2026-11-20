@@ -1,0 +1,29 @@
+examples/README.md
+  s_6331e9b5eb051b::t_4d91d5d91d1757 57,123,144
+examples/rl/README.md
+  s_6331e9b5eb051b::t_4d91d5d91d1757 6-20
+examples/differentiable/rigid_throw_to_target.py
+  s_6331e9b5eb051b::t_5dfaade8567a36 1-17,19,21,25-27,32-33,35-37,42-44,47-48,51-52,58-73,76,79-85,89-205,207-209,211-222
+examples/rl/go2_terrain_env.py
+  s_6331e9b5eb051b::t_bd6b1cb7b1e826 1-376
+examples/rl/go2_terrain_eval.py
+  s_6331e9b5eb051b::t_ad0d6aa7fccfb1 2,4-10,16,18-19,21-24,26-27,32-42,45-83,85-86,89-96,98-165
+examples/rl/go2_terrain_train.py
+  s_6331e9b5eb051b::t_d2768696ca0f72 1-201
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7f9dc65c681b0eeceea36bce3dcb70847e9d49b1",
+  "prompts": {},
+  "sessions": {
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
