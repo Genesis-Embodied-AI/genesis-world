@@ -2438,8 +2438,7 @@ class RigidEntity(KinematicEntity):
         """
         Set the position gains (kp) of the entity's dofs, used by position control.
 
-        Position control applies the force kp * (q_target - q) + kv * (v_target - v), so kp is a force per unit of
-        position (N/m, or N*m/rad for a rotational dof).
+        The position term is kp * (q_target - q), with kp in N/m (or N*m/rad for a rotational dof).
 
         Parameters
         ----------
@@ -2459,8 +2458,7 @@ class RigidEntity(KinematicEntity):
         """
         Set the velocity gains (kv) of the entity's dofs, used by position and velocity control.
 
-        The velocity term is kv * (v_target - v), so kv is a force per unit of velocity (N*s/m, or N*m*s/rad for a
-        rotational dof).
+        The velocity term is kv * (v_target - v), with kv in N*s/m (or N*m*s/rad for a rotational dof).
 
         Parameters
         ----------
@@ -2480,10 +2478,11 @@ class RigidEntity(KinematicEntity):
         """
         Set the integral gains (ki) of the entity's dofs, used by position and velocity control. Zero by default.
 
-        The integral term is ki times the time integral of the error, so ki is in N/(m*s) under position control and in
-        N/m under velocity control (N*m/(rad*s) and N*m/rad for a rotational dof). It restarts from zero on
-        `scene.reset`, on any pose write of the link of the dof (`set_pos`, `set_quat`, `set_qpos`,
-        `set_dofs_position`), and on any step under force control or with a zero gain.
+        The integral term is ki * integral((q_target - q) dt) under position control, with ki in N/(m*s) (or
+        N*m/(rad*s) for a rotational dof), and ki * integral((v_target - v) dt) under velocity control, with ki in N/m
+        (or N*m/rad for a rotational dof).
+        It restarts from zero on `scene.reset`, on any pose write of the link of the dof (`set_pos`, `set_quat`,
+        `set_qpos`, `set_dofs_position`), and on any step under force control or with a zero gain.
 
         Parameters
         ----------
