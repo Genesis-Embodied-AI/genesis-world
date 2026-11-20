@@ -195,6 +195,9 @@ class Emitter(RBC):
         """
         assert self._entity is not None
 
+        if source_radius <= 0.0:
+            gs.raise_exception(f"The radius of the source must be positive, got {source_radius}.")
+
         pos = np.asarray(pos, dtype=gs.np_float)
 
         if particle_size is None:
