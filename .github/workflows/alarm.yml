@@ -13,7 +13,6 @@ on:
       wandb_project:
         description: W&B project containing baseline measurements.
         type: string
-        default: genesis-benchmarks-2
       wandb_filters:
         description: JSON filters selecting baseline runs.
         type: string
@@ -97,7 +96,7 @@ jobs:
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
           WANDB_ENTITY: genesis-ai-company
           WANDB_SILENT: "true"
-          BASELINE_PROJECT: ${{ inputs.wandb_project || 'genesis-benchmarks-2' }}
+          BASELINE_PROJECT: ${{ inputs.wandb_project }}
           BASELINE_FILTERS: ${{ inputs.wandb_filters || '{}' }}
         run: |
           mkdir -p /tmp
@@ -143,7 +142,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-comparison-tables
-          overwrite: true
           path: |
             /tmp/runtime_fps.csv
             /tmp/compile_time.csv
