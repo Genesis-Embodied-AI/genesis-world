@@ -1,0 +1,23 @@
+genesis/engine/entities/base_entity.py
+  s_4d969401aad039::t_a08fae2f86704c 238-239
+  s_4d969401aad039::t_0bb0a1c0b3c59e 240-241,246-255
+  s_4d969401aad039::t_485445ef371b34 242-245
+tests/rigid/test_kinematics.py
+  s_4d969401aad039::t_bc84ce0bdd5c73 836,838-843,845-849
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "228fefd9ccd199e74888b5b565a501b2388a68dd",
+  "prompts": {},
+  "sessions": {
+    "s_4d969401aad039": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f2e3b45b-a76a-4a65-841d-9b42f7f8c42c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
