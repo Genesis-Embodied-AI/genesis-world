@@ -1,7 +1,7 @@
 """Check explicit compiler baselines independently of the simulation test suite."""
 
 # Currently run manually, not as part of CI:
-# python -m pytest .github/workflows/scripts/tests/test_alarm_baseline.py -v
+# python -m pytest -o addopts= .github/workflows/scripts/tests/test_alarm_baseline.py -v
 
 import os
 import runpy

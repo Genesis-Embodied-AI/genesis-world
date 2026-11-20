@@ -175,7 +175,8 @@ jobs:
           CHECK_OUTPUT: ${{ env.CHECK_OUTPUT }}
           HAS_REGRESSIONS: ${{ env.HAS_REGRESSIONS }}
           HAS_ALERTS: ${{ env.HAS_ALERTS }}
-          HAS_ERRORS: ${{ failure() && '1' || env.HAS_ERRORS }}
+          HAS_ERRORS: >-
+            ${{ (steps.analyze.outcome != 'success' || steps.upload.outcome != 'success') && '1' || env.HAS_ERRORS }}
           COMPARISON_CONTEXT: ${{ inputs.comparison_context }}
           ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
         with:
