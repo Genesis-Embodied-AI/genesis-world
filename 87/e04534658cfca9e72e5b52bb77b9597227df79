@@ -1,0 +1,35 @@
+examples/README.md
+  s_6331e9b5eb051b::t_39e99a20683a42 86-87,89,91-92
+tests/test_examples.py
+  s_6331e9b5eb051b::t_39e99a20683a42 25
+examples/multiphysics/ipc_README.md
+  s_6331e9b5eb051b::t_39e99a20683a42 3-4,7-8,10,12,14,16-17,19,21,23
+README.md
+  s_6331e9b5eb051b::t_39e99a20683a42 59,61,63,65,234,236
+examples/multiphysics/ipc_fold_towel.py
+  s_6331e9b5eb051b::t_c622f3f54fdc5d 1-26,37,40-50,57-59,62-65,69,72,77-78,81,84-85,87-100,103-119,123,126,128-131,134-136,138-139,142,146-153,157-181,185-257,260-261,263-264,266-267,269,271-272,274-277,293-296,301-306
+examples/multiphysics/rigid_mpm_fruit_ninja.py
+  s_6331e9b5eb051b::t_80c4973ccb09da 1-15,17-19,21-22,24-79,84-86,89-92,96-98,100-105,108-110,118-142,144,148-149,152-156,158-159,161,164-174,178-275
+examples/multiphysics/rigid_mpm_snowplow.py
+  s_6331e9b5eb051b::t_89b161f39e0c0f 1-16,18-20,25-89,94-98,101-104,108-109,112-113,116-118,123-128,130-136,139-147,154-163,167-173,175-176,178-179,181-184,187-211,213-227
+examples/multiphysics/soft_grasp.py
+  s_6331e9b5eb051b::t_1db8e95e8a9a23 1-17,20-22,25-63,69,71-73,76-79,81-83,86,95-101,105-107,112-113,115-124,126,129-137,140-150,152-155,157-181,185-193,195-198,200-201,203-205,207-212,214-217,219-271
+examples/multiphysics/sph_mpm_bathtub.py
+  s_6331e9b5eb051b::t_5eb5c01db05edd 1-15,18-20,23-69,74-76,79-84,88-89,92-94,96-100,103-105,110-133,135-136,138-142,144-145,147,149,155-156,159,161-162,165,168-190,192-193,195-221,224-255
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "87e04534658cfca9e72e5b52bb77b9597227df79",
+  "prompts": {},
+  "sessions": {
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
