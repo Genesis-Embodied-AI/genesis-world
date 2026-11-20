@@ -1,0 +1,39 @@
+genesis/engine/entities/emitter.py
+  s_4d969401aad039::t_7eb82b92b33aee 113,115,117,119,122
+  s_4d969401aad039::t_dde7281976ab60 188-192
+  s_4d969401aad039::t_8bcc433bf280d9 4-5
+  s_4d969401aad039::t_eda37e236a5961 169-170
+genesis/utils/particle.py
+  s_4d969401aad039::t_7ebff2309ec25e 278,280,282-283,285,287-289,291-296,298
+  s_4d969401aad039::t_ce9371906640b7 51,103
+genesis/engine/force_fields.py
+  s_4e532cc51f4368::t_025a1a319347fc 9-13,16-18,77,118,276,310,325,433,441
+tests/particles/test_pbd.py
+  s_4e532cc51f4368::t_6711a0793a3344 270,276,291-297,303,305-308,312-313,351,354,356-358
+genesis/engine/solvers/rigid/rigid_solver.py
+  s_4e532cc51f4368::t_b3d6eabf6f5612 1463-1464,1466-1471
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2b53922fdfab051ddbaac8fcb7e4cd8046cd7d6e",
+  "prompts": {},
+  "sessions": {
+    "s_4d969401aad039": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f2e3b45b-a76a-4a65-841d-9b42f7f8c42c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_4e532cc51f4368": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "70ed08a1-5a04-49fd-9697-c03270ba2dff",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
