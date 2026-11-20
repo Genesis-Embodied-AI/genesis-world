@@ -1,0 +1,21 @@
+genesis/engine/solvers/rigid/abd/accessor.py
+  s_f05260c24812c8::t_44b937d5a594f2 61,233,789
+genesis/engine/solvers/rigid/rigid_solver.py
+  s_f05260c24812c8::t_44b937d5a594f2 1826,1959,2258
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "df4730bf28a7dd8e1a8c256a4eff75b7736f0165",
+  "prompts": {},
+  "sessions": {
+    "s_f05260c24812c8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cc4fea8e-25cc-4a9b-93c9-29351957258e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
