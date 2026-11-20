@@ -246,17 +246,10 @@ def parse_prim_geoms(
 
             geom_data = None
             gs_type = gs.GEOM_TYPE.MESH
-            is_data_exact = True
 
         else:  # primitive geometries
             # Reflection from negative xformOp:scale is carried by geom_ST; collision sizes stay positive.
             geom_S_diag = np.abs(np.diag(geom_S))
-            is_scale_uniform = np.allclose(geom_S_diag, geom_S_diag[0], atol=1e-6)
-            if not is_scale_uniform:
-                gs.logger.warning(
-                    f"Non-uniform scale {geom_S_diag} on primitive {prim.GetPath()}. "
-                    "Using first axis scale for collision geometry data."
-                )
             geom_scale = float(geom_S_diag[0])
 
             if prim.IsA(UsdGeom.Plane):
@@ -316,11 +309,16 @@ def parse_prim_geoms(
 
             # The data read the diagonal of the scale alone, so a shear or a scale rotated off the primitive axes leaves
             # them approximate. A plane normal ignores a diagonal scale and box extents take it per axis, while the size
-            # of the other primitives comes from the first axis alone.
+            # of the other primitives comes from the first axis alone. The geom is then the mesh, which carries the full
+            # scale, for collision and for drawing alike.
             is_scale_diagonal = np.allclose(geom_S, np.diag(np.diag(geom_S)), atol=1e-6)
-            is_data_exact = is_scale_diagonal and (
-                is_scale_uniform or gs_type in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.BOX)
-            )
+            is_scale_uniform = np.allclose(geom_S_diag, geom_S_diag[0], atol=1e-6)
+            if not (is_scale_diagonal and (is_scale_uniform or gs_type in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.BOX))):
+                gs.logger.warning(
+                    f"Scale {geom_S_diag} of primitive {prim.GetPath()} does not fit its shape. Using its mesh instead."
+                )
+                gs_type = gs.GEOM_TYPE.MESH
+                geom_data = None
 
             # Mesh stays Z-aligned; axis orientation is handled by the quat (matching MuJoCo pattern).
             # axis_T is NOT baked into mesh vertices — it goes into geom_Q instead.
@@ -353,9 +351,8 @@ def parse_prim_geoms(
                         quat=geom_quat,
                         contype=0,
                         conaffinity=0,
-                        # Primitive data that approximate the scale give way to the visual mesh, which carries it exactly
-                        type=gs_type if is_data_exact else gs.GEOM_TYPE.MESH,
-                        data=geom_data if is_data_exact else None,
+                        type=gs_type,
+                        data=geom_data,
                     )
                 )
         if is_collision:
