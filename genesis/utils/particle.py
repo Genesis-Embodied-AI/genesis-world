@@ -882,6 +882,7 @@ class FoamGenerator:
         velocities_dir = np.divide(
             velocities, speeds[:, None], out=np.zeros_like(velocities), where=speeds[:, None] > gs.EPS
         )
+        # TODO: Document where these constants come from.
         is_crest = (velocities_dir * normals).sum(axis=-1) >= 0.6
         kinetic_energy = 0.5 * m * speeds**2
         ke_min = 0.1 * m * 2.5**2
