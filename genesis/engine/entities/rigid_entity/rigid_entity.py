@@ -1354,19 +1354,23 @@ class KinematicEntity(Entity):
             useful for positioning a tool center point (TCP) or fingertip that is offset from the link origin. Defaults
             to None (equivalent to [0, 0, 0]).
         init_qpos : None | array_like, shape (n_dofs,), optional
-            Initial qpos used for solving IK. If None, the current qpos will be used. Defaults to None.
+            Initial qpos of the first restart. If None, the current qpos is used. When `respect_joint_limit` is True,
+            each later restart draws every revolute and prismatic joint that has finite limits uniformly within those
+            limits, on every link that carries at least one solved dof. This includes joints of those links that are not
+            among the solved dofs. A solve whose first restart misses can therefore return a qpos far from `init_qpos`.
+            Defaults to None.
         respect_joint_limit : bool, optional
             Whether to respect joint limits. Defaults to True.
         max_samples : int, optional
-            Number of resample attempts. Defaults to 50.
+            Maximum number of restarts, the first one included. Defaults to 50.
         max_solver_iters : int, optional
             Maximum number of solver iterations per sample. Defaults to 20.
         damping : float, optional
             Damping for damped least squares. Defaults to 0.01.
         pos_tol : float, optional
-            Position tolerance for normalized position error (in meter). Defaults to 1e-4.
+            Tolerance on the norm of the position error after `pos_mask`, in meters. Defaults to 5e-4.
         rot_tol : float, optional
-            Rotation tolerance for normalized rotation vector error (in radian). Defaults to 1e-4.
+            Tolerance on the norm of the rotation vector error after `rot_mask`, in radians. Defaults to 5e-3.
         pos_mask : list, shape (3,), optional
             Mask for position error. Defaults to [True, True, True]. E.g.: If you only care about position along x and
             y, you can set it to [True, True, False].
@@ -1390,7 +1394,9 @@ class KinematicEntity(Entity):
         Returns
         -------
         qpos : array_like, shape (n_dofs,) or (n_envs, n_dofs) or (len(envs_idx), n_dofs)
-            Solver qpos (joint positions).
+            Solver qpos (joint positions), from the first restart that meets `pos_tol` and `rot_tol`. If no restart
+            converges, it is the qpos of the last restart whose position and rotation errors are both at most those
+            kept so far, and it misses at least one tolerance. Pass `return_error=True` to read the residual.
         (optional) error_pose : array_like, shape (6,) or (n_envs, 6) or (len(envs_idx), 6)
             Pose error for each target. The 6-vector is [err_pos_x, err_pos_y, err_pos_z, err_rot_x, err_rot_y,
             err_rot_z]. Only returned if `return_error` is True.
@@ -1460,19 +1466,24 @@ class KinematicEntity(Entity):
             This is useful for positioning tool center points (TCP) or fingertips that are offset from the link origin.
             Defaults to None.
         init_qpos : array_like, shape (n_dofs,), optional
-            Initial qpos used for solving IK. If None, the current qpos will be used. Defaults to None.
+            Initial qpos of the first restart. If None, the current qpos is used. When `respect_joint_limit` is True,
+            each later restart draws every revolute and prismatic joint that has finite limits uniformly within those
+            limits, on every link that carries at least one solved dof. This includes joints of those links that are not
+            among the solved dofs. A solve whose first restart misses can therefore return a qpos far from `init_qpos`.
+            Defaults to None.
         respect_joint_limit : bool, optional
             Whether to respect joint limits. Defaults to True.
         max_samples : int, optional
-            Number of resample attempts. Defaults to 50.
+            Maximum number of restarts, the first one included. Defaults to 50.
         max_solver_iters : int, optional
             Maximum number of solver iterations per sample. Defaults to 20.
         damping : float, optional
             Damping for damped least squares. Defaults to 0.01.
         pos_tol : float, optional
-            Position tolerance for normalized position error (in meter). Defaults to 1e-4.
+            Tolerance on the norm of the position error of each target after `pos_mask`, in meters. Defaults to 5e-4.
         rot_tol : float, optional
-            Rotation tolerance for normalized rotation vector error (in radian). Defaults to 1e-4.
+            Tolerance on the norm of the rotation vector error of each target after `rot_mask`, in radians. Defaults
+            to 5e-3.
         pos_mask : list, shape (3,), optional
             Mask for position error. Defaults to [True, True, True]. E.g.: If you only care about position along x and
             y, you can set it to [True, True, False].
@@ -1496,7 +1507,10 @@ class KinematicEntity(Entity):
         Returns
         -------
         qpos : array_like, shape (n_dofs,) or (n_envs, n_dofs) or (len(envs_idx), n_dofs)
-            Solver qpos (joint positions).
+            Solver qpos (joint positions), from the first restart that meets `pos_tol` and `rot_tol` for every target.
+            If no restart converges, it is the qpos of the last restart whose position and rotation errors are both at
+            most those kept so far for every target, and at least one target misses its tolerance. Pass
+            `return_error=True` to read the residual.
         (optional) error_pose : array_like, shape (6,) or (n_envs, 6) or (len(envs_idx), 6)
             Pose error for each target. The 6-vector is [err_pos_x, err_pos_y, err_pos_z, err_rot_x, err_rot_y,
             err_rot_z]. Only returned if `return_error` is True.
