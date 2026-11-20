@@ -1,33 +1,16 @@
-import re
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 import quadrants as qd
-from pydantic import BeforeValidator, Field, PrivateAttr
-from pydantic_core import PydanticCustomError
+from pydantic import Field, PrivateAttr
 
 import genesis as gs
 from genesis.constants import STRUCTURE
 from genesis.typing import PositiveFloat, StrictInt, ValidFloat
 
-from ..base import Material
+from ..base import Material, SamplerType
 
 if TYPE_CHECKING:
     from genesis.engine.entities.mpm_entity import MPMEntity
-
-_SAMPLER_PATTERN = re.compile(r"^pbs(-\d+)?$|^random$|^regular$")
-
-
-def _validate_sampler(v: str) -> str:
-    if not isinstance(v, str) or not _SAMPLER_PATTERN.match(v):
-        raise PydanticCustomError(
-            "invalid_sampler",
-            "Input should be 'pbs', 'pbs-<res>', 'random', or 'regular'",
-            {"value": v},
-        )
-    return v
-
-
-SamplerType = Annotated[str, BeforeValidator(_validate_sampler)]
 
 
 @qd.data_oriented
@@ -54,7 +37,9 @@ class Base(Material["MPMEntity"]):
     sampler : str, optional
         Particle sampler. Defaults to 'pbs', which relaxes the particles to a uniform density inside the shape, at the
         cost of a slower first sampling of each shape, cached afterwards. 'regular' places them on a grid, which leaves
-        the surface stair-stepped. 'random' draws them uniformly, which leaves local density fluctuations.
+        the surface stair-stepped. 'random' draws them uniformly, which leaves local density fluctuations. 'pbs-<res>'
+        sets the number of cells per axis of the signed distance field that keeps the particles inside the shape, 32 for
+        'pbs', a finer one following thin features more closely at a slightly slower first sampling.
     """
 
     structure: ClassVar[STRUCTURE] = STRUCTURE.TEARABLE

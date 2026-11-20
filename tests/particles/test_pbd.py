@@ -369,3 +369,11 @@ def test_force_fields(show_viewer, tol):
         for direction in ((0.0, 0.0, 0.0), (float("nan"), 0.0, 1.0), (float("inf"), 0.0, 0.0)):
             with pytest.raises(gs.GenesisException):
                 force_field_type(direction=direction)
+
+
+@pytest.mark.required
+def test_sampler_validation():
+    gs.materials.PBD.Liquid(sampler="pbs-64")
+    for sampler in ("pbs-0", "pbs-032", "random\n", "foo"):
+        with pytest.raises(gs.GenesisException):
+            gs.materials.PBD.Liquid(sampler=sampler)

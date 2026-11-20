@@ -6,7 +6,7 @@ from pydantic import StrictBool, model_validator
 import genesis as gs
 from genesis.constants import STRUCTURE
 
-from .base import SamplerType
+from ..base import SamplerType
 from .elasto_plastic import ElastoPlastic
 
 
@@ -29,7 +29,9 @@ class Snow(ElastoPlastic):
     rho : float, optional
         Density (kg/m³). Default is 1000.
     sampler : str, optional
-        Particle sampler. Default is 'random'.
+        Particle sampler. Default is 'random'. 'pbs-<res>' sets the number of cells per axis of the signed distance
+        field that keeps the particles inside the shape, 32 for 'pbs', a finer one following thin features more closely
+        at a slightly slower first sampling.
     yield_lower : float, optional
         Lower bound of yield condition. Default is 2.5e-2.
     yield_higher : float, optional
