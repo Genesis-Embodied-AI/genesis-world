@@ -14,9 +14,6 @@ on:
       baseline_revision:
         description: Commit identifying the explicit baseline. Required with baseline_artifact.
         type: string
-      candidate_artifact:
-        description: Optional combined candidate measurements artifact in the calling run.
-        type: string
       comparison_context:
         description: Markdown provenance to include above the comparison tables.
         type: string
@@ -63,7 +60,6 @@ jobs:
       # holds no benchmark.
       - name: Download speed artifacts from triggering run
         id: dl_speed
-        if: inputs.candidate_artifact == ''
         uses: actions/download-artifact@v4
         with:
           pattern: speed-test-*
@@ -73,19 +69,11 @@ jobs:
 
       - name: Download mem artifacts from triggering run
         id: dl_mem
-        if: inputs.candidate_artifact == ''
         uses: actions/download-artifact@v4
         with:
           pattern: mem-test-*
           run-id: ${{ github.repository == job.workflow_repository && github.event.workflow_run.id || github.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: ./artifacts
-
-      - name: Download combined candidate measurements
-        if: inputs.candidate_artifact != ''
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ inputs.candidate_artifact }}
           path: ./artifacts
 
       - name: Download explicit baseline measurements
@@ -95,8 +83,17 @@ jobs:
           name: ${{ inputs.baseline_artifact }}
           path: ./baseline-artifacts
 
-      - name: Show downloaded measurements
-        run: find ./artifacts -type f -print
+      - name: Show downloaded speed files
+        run: |
+          echo "Downloaded into ${{ steps.dl_speed.outputs.download-path }}"
+          ls -la ${{ steps.dl_speed.outputs.download-path }} || true
+          (command -v tree >/dev/null && tree -a ${{ steps.dl_speed.outputs.download-path }}) || true
+
+      - name: Show downloaded mem files
+        run: |
+          echo "Downloaded into ${{ steps.dl_mem.outputs.download-path }}"
+          ls -la ${{ steps.dl_mem.outputs.download-path }} || true
+          (command -v tree >/dev/null && tree -a ${{ steps.dl_mem.outputs.download-path }}) || true
 
       - name: Check regressions + build outputs
         id: analyze
@@ -120,8 +117,8 @@ jobs:
           fi
           set +e
           python .github/workflows/scripts/alarm.py \
-            --speed-artifacts-dir ./artifacts \
-            --mem-artifacts-dir ./artifacts \
+            --speed-artifacts-dir ${{ steps.dl_speed.outputs.download-path }} \
+            --mem-artifacts-dir ${{ steps.dl_mem.outputs.download-path }} \
             "${BASELINE_ARGS[@]}" \
             --max-valid-revisions 5 \
             --max-fetch-revisions 40 \
