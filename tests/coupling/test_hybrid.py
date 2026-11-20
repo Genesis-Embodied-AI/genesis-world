@@ -454,12 +454,6 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
             convexify=False,
         ),
     )
-    small_emitter = scene.add_emitter(
-        material=material_type(
-            sampler="regular",
-        ),
-        max_particles=10,
-    )
     emitter = scene.add_emitter(
         material=material_type(),
         max_particles=5000,
@@ -467,28 +461,27 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
             color=(0.7, 0.85, 1.0, 0.7),
         ),
     )
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.5, -1.0, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=material_type(),
+    )
     scene.build(n_envs=n_envs)
 
-    # A batch that does not fit in the free slots of an emitter overwrites its oldest particles, leaving those of the
-    # next entity untouched. Batches of 3, 8 (a shell of radius one particle size) and 3 particles leave 2 slots free.
-    p_size = small_emitter.entity.particle_size
-    small_emitter.emit(
-        droplet_shape="rectangle", droplet_size=(3 * p_size, p_size), droplet_length=p_size, pos=(0.5, -1.0, 1.0)
-    )
-    small_emitter.emit_omni(source_radius=p_size, pos=(0.5, -1.0, 1.0))
-    small_emitter.emit(
-        droplet_shape="rectangle", droplet_size=(3 * p_size, p_size), droplet_length=p_size, pos=(0.5, -1.0, 1.0)
-    )
-    assert_equal(small_emitter.entity.get_particles_active(), np.arange(10) < 8)
-    assert not emitter.entity.get_particles_active().any()
-    # A batch filling the last free slots exactly wraps the cursor back to the first slot.
-    small_emitter.emit(
-        droplet_shape="rectangle", droplet_size=(7 * p_size, p_size), droplet_length=p_size, pos=(0.5, -1.0, 1.0)
-    )
-    assert small_emitter.next_particle == 0
-    assert small_emitter.entity.get_particles_active().all()
+    # The particles of the box follow those of the emitter, so an emission running past its last particle moves them.
+    # Small emissions fill more than half of the emitter, then a large emission needs more than half of it.
+    particle_size = emitter.entity.particle_size
+    for i in range(50):
+        if emitter.next_particle > emitter.max_particles // 2:
+            break
+        emitter.emit_omni(source_radius=5.0 * particle_size)
+    assert emitter.next_particle > emitter.max_particles // 2
+    box_pos = box.get_particles_pos()
+    emitter.emit_omni(source_radius=10.0 * particle_size)
+    assert_equal(box.get_particles_pos(), box_pos)
 
-    emitter.emit_omni()
     for i in range(5):
         emitter.emit(droplet_shape="circle", droplet_size=0.25)
         scene.step()
