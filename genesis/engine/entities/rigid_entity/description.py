@@ -73,9 +73,9 @@ class RigidVisGeomDescription(BaseRigidGeomDescription):
     vmesh: "gs.Mesh"
     dynamic_vertices: DynamicVertices | None = None
     type: GEOM_TYPE = GEOM_TYPE.MESH
-    """Shape the asset states for the geom. A primitive is integrated from its exact shape rather than 'vmesh'."""
+    """Shape of the geom, a primitive or a mesh, of which 'vmesh' is the tessellation."""
     data: np.ndarray | None = None
-    """Dimensions of the primitive 'type' names, as a collision geom of that type holds them."""
+    """Dimensions of the primitive that 'type' names, laid out as in 'RigidGeom.data', or None for a mesh."""
 
 
 @dataclass(frozen=True, kw_only=True)
