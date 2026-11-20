@@ -1,0 +1,20 @@
+examples/multiphysics/sph_mpm_bathtub.py
+  s_6331e9b5eb051b::t_a64535f5ebaa9f 126-127
+  s_6331e9b5eb051b::t_5745db78467fd5 7-8,165,167-178,182-188,190,243
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d5e27a0f9f268ea29433c0696af9094431e0a11d",
+  "prompts": {},
+  "sessions": {
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
