@@ -314,9 +314,13 @@ def parse_prim_geoms(
             else:
                 gs.raise_exception(f"Unsupported geometry type: {prim.GetTypeName()}")
 
-            # A plane normal ignores the scale and box extents take it per axis, while the size of the other
-            # primitives comes from the first axis alone
-            is_data_exact = is_scale_uniform or gs_type in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.BOX)
+            # The data read the diagonal of the scale alone, so a shear or a scale rotated off the primitive axes leaves
+            # them approximate. A plane normal ignores a diagonal scale and box extents take it per axis, while the size
+            # of the other primitives comes from the first axis alone.
+            is_scale_diagonal = np.allclose(geom_S, np.diag(np.diag(geom_S)), atol=1e-6)
+            is_data_exact = is_scale_diagonal and (
+                is_scale_uniform or gs_type in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.BOX)
+            )
 
             # Mesh stays Z-aligned; axis orientation is handled by the quat (matching MuJoCo pattern).
             # axis_T is NOT baked into mesh vertices — it goes into geom_Q instead.
