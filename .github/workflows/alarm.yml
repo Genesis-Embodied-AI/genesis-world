@@ -4,11 +4,22 @@ on:
   workflow_run:
     workflows: ["Production"]
     types: [completed]
-  # Repositories running the Genesis benchmarks through production.yml call this workflow to compare their results
-  # against the same baseline, the history of the default branch of Genesis. A called workflow sees the event of its
-  # caller, a 'workflow_run' like the trigger above whose artifacts live in the calling run rather than in the run
-  # that completed.
+  # Callers can supply a measured baseline, otherwise comparisons use Genesis main history. A called workflow reads
+  # its caller's artifacts from the current run, while the Production trigger reads the completed run's artifacts.
   workflow_call:
+    inputs:
+      baseline_artifact:
+        description: Artifact in the calling run containing explicit speed and memory baseline measurements.
+        type: string
+      baseline_revision:
+        description: Commit identifying the explicit baseline. Required with baseline_artifact.
+        type: string
+      candidate_artifact:
+        description: Optional combined candidate measurements artifact in the calling run.
+        type: string
+      comparison_context:
+        description: Markdown provenance to include above the comparison tables.
+        type: string
     secrets:
       WANDB_API_KEY:
         required: false
@@ -52,6 +63,7 @@ jobs:
       # holds no benchmark.
       - name: Download speed artifacts from triggering run
         id: dl_speed
+        if: inputs.candidate_artifact == ''
         uses: actions/download-artifact@v4
         with:
           pattern: speed-test-*
@@ -61,6 +73,7 @@ jobs:
 
       - name: Download mem artifacts from triggering run
         id: dl_mem
+        if: inputs.candidate_artifact == ''
         uses: actions/download-artifact@v4
         with:
           pattern: mem-test-*
@@ -68,17 +81,22 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: ./artifacts
 
-      - name: Show downloaded speed files
-        run: |
-          echo "Downloaded into ${{ steps.dl_speed.outputs.download-path }}"
-          ls -la ${{ steps.dl_speed.outputs.download-path }} || true
-          (command -v tree >/dev/null && tree -a ${{ steps.dl_speed.outputs.download-path }}) || true
+      - name: Download combined candidate measurements
+        if: inputs.candidate_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: ./artifacts
 
-      - name: Show downloaded mem files
-        run: |
-          echo "Downloaded into ${{ steps.dl_mem.outputs.download-path }}"
-          ls -la ${{ steps.dl_mem.outputs.download-path }} || true
-          (command -v tree >/dev/null && tree -a ${{ steps.dl_mem.outputs.download-path }}) || true
+      - name: Download explicit baseline measurements
+        if: inputs.baseline_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.baseline_artifact }}
+          path: ./baseline-artifacts
+
+      - name: Show downloaded measurements
+        run: find ./artifacts -type f -print
 
       - name: Check regressions + build outputs
         id: analyze
@@ -88,12 +106,23 @@ jobs:
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
           WANDB_ENTITY: genesis-ai-company
           WANDB_SILENT: "true"
+          BASELINE_ARTIFACT: ${{ inputs.baseline_artifact }}
+          BASELINE_REVISION: ${{ inputs.baseline_revision }}
         run: |
           mkdir -p /tmp
+          BASELINE_ARGS=()
+          if [[ -n "$BASELINE_ARTIFACT" ]] ; then
+            if [[ -z "$BASELINE_REVISION" ]] ; then
+              echo "::error::baseline_revision is required with baseline_artifact."
+              exit 1
+            fi
+            BASELINE_ARGS=(--baseline-artifacts-dir ./baseline-artifacts --baseline-revision "$BASELINE_REVISION")
+          fi
           set +e
           python .github/workflows/scripts/alarm.py \
-            --speed-artifacts-dir ${{ steps.dl_speed.outputs.download-path }} \
-            --mem-artifacts-dir ${{ steps.dl_mem.outputs.download-path }} \
+            --speed-artifacts-dir ./artifacts \
+            --mem-artifacts-dir ./artifacts \
+            "${BASELINE_ARGS[@]}" \
             --max-valid-revisions 5 \
             --max-fetch-revisions 40 \
             --runtime-fps-regression-tolerance-pct 8 \
@@ -130,6 +159,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-comparison-tables
+          overwrite: true
           path: |
             /tmp/runtime_fps.csv
             /tmp/compile_time.csv
@@ -138,18 +168,20 @@ jobs:
 
       - name: Publish report and PR status
         id: publish_check
+        if: ${{ !cancelled() }}
         uses: actions/github-script@v8
         env:
           CHECK_NAME: '_Artifact: Benchmark Comparison'
           CHECK_OUTPUT: ${{ env.CHECK_OUTPUT }}
           HAS_REGRESSIONS: ${{ env.HAS_REGRESSIONS }}
           HAS_ALERTS: ${{ env.HAS_ALERTS }}
-          HAS_ERRORS: ${{ env.HAS_ERRORS }}
+          HAS_ERRORS: ${{ failure() && '1' || env.HAS_ERRORS }}
+          COMPARISON_CONTEXT: ${{ inputs.comparison_context }}
           ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
         with:
           script: |
             const artifactUrl = process.env.ARTIFACT_URL || '';
-            let body = process.env.CHECK_OUTPUT || '';
+            let body = [process.env.COMPARISON_CONTEXT, process.env.CHECK_OUTPUT].filter(Boolean).join('\n\n');
             if (body && artifactUrl) {
               body += `\n\n**Artifact:** [Download raw data](${artifactUrl})`;
             }
