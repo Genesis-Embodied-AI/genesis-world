@@ -146,7 +146,7 @@ def compose_inertial_from_g_infos(g_infos: Sequence[dict], rho: float) -> Inerti
         tuple(
             GeomInertialInfo(
                 get_local_inertial_from_geom(
-                    g_info.get("type", gs.GEOM_TYPE.MESH),
+                    g_info.get("type", gs.GEOM_TYPE.MESH) if "vmesh" in g_info else g_info["type"],
                     g_info.get("data"),
                     g_info["vmesh"] if "vmesh" in g_info else g_info["mesh"],
                     rho if g_info.get("density") is None else g_info["density"],

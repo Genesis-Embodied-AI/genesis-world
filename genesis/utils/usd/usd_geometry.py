@@ -246,11 +246,13 @@ def parse_prim_geoms(
 
             geom_data = None
             gs_type = gs.GEOM_TYPE.MESH
+            is_scale_uniform = True
 
         else:  # primitive geometries
             # Reflection from negative xformOp:scale is carried by geom_ST; collision sizes stay positive.
             geom_S_diag = np.abs(np.diag(geom_S))
-            if not np.allclose(geom_S_diag, geom_S_diag[0], atol=1e-6):
+            is_scale_uniform = np.allclose(geom_S_diag, geom_S_diag[0], atol=1e-6)
+            if not is_scale_uniform:
                 gs.logger.warning(
                     f"Non-uniform scale {geom_S_diag} on primitive {prim.GetPath()}. "
                     "Using first axis scale for collision geometry data."
@@ -343,8 +345,9 @@ def parse_prim_geoms(
                         quat=geom_quat,
                         contype=0,
                         conaffinity=0,
-                        type=gs_type,
-                        data=geom_data,
+                        # The primitive data approximate a non-uniform scale, while the visual mesh carries it exactly
+                        type=gs_type if is_scale_uniform else gs.GEOM_TYPE.MESH,
+                        data=geom_data if is_scale_uniform else None,
                     )
                 )
         if is_collision:
