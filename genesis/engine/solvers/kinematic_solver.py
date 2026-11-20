@@ -347,9 +347,10 @@ class KinematicSolver(Solver):
         self.n_entities_ = max(1, self.n_entities)
 
         # The link of each configuration entry and of each dof, to restart the integral term of every dof of a link on
-        # a write of its configuration (see ctrl_force_int in rigid/data.py)
+        # a write of its configuration (see ctrl_force_int in rigid/data.py). The dofs are padded like the state, which
+        # leaves the padding slot unset, since a scene without dofs has no configuration entry either.
         qs_link_idx = np.empty((self.n_qs,), dtype=gs.np_int)
-        dofs_link_idx = np.empty((self.n_dofs,), dtype=gs.np_int)
+        dofs_link_idx = np.zeros((self.n_dofs_,), dtype=gs.np_int)
         for link in self.links:
             qs_link_idx[link.q_start : link.q_end] = link.idx
             dofs_link_idx[link.dof_start : link.dof_end] = link.idx

@@ -107,6 +107,7 @@ def test_all_fixed(show_viewer):
         ),
     )
     scene.build()
+    cube.set_qpos([])
     scene.step()
 
     assert_allclose(cube.get_pos(), 0, tol=gs.EPS)
