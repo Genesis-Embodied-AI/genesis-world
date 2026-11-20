@@ -39,6 +39,11 @@ jobs:
       - name: Re-run the skipped workflows of the pull request
         uses: actions/github-script@v8
         env:
+          GATED_WORKFLOWS: >-
+            .github/workflows/examples.yml
+            .github/workflows/gate.yml
+            .github/workflows/generic.yml
+            .github/workflows/production.yml
           GATE_WORKFLOW: .github/workflows/gate.yml
         with:
           script: |
@@ -77,16 +82,18 @@ jobs:
               return;
             }
             // The runs of the commit may not exist yet right after a push, and a run can be re-run only once completed,
-            // so they are polled until they settle. The gate run is never skipped, so its presence shows that the push
-            // created its runs. A run re-run already, by hand or by an earlier command, is never waited for, and
-            // neither is a run testing the commit, started while the pull request was ready for review. A job exists
-            // once its gate is evaluated, and a job the gate skips is created completed, so any other job, queued for a
-            // runner included, shows a run testing the commit. The gate run lints the commit whatever the draft flag,
-            // and carries the draft gate of the Nyx Plugin workflow in its name instead (see the gate workflow), so the
-            // run of a draft is re-run like a skipped run, once completed. The bound of 30 minutes is far above lint
-            // duration.
+            // so they are polled until they settle. A push creates the run of each workflow separately, so the run of
+            // every gated workflow is waited for. The list serves this wait alone: every skipped run of the commit is
+            // re-run, so a gated workflow missing from the list is still tested. A run re-run already, by hand or by an
+            // earlier command, is never waited for, and neither is a run testing the commit, started while the pull
+            // request was ready for review. A job exists once its gate is evaluated, and a job the gate skips is
+            // created completed, so any other job, queued for a runner included, shows a run testing the commit. The
+            // gate run lints the commit whatever the draft flag, and carries the draft gate of the Nyx Plugin workflow
+            // in its name instead (see the gate workflow), so the run of a draft is re-run like a skipped run, once
+            // completed. The bound of 30 minutes leaves room for a backlog of runners before the runs start.
             const isDraftGate = (run) => run.path === process.env.GATE_WORKFLOW
               && run.display_title.startsWith('Draft ');
+            const pathsGated = process.env.GATED_WORKFLOWS.split(' ');
             let runsLatest = [];
             let isSettled = false;
             for (let i_poll = 0; i_poll < 180; i_poll++) {
@@ -101,7 +108,7 @@ jobs:
                 && run.head_repository.full_name === pull.head.repo.full_name);
               runsLatest = runsPull.filter(
                 (run, i_run) => runsPull.findIndex(({ path }) => path === run.path) === i_run);
-              isSettled = runsLatest.some((run) => run.path === process.env.GATE_WORKFLOW);
+              isSettled = pathsGated.every((path) => runsLatest.some((run) => run.path === path));
               for (const run of runsLatest) {
                 if (!isSettled) {
                   break;

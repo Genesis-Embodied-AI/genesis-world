@@ -7,7 +7,7 @@ on:
       - main
   # A draft pull request runs only when re-run, by hand or by the CI Command workflow, which a '/ci' comment or marking
   # the pull request ready for review starts (see the setup job). A ready_for_review trigger would start a new run that
-  # cancels a re-run in progress on the same commit.
+  # cancels a re-run in progress on the same commit. Every workflow gated this way is listed in the CI Command workflow.
   pull_request:
     types: [opened, synchronize, reopened]
     branches:
