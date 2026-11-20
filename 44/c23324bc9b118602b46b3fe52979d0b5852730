@@ -1,0 +1,35 @@
+genesis/ext/urdfpy/urdf.py
+  s_1a5cc50b1f48d9::t_5bd67605df5fba 1269,1295-1298,1313-1315
+tests/rigid/conftest.py
+  s_6331e9b5eb051b::t_43bf9660138e4b 858-865
+  s_6331e9b5eb051b::t_ece823d7f0f3c6 857
+tests/rigid/test_asset_loading.py
+  s_6331e9b5eb051b::t_43bf9660138e4b 231,410-412
+  s_6331e9b5eb051b::t_9216c4c53f24cf 413
+genesis/utils/urdf.py
+  s_1a5cc50b1f48d9::t_5bd67605df5fba 194
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "44c23324bc9b118602b46b3fe52979d0b5852730",
+  "prompts": {},
+  "sessions": {
+    "s_1a5cc50b1f48d9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5c67fa9e-d3f1-4a58-a343-d95599823feb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
