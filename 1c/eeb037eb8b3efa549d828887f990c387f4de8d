@@ -1,0 +1,21 @@
+examples/README.md
+  s_6331e9b5eb051b::t_92d59d5119c3e1 104-105
+examples/sensors/tactile_peg_insertion.py
+  s_6331e9b5eb051b::t_3f7b7337abe8ab 1-17,22,25,29,33-80,82-97,100-104,106-109,113-116,120,125-128,131-133,136,141-142,144-146,149,151,153-154,157-167,170-171,174,178-184,186-193,195-213,215-225,228-252,254-361,363-366,368-403,405-406
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1ceeb037eb8b3efa549d828887f990c387f4de8d",
+  "prompts": {},
+  "sessions": {
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "unknown"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
