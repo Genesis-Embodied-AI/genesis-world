@@ -167,10 +167,6 @@ def fmt_num(v, is_int: bool):
 
 
 class WandbParser:
-    @property
-    def project(self):
-        raise NotImplementedError()
-
     def __call__(
         self,
         benchmark_under_test: "BenchmarkRunUnderTest",
@@ -183,10 +179,6 @@ class WandbParser:
 
 
 class WandbParserNewFormat(WandbParser):
-    @property
-    def project(self):
-        return "genesis-benchmarks-2"
-
     def __call__(
         self,
         benchmark_under_test: "BenchmarkRunUnderTest",
@@ -288,7 +280,7 @@ class Alarm:
     ) -> dict[str, dict[frozendict[str, str], dict[str, float | int]]]:
         api = wandb.Api()
         runs_iter: Iterable[Run] = api.runs(
-            f"{self.wandb_entity}/{self.wandb_project or wandb_parser.project}",
+            f"{self.wandb_entity}/{self.wandb_project}",
             filters=self.wandb_filters,
             order="-created_at",
         )
@@ -469,7 +461,7 @@ class Alarm:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--wandb-project")
+    parser.add_argument("--wandb-project", required=True)
     parser.add_argument("--wandb-filters", type=json.loads, default={})
     parser.add_argument("--speed-artifacts-dir", type=str, required=True)
     parser.add_argument("--mem-artifacts-dir", type=str, required=True)
@@ -492,6 +484,8 @@ if __name__ == "__main__":
     parser.add_argument("--dev-skip-speed", action="store_true")
     parser.add_argument("--dev-allow-all-branches", action="store_true")
     args = parser.parse_args()
+    if not args.wandb_project.strip():
+        parser.error("--wandb-project must not be empty")
 
     alarm = Alarm(args=args)
 
@@ -555,8 +549,8 @@ if __name__ == "__main__":
             "### Memory usage",
             *table_by_metric_name[alarm.metric_max_mem_mb],
             "",
-            f"- (*1) last: last commit on main, mean/std: stats over commit hashes {alarm.max_valid_revisions} commits if available.",
-            "- (*2) Δ: relative difference between PR and last commit on main, i.e. (PR - main) / main * 100%.",
+            f"- (*1) last: first selected baseline revision, mean/std: stats over {alarm.max_valid_revisions} selected revisions if available.",
+            "- (*2) Δ: relative difference between PR and selected baseline, i.e. (PR - baseline) / baseline * 100%.",
         ]
     )
 
