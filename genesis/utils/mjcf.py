@@ -97,23 +97,73 @@ def build_model(
             is_urdf_file = root.tag == "robot"
             mjcf = ET.SubElement(root, "mujoco") if is_urdf_file else root
 
-        # Parse all included sub-models recursively
-        root_parent_stack = [(mjcf, Path(""))]
-        while root_parent_stack:
-            xml_root, parent_path = root_parent_stack.pop()
-            for elem in tuple(xml_root.findall("include")):
-                include_path = parent_path / elem.attrib["file"]
+        # Parse all included sub-models recursively, splicing <include> elements in place inside any parent element.
+        active_compiler_dirs: dict[str, str] = {}
+        asset_tag_dirs = (
+            ("mesh", "meshdir"),
+            ("texture", "texturedir"),
+            ("hfield", "assetdir"),
+            ("skin", "assetdir"),
+        )
+
+        def _record_compiler_dirs(comp_elem: ET.Element, target: dict[str, str]) -> None:
+            for dir_attr in ("assetdir", "meshdir", "texturedir"):
+                if dir_attr in comp_elem.attrib:
+                    target[dir_attr] = comp_elem.attrib[dir_attr]
+
+        def _expand_includes(parent_elem: ET.Element, current_dir: Path) -> None:
+            for child in list(parent_elem):
+                if child.tag == "compiler":
+                    _record_compiler_dirs(child, active_compiler_dirs)
+                    continue
+                if child.tag != "include":
+                    _expand_includes(child, current_dir)
+                    continue
+
+                rel_include = Path(child.attrib["file"])
+                candidate = current_dir / rel_include
+                include_path = candidate if (Path(asset_path) / candidate).exists() else rel_include
                 include_root = ET.parse(Path(asset_path) / include_path).getroot()
-                # Mesh file paths in the included file are relative to that file's directory, whereas meshdir
-                # points at the top-level model, so rewrite them to stay valid once inlined. Only <asset> meshes
-                # reference a file; a <mesh> under <default> is a default class setting attributes (e.g.
-                # maxhullvert) and a vertex mesh under <asset> is procedural, both carrying no file to rewrite.
-                for include_elem in include_root.findall(".//asset/mesh[@file]"):
-                    include_elem.attrib["file"] = str(include_path.parent / include_elem.attrib["file"])
-                for child in include_root:
-                    mjcf.append(child)
-                mjcf.remove(elem)
-                root_parent_stack.append((include_root, include_path))
+
+                local_compiler_dirs = dict(active_compiler_dirs)
+                for inc_comp in include_root.findall("compiler"):
+                    for dir_attr in ("assetdir", "meshdir", "texturedir"):
+                        if (
+                            dir_attr in inc_comp.attrib
+                            and not os.path.isabs(inc_comp.attrib[dir_attr])
+                            and (Path(asset_path) / include_path.parent / inc_comp.attrib[dir_attr]).exists()
+                        ):
+                            inc_comp.attrib[dir_attr] = str(include_path.parent / inc_comp.attrib[dir_attr])
+                    _record_compiler_dirs(inc_comp, local_compiler_dirs)
+
+                # Rewrite direct <asset> file paths relative to the fragment's directory only when an active
+                # <compiler> asset/mesh/texture directory does not already resolve the file.
+                for tag, dir_attr in asset_tag_dirs:
+                    comp_dir = local_compiler_dirs.get(dir_attr) or local_compiler_dirs.get("assetdir")
+                    for include_elem in include_root.findall(f".//asset/{tag}[@file]"):
+                        asset_file = include_elem.attrib["file"]
+                        if os.path.isabs(asset_file):
+                            continue
+                        if comp_dir is not None:
+                            comp_base = Path(comp_dir) if os.path.isabs(comp_dir) else Path(asset_path) / comp_dir
+                            if (comp_base / asset_file).exists():
+                                continue
+                        if (Path(asset_path) / include_path.parent / asset_file).exists():
+                            # os.path.abspath normalizes '..' without resolving symlinks (preserving extensions).
+                            include_elem.attrib["file"] = os.path.abspath(
+                                Path(asset_path) / include_path.parent / asset_file
+                            )
+
+                # Expand any nested <include> elements inside the fragment (including direct children of
+                # <mujocoinclude>) while retaining this fragment's directory context.
+                _expand_includes(include_root, include_path.parent)
+
+                elem_idx = list(parent_elem).index(child)
+                parent_elem.remove(child)
+                for offset, inc_child in enumerate(list(include_root)):
+                    parent_elem.insert(elem_idx + offset, inc_child)
+
+        _expand_includes(mjcf, Path(""))
 
         # Drop ground planes authored directly under the worldbody so a model that embeds its own floor can be
         # loaded into a scene that already provides a ground. Removing the source geoms before compilation leaves
@@ -124,14 +174,21 @@ def build_model(
                     if geom.attrib.get("type") == "plane":
                         worldbody.remove(geom)
 
-        # Make sure compiler options are defined
-        compiler = mjcf.find("compiler")
-        if compiler is None:
-            compiler = ET.SubElement(mjcf, "compiler")
+        # Make sure compiler options are defined across every <compiler> block (included fragments may add their own).
+        compilers = mjcf.findall("compiler")
+        if not compilers:
+            compilers = [ET.SubElement(mjcf, "compiler")]
+        compiler = compilers[-1]
 
-        # Set absolute asset search directory
+        # Resolve any explicitly authored asset directories on each <compiler>, and seed defaults on the first block
+        # so a later <compiler angle="radian"/> without meshdir does not clobber an earlier meshdir.
+        for comp in compilers:
+            for name in ("assetdir", "meshdir", "texturedir"):
+                if name in comp.attrib:
+                    val = comp.attrib[name]
+                    comp.attrib[name] = val if os.path.isabs(val) else str(Path(asset_path) / val)
         for name in ("assetdir", "meshdir", "texturedir"):
-            compiler.attrib[name] = str(Path(asset_path) / compiler.attrib.get(name, ""))
+            compilers[0].attrib.setdefault(name, str(Path(asset_path)))
 
         # Set default constraint solver time constant.
         # Note that these default options are ignored when parsing URDF files.

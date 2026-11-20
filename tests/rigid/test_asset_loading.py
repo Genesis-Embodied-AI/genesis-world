@@ -90,6 +90,73 @@ def test_mjcf_include_rewrites_asset_mesh_and_skips_default_mesh(mjcf_include_de
 
 
 @pytest.mark.required
+def test_mjcf_nested_body_include_and_multiple_compilers(tmp_path, tol):
+    import numpy as np
+    import trimesh
+
+    extents = (0.3, 0.2, 0.5)
+    decoy_extents = (0.05, 0.05, 0.05)
+    meshes_dir = tmp_path / "shared_meshes"
+    frag_dir = tmp_path / "models" / "arm" / "assets"
+    decor_dir = tmp_path / "models" / "scene"
+    meshes_dir.mkdir(parents=True)
+    frag_dir.mkdir(parents=True)
+    decor_dir.mkdir(parents=True)
+
+    trimesh.creation.box(extents=extents).export(meshes_dir / "humerus.obj")
+    # Same-named decoy mesh next to the fragment must not override the active top-level <compiler meshdir="..."/>.
+    trimesh.creation.box(extents=decoy_extents).export(frag_dir / "humerus.obj")
+
+    (frag_dir / "arm_meshes.xml").write_text(
+        '<mujocoinclude><asset><mesh name="humerus" file="humerus.obj"/></asset></mujocoinclude>',
+        encoding="utf-8",
+    )
+    # Direct-child <include> inside an included <mujocoinclude>, plus <compiler angle="radian"/>.
+    (frag_dir / "arm_assets.xml").write_text(
+        '<mujocoinclude><compiler angle="radian"/><include file="arm_meshes.xml"/></mujocoinclude>',
+        encoding="utf-8",
+    )
+    (decor_dir / "decor.xml").write_text(
+        '<mujocoinclude><body name="tip" pos="0 0 0.25" euler="0 1.5707963267948966 0">'
+        '<geom type="sphere" size="0.04"/></body></mujocoinclude>',
+        encoding="utf-8",
+    )
+    (frag_dir / "arm_body.xml").write_text(
+        '<mujocoinclude><worldbody><body name="upper_arm" pos="0 0 0.5" quat="1 0 0 0">'
+        '<joint name="shoulder" type="hinge" axis="0 1 0"/>'
+        '<geom type="mesh" mesh="humerus"/>'
+        '<include file="../../scene/decor.xml"/>'
+        "</body></worldbody></mujocoinclude>",
+        encoding="utf-8",
+    )
+    top_xml = tmp_path / "models" / "arm" / "arm.xml"
+    top_xml.write_text(
+        '<mujoco model="nested_arm">'
+        '<compiler meshdir="../../shared_meshes"/>'
+        '<include file="assets/arm_assets.xml"/>'
+        '<include file="assets/arm_body.xml"/>'
+        "</mujoco>",
+        encoding="utf-8",
+    )
+
+    scene = gs.Scene(show_viewer=False, show_FPS=False)
+    entity = scene.add_entity(gs.morphs.MJCF(file=str(top_xml)))
+    scene.build()
+    link_names = {link.name for link in entity.links}
+    assert {"upper_arm", "tip"} <= link_names
+    assert entity.get_link("tip").parent_idx == entity.get_link("upper_arm").idx
+
+    # Verify top-level shared_meshes/humerus.obj won over the fragment-directory decoy.
+    humerus_geom = next(g for g in entity.get_link("upper_arm").geoms if g.type == gs.GEOM_TYPE.MESH)
+    aabb = humerus_geom.get_AABB()
+    assert_allclose(aabb[1] - aabb[0], extents, tol=5e-6)
+
+    # Verify <compiler angle="radian"/> took effect on euler="0 pi/2 0" (90 deg pitch, not 1.57 deg).
+    expected_quat = np.array([np.cos(np.pi / 4.0), 0.0, np.sin(np.pi / 4.0), 0.0])
+    assert_allclose(entity.get_link("tip").get_quat(), expected_quat, tol=tol)
+
+
+@pytest.mark.required
 def test_ground_plane_preservation(box_plan):
     mjcf = ET.tostring(box_plan, encoding="unicode")
 
