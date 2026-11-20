@@ -488,9 +488,8 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
         scene.step()
     scene.step()
 
-    # The pending droplet grows by 0.4 particle size per step and is released at one particle size. Any growth between
-    # 1/3 and 1/2 holds two steps back and releases on the third, and 0.4 stays clear of both bounds against rounding.
-    # A reset drops the 0.8 held back, so the release waits three more steps.
+    # A reset must drop the partial droplet of the steps before it. Two steps of 0.4 particle size leave 0.8, which
+    # would complete a droplet on the first step after the reset, where a fresh emitter needs three (0.4, 0.8, 1.2).
     speed = 0.4 * particle_size / scene.dt
     for _ in range(2):
         emitter.emit(droplet_shape="circle", droplet_size=0.25, speed=speed)
