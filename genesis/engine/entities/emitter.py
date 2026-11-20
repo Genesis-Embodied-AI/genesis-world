@@ -3,6 +3,8 @@ import numbers
 import numpy as np
 import torch
 
+import trimesh
+
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.particle as pu
@@ -108,12 +110,11 @@ class Emitter(RBC):
         if droplet_shape == "omni":
             if not 0.0 < droplet_size < float("inf"):
                 gs.raise_exception(f"The size of an omni droplet must be positive and finite, got {droplet_size}.")
-            positions_ = pu.shell_to_particles(
-                p_size=p_size,
-                outer_radius=droplet_size / 2,
-                inner_radius=0.2 * droplet_size,
-                sampler=self._entity.sampler,
+            positions_ = pu.primitive_to_particles(
+                trimesh.primitives.Sphere(radius=0.5 * droplet_size), p_size, self._entity.sampler
             )
+            # The source is hollow, so that no particle starts at its center
+            positions_ = positions_[np.linalg.norm(positions_, axis=-1) >= 0.2 * droplet_size]
             positions = np.asarray(pos, dtype=gs.np_float) + positions_
             dists = np.linalg.norm(positions_, axis=1)
             positions[dists < gs.EPS] = gs.EPS
@@ -133,30 +134,14 @@ class Emitter(RBC):
                 return
 
             if droplet_shape == "circle":
-                positions = pu.cylinder_to_particles(
-                    p_size=p_size,
-                    radius=droplet_size / 2,
-                    height=droplet_length,
-                    sampler=self._entity.sampler,
-                )
+                droplet = trimesh.primitives.Cylinder(radius=0.5 * droplet_size, height=droplet_length)
             elif droplet_shape == "sphere":  # sphere droplet ignores droplet_length
-                positions = pu.sphere_to_particles(
-                    p_size=p_size,
-                    radius=droplet_size / 2,
-                    sampler=self._entity.sampler,
-                )
+                droplet = trimesh.primitives.Sphere(radius=0.5 * droplet_size)
             elif droplet_shape == "square":
-                positions = pu.box_to_particles(
-                    p_size=p_size,
-                    size=np.array([droplet_size, droplet_size, droplet_length]),
-                    sampler=self._entity.sampler,
-                )
+                droplet = trimesh.primitives.Box(extents=(droplet_size, droplet_size, droplet_length))
             else:
-                positions = pu.box_to_particles(
-                    p_size=p_size,
-                    size=np.array([droplet_size[0], droplet_size[1], droplet_length]),
-                    sampler=self._entity.sampler,
-                )
+                droplet = trimesh.primitives.Box(extents=(droplet_size[0], droplet_size[1], droplet_length))
+            positions = pu.primitive_to_particles(droplet, p_size, self._entity.sampler)
 
             positions = gu.transform_by_trans_R(
                 positions.astype(gs.np_float, copy=False),
