@@ -9,7 +9,7 @@ import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 import genesis.utils.misc as miscu
 import genesis.utils.particle as pu
-from genesis.engine import entities
+from genesis.engine.render_context import ParticlesPhysics, StaticMeshBatch
 from genesis.utils.misc import BuildableMixin
 
 try:
@@ -89,7 +89,7 @@ class SphereLight(ShapeLight):
             )
             renderer.update_rigid(self.name, gs.trans_to_T(self.pos))
         else:
-            renderer.add_particles(self.name, None)
+            renderer.add_particles(self.name)
             renderer.update_particles(self.name, self.pos, self.radius)
 
 
@@ -121,6 +121,23 @@ class MeshLight(ShapeLight):
         renderer.update_rigid(self.name, self.transform)
 
 
+def _get_luisa_thin_lens(fov: float, res: tuple[int, int], lens: "gs.options.ThinLens") -> tuple[float, float]:
+    """Return the focal length in millimeters and the f-number that LuisaRender takes to render a thin lens.
+
+    LuisaRender frames a thin-lens camera through a full-frame sensor of 36x24 mm behind a lens of the focal length it
+    takes, and sizes the radius of the lens as that focal length over twice the f-number. The focal length it takes is
+    the one framing the vertical field of view `fov` at the resolution `res`, and the f-number the one giving the
+    radius of the lens `lens`, whose focus distance is set.
+    """
+    if res[0] > res[1]:
+        projected_pixel_size = min(0.036 / res[0], 0.024 / res[1])
+    else:
+        projected_pixel_size = min(0.036 / res[1], 0.024 / res[0])
+    image_dist = res[1] * projected_pixel_size / (2.0 * np.tan(np.deg2rad(fov / 2.0)))
+    luisa_focal_len = 1.0 / (1.0 / image_dist + 1.0 / lens.focus_dist)
+    return 1000.0 * luisa_focal_len, lens.aperture * luisa_focal_len / lens.focal_len
+
+
 class Raytracer(BuildableMixin):
     def __init__(self, options, vis_options):
         self.logging_level = options.logging_level
@@ -130,7 +147,6 @@ class Raytracer(BuildableMixin):
         self.rr_threshold = options.rr_threshold
         self.clamp_normal = options.normal_diff_clamp
 
-        self.render_particle_as = vis_options.render_particle_as
         self.rendered_envs_idx = vis_options.rendered_envs_idx
 
         self._scene = None
@@ -141,11 +157,11 @@ class Raytracer(BuildableMixin):
         # shape properties
         self.shape_surfaces = dict()
         self.shape_clamp_normals = dict()
-        self.shape_reconstructs = dict()
         self.shape_surface_only = dict()
         self.shape_foamgens = dict()
         self.shape_geoms = dict()
-        self.shape_skin_visuals = dict()
+        # The foam each shape of a rendered environment generates, by the name of the shape (see '_add_foams')
+        self._foams_generator: dict[str, pu.FoamGenerator] = {}
 
         # environment configs
         self.env_sphere = EnvironmentSphere(
@@ -236,7 +252,7 @@ class Raytracer(BuildableMixin):
             )
         )
 
-        self.visualizer.update_visual_states()
+        self.visualizer.update_cameras()
 
         # state_limit = 0
         # for camera in self._cameras:
@@ -248,96 +264,22 @@ class Raytracer(BuildableMixin):
         for light in self.lights:
             light.add_to_render(self)
 
-        for entity in self.sim.entities:
-            if isinstance(entity, entities.KinematicEntity):
-                for geom in entity.vgeoms:
-                    self.add_surface(str(geom.uid), geom.surface)
-                if isinstance(entity, entities.RigidEntity):
-                    for geom in entity.geoms:
-                        self.add_surface(str(geom.uid), geom.surface)
-            elif isinstance(entity, entities.FEMEntity):
-                for vgeom in entity.vgeoms:
-                    self.add_surface(str(vgeom.uid), vgeom.surface)
-            else:
-                self.add_surface(str(entity.uid), entity.surface)
-
-        # rigid entities
-        if self.sim.rigid_solver.is_active:
-            for rigid_entity in self.sim.rigid_solver.entities:
-                if rigid_entity.surface.vis_mode == "visual":
-                    geoms = rigid_entity.vgeoms
-                else:
-                    geoms = rigid_entity.geoms
-
-                for geom in geoms:
-                    if "sdf" in rigid_entity.surface.vis_mode:
-                        mesh = geom.sdf_trimesh
-                    else:
-                        mesh = geom.trimesh
+        # The meshes posed by their solver are added here, the dynamic meshes as they are first drawn, see
+        # 'update_scene'.
+        for shape in self.sim.render_context.get_shapes(
+            self.rendered_envs_idx, debug=False, reconstruct_surfaces=False
+        ):
+            if isinstance(shape, StaticMeshBatch):
+                for geometry in shape.geometries:
+                    name = str(geometry.seg_keys.geom)
+                    self.add_surface(name, geometry.surface)
                     self.add_rigid_batch(
-                        name=str(geom.uid),
-                        vertices=mesh.vertices,
-                        triangles=mesh.faces,
-                        normals=mesh.vertex_normals,
-                        uvs=np.array([]) if geom.uvs is None else geom.uvs,
+                        name=name,
+                        vertices=miscu.tensor_to_array(geometry.verts),
+                        triangles=miscu.tensor_to_array(geometry.faces),
+                        normals=miscu.tensor_to_array(geometry.normals),
+                        uvs=np.array([]) if geometry.uvs is None else geometry.uvs,
                     )
-
-        # kinematic entities
-        if self.sim.kinematic_solver.is_active:
-            for kinematic_entity in self.sim.kinematic_solver.entities:
-                assert kinematic_entity.surface.vis_mode == "visual"
-                for geom in kinematic_entity.vgeoms:
-                    mesh = geom.trimesh
-                    self.add_rigid_batch(
-                        name=str(geom.uid),
-                        vertices=mesh.vertices,
-                        triangles=mesh.faces,
-                        normals=mesh.vertex_normals,
-                        uvs=np.array([]) if geom.uvs is None else geom.uvs,
-                    )
-
-        # MPM particles
-        if self.sim.mpm_solver.is_active:
-            for mpm_entity in self.sim.mpm_solver.entities:
-                if mpm_entity.surface.vis_mode == "visual":
-                    self.add_deformable(str(mpm_entity.uid))
-                else:
-                    self.add_particles(
-                        str(mpm_entity.uid),
-                        self.sim.mpm_solver,
-                        self.sim.mpm_solver.particle_radius,
-                        mpm_entity.material.rho,
-                    )
-
-        # SPH particles
-        if self.sim.sph_solver.is_active:
-            for sph_entity in self.sim.sph_solver.entities:
-                self.add_particles(
-                    str(sph_entity.uid),
-                    self.sim.sph_solver,
-                    self.sim.sph_solver.particle_radius,
-                    sph_entity.material.rho,
-                )
-
-        # PBD entities
-        if self.sim.pbd_solver.is_active:
-            for pbd_entity in self.sim.pbd_solver.entities:
-                if pbd_entity.surface.vis_mode == "visual":
-                    self.add_deformable(str(pbd_entity.uid))
-                else:
-                    if self.render_particle_as == "sphere":
-                        self.add_particles(str(pbd_entity.uid), self.sim.pbd_solver)
-                    elif self.render_particle_as == "tet":
-                        mesh = mu.create_tets_mesh(pbd_entity.n_particles, self.sim.pbd_solver.particle_radius)
-                        pbd_entity._tets_mesh = mesh
-                        self.add_deformable(str(pbd_entity.uid))
-
-        # FEM entities
-        if self.sim.fem_solver.is_active:
-            for fem_entity in self.sim.fem_solver.entities:
-                if fem_entity.surface.vis_mode == "visual":
-                    for vgeom in fem_entity.vgeoms:
-                        self.add_deformable(str(vgeom.uid))
 
         self._is_built = True
 
@@ -375,6 +317,7 @@ class Raytracer(BuildableMixin):
             gs.raise_exception(f"Texture type error: {type(texture)}")
 
     def add_surface(self, shape_name, surface):
+        """Add the surface of a shape."""
         # add emission
         if surface.emission is not None:
             emission_luisa = LuisaRenderPy.Light(
@@ -464,18 +407,6 @@ class Raytracer(BuildableMixin):
             min(self.clamp_normal, surface.normal_diff_clamp) if surface.smooth else 0.0
         )
 
-        # surface reconstruction
-        if surface.vis_mode == "recon":
-            self.shape_reconstructs[shape_name] = [surface.recon_backend]
-        else:
-            self.shape_reconstructs[shape_name] = None
-
-        # skinning visual mesh
-        if surface.vis_mode == "visual":
-            self.shape_skin_visuals[shape_name] = True
-        else:
-            self.shape_skin_visuals[shape_name] = False
-
         # generate foams
         if surface.generate_foam:
             self.shape_foamgens[shape_name] = {
@@ -553,66 +484,60 @@ class Raytracer(BuildableMixin):
         )
         self._scene.update_shape(self._shapes[shape_name])
 
-    def add_particles(self, name, solver, radius=None, density=None):
-        if self.shape_reconstructs[name] is not None:
-            self.add_deformable(name)
-        else:
-            self._shapes[name] = LuisaRenderPy.ParticlesShape(
-                name=name,
-                subdivision=0,
-                surface=self.shape_surfaces[name][0],
-                emission=self.shape_surfaces[name][1],
-                subsurface=self.shape_surfaces[name][2],
-            )
+    def add_particles(self, name, batch_index=None):
+        shape_name = name if batch_index is None else f"{name}_{batch_index}"
+        self._shapes[shape_name] = LuisaRenderPy.ParticlesShape(
+            name=shape_name,
+            subdivision=0,
+            surface=self.shape_surfaces[name][0],
+            emission=self.shape_surfaces[name][1],
+            subsurface=self.shape_surfaces[name][2],
+        )
 
-        if self.shape_foamgens[name] is not None:
-            # The gravity of the environment being rendered, taken from the solver these particles belong to, since
-            # each holds its own and a solver no entity was given never built one.
-            envs_idx = self.rendered_envs_idx[:1] if self.sim.n_envs > 0 else None
-            gravity = solver.get_gravity(envs_idx)
-            if envs_idx is not None:
-                gravity = gravity[0]
-            self.shape_foamgens[name]["generator"] = pu.FoamGenerator(
-                particle_radius=radius,
-                time_step=self.scene.dt,
-                gravity=miscu.tensor_to_array(gravity),
-                lower_bound=self.sim.sph_solver.lower_bound,
-                upper_bound=self.sim.sph_solver.upper_bound,
-                spray_decay=self.shape_foamgens[name]["spray_decay"],
-                foam_decay=self.shape_foamgens[name]["foam_decay"],
-                bubble_decay=self.shape_foamgens[name]["bubble_decay"],
-                k_foam=self.shape_foamgens[name]["k_foam"],
-                foam_density=density,  # use fluid density for foam
-            )
-            self.shape_foamgens[name]["radius"] = radius * self.shape_foamgens[name]["radius_scale"]
-            self.add_particles(f"{name}_foams", solver)
+    def update_particles(self, name, particles, radius, batch_index=None):
+        shape_name = name if batch_index is None else f"{name}_{batch_index}"
+        self._shapes[shape_name].update(centers=particles, radii=np.array([radius]))
+        self._scene.update_shape(self._shapes[shape_name])
 
-    def update_particles(self, name, particles, radius=None, particles_vel=None, particles_radii=None):
-        if self.shape_reconstructs[name] is not None:
-            mesh = pu.particles_to_mesh(positions=particles, radius=radius, backend=self.shape_reconstructs[name][0])
-            self.update_deformable(
-                name,
-                mesh.vertices,
-                mesh.faces,
-                mesh.vertex_normals,
-                np.array([]),
-            )
-        else:
-            radii = np.array([radius]) if particles_radii is None else particles_radii
-            self._shapes[name].update(centers=particles, radii=radii)
-            self._scene.update_shape(self._shapes[name])
+    def _add_foams(self, name: str, batch_index: int, radius: float, physics: ParticlesPhysics | None) -> None:
+        """Add the foam the particles of a shape generate in a rendered environment.
 
-        if self.shape_foamgens[name] is not None:
-            if particles_vel is None:
-                gs.raise_exception("Velocities not passed when generating foams.")
-            foam_particles = self.shape_foamgens[name]["generator"].generate(particles, particles_vel)
-            self.update_particles(f"{name}_foams", foam_particles, self.shape_foamgens[name]["radius"])
+        Foam requires a surface asking for it (see 'Surface.generate_foam') and the physical setting of the particles
+        (see 'Points.physics').
+        """
+        foam_options = self.shape_foamgens[name]
+        if foam_options is None or physics is None:
+            return
+        self._foams_generator[f"{name}_{batch_index}"] = pu.FoamGenerator(
+            particle_radius=radius,
+            time_step=self.scene.dt,
+            gravity=np.array(physics.gravity),
+            lower_bound=physics.lower_bound,
+            upper_bound=physics.upper_bound,
+            spray_decay=foam_options["spray_decay"],
+            foam_decay=foam_options["foam_decay"],
+            bubble_decay=foam_options["bubble_decay"],
+            k_foam=foam_options["k_foam"],
+            foam_density=physics.density,
+        )
+        self.add_particles(f"{name}_foams", batch_index)
 
     def add_camera(self, camera):
         camera_name = str(camera.uid)
-        camera_model = camera.model
 
-        if camera_model == "pinhole":
+        if camera.lens is not None:
+            luisa_focal_len, luisa_aperture = _get_luisa_thin_lens(camera.fov, camera.res, camera.lens)
+            self._cameras[camera_name] = LuisaRenderPy.ThinLensCamera(
+                name=camera_name,
+                pose=self.get_transform(np.eye(4)),
+                film=LuisaRenderPy.Film(resolution=camera.res),
+                filter=LuisaRenderPy.Filter(),
+                spp=camera.spp,
+                aperture=luisa_aperture,
+                focal_len=luisa_focal_len,
+                focus_dis=camera.lens.focus_dist,
+            )
+        elif camera.model == "pinhole":
             self._cameras[camera_name] = LuisaRenderPy.PinholeCamera(
                 name=camera_name,
                 pose=self.get_transform(np.eye(4)),
@@ -621,17 +546,6 @@ class Raytracer(BuildableMixin):
                 spp=camera.spp,
                 fov=camera.fov,
             )
-        elif camera_model == "thinlens":
-            self._cameras[camera_name] = LuisaRenderPy.ThinLensCamera(
-                name=camera_name,
-                pose=self.get_transform(np.eye(4)),
-                film=LuisaRenderPy.Film(resolution=camera.res),
-                filter=LuisaRenderPy.Filter(),
-                spp=camera.spp,
-                aperture=camera.aperture,
-                focal_len=camera.focal_len * 1000,  # measure in mms
-                focus_dis=camera.focus_dist,
-            )
         else:
             gs.raise_exception("Invalid camera model.")
 
@@ -639,18 +553,18 @@ class Raytracer(BuildableMixin):
 
     def update_camera(self, camera):
         camera_name = str(camera.uid)
-        camera_model = camera.model
         camera_transform = camera.transform
 
-        if camera_model == "pinhole":
-            self._cameras[camera_name].update(pose=self.get_transform(camera_transform), fov=camera.fov)
-        elif camera_model == "thinlens":
+        if camera.lens is not None:
+            luisa_focal_len, luisa_aperture = _get_luisa_thin_lens(camera.fov, camera.res, camera.lens)
             self._cameras[camera_name].update(
                 pose=self.get_transform(camera_transform),
-                aperture=camera.aperture,
-                focal_len=camera.focal_len * 1000,
-                focus_dis=camera.focus_dist,
+                aperture=luisa_aperture,
+                focal_len=luisa_focal_len,
+                focus_dis=camera.lens.focus_dist,
             )
+        elif camera.model == "pinhole":
+            self._cameras[camera_name].update(pose=self.get_transform(camera_transform), fov=camera.fov)
         else:
             gs.raise_exception("Invalid camera model.")
 
@@ -672,104 +586,58 @@ class Raytracer(BuildableMixin):
         self._t = self.scene.sim.cur_step_global
 
         # update variables not used in simulation
-        self.visualizer.update_visual_states(force_render)
+        self.visualizer.update_cameras(force_render)
 
-        # rigid-like entities (rigid + kinematic)
-        for solver in (self.sim.rigid_solver, self.sim.kinematic_solver):
-            if not solver.is_active:
+        # Every rendered environment is drawn, laid out on the environment grid
+        for shape in self.sim.render_context.get_shapes(self.rendered_envs_idx, debug=False):
+            # The shapes hold one row per environment of their own, among which the rendered ones are drawn
+            envs_row = {i_b: i_r for i_r, i_b in enumerate(shape.envs)}
+            rows_env = [(envs_row[i_b], i_b) for i_b in self.rendered_envs_idx if i_b in envs_row]
+            rows = [i_r for i_r, _ in rows_env]
+            if isinstance(shape, StaticMeshBatch):
+                poses_T = gu.trans_quat_to_T(
+                    miscu.tensor_to_array(shape.pos[rows]), miscu.tensor_to_array(shape.quat[rows])
+                )
+                for i_m, geometry in enumerate(shape.geometries):
+                    self.update_rigid_batch(str(geometry.seg_keys.geom), poses_T[:, i_m])
                 continue
-
-            # One conversion of the geom poses per visual mode in use
-            geoms_T_by_mode = {}
-            for entity in solver.entities:
-                is_visual = entity.surface.vis_mode == "visual"
-                geoms = entity.vgeoms if is_visual else entity.geoms
-                if is_visual not in geoms_T_by_mode:
-                    geoms_T_by_mode[is_visual] = self.visualizer.context.rigid_geoms_T(solver, is_visual)
-                geoms_T = geoms_T_by_mode[is_visual]
-
-                for geom in geoms:
-                    self.update_rigid_batch(str(geom.uid), geoms_T[:, geom.idx])
-
-        # Particle-based entities, read in the environment rendered
-        idx = self.rendered_envs_idx[0]
-        for solver in (self.sim.mpm_solver, self.sim.sph_solver, self.sim.pbd_solver):
-            if not solver.is_active:
-                continue
-
-            particles_render = solver.particles_render
-            particles_all = miscu.qd_to_numpy(particles_render.pos, idx, keepdim=False, transpose=True)
-            particles_vel_all = miscu.qd_to_numpy(particles_render.vel, idx, keepdim=False, transpose=True)
-            # The flags are integers on Metal (see 'gs.qd_bool'), which masks read as indices
-            active_all = miscu.qd_to_numpy(particles_render.is_active, idx, keepdim=False, transpose=True).astype(bool)
-            if solver.vverts_render is not None:
-                vverts_all = miscu.qd_to_numpy(solver.vverts_render.pos, idx, keepdim=False, transpose=True)
-
-            for entity in solver.entities:
-                particles_slice = slice(entity.particle_start, entity.particle_end)
-                particles = particles_all[particles_slice][active_all[particles_slice]]
-                if solver is self.sim.mpm_solver:
-                    if entity.surface.vis_mode == "visual":
-                        self.update_deformable(
-                            str(entity.uid),
-                            vverts_all[entity.vvert_start : entity.vvert_end],
-                            entity.vmesh.trimesh.faces,
-                            entity.vmesh.trimesh.vertex_normals,
-                            np.array([]) if entity.vmesh.uvs is None else entity.vmesh.uvs,
-                        )
-                    else:
-                        particles_vel = particles_vel_all[particles_slice][active_all[particles_slice]]
-                        self.update_particles(str(entity.uid), particles, solver.particle_radius, particles_vel)
-                elif solver is self.sim.sph_solver:
-                    particles_vel = particles_vel_all[particles_slice][active_all[particles_slice]]
-                    self.update_particles(str(entity.uid), particles, solver.particle_radius, particles_vel)
-                elif entity.surface.vis_mode == "visual":
-                    vverts = vverts_all[entity.vvert_start : entity.vvert_end]
-                    self.update_deformable(
-                        str(entity.uid),
-                        vverts,
-                        entity.vmesh.trimesh.faces,
-                        trimesh.Trimesh(
-                            vertices=vverts, faces=entity.vmesh.trimesh.faces, process=False
-                        ).vertex_normals,  # TODO: make this more principled
-                        np.array([]) if entity.vmesh.uvs is None else entity.vmesh.uvs,
-                    )
-                elif self.render_particle_as == "sphere":
-                    self.update_particles(str(entity.uid), particles, solver.particle_radius, None)
-                elif self.render_particle_as == "tet":
-                    self.update_deformable(
-                        str(entity.uid),
-                        mu.transform_tets_mesh_verts(
-                            entity._tets_mesh.vertices,
-                            positions=particles_all[particles_slice],
-                            zs=particles_vel_all[particles_slice],
-                        ).astype(np.float32),
-                        entity._tets_mesh.faces,
-                        np.array([]),
-                        np.array([]),
-                    )
-
-        # FEM entities
-        if self.sim.fem_solver.is_active:
-            vverts_pos, _, _ = self.sim.fem_solver.get_state_render()
-            vverts_all = miscu.qd_to_numpy(vverts_pos, self.rendered_envs_idx[0], keepdim=False, transpose=True)
-
-            for fem_entity in self.sim.fem_solver.entities:
-                if fem_entity.surface.vis_mode != "visual":
+            # A dynamic mesh is a shape per rendered environment showing it, which the skinned mesh of a body and the
+            # surface reconstructed once it tears there share.
+            name = str(shape.seg_keys.geom)
+            if name not in self.shape_surfaces:
+                self.add_surface(name, shape.surface)
+            # The vertices a mesh shares are gathered as they are uploaded (see 'DynamicMesh.verts_idx')
+            verts = miscu.tensor_to_array(shape.verts[rows])
+            if shape.verts_idx is not None:
+                verts = verts[:, miscu.tensor_to_array(shape.verts_idx)]
+            rows_shown = np.ones(len(rows), dtype=np.bool_)
+            if shape.is_active is not None:
+                rows_shown = miscu.tensor_to_array(shape.is_active[rows], dtype=np.bool_)
+            faces = miscu.tensor_to_array(shape.faces)
+            uvs = np.array([]) if shape.uvs is None else shape.uvs
+            particles = shape.particles
+            for (_, i_b), vverts, is_shown in zip(rows_env, verts, rows_shown):
+                if not is_shown:
                     continue
-
-                for vgeom in fem_entity.vgeoms:
-                    render_verts = vverts_all[vgeom.vvert_start : vgeom.vvert_end]
-                    vertex_normals = trimesh.Trimesh(
-                        vertices=render_verts, faces=vgeom.vmesh.faces, process=False
-                    ).vertex_normals
-                    self.update_deformable(
-                        str(vgeom.uid),
-                        render_verts,
-                        vgeom.vmesh.faces,
-                        vertex_normals,
-                        np.array([]) if vgeom.uvs is None else vgeom.uvs,
+                if f"{name}_{i_b}" not in self._shapes:
+                    self.add_deformable(name, i_b)
+                    if particles is not None:
+                        self._add_foams(name, i_b, particles.radius, particles.physics)
+                vverts = vverts + self.scene.envs_offset[i_b]
+                normals = trimesh.Trimesh(vertices=vverts, faces=faces, process=False).vertex_normals
+                self.update_deformable(name, vverts, faces, normals, uvs, i_b)
+                foams_generator = self._foams_generator.get(f"{name}_{i_b}")
+                if foams_generator is not None:
+                    # The particles hold rows for environments of their own (those of the solver for a skinned mesh)
+                    i_p = particles.envs.index(i_b)
+                    is_active = miscu.tensor_to_array(particles.is_active[i_p], dtype=np.bool_)
+                    foam_particles = foams_generator.generate(
+                        miscu.tensor_to_array(particles.pos[i_p])[is_active],
+                        miscu.tensor_to_array(particles.vel[i_p])[is_active],
                     )
+                    foam_radius = particles.radius * self.shape_foamgens[name]["radius_scale"]
+                    foam_particles = foam_particles + self.scene.envs_offset[i_b]
+                    self.update_particles(f"{name}_foams", foam_particles, foam_radius, i_b)
 
         # Flush the update buffer.
         self._scene.update_scene(time=self._t)

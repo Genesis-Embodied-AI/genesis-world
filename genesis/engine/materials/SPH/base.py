@@ -1,4 +1,6 @@
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
+
+from genesis.constants import STRUCTURE
 
 from ..base import Material
 
@@ -23,5 +25,7 @@ class Base(Material["SPHEntity"]):
         cost of a slower first sampling of each shape, cached afterwards. 'regular' places them on a grid, which leaves
         the surface stair-stepped. 'random' draws them uniformly, which leaves local density fluctuations.
     """
+
+    structure: ClassVar[STRUCTURE] = STRUCTURE.AMORPHOUS
 
     sampler: SamplerType = "pbs"

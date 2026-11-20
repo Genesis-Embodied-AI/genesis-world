@@ -1,7 +1,9 @@
 name: Examples (CPU)
 
 on:
+  # A draft pull request is gated as in the production workflow.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
 
@@ -13,6 +15,7 @@ jobs:
   run-examples:
     runs-on: ubuntu-24.04
     name: ubuntu-24.04-3.12-examples
+    if: ${{ !github.event.pull_request.draft || github.run_attempt > 1 }}
 
     env:
       HF_HUB_DOWNLOAD_TIMEOUT: 60

@@ -1,0 +1,114 @@
+name: CI Command
+
+# A comment '/ci' on a pull request re-runs its workflows that skipped the latest commit for being a draft (see the
+# production workflow). The re-run keeps the event and permissions of the pull request, so this workflow, which runs
+# from the default branch with a write token, never checks out the code of the pull request.
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write
+  issues: write
+  # Reacting to a comment on a pull request takes write access to pull requests on top of issues.
+  pull-requests: write
+
+jobs:
+  rerun:
+    name: ci-command-rerun
+
+    if: >-
+      github.event.issue.pull_request
+      && (github.event.comment.body == '/ci' || startsWith(github.event.comment.body, '/ci '))
+
+    runs-on: ubuntu-24.04
+
+    # Two '/ci' comments on one pull request would re-run the same runs, so the second one waits for the first. The
+    # group is set on the job, so that the other comments, whose job is skipped, never cancel a pending command.
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.issue.number }}
+
+    steps:
+      - name: Re-run the skipped workflows of the pull request
+        uses: actions/github-script@v8
+        env:
+          PRECOMMIT_WORKFLOW: .github/workflows/format.yml
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const comment = context.payload.comment;
+            const react = (content) => github.rest.reactions.createForIssueComment({
+              owner, repo, comment_id: comment.id, content,
+            });
+
+            // The association of a comment misses the members of the organization whose membership is private, so
+            // the permission is asked of the API instead.
+            const { data: access } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner, repo, username: comment.user.login,
+            });
+            if (!['admin', 'write'].includes(access.permission)) {
+              core.notice(`${comment.user.login} has no write access, so the command is ignored.`);
+              await react('-1');
+              return;
+            }
+
+            const { data: pull } = await github.rest.pulls.get({ owner, repo, pull_number: context.issue.number });
+            if (!pull.draft) {
+              core.notice('The pull request is ready for review, so every push already runs its CI.');
+              await react('confused');
+              return;
+            }
+            // The runs of the commit may not exist yet right after a push, and a run can be re-run only once completed,
+            // so they are polled until they settle. The precommit run is never gated, so its presence shows that the
+            // push created its runs. A run re-run already, by hand or by an earlier '/ci', is never waited for. The
+            // bound of 30 minutes sits far above the duration of lint.
+            let runsLatest = [];
+            let isSettled = false;
+            for (let i_poll = 0; i_poll < 180; i_poll++) {
+              const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+                owner, repo, event: 'pull_request', head_sha: pull.head.sha,
+              });
+              // A run lists no pull request when it comes from a fork, so it is matched to the pull request through
+              // its head branch, since other branches may point at the same commit. A commit can have several runs of
+              // a workflow, one per event of its pull request. The runs are listed newest first, and the latest one of
+              // each workflow alone is considered.
+              const runsPull = runs.filter((run) => run.head_branch === pull.head.ref
+                && run.head_repository.full_name === pull.head.repo.full_name);
+              runsLatest = runsPull.filter(
+                (run, i_run) => runsPull.findIndex(({ path }) => path === run.path) === i_run);
+              isSettled = runsLatest.some((run) => run.path === process.env.PRECOMMIT_WORKFLOW)
+                && runsLatest.every((run) => run.status === 'completed' || run.conclusion === 'action_required'
+                  || run.run_attempt > 1);
+              if (isSettled) {
+                break;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 10000));
+            }
+            if (!isSettled) {
+              await react('confused');
+              core.setFailed(`The runs of ${pull.head.sha} did not complete in time. Comment /ci again once they do.`);
+              return;
+            }
+            // A run from a fork that needs a maintainer's approval waits as 'action_required', and is approved on the
+            // pull request page before '/ci' can re-run it.
+            if (runsLatest.some((run) => run.conclusion === 'action_required')) {
+              core.notice('The workflows of the pull request wait for approval. Approve them, then comment /ci again.');
+              await react('confused');
+              return;
+            }
+            // A run skips as a whole only through a draft gate (see the production workflow).
+            const runsSkipped = runsLatest.filter((run) => run.conclusion === 'skipped');
+            if (runsSkipped.length === 0) {
+              core.notice(`Commit ${pull.head.sha} has no skipped run to re-run.`);
+              await react('confused');
+              return;
+            }
+            // Re-running the precommit run starts the Nyx Plugin workflow past its draft gate (see that workflow). A
+            // precommit run re-run already is still in progress, and the Nyx Plugin run it starts passes the gate too.
+            const runPrecommit = runsLatest.find((run) => run.path === process.env.PRECOMMIT_WORKFLOW);
+            const runsRerun = [...runsSkipped, runPrecommit].filter((run) => run.status === 'completed');
+            for (const run of runsRerun) {
+              await github.rest.actions.reRunWorkflow({ owner, repo, run_id: run.id });
+              core.notice(`Re-running ${run.html_url}`);
+            }
+            await react('rocket');

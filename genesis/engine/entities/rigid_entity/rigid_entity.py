@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from itertools import chain
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 import numpy as np
 import torch
@@ -30,8 +30,9 @@ from .rigid_link import KinematicLink, RigidLink
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
-    from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
+    from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+    from genesis.typing import IndexType
 
 
 def get_variants_kinematics(entity, n_envs: int):
@@ -218,8 +219,6 @@ class KinematicEntity(Entity):
         self._vgeom_start = solver.n_vgeoms
         self._vvert_start = solver.n_vverts
         self._vface_start = solver.n_vfaces
-        self._custom_vvert_start = solver.n_custom_vverts
-        self._custom_vface_start = solver.n_custom_vfaces
 
         self._is_attached: bool = False
         self._is_vverts_overridden: bool = False
@@ -522,7 +521,6 @@ class KinematicEntity(Entity):
         # flag follows the parent link's down the tree, which the link order walks parents first.
         for link in self._solver.links:
             if link.root_idx == base_link.idx:
-                was_fixed = link.is_fixed
                 link._root_idx = parent_link.root_idx
                 link._is_fixed = self._solver.links[link.parent_idx].is_fixed and all(
                     joint.type is gs.JOINT_TYPE.FIXED for joint in link.joints
@@ -531,27 +529,6 @@ class KinematicEntity(Entity):
                 # The attach moves this link into another kinematic tree, so its old tree's inverse weight no longer
                 # applies. The sentinel makes the solver recompute it during its refresh.
                 link.desc.invweight = np.full((2,), fill_value=-1.0, dtype=gs.np_float)
-
-                # Inertial resolution skips the geometry estimate for a world-carried link (see '_describe_link'), so a
-                # link that starts moving recomputes it from its geoms at the density its entity simulates. Values the
-                # asset states still win over the estimate.
-                if was_fixed and not link.is_fixed and isinstance(link.desc, RigidLinkDescription):
-                    desc = link.desc
-                    # An entity attached beneath this one shares its root, so the density comes from the link's own
-                    # entity rather than from this one.
-                    rho = link.entity.material.rho
-                    if rho is None:
-                        if self._solver._enable_mujoco_compatibility:
-                            rho = RHO_MUJOCO
-                        else:
-                            rho = RHO_ROBOT if desc.is_robot else RHO_OBJECT
-                    # A geom description holds the fields a parse states it with, so one composition serves either.
-                    hint = compose_inertial_from_g_infos([vars(g_desc) for g_desc in (desc.geoms or desc.vgeoms)], rho)
-                    # A fixed link holds what the asset states and None elsewhere (see 'RigidLinkDescription'), so
-                    # this resolves it exactly as '_describe_link' resolves a moving link.
-                    desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia = finalize_inertial(
-                        desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia, *hint
-                    )
 
         # The anchor of an aligned free root is the center of mass and principal axes of the body the build described,
         # and the attached links now extend that body. Its frame and qpos stay where they are, so the anchor stops
@@ -1232,50 +1209,45 @@ class KinematicEntity(Entity):
         """The list of visual geoms (`RigidVisGeom`) in the entity, as a copy."""
         return gs.List(self._vgeoms)
 
-    @gs.assert_built
-    def set_vverts(self, vverts, envs_idx=None):
-        """Override this entity's visual vertex positions for rendering and sensors.
+    @overload
+    def set_vverts(self, vverts: "np.typing.ArrayLike", envs_idx: "IndexType | None" = None) -> None: ...
 
-        vverts is broadcast to (len(envs_idx), n_vverts, 3); scalars, (3,) and (n_vverts, 3) are accepted. vverts=None
-        re-runs FK over the entity's vgeoms and writes the result back into the custom buffer. Requires the entity's
-        morph to be created with enable_custom_vverts=True.
+    @overload
+    def set_vverts(
+        self,
+        vverts: None = None,
+        envs_idx: "IndexType | None" = None,
+        *,
+        variant: "int | str | Sequence[int | str] | None" = None,
+    ) -> None: ...
+
+    @gs.assert_built
+    def set_vverts(
+        self,
+        vverts: "np.typing.ArrayLike | None" = None,
+        envs_idx: "IndexType | None" = None,
+        *,
+        variant: "int | str | Sequence[int | str] | None" = None,
+    ) -> None:
+        """Write the batched variant of the DynamicVertices of the visual geom of this entity and show it, or show one
+        of its variants, giving both raising.
+
+        The entity holds a single visual geom, whose 'set_vverts' this is (see ``RigidVisGeom.set_vverts``).
         """
-        if self._enable_heterogeneous:
-            gs.raise_exception("This method is not supported by heterogeneous entities.")
-        if not self._morph.enable_custom_vverts:
+        if len(self._vgeoms) != 1:
             gs.raise_exception(
-                "'set_vverts' requires the entity's morph to be created with 'enable_custom_vverts=True'."
+                f"'entity.set_vverts' requires an entity with a single visual geom, got {len(self._vgeoms)}. Use "
+                "'vgeom.set_vverts' of its visual geoms instead."
             )
-        self._is_vverts_overridden = True
-        self._solver.set_vverts(
-            self._custom_vvert_start,
-            self._custom_vvert_start + self.n_vverts,
-            np.array([vg.idx for vg in self.vgeoms], dtype=gs.np_int),
-            vverts,
-            envs_idx,
-        )
+        self._vgeoms[0].set_vverts(vverts, envs_idx, variant=variant)
 
     @gs.assert_built
-    def get_vverts(self, envs_idx=None):
-        """Return a copy of this entity's visual vertex positions in world space.
+    def get_vverts(self, envs_idx: "IndexType | None" = None) -> torch.Tensor:
+        """Return a copy of the world position of the vertices of the visual geoms of this entity, as drawn.
 
-        For entities created with enable_custom_vverts=True the positions are read from the engine custom buffer; for
-        other entities they are computed on the fly from each vgeom's current pose applied to its rest-pose init_vverts.
+        The vertices of the visual geoms follow one another in their order (see ``RigidVisGeom.get_vverts``).
         """
-        if self._enable_heterogeneous:
-            gs.raise_exception("This method is not supported by heterogeneous entities.")
-        if self._morph.enable_custom_vverts:
-            return self._solver.get_vverts(self._custom_vvert_start, self._custom_vvert_start + self.n_vverts, envs_idx)
-
-        vgeoms_pos = qd_to_torch(self._solver.dyn_state.vgeoms.pos, envs_idx, transpose=True, copy=None)
-        vgeoms_quat = qd_to_torch(self._solver.dyn_state.vgeoms.quat, envs_idx, transpose=True, copy=None)
-        parts = []
-        for vgeom in self.vgeoms:
-            init = torch.as_tensor(vgeom.init_vverts, dtype=gs.tc_float, device=gs.device)
-            pos = vgeoms_pos[..., vgeom.idx, :].unsqueeze(-2)
-            quat = vgeoms_quat[..., vgeom.idx, :].unsqueeze(-2)
-            parts.append(gu.transform_by_trans_quat(init, pos, quat))
-        tensor = torch.cat(parts, dim=-2)
+        tensor = self._solver.render_context.get_vverts(self._vgeoms, envs_idx)
         return tensor[0] if self._solver.n_envs == 0 else tensor
 
     @property
@@ -1746,6 +1718,7 @@ class RigidEntity(KinematicEntity):
         for e_desc in self._desc.equalities:
             self._add_equality(e_desc)
 
+    @gs.assert_unbuilt
     def attach(
         self,
         parent_entity: "KinematicEntity",
@@ -1753,9 +1726,40 @@ class RigidEntity(KinematicEntity):
         pos: Vec3FType | None = None,
         quat: UnitVec4FType | None = None,
     ) -> None:
-        """Attach this entity beneath a link of another one (see KinematicEntity.attach), the slots of its collision
-        vertices following the fixed flags the attach leaves."""
+        """Attach this entity as ``KinematicEntity.attach`` does, then resolve the inertia of its links that start
+        moving, from the density of their entity.
+
+        The slots of its collision vertices follow the fixed flags the attach leaves. The parameters are those of
+        ``KinematicEntity.attach``.
+        """
+        # The links the attach re-roots, scene-wide since entities attached beneath this one share its root, among
+        # which those fixed so far.
+        base_link = self.links[0]
+        links_fixed = [link for link in self._solver.links if link.root_idx == base_link.idx and link.is_fixed]
         super().attach(parent_entity, parent_link_name, pos, quat)
+
+        # Inertial resolution skips the geometry estimate for a world-carried link (see '_describe_link'), so a link
+        # that starts moving recomputes it from its geoms at the density its entity simulates. Values the asset states
+        # still win over the estimate.
+        for link in links_fixed:
+            if link.is_fixed:
+                continue
+            desc = link.desc
+            # An entity attached beneath this one shares its root, so the density comes from the link's own entity
+            # rather than from this one.
+            rho = link.entity.material.rho
+            if rho is None:
+                if self._solver._enable_mujoco_compatibility:
+                    rho = RHO_MUJOCO
+                else:
+                    rho = RHO_ROBOT if desc.is_robot else RHO_OBJECT
+            # A geom description holds the fields a parse states it with, so one composition serves either.
+            hint = compose_inertial_from_g_infos([vars(g_desc) for g_desc in (desc.geoms or desc.vgeoms)], rho)
+            # A fixed link holds what the asset states and None elsewhere (see 'RigidLinkDescription'), so this
+            # resolves it exactly as '_describe_link' resolves a moving link.
+            desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia = finalize_inertial(
+                desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia, *hint
+            )
 
         # This entity's links and geoms move between the free and fixed pools, and the rigid entities created after it
         # shift behind them, the totals of the solver following

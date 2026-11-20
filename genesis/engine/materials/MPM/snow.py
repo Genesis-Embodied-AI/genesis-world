@@ -1,10 +1,10 @@
-from typing import Any
+from typing import Any, ClassVar
 
 import quadrants as qd
 from pydantic import StrictBool, model_validator
 
 import genesis as gs
-from genesis.typing import PositiveFloat
+from genesis.constants import STRUCTURE
 
 from .base import SamplerType
 from .elasto_plastic import ElastoPlastic
@@ -35,6 +35,8 @@ class Snow(ElastoPlastic):
     yield_higher : float, optional
         Upper bound of yield condition. Default is 4.5e-3.
     """
+
+    structure: ClassVar[STRUCTURE] = STRUCTURE.AMORPHOUS
 
     sampler: SamplerType = "random"
     use_von_mises: StrictBool = False

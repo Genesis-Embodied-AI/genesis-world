@@ -25,7 +25,6 @@ from genesis.utils.data import (
     DataItem,
     DataKind,
     ScalarItem,
-    Size,
     copy_data,
     eoa,
     field,
@@ -50,7 +49,7 @@ from genesis.utils.misc import (
 
 
 if TYPE_CHECKING:
-    from genesis.engine.scene import Scene
+    from genesis.engine.render_context import ScopedRenderContext
     from genesis.engine.simulator import Simulator
     from genesis.options import Options
 
@@ -82,11 +81,6 @@ class ErrorCode(IntFlag):
         if bit >= ERRNO_BITS:
             raise TypeError(f"'{name}' exceeds the {ERRNO_BITS} bits of an errno.")
         return 1 << bit
-
-
-# The visual vertices and faces a solver skins for rendering
-VVERTS = Size("vverts")
-VFACES = Size("vfaces")
 
 
 class SimulatorState(Data, kind=DataKind.SCRATCH):
@@ -579,28 +573,52 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
 
         # Registered Subscribers, notified after @mutates-tagged methods run; see subscribe(). The re-entrancy guard
         # below defers notification to the outermost tagged call, accumulating every change that occurred in between,
-        # so a setter calling other tagged setters notifies once rather than per nested call.
-        self._subscribers: set[Subscriber] = set()
+        # so a setter calling other tagged setters notifies once rather than per nested call. The order of subscription
+        # is kept, so that a consumer of the render context, which subscribes after it, finds the change recorded there.
+        self._subscribers: list[Subscriber] = []
         self._is_mutating = False
         self._mutation_changes: set[StateChange] = set()
         self._mutation_links_idx_list: list[np.ndarray] | None = None
-        # Global indices of the links whose pose is a function of the configuration, resolving
-        # MutatedLinks.ARTICULATED notifications, and the per-link parent indices (-1 for roots) closing named-links
-        # reaches over kinematic subtrees; None keeps the corresponding notifications unbounded. Set at build by
-        # solvers that expose a kinematic structure (see KinematicSolver).
+        # The kinematic structure resolving the reach of the notifications (see 'mutates'): the links holding a degree
+        # of freedom, the parent of each link (-1 for a root), and the link holding each degree of freedom and each
+        # configuration entry, by name of index argument. Set at build by the solvers exposing a kinematic structure
+        # (see KinematicSolver), the notifications staying unbounded otherwise.
         self._articulated_links_idx: np.ndarray | None = None
         self._links_parent_idx: np.ndarray | None = None
+        self._indices_link_idx: dict[str, np.ndarray] = {}
+        # The links whose change can move a link of the filter of each link-filtered subscriber, its filtered links and
+        # their ancestors, which a notification of a change of other links skips.
+        self._subscribers_links_watched: dict[Subscriber, np.ndarray] = {}
+        # The changes some link-filtered subscriber listens to, the only ones whose reach a notification resolves
+        self._links_watched_changes: frozenset[StateChange] = frozenset()
+        # The part of the render context the solver draws, set as it builds
+        self.render_context: "ScopedRenderContext | None" = None
 
     def _add_force_field(self, force_field: ForceField) -> None:
         self._force_fields.fields.append(force_field)
 
     def subscribe(self, subscriber: Subscriber):
-        """Register a Subscriber to be notified after any @mutates-tagged method whose change is in its filter."""
-        if subscriber.links_filter is not None:
-            subscriber.links_filter = tensor_to_array(
-                sanitize_index(subscriber.links_filter, -1, self.n_links, 0, "links_filter")
+        """Register a Subscriber to be notified after any @mutates-tagged method whose change is in its filter, after
+        the subscribers registered before it."""
+        # A change of a link moves its whole kinematic subtree, so the filter closes over the ancestors of its links
+        # once, here, rather than over the subtrees of the links of each change.
+        if subscriber.links_filter is not None and self._links_parent_idx is not None:
+            links_filter = tensor_to_array(
+                sanitize_index(
+                    subscriber.links_filter, expected_size=-1, max_size=self.n_links, dim=0, name="links_filter"
+                )
             )
-        self._subscribers.add(subscriber)
+            links_watched = np.zeros(len(self._links_parent_idx), dtype=np.bool_)
+            links_watched[links_filter] = True
+            while True:
+                parents_idx = self._links_parent_idx[links_watched]
+                parents_idx = parents_idx[parents_idx >= 0]
+                if links_watched[parents_idx].all():
+                    break
+                links_watched[parents_idx] = True
+            self._subscribers_links_watched[subscriber] = links_watched
+            self._links_watched_changes |= subscriber.to
+        self._subscribers.append(subscriber)
 
     def _sanitize_io_variables(
         self,
@@ -704,6 +722,10 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
                     "to differentiate over this horizon: shorten it, or decrease the simulation timestep."
                 ),
             }
+        self.render_context = self._sim.render_context.register(self, is_empty=not self.is_active)
+        for entity in self._entities:
+            if entity.spec.vis.debug is not None:
+                self.render_context.set_debug(entity, entity.spec.vis.debug)
 
     def destroy(self) -> None:
         for entity in self._entities:

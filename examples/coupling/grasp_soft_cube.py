@@ -21,9 +21,9 @@ def main():
             grid_density=128,
             lower_bound=(0.55, -0.1, -0.05),
             upper_bound=(0.75, 0.1, 0.3),
-        ),
-        vis_options=gs.options.VisOptions(
-            visualize_mpm_boundary=True,
+            vis=gs.options.ParticleVisOptions(
+                boundary=True,
+            ),
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(3, -1, 1.5),
@@ -37,14 +37,16 @@ def main():
         gs.morphs.Plane(),
     )
     cube = scene.add_entity(
-        material=gs.materials.MPM.Elastic(),
-        morph=gs.morphs.Box(
-            size=(0.04, 0.04, 0.04),
-            pos=(0.65, 0.0, 0.025),
-            euler=(0, 0, 0),
-        ),
-        surface=gs.surfaces.Default(
-            vis_mode="particle",
+        spec=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                size=(0.04, 0.04, 0.04),
+                pos=(0.65, 0.0, 0.025),
+                euler=(0, 0, 0),
+            ),
+            material=gs.materials.MPM.Elastic(),
+            vis=gs.options.EntityVisOptions(
+                debug=True,
+            ),
         ),
     )
     franka = scene.add_entity(

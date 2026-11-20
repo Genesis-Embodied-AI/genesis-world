@@ -530,25 +530,32 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         if changed:
             render_flags["shadows"] = new_val
 
+        # Debug view, which shows each entity in its debug representation (see 'VisOptions.debug')
+        is_changed, is_debug = imgui.checkbox("Debug View", self.scene.sim.render_context.debug)
+        if is_changed:
+            self.interactive_scene.set_debug_view(is_debug)
+
         # World Frame
         changed, new_val = imgui.checkbox("World Frame", gs_context.world_frame_shown)
         if changed:
             (gs_context.on_world_frame if new_val else gs_context.off_world_frame)()
 
-        # Link Frame
-        changed, new_val = imgui.checkbox("Link Frame", gs_context.link_frame_shown)
-        if changed:
-            (gs_context.on_link_frame if new_val else gs_context.off_link_frame)()
-
-        # Link Frame Size slider
-        link_size = gs_context.link_frame_size
-        changed_size, new_size = imgui.slider_float("Frame Size##link_frame_size", link_size, 0.02, 0.5, "%.2f")
-        if changed_size and link_size > 0 and new_size > 0:
-            gs_context.link_frame_mesh.vertices *= new_size / link_size
-            gs_context.link_frame_size = new_size
-            if gs_context.link_frame_shown:
-                gs_context.off_link_frame()
-                gs_context.on_link_frame()
+        # Link Frame and its size, for the links of the kinematic and rigid solvers alike
+        links_contexts = [
+            solver.render_context
+            for solver in (self.scene.sim.kinematic_solver, self.scene.sim.rigid_solver)
+            if solver.is_active
+        ]
+        if links_contexts:
+            is_changed, is_link_frames_shown = imgui.checkbox("Link Frame", self.scene.visualizer.link_frames)
+            if is_changed:
+                self.scene.visualizer.set_link_frames(is_link_frames_shown)
+            is_changed, link_frame_size = imgui.slider_float(
+                "Frame Size##link_frame_size", links_contexts[-1].link_frame_size, 0.02, 0.5, "%.2f"
+            )
+            if is_changed and link_frame_size > 0:
+                for links_context in links_contexts:
+                    links_context.set_link_frame_size(link_frame_size)
 
         # Camera Frustum
         changed, new_val = imgui.checkbox("Camera Frustum", gs_context.camera_frustum_shown)
@@ -1012,6 +1019,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
             # matching the <ClassName> style used by the option reprs. Controls unavailable for kinematic entities are
             # disabled rather than removed, keeping the panel layout consistent across entity types.
             is_rigid = isinstance(entity, gs.engine.entities.RigidEntity)
+            render_context = entity.solver.render_context
             expanded = imgui.collapsing_header(
                 f"{data.name}  <{type(entity).__name__}>##entity_{entity_idx}",
                 flags=imgui.TreeNodeFlags_.default_open,
@@ -1024,51 +1032,52 @@ class ImGuiOverlayPlugin(ViewerPlugin):
             # DOF count display
             imgui.text(f"DOFs: {data.n_dofs}")
 
-            # Vis mode combo. The collision item is greyed out unless the entity has collision geometry (kinematic
-            # entities have none, and rigid entities can be loaded without it), so an empty mode is never selectable.
-            has_collision = is_rigid and len(entity.geoms) > 0
-            current_mode = entity.surface.vis_mode
-            if imgui.begin_combo(f"Vis Mode##vis_{entity_idx}", current_mode):
-                for mode in ("visual", "collision"):
-                    disabled = mode == "collision" and not has_collision
-                    imgui.begin_disabled(disabled)
-                    clicked = imgui.selectable(mode, current_mode == mode)[0]
+            # View of the entity in the viewer and the debug cameras: as it looks or in its debug representation, which
+            # is greyed out for an entity without one (kinematic entities, rigid ones without collision geometry).
+            is_debug = render_context.get_debug(entity)
+            if is_debug is None:
+                is_debug = self.scene.sim.render_context.debug
+            has_debug = is_rigid and entity.spec.vis.debug_vis_mode is not None and entity.n_geoms > 0
+            if imgui.begin_combo(f"View##view_{entity_idx}", "debug" if is_debug else "as it looks"):
+                for label, is_label_debug in (("as it looks", False), ("debug", True)):
+                    is_disabled = is_label_debug and not has_debug
+                    imgui.begin_disabled(is_disabled)
+                    is_clicked = imgui.selectable(label, is_debug == is_label_debug)[0]
                     imgui.end_disabled()
-                    if disabled and imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled.value):
-                        imgui.set_tooltip("No collision geometry available for this entity")
-                    if clicked and mode != current_mode:
-                        self.interactive_scene.set_entity_vis_mode(entity, mode)
+                    if is_disabled and imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled.value):
+                        imgui.set_tooltip("No debug representation available for this entity")
+                    if is_clicked and is_label_debug != is_debug:
+                        render_context.set_debug(entity, is_label_debug)
                 imgui.end_combo()
 
-            # Per-entity wireframe toggle. Material lives on render primitives, so we walk the active geom set (vgeoms
-            # for visual mode, geoms otherwise) and flip the flag on each.
-            is_wireframe = self._wireframe_state.get(entity_idx, False)
-            changed_wf, new_wf = imgui.checkbox(f"Wireframe##wf_{entity_idx}", is_wireframe)
-            if changed_wf:
-                self._wireframe_state[entity_idx] = new_wf
-                ctx = self.viewer.gs_context
-                geoms = entity.vgeoms if entity.surface.vis_mode == "visual" else entity.geoms
-                for geom in geoms:
-                    node = ctx.rigid_nodes.get(geom.uid)
-                    if node is None:
+            # Per-entity wireframe toggle. Material lives on render primitives, so we walk the nodes drawing the entity,
+            # found by their segmentation keys, and flip the flag on each.
+            is_changed, is_wireframe = imgui.checkbox(
+                f"Wireframe##wireframe_{entity_idx}", self._wireframe_state.get(entity_idx, False)
+            )
+            if is_changed:
+                self._wireframe_state[entity_idx] = is_wireframe
+                rasterizer_context = self.viewer.gs_context
+                for seg_keys, nodes in rasterizer_context.nodes_by_seg_keys.items():
+                    if seg_keys.entity != entity.idx:
                         continue
-                    for primitive in node.mesh.primitives:
-                        if primitive.material is not None:
-                            primitive.material.wireframe = new_wf
-                ctx._scene._meshes_updated = True
+                    for node in nodes:
+                        for primitive in node.mesh.primitives:
+                            if primitive.material is not None:
+                                primitive.material.wireframe = is_wireframe
+                rasterizer_context._scene._meshes_updated = True
 
             # Visualize contact toggle. Contacts only exist for dynamically simulated rigid entities; for kinematic
-            # entities the control is disabled and reads False, since they carry no visualize_contact state.
-            show_contact = entity.visualize_contact if is_rigid else False
+            # entities the control is disabled and reads False.
             imgui.begin_disabled(not is_rigid)
-            changed_contact, new_contact = imgui.checkbox(f"Show Contacts##contact_{entity_idx}", show_contact)
+            is_changed, is_contact_shown = imgui.checkbox(
+                f"Show Contacts##contact_{entity_idx}", is_rigid and render_context.get_visualize_contact(entity)
+            )
             imgui.end_disabled()
             if not is_rigid and imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled.value):
                 imgui.set_tooltip("Only available for rigid entities")
-            if changed_contact:
-                entity._visualize_contact = new_contact
-                for link in entity.links:
-                    link._visualize_contact = new_contact
+            if is_changed:
+                render_context.set_visualize_contact(entity, is_contact_shown)
 
             # Gizmo toggle to translate/rotate the entity's base link (fixed or floating base).
             if self._gizmo is not None:

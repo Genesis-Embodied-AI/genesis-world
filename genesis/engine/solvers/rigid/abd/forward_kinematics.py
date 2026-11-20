@@ -217,11 +217,6 @@ def func_update_kinematics_root(
     func_forward_kinematics_root(
         i_l_root, i_b, rigid_info.qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
     )
-    i_l_end = rigid_info.links_root_end[i_l_root]
-    for i_l in range(i_l_root, i_l_end):
-        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-        if dyn_info.links.root_idx[I_l] == i_l_root:
-            func_update_vgeoms_link(i_l, i_b, dyn_state, dyn_info, rigid_config)
     func_COM_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
     func_forward_velocity_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
 
@@ -513,11 +508,15 @@ def func_forward_kinematics_link(
             # uninitialized memory (NaN gradients on qpos) otherwise.
             quat = W(next_I, quat, dyn_state.links.quat_bw, BW)
 
-    # Skip link pose update for fixed root links to let users manually overwrite them
+    # The pose of a fixed root link is state, which the setters write (see FixedRootsState in rigid/data.py)
     I_jf = (i_l, 0 if qd.static(not BW) else n_joints, i_b)
-    if not (i_p == -1 and dyn_info.links.is_fixed[I_l]):
+    i_fr = dyn_info.links.fixed_root_idx[I_l]
+    if i_fr == -1:
         dyn_state.links.pos[i_l, i_b] = R(I_jf, pos, dyn_state.links.pos_bw, BW)
         dyn_state.links.quat[i_l, i_b] = R(I_jf, quat, dyn_state.links.quat_bw, BW)
+    else:
+        dyn_state.links.pos[i_l, i_b] = dyn_state.fixed_roots.pos[i_fr, i_b]
+        dyn_state.links.quat[i_l, i_b] = gu.qd_normalize(dyn_state.fixed_roots.quat[i_fr, i_b], rigid_info.EPS[None])
 
 
 @qd.func
@@ -622,22 +621,6 @@ def func_update_geoms_link(
 
 
 @qd.func
-def func_update_vgeoms_link(i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()):
-    """Place the visual geoms of the variant of link i_l active in env i_b on the link.
-
-    The world-space visual vertices follow lazily (see 'update_vverts_for_vgeoms').
-    """
-    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-    for i_vg in range(dyn_info.links.vgeom_start[I_l], dyn_info.links.vgeom_end[I_l]):
-        dyn_state.vgeoms.pos[i_vg, i_b], dyn_state.vgeoms.quat[i_vg, i_b] = gu.qd_transform_pos_quat_by_trans_quat(
-            dyn_info.vgeoms.pos[i_vg],
-            dyn_info.vgeoms.quat[i_vg],
-            dyn_state.links.pos[i_l, i_b],
-            dyn_state.links.quat[i_l, i_b],
-        )
-
-
-@qd.func
 def func_update_geoms_root(
     i_l_root: int,
     i_b: int,
@@ -700,26 +683,6 @@ def func_update_geoms(
             dyn_state.geoms.verts_updated[i_g, i_b] = False
             if qd.static(not is_backward):
                 func_update_geom_aabb(i_g, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms)
-
-    # The visual geoms of the awake links follow, one thread each as well, the replay of the reversal leaving them be
-    if qd.static(not is_backward):
-        qd.loop_config(
-            name="update_cartesian_space_vgeoms", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-        )
-        for i_vg, i_b in qd.ndrange(*dyn_state.vgeoms.pos.shape, axes=qd.static(eoa(dyn_state.vgeoms.pos))):
-            i_l = dyn_info.vgeoms.link_idx[i_vg]
-            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-            # See the geoms above for the visual geoms of an inactive variant or of the padding slot
-            is_placed = dyn_info.links.vgeom_start[I_l] <= i_vg < dyn_info.links.vgeom_end[I_l]
-            if is_placed and func_is_awake_link(i_l, i_b, dyn_state, rigid_config):
-                dyn_state.vgeoms.pos[i_vg, i_b], dyn_state.vgeoms.quat[i_vg, i_b] = (
-                    gu.qd_transform_pos_quat_by_trans_quat(
-                        dyn_info.vgeoms.pos[i_vg],
-                        dyn_info.vgeoms.quat[i_vg],
-                        dyn_state.links.pos[i_l, i_b],
-                        dyn_state.links.quat[i_l, i_b],
-                    )
-                )
 
 
 @qd.func
@@ -1004,31 +967,6 @@ def kernel_update_all_verts(dyn_state: DynState, dyn_info: DynInfo, rigid_config
     func_update_all_verts(dyn_state, dyn_info, rigid_config)
 
 
-@qd.kernel(fastcache=True)
-def kernel_update_vverts_for_vgeoms(
-    vgeoms_idx: qd.types.ndarray(), dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()
-):
-    """
-    Refresh vverts_state.pos for the requested vgeom range from FK output. Only iterates vverts that have a slot in
-    the custom buffer (vverts_state_idx != -1); other vverts are computed on the fly by their consumers, so they have
-    no persistent storage here.
-    """
-    n_vgeoms_in = vgeoms_idx.shape[0]
-    _B = dyn_state.vgeoms.pos.shape[1]
-
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_vg_, i_b in qd.ndrange(n_vgeoms_in, _B, axes=qd.static(eoa(dyn_state.vverts.pos))):
-        i_vg = vgeoms_idx[i_vg_]
-        v_start = dyn_info.vgeoms.vvert_start[i_vg]
-        v_end = dyn_info.vgeoms.vvert_end[i_vg]
-        for i_vv in range(v_start, v_end):
-            i_state = dyn_info.vverts.vverts_state_idx[i_vv]
-            if i_state >= 0:
-                dyn_state.vverts.pos[i_state, i_b] = gu.qd_transform_by_trans_quat(
-                    dyn_info.vverts.init_pos[i_vv], dyn_state.vgeoms.pos[i_vg, i_b], dyn_state.vgeoms.quat[i_vg, i_b]
-                )
-
-
 @qd.func
 def func_update_cartesian_space_root(
     i_l_root: int,
@@ -1051,8 +989,6 @@ def func_update_cartesian_space_root(
         if dyn_info.links.root_idx[I_l] == i_l_root and func_is_awake_link(i_l, i_b, dyn_state, rigid_config):
             func_forward_kinematics_link(i_l, i_b, qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
             func_update_geoms_link(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms)
-            if qd.static(not is_backward):
-                func_update_vgeoms_link(i_l, i_b, dyn_state, dyn_info, rigid_config)
     func_COM_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
 
@@ -1235,8 +1171,6 @@ def func_update_cartesian_space(
                     func_update_geoms_link(
                         i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms
                     )
-                    if qd.static(not is_backward):
-                        func_update_vgeoms_link(i_l, i_b, dyn_state, dyn_info, rigid_config)
     elif qd.static(rigid_config.enable_level_sweep):
         func_sweep_links_by_level(
             dyn_state,

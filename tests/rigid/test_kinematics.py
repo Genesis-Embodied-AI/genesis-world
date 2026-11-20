@@ -636,6 +636,9 @@ def test_path_planning_avoidance(backend, n_envs, batch_dofs_info, show_viewer, 
         rigid_options=gs.options.RigidOptions(
             batch_dofs_info=batch_dofs_info,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(3, 1, 1.5),
             camera_lookat=(0.0, 0.0, 0.5),
@@ -661,7 +664,6 @@ def test_path_planning_avoidance(backend, n_envs, batch_dofs_info, show_viewer, 
         gs.morphs.MJCF(
             file="xml/franka_emika_panda/panda.xml",
         ),
-        vis_mode="collision",
     )
     scene.build(n_envs=n_envs)
     collider_state = scene.rigid_solver.collider.collider_state

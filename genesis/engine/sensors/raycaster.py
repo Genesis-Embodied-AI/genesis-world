@@ -5,12 +5,11 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 
 import genesis as gs
-from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+from genesis.engine.render_context import Points, Shape
 from genesis.options.sensors import RaycastPattern, Raycaster as RaycasterOptions
 from genesis.utils.geom import normalize, transform_by_quat, transform_by_trans_quat
 from genesis.utils.misc import concat_with_tensor, make_tensor_field
-from genesis.utils.raycast_qd import RaycastTarget, get_raycast_targets, kernel_cast_rays
-from genesis.vis.rasterizer_context import RasterizerContext
+from genesis.utils.raycast_qd import RaycastTarget, RaycastWorldTarget, get_raycast_targets, kernel_cast_rays
 
 from .base_sensor import (
     KinematicSensorMetadataMixin,
@@ -21,7 +20,7 @@ from .base_sensor import (
 )
 
 if TYPE_CHECKING:
-    from genesis.ext.pyrender.mesh import Mesh
+    from genesis.engine.solvers.base_solver import Solver
 
     from .sensor_manager import SensorManager
 
@@ -30,17 +29,17 @@ class RaycastContext(SharedSensorContext):
     """
     Per-simulator raycast targets, shared across sensor types that cast rays.
 
-    Holds the targets of each active solver: the collision geoms of a rigid solver, and the visual geoms opted into
-    ``material.use_visual_raycasting`` (see get_raycast_targets).
+    Holds the targets of the collision geoms of the rigid solver, and of the visual geoms opted into
+    ``use_visual_raycasting`` of their entity spec (see get_raycast_targets).
     """
 
     def __init__(self, sim):
         super().__init__(sim)
-        self._targets: list[RaycastTarget] = []
+        self._targets: list[RaycastTarget | RaycastWorldTarget] = []
 
     @property
-    def targets(self) -> list[RaycastTarget]:
-        """The targets of the active solvers.
+    def targets(self) -> list[RaycastTarget | RaycastWorldTarget]:
+        """The targets of the scene.
 
         Raises if inactive: only a consumer that activated it may read them.
         """
@@ -54,17 +53,15 @@ class RaycastContext(SharedSensorContext):
         return next(iter([target for target in self.targets if not target.is_visual]), None)
 
     def activate(self):
-        """Build the targets of the active solvers at the first activation, and nothing at the next ones."""
+        """Build the targets of the scene at the first activation, and nothing at the next ones."""
         if self._active:
             return
         self._active = True
-        for solver in (self._sim.rigid_solver, self._sim.kinematic_solver):
-            if not solver.is_active:
-                continue
-            # The collision faces are those of the rigid solver alone
-            if isinstance(solver, RigidSolver):
-                self._targets.extend(get_raycast_targets(solver, is_visual=False))
-            self._targets.extend(get_raycast_targets(solver, is_visual=True))
+        context, rigid_solver = self._sim.render_context, self._sim.rigid_solver
+        # The collision geometry is the rigid solver's alone, while visual meshes exist on both solvers
+        visual_contexts = (rigid_solver.render_context, self._sim.kinematic_solver.render_context)
+        self._targets.extend(get_raycast_targets(context, (rigid_solver.render_context,), is_visual=False))
+        self._targets.extend(get_raycast_targets(context, visual_contexts, is_visual=True))
         self.update()
 
     def update(self):
@@ -141,7 +138,7 @@ class RaycasterSensor(
         if not self._shared_context.targets:
             gs.raise_exception(
                 "Raycaster sensor has no geometry to raycast against: rigid_solver is inactive and no entity "
-                "has material.use_visual_raycasting=True."
+                "sets use_visual_raycasting=True on its spec."
             )
 
         self._shared_metadata.patterns.append(self._options.pattern)
@@ -218,7 +215,7 @@ class RaycasterSensor(
         # into the initial allocation so static sensors (entity_idx<0) leave their rows at identity, letting the cast
         # kernel apply pos_offset / euler_offset in world frame.
         if shared_metadata.links_pos is None:
-            B = targets[0].solver.n_envs_
+            B = raw_data_T.shape[-1]
             shared_metadata.links_pos = torch.zeros(
                 B, shared_metadata.n_sensors, 3, device=gs.device, dtype=gs.tc_float
             )
@@ -262,39 +259,38 @@ class RaycasterSensor(
                 is_last=i_target == len(targets) - 1,
             )
 
-    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
-        """Make spheres at the start and at the hit point of every ray, for the first rendered environment."""
-        if 0 not in envs_idx:
-            return []
-        env_idx = context.rendered_envs_idx[0] if self._manager.n_envs > 0 else None
+    @property
+    def _sources(self) -> "tuple[Solver, ...]":
+        # The rays hit the meshes of the solvers of the targets
+        targets_solvers = (target.scoped_context.owner for target in self._shared_context.targets)
+        return tuple(dict.fromkeys((*super()._sources, *targets_solvers)))
 
-        data = self.read(env_idx)
-
-        pos = self._link.get_pos(env_idx, relative=False)
-        quat = self._link.get_quat(env_idx, relative=False)
-        if pos.ndim == 2:
-            pos, quat = pos[0], quat[0]
-
-        ray_starts = transform_by_trans_quat(self.ray_starts, pos, quat)
-
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Points, Points]:
+        if not markers:
+            # The spheres at the start and at the hit point of every ray
+            pos = torch.zeros((self._manager.n_envs_, len(self.ray_starts), 3), dtype=gs.tc_float, device=gs.device)
+            radius = self._options.debug_sphere_radius
+            markers = (
+                Points(pos, radius, self._options.debug_ray_start_color),
+                Points(torch.zeros_like(pos), radius, self._options.debug_ray_hit_color),
+            )
+        data = self.read(envs_idx)
+        link_pos = self._link.get_pos(envs_idx, relative=False)[..., None, :]
+        link_quat = self._link.get_quat(envs_idx, relative=False)[..., None, :]
         if self._options.return_points:
-            points = data.points.reshape((-1, 3))
+            points = data.points.reshape((*link_pos.shape[:-2], -1, 3))
             if not self._options.return_world_frame:
-                points = transform_by_trans_quat(points + self.ray_starts, pos, quat)
+                points = transform_by_trans_quat(pos=points + self.ray_starts, trans=link_pos, quat=link_quat)
         else:
             # Reconstruct the local-frame hit points as distance * unit ray_dir. Missed rays carry exactly
             # no_hit_value as distance (which may lie below max_range, so an ordering test cannot discriminate) and
             # collapse onto the ray start, matching the (0, 0, 0) stored for them when points are enabled.
-            distances = data.distances.reshape((-1, 1))
+            distances = data.distances.reshape((*link_pos.shape[:-2], -1, 1))
             hit_points_local = torch.where(
                 distances != self._options.no_hit_value, distances * normalize(self.ray_dirs), 0.0
             )
-            points = transform_by_trans_quat(hit_points_local + self.ray_starts, pos, quat)
-
-        ray_starts_spheres = context.make_debug_spheres(
-            ray_starts, radius=self._options.debug_sphere_radius, color=self._options.debug_ray_start_color
-        )
-        hit_points_spheres = context.make_debug_spheres(
-            points, radius=self._options.debug_sphere_radius, color=self._options.debug_ray_hit_color
-        )
-        return [(None, ray_starts_spheres, None), (None, hit_points_spheres, None)]
+            points = transform_by_trans_quat(pos=hit_points_local + self.ray_starts, trans=link_pos, quat=link_quat)
+        starts_pos, hits_pos = markers[0].pos, markers[1].pos
+        starts_pos[envs_idx] = transform_by_trans_quat(self.ray_starts, link_pos, link_quat)
+        hits_pos[envs_idx] = points
+        return markers

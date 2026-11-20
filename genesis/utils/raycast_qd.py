@@ -1,5 +1,3 @@
-from typing import TYPE_CHECKING
-
 import numpy as np
 
 import quadrants as qd
@@ -10,20 +8,33 @@ from genesis.engine.bvh import (
     BVHState,
     InstancesQuery,
     PackedInstances,
-    build_packed_instances,
     func_build_bvh,
     func_bvh_traverse,
     get_bvh_data,
+    get_meshes_trees,
     kernel_build_instances_tree,
 )
-from genesis.engine.solvers.rigid.data import DynInfo, DynState
+from genesis.engine.render_context import (
+    DynamicMesh,
+    MeshGeometry,
+    RenderContext,
+    ScopedRenderContext,
+    SegmentationKeys,
+    StaticMeshBatch,
+)
 from genesis.engine.state_change import StateChange, Subscriber
-from genesis.utils.cache import OwnedCache
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
-from genesis.utils.misc import qd_to_numpy, tensor_to_array
+from genesis.utils.misc import tensor_to_array
 
-if TYPE_CHECKING:
-    from genesis.engine.solvers.kinematic_solver import KinematicSolver
+
+class RaycastInfo(Data, kind=DataKind.INFO):
+    """The constants a ray cast against a target reads.
+
+    The target holds them in a struct of its own, so that the kernels casting rays take a single scalar array rather
+    than the struct of another component.
+    """
+
+    EPS: qd.Tensor = field(float, shape=())
 
 
 class RaycastResult(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
@@ -37,16 +48,23 @@ class RaycastResult(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     normal: qd.Tensor = field((float, 3))
 
 
-# Faces of the visual geoms of a solver whose vertices are set per environment
+# Faces of the dynamic meshes posed in the world, and the meshes
 WORLD_FACES = Size("world_faces")
+WORLD_MESHES = Size("world_meshes")
 
 
 class WorldFaces(Data, kind=DataKind.CONSTANT, shape=(WORLD_FACES,)):
-    """The faces of the visual geoms of a solver whose vertices are set per environment (see set_vverts)."""
+    """The faces of the meshes whose vertices are placed per environment in the world (see DynamicMesh)."""
 
-    # Vertices of each face, as their slots of the per-environment vertices
+    # Vertices of each face among those of the array holding the meshes, and its mesh
     faces_verts_idx: qd.Tensor = field((int, 3))
-    faces_geom_idx: qd.Tensor = field(int)
+    faces_mesh_idx: qd.Tensor = field(int)
+
+
+class WorldMeshes(Data, kind=DataKind.CONSTANT, shape=(WORLD_MESHES, ENVS)):
+    """Whether each environment holds each mesh whose vertices are placed in the world (see DynamicMesh)."""
+
+    is_active: qd.Tensor = field(bool)
 
 
 # Sensors and geoms of the closest-point queries a mask of geoms restricts (see CandidateGeoms)
@@ -77,42 +95,6 @@ class ClosestHits(Data, kind=DataKind.SCRATCH, shape=(CLOSEST_QUERIES, ENVS)):
     signed_dist: qd.Tensor = field(float)
     geom_idx: qd.Tensor = field(int)
     normal: qd.Tensor = field((float, 3))
-
-
-_SOLVER_MESHES_CACHE = OwnedCache()
-
-
-def get_solver_meshes(
-    solver: "KinematicSolver", is_visual: bool, faces_is_used: np.ndarray | None = None
-) -> PackedInstances:
-    """Return the trees of the faces of the geoms of a solver, or of its visual geoms, in the frame of each geom.
-
-    The geoms of one mesh share its tree. A geom holding a face that `faces_is_used` drops gets no tree. The trees are
-    built once and shared by every user of the solver.
-    """
-
-    def compute():
-        dyn_info = solver.dyn_info
-        if is_visual:
-            verts = qd_to_numpy(dyn_info.vverts.init_pos, transpose=True)
-            faces_verts_idx = qd_to_numpy(dyn_info.vfaces.vverts_idx, transpose=True)
-            geoms_face_start = qd_to_numpy(dyn_info.vgeoms.vface_start, transpose=True)
-            geoms_face_end = qd_to_numpy(dyn_info.vgeoms.vface_end, transpose=True)
-        else:
-            verts = qd_to_numpy(dyn_info.verts.init_pos, transpose=True)
-            faces_verts_idx = qd_to_numpy(dyn_info.faces.verts_idx, transpose=True)
-            geoms_face_start = qd_to_numpy(dyn_info.geoms.face_start, transpose=True)
-            geoms_face_end = qd_to_numpy(dyn_info.geoms.face_end, transpose=True)
-        geoms_aabb_min, geoms_aabb_max = [], []
-        for i_f_start, i_f_end in zip(geoms_face_start.tolist(), geoms_face_end.tolist()):
-            tris = verts[faces_verts_idx[i_f_start:i_f_end]]
-            if faces_is_used is not None and not faces_is_used[i_f_start:i_f_end].all():
-                tris = tris[:0]
-            geoms_aabb_min.append(tris.min(axis=1))
-            geoms_aabb_max.append(tris.max(axis=1))
-        return build_packed_instances(geoms_face_start.tolist(), geoms_aabb_min, geoms_aabb_max)
-
-    return _SOLVER_MESHES_CACHE.get(solver, (solver, is_visual), compute)
 
 
 @qd.func
@@ -438,68 +420,64 @@ def kernel_cast_rays(
 
 @qd.kernel(fastcache=True)
 def kernel_fit_mesh_instances(
-    geoms_link_idx: qd.Tensor,
-    links_geom_start: qd.Tensor,
-    links_geom_end: qd.Tensor,
-    geoms_pos: qd.Tensor,
-    geoms_quat: qd.Tensor,
+    instances_is_active: qd.Tensor,
+    instances_pos: qd.Tensor,
+    instances_quat: qd.Tensor,
     instances: BVHState,
     meshes: PackedInstances,
-    rigid_config: qd.template(),
     bvh_config: qd.template(),
     eps: float,
+    has_is_active: qd.template(),
 ):
-    """Fit the box of each geom of every environment posed in the world from the root of its tree, the leaves of the
-    top-level trees, and build them.
+    """Fit the box of each instance of every environment posed in the world from the root of its tree, the leaves of
+    the top-level trees, and build them.
 
-    A geom without tree or that the environment does not carry (see func_update_geoms) gets an empty box, which no
-    query reaches.
+    An instance without tree, or that the environment does not hold as `instances_is_active` tells with
+    `has_is_active`, gets an empty box, which no query reaches.
     """
-    for i_g, i_b in qd.ndrange(instances.leaves.aabbs_min.shape[1], instances.leaves.aabbs_min.shape[0]):
+    for i_k, i_b in qd.ndrange(instances.leaves.aabbs_min.shape[1], instances.leaves.aabbs_min.shape[0]):
         aabb_min = qd.Vector([qd.math.inf, qd.math.inf, qd.math.inf], dt=gs.qd_float)
         aabb_max = -aabb_min
-        i_tree = meshes.instances_tree_idx[i_g]
-        i_l = geoms_link_idx[i_g]
-        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-        if i_tree >= 0 and links_geom_start[I_l] <= i_g and i_g < links_geom_end[I_l]:
+        i_tree = meshes.instances_tree_idx[i_k]
+        is_placed = i_tree >= 0
+        if qd.static(has_is_active):
+            is_placed = is_placed and instances_is_active[i_k, i_b]
+        if is_placed:
             i_root = meshes.trees_root[i_tree]
             aabb_min, aabb_max = gu.qd_transform_aabb(
                 meshes.tree.nodes_min[0, i_root],
                 meshes.tree.nodes_max[0, i_root],
-                trans=geoms_pos[i_g, i_b],
-                quat=geoms_quat[i_g, i_b],
+                trans=instances_pos[i_k, i_b],
+                quat=instances_quat[i_k, i_b],
             )
-        instances.leaves.aabbs_min[i_b, i_g] = aabb_min
-        instances.leaves.aabbs_max[i_b, i_g] = aabb_max
+        instances.leaves.aabbs_min[i_b, i_k] = aabb_min
+        instances.leaves.aabbs_max[i_b, i_k] = aabb_max
     func_build_bvh(instances.leaves.aabbs_min.shape[0], instances, bvh_config, eps)
 
 
 @qd.kernel(fastcache=True)
 def kernel_fit_world_faces(
-    dyn_state: DynState,
+    verts_pos: qd.Tensor,
     bvh_state: BVHState,
-    dyn_info: DynInfo,
     faces: WorldFaces,
-    rigid_config: qd.template(),
+    meshes: WorldMeshes,
     bvh_config: qd.template(),
     eps: float,
 ):
     """Fit the box of each face of every environment in the world, the leaves of the trees of the environments, and
     build them.
 
-    A face of a visual geom that the environment does not carry gets an empty box, which no query reaches.
+    A face of a mesh that the environment does not hold gets an empty box, which no query reaches.
     """
     for i_f, i_b in qd.ndrange(bvh_state.leaves.aabbs_min.shape[1], bvh_state.leaves.aabbs_min.shape[0]):
         aabb_min = qd.Vector([qd.math.inf, qd.math.inf, qd.math.inf], dt=gs.qd_float)
         aabb_max = -aabb_min
-        i_g = faces.faces_geom_idx[i_f]
-        i_l = dyn_info.vgeoms.link_idx[i_g]
-        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-        if dyn_info.links.vgeom_start[I_l] <= i_g and i_g < dyn_info.links.vgeom_end[I_l]:
+        i_m = faces.faces_mesh_idx[i_f]
+        if meshes.is_active[i_m, i_b]:
             for j in qd.static(range(3)):
                 i_v = faces.faces_verts_idx[i_f][j]
-                aabb_min = qd.min(aabb_min, dyn_state.vverts.pos[i_v, i_b])
-                aabb_max = qd.max(aabb_max, dyn_state.vverts.pos[i_v, i_b])
+                aabb_min = qd.min(aabb_min, verts_pos[i_v, i_b])
+                aabb_max = qd.max(aabb_max, verts_pos[i_v, i_b])
         bvh_state.leaves.aabbs_min[i_b, i_f] = aabb_min
         bvh_state.leaves.aabbs_max[i_b, i_f] = aabb_max
     func_build_bvh(bvh_state.leaves.aabbs_min.shape[0], bvh_state, bvh_config, eps)
@@ -511,10 +489,10 @@ class RayTriangles:
 
     The query is the ray in the frame of the tree, with the projection a triangle test needs, computed once per frame
     (see Query and ray_projection). It reads the vertices of each face, `faces_verts_idx`, among `verts`, and the poses
-    of the geoms (`geoms_state`). Without `faces_geom_idx`, the tree spans a mesh in the frame of its geom, the vertices
-    are those of the meshes, and the geom is the instance i_k the walk entered (see InstancesQuery). With it, the
-    vertices are those of each environment in the world, each face giving its geom (see WorldFaces). With `hits`, it
-    records the geom and the outward normal in the world of the closest crossing of each environment, the query index
+    of the meshes (`poses`). Without `faces_mesh_idx`, the tree spans a mesh in the frame of its pose, the
+    vertices are those of the meshes, and the mesh is the instance i_k the walk entered (see InstancesQuery). With it,
+    the vertices are those of each environment in the world, each face giving its mesh (see WorldFaces). With `hits`, it
+    records the mesh and the outward normal in the world of the closest crossing of each environment, the query index
     being the environment (see RaycastResult).
     """
 
@@ -524,18 +502,18 @@ class RayTriangles:
         self,
         verts: qd.Tensor,
         faces_verts_idx: qd.Tensor,
-        geoms_state,
+        poses: "MeshesPoses | None",
         eps: qd.Tensor,
-        faces_geom_idx: qd.Tensor | None,
+        faces_mesh_idx: qd.Tensor | None,
         hits: RaycastResult | None,
     ) -> None:
         self.verts = verts
         self.faces_verts_idx = faces_verts_idx
-        self.geoms_state = geoms_state
+        self.poses = poses
         self.eps = eps
-        self.faces_geom_idx = faces_geom_idx
+        self.faces_mesh_idx = faces_mesh_idx
         self.hits = hits
-        self.is_world_verts = faces_geom_idx is not None
+        self.is_world_verts = faces_mesh_idx is not None
         self.is_recording_hits = hits is not None
         # The start and the direction of the ray, then its projection (see ray_projection)
         self.Query = qd.types.struct(
@@ -587,10 +565,10 @@ class RayTriangles:
             if qd.static(self.is_recording_hits):
                 normal = triangle_face_normal(v0, v1, v2, self.eps[None])
                 if qd.static(self.is_world_verts):
-                    self.hits.geom_idx[i_q] = self.faces_geom_idx[i_a]
+                    self.hits.geom_idx[i_q] = self.faces_mesh_idx[i_a]
                 else:
                     self.hits.geom_idx[i_q] = i_k
-                    normal = gu.qd_transform_by_quat(normal, self.geoms_state.quat[i_k, i_t])
+                    normal = gu.qd_transform_by_quat(normal, self.poses.quat[i_k, i_t])
                 self.hits.normal[i_q] = normal
         return bound
 
@@ -601,7 +579,7 @@ class ClosestTriangles:
     distance of the closest one.
 
     The query is the point, in the frame of the geom the walk entered (see InstancesQuery). It reads the vertices of
-    the meshes in the frame of their geom, the vertices of each face, the poses of the geoms (`geoms_state`), the
+    the meshes in the frame of their geom, the vertices of each face, the poses of the geoms (`poses`), the
     sensor of each query and the geoms each sensor may reach (see ClosestQueries and CandidateGeoms), and records the
     closest triangle of each query (see ClosestHits).
     """
@@ -612,7 +590,7 @@ class ClosestTriangles:
         self,
         verts_init_pos: qd.Tensor,
         faces_verts_idx: qd.Tensor,
-        geoms_state,
+        poses: "MeshesPoses",
         eps: qd.Tensor,
         queries: ClosestQueries,
         candidate_geoms: CandidateGeoms,
@@ -620,7 +598,7 @@ class ClosestTriangles:
     ) -> None:
         self.verts_init_pos = verts_init_pos
         self.faces_verts_idx = faces_verts_idx
-        self.geoms_state = geoms_state
+        self.poses = poses
         self.eps = eps
         self.queries = queries
         self.candidate_geoms = candidate_geoms
@@ -663,7 +641,7 @@ class ClosestTriangles:
             normal = triangle_face_normal(v0, v1, v2, self.eps[None])
             self.hits.signed_dist[i_q, i_t] = qd.select(diff.dot(normal) >= 0.0, 1.0, -1.0) * qd.sqrt(dist_sq)
             self.hits.geom_idx[i_q, i_t] = i_k
-            self.hits.normal[i_q, i_t] = gu.qd_transform_by_quat(normal, self.geoms_state.quat[i_k, i_t])
+            self.hits.normal[i_q, i_t] = gu.qd_transform_by_quat(normal, self.poses.quat[i_k, i_t])
         return bound
 
 
@@ -704,87 +682,120 @@ class ClosestQuery:
         )
 
 
+@qd.data_oriented
+class MeshesPoses:
+    """The world pose of each mesh of a target in each environment, the arrays its StaticMeshBatch views."""
+
+    def __init__(self, pos: qd.Tensor, quat: qd.Tensor) -> None:
+        self.pos = pos
+        self.quat = quat
+
+
 # FIXME: quadrants#1039 - the fastcache key misses the fields a data_oriented visitor or target reads through its
 # methods, so the kernels taking one go without fastcache, their Python front end compiled again in every process.
 @qd.data_oriented
 class RaycastTarget:
-    """The collision or the visual geoms of a solver as a target of ray casts and closest-point queries.
+    """The meshes of a StaticMeshBatch of the render context as a target of ray casts and closest-point queries.
 
-    The trees of their meshes (see get_solver_meshes) lie under a top-level tree per environment over the geoms. With
-    `hits`, its ray casts record the geom and the normal of the closest hit of each environment there.
+    The trees of the meshes lie under a top-level tree per environment over them, each mesh an instance. The hits name a
+    mesh by its position in the batch, whose segmentation keys are those of `meshes_seg_keys`, None for a mesh the ray
+    casting leaves out. `is_visual` tells whether the meshes are visual meshes, which their scoped context refreshes, or
+    collision meshes, posed by the forward kinematics of their solver. With `hits`, its ray casts record the mesh and
+    the normal of the closest hit of each environment there. 'update' fits the top-level trees to the current poses.
     """
 
     def __init__(
-        self, solver: "KinematicSolver", is_visual: bool, meshes: PackedInstances, hits: RaycastResult | None
+        self,
+        scoped_context: ScopedRenderContext,
+        batch: StaticMeshBatch,
+        geometries: "tuple[MeshGeometry | None, ...]",
+        is_visual: bool,
+        hits: RaycastResult | None,
     ) -> None:
-        self.solver = solver
+        self.scoped_context = scoped_context
         self.is_visual = is_visual
-        self.meshes = meshes
         self.hits = hits
-        self.eps = solver.rigid_info.EPS
-        dyn_info, dyn_state = solver.dyn_info, solver.dyn_state
-        self.geoms_info = dyn_info.vgeoms if is_visual else dyn_info.geoms
-        self.geoms_state = dyn_state.vgeoms if is_visual else dyn_state.geoms
-        # The arrays alone, the collision and the visual structs naming their fields differently
-        self.verts_init_pos = dyn_info.vverts.init_pos if is_visual else dyn_info.verts.init_pos
-        self.faces_verts_idx = dyn_info.vfaces.vverts_idx if is_visual else dyn_info.faces.verts_idx
-        bvh = get_bvh_data(solver.n_envs_, meshes.instances_tree_idx.shape[0])
+        self.meshes_seg_keys: "tuple[SegmentationKeys | None, ...]" = tuple(
+            None if geometry is None else geometry.seg_keys for geometry in geometries
+        )
+        # The batches of the scoped contexts view their pose arrays from their first element on
+        refs = batch.refs
+        self.poses = MeshesPoses(refs["pos"].array, refs["quat"].array)
+        is_active_ref, aabb_min_ref, aabb_max_ref = (refs.get(name) for name in ("is_active", "aabb_min", "aabb_max"))
+        self.has_is_active = is_active_ref is not None
+        self.meshes_is_active = refs["pos"].array if is_active_ref is None else is_active_ref.array
+        self.meshes_aabb = None if aabb_min_ref is None else (aabb_min_ref.array, aabb_max_ref.array)
+        self.info = RaycastInfo(values=dict(EPS=gs.EPS))
+        self.eps = self.info.EPS
+        geometry = next(geometry for geometry in geometries if geometry is not None)
+        self.verts_init_pos = geometry.verts_ref.array
+        self.faces_verts_idx = geometry.faces_ref.array
+        faces_range = tuple(
+            (0, 0) if geometry is None else (geometry.faces_ref.cols.start, geometry.faces_ref.cols.stop)
+            for geometry in geometries
+        )
+        self.meshes = get_meshes_trees(scoped_context.owner, self.verts_init_pos, self.faces_verts_idx, faces_range)
+        bvh = get_bvh_data(len(batch.envs), len(geometries))
         self.tree_state = bvh.state
         self.tree_config = bvh.config
         self.ray_query = InstancesQuery(
             RayTriangles(
-                self.verts_init_pos, self.faces_verts_idx, self.geoms_state, self.eps, faces_geom_idx=None, hits=hits
+                self.verts_init_pos, self.faces_verts_idx, self.poses, self.eps, faces_mesh_idx=None, hits=hits
             ),
-            meshes,
-            self.geoms_state,
+            self.meshes,
+            self.poses,
         )
+        # The record of the refreshes of the visual meshes since the last fit (see 'get_raycast_targets')
+        self.subscriber = Subscriber(to=frozenset({StateChange.GEOMETRY}))
+        self.subscriber.notify(StateChange.GEOMETRY)
 
     def update(self) -> None:
-        """Fit the top-level trees to the current poses of the geoms."""
+        """Fit the top-level trees to the current poses of the meshes, for visual meshes once their scoped context
+        refreshed them since the last fit."""
         if self.is_visual:
-            self.solver.update_forward_pos()
-            dyn_info = self.solver.dyn_info
-            kernel_fit_mesh_instances(
-                self.geoms_info.link_idx,
-                dyn_info.links.vgeom_start,
-                dyn_info.links.vgeom_end,
-                self.geoms_state.pos,
-                self.geoms_state.quat,
-                self.tree_state,
-                self.meshes,
-                self.solver.rigid_config,
-                self.tree_config,
-                eps=gs.EPS,
-            )
-        else:
-            # The forward kinematics of the rigid solver refits the box of each geom with its pose (see
-            # func_update_geom_aabb), before the sensors and the viewer read it.
+            self.scoped_context.get_shapes()
+            if not self.subscriber.pending:
+                return
+            self.subscriber.clear()
+        if self.meshes_aabb is not None:
+            # The boxes of the meshes in the world, which the poses keep current, give the leaves of the trees as is
             kernel_build_instances_tree(
                 i_k_excluded=-1,
-                instances_aabb_min=self.geoms_state.aabb_min,
-                instances_aabb_max=self.geoms_state.aabb_max,
+                instances_aabb_min=self.meshes_aabb[0],
+                instances_aabb_max=self.meshes_aabb[1],
                 bvh_state=self.tree_state,
                 packed_instances=self.meshes,
                 bvh_config=self.tree_config,
                 eps=gs.EPS,
             )
+            return
+        kernel_fit_mesh_instances(
+            self.meshes_is_active,
+            self.poses.pos,
+            self.poses.quat,
+            self.tree_state,
+            self.meshes,
+            self.tree_config,
+            eps=gs.EPS,
+            has_is_active=self.has_is_active,
+        )
 
     def build_closest_query(self, queries_sensor_idx: np.ndarray, candidate_geoms: CandidateGeoms) -> ClosestQuery:
-        """Return the closest-point query of the triangles of the geoms, of the given sensor per query, among the
-        candidate geoms of each sensor."""
+        """Return the closest-point query of the triangles of the meshes, of the given sensor per query, among the
+        candidate meshes of each sensor."""
         queries = ClosestQueries(sizes=dict(closest_queries=len(queries_sensor_idx)))
         queries.sensor_idx.from_numpy(queries_sensor_idx)
-        hits = ClosestHits(sizes=dict(closest_queries=len(queries_sensor_idx), envs=self.solver.n_envs_))
+        hits = ClosestHits(sizes=dict(closest_queries=len(queries_sensor_idx), envs=self.poses.pos.shape[1]))
         closest_triangles = ClosestTriangles(
-            self.verts_init_pos, self.faces_verts_idx, self.geoms_state, self.eps, queries, candidate_geoms, hits
+            self.verts_init_pos, self.faces_verts_idx, self.poses, self.eps, queries, candidate_geoms, hits
         )
-        return ClosestQuery(InstancesQuery(closest_triangles, self.meshes, self.geoms_state), self.tree_state)
+        return ClosestQuery(InstancesQuery(closest_triangles, self.meshes, self.poses), self.tree_state)
 
     @qd.func
     def cast(
         self, i_t: int, i_q: int, ray_start: qd.types.vector(3), ray_dir: qd.types.vector(3), max_range: float
     ) -> float:
-        """Cast ray i_q against the geoms of environment i_t, and return the distance of its closest hit, `max_range`
+        """Cast ray i_q against the meshes of environment i_t, and return the distance of its closest hit, `max_range`
         without hit or for a direction too short to define a ray."""
         distance = max_range
         axes, shear, is_valid = ray_projection(ray_dir, self.eps[None])
@@ -805,77 +816,98 @@ class RaycastTarget:
 
 @qd.data_oriented
 class RaycastWorldTarget(RaycastTarget):
-    """The visual geoms of a solver opted into raycasting whose vertices are set per environment in the world (see
-    set_vverts) as a target of ray casts: a tree per environment over their faces.
+    """Ray-cast target over the dynamic meshes of a scoped context, placed per environment in the world.
 
-    The trees are rebuilt when a change of the geometry of the solver is pending and at the first update. With `hits`,
-    its ray casts record the geom and the normal of the closest hit of each environment there.
+    It holds a tree per environment over their faces, which the hits name by mesh (see 'RaycastTarget'). The trees are
+    built at the first update, then again whenever the scoped context refreshed the meshes.
     """
 
-    def __init__(self, solver: "KinematicSolver", faces_idx: np.ndarray, hits: RaycastResult | None) -> None:
-        self.solver = solver
+    def __init__(
+        self, scoped_context: ScopedRenderContext, dynamic_meshes: tuple[DynamicMesh, ...], hits: RaycastResult | None
+    ):
+        self.scoped_context = scoped_context
         self.is_visual = True
         self.hits = hits
-        self.eps = solver.rigid_info.EPS
-        dyn_info = solver.dyn_info
-        vverts_state_idx = qd_to_numpy(dyn_info.vverts.vverts_state_idx, transpose=True)
-        faces_vverts_idx = qd_to_numpy(dyn_info.vfaces.vverts_idx, transpose=True)
-        self.faces = WorldFaces(sizes=dict(world_faces=len(faces_idx)))
-        self.faces.faces_verts_idx.from_numpy(vverts_state_idx[faces_vverts_idx[faces_idx]])
-        self.faces.faces_geom_idx.from_numpy(qd_to_numpy(dyn_info.vfaces.vgeom_idx, transpose=True)[faces_idx])
-        bvh = get_bvh_data(solver.n_envs_, len(faces_idx))
+        self.meshes_seg_keys = tuple(mesh.seg_keys for mesh in dynamic_meshes)
+        self.info = RaycastInfo(values=dict(EPS=gs.EPS))
+        self.eps = self.info.EPS
+        # The meshes of a scoped context view the same array, as vertices of each environment in the world
+        self.verts_pos = dynamic_meshes[0].refs["verts"].array
+        n_envs = len(dynamic_meshes[0].envs)
+        faces_verts_idx, faces_mesh_idx = [], []
+        meshes_is_active = np.ones((len(dynamic_meshes), n_envs), dtype=gs.np_bool)
+        for i_m, mesh in enumerate(dynamic_meshes):
+            faces_verts_idx.append(tensor_to_array(mesh.faces) + mesh.refs["verts"].cols.start)
+            faces_mesh_idx.append(np.full(len(mesh.faces), i_m, dtype=gs.np_int))
+            # The environments holding the visual geom of a heterogeneous variant are constant
+            if mesh.is_active is not None:
+                meshes_is_active[i_m] = tensor_to_array(mesh.is_active, dtype=gs.np_bool)
+        faces_verts_idx = np.concatenate(faces_verts_idx, dtype=gs.np_int)
+        self.faces = WorldFaces(sizes=dict(world_faces=len(faces_verts_idx)))
+        self.faces.faces_verts_idx.from_numpy(faces_verts_idx)
+        self.faces.faces_mesh_idx.from_numpy(np.concatenate(faces_mesh_idx))
+        self.meshes = WorldMeshes(sizes=dict(world_meshes=len(dynamic_meshes), envs=n_envs))
+        self.meshes.is_active.from_numpy(meshes_is_active)
+        bvh = get_bvh_data(n_envs, len(faces_verts_idx))
         self.tree_state = bvh.state
         self.tree_config = bvh.config
         self.ray_query = RayTriangles(
-            solver.dyn_state.vverts.pos,
+            self.verts_pos,
             self.faces.faces_verts_idx,
-            solver.dyn_state.vgeoms,
+            None,
             self.eps,
-            faces_geom_idx=self.faces.faces_geom_idx,
+            faces_mesh_idx=self.faces.faces_mesh_idx,
             hits=hits,
         )
         self.subscriber = Subscriber(to=frozenset({StateChange.GEOMETRY}))
-        solver.subscribe(self.subscriber)
-        self.is_stale = True
+        self.subscriber.notify(StateChange.GEOMETRY)
 
     def update(self) -> None:
-        """Rebuild the trees if the vertices may have changed since the last build."""
-        if not (self.is_stale or self.subscriber.pending):
+        """Build the trees of the environments over the faces at their current positions, once the scoped context of the
+        meshes refreshed them since the last build."""
+        self.scoped_context.get_shapes()
+        if not self.subscriber.pending:
             return
         self.subscriber.clear()
-        self.is_stale = False
-        kernel_fit_world_faces(
-            self.solver.dyn_state,
-            self.tree_state,
-            self.solver.dyn_info,
-            self.faces,
-            self.solver.rigid_config,
-            self.tree_config,
-            eps=gs.EPS,
-        )
+        kernel_fit_world_faces(self.verts_pos, self.tree_state, self.faces, self.meshes, self.tree_config, eps=gs.EPS)
 
 
 def get_raycast_targets(
-    solver: "KinematicSolver", is_visual: bool, hits: RaycastResult | None = None
-) -> list[RaycastTarget]:
-    """Return the targets of the collision geoms of a solver, or of its visual geoms opted into raycasting, recording
-    the geom and the normal of the closest hit of each environment in `hits` if given.
+    context: RenderContext,
+    scoped_contexts: tuple[ScopedRenderContext, ...],
+    is_visual: bool,
+    hits: RaycastResult | None = None,
+) -> "list[RaycastTarget | RaycastWorldTarget]":
+    """Return the targets of the collision geoms or of the visual meshes the given scoped contexts of solvers draw.
 
-    The visual geoms whose vertices are set per environment (see set_vverts) form a target of their own. A target
-    without face is left out.
+    The meshes are read from the render context. A target without mesh is left out.
+
+    Parameters
+    ----------
+    context : RenderContext
+        The render context.
+    scoped_contexts : tuple[ScopedRenderContext, ...]
+        The scoped contexts of the solvers.
+    is_visual : bool
+        Whether the targets are the static and dynamic meshes of the scene as it looks of the entities opted into visual
+        raycasting (see ``gs.entities.Rigid.use_visual_raycasting``), rather than the collision representation of each,
+        which is then that of a rigid solver.
+    hits : RaycastResult | None, optional
+        Where the targets record the mesh and the normal of the closest hit of each environment. Defaults to None.
     """
-    dyn_info = solver.dyn_info
-    if not is_visual:
-        if dyn_info.faces.verts_idx.shape[0] == 0:
-            return []
-        return [RaycastTarget(solver, is_visual, get_solver_meshes(solver, is_visual), hits)]
-    faces_vverts_idx = qd_to_numpy(dyn_info.vfaces.vverts_idx, transpose=True)
-    faces_is_world = qd_to_numpy(dyn_info.vverts.vverts_state_idx, transpose=True)[faces_vverts_idx[:, 0]] >= 0
-    faces_is_used = tensor_to_array(solver.vfaces_raycast_mask, dtype=bool)
-    faces_is_mesh = faces_is_used & ~faces_is_world
-    targets = []
-    if faces_is_mesh.any():
-        targets.append(RaycastTarget(solver, is_visual, get_solver_meshes(solver, is_visual, faces_is_mesh), hits))
-    if (faces_is_used & faces_is_world).any():
-        targets.append(RaycastWorldTarget(solver, np.flatnonzero(faces_is_used & faces_is_world), hits))
+    targets: "list[RaycastTarget | RaycastWorldTarget]" = []
+    for scoped_context in scoped_contexts:
+        shapes = scoped_context.get_shapes(debug_vis_mode=None if is_visual else "collision")
+        for batch in shapes:
+            if isinstance(batch, StaticMeshBatch):
+                geometries = tuple(
+                    geometry if geometry.is_ray_target or not is_visual else None for geometry in batch.geometries
+                )
+                if any(geometry is not None for geometry in geometries):
+                    targets.append(RaycastTarget(scoped_context, batch, geometries, is_visual, hits))
+                    context.subscribe(targets[-1].subscriber, (batch,))
+        dynamic_meshes = tuple(shape for shape in shapes if isinstance(shape, DynamicMesh) and shape.is_ray_target)
+        if dynamic_meshes:
+            targets.append(RaycastWorldTarget(scoped_context, dynamic_meshes, hits))
+            context.subscribe(targets[-1].subscriber, dynamic_meshes)
     return targets

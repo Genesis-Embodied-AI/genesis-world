@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "genesis-world"
-version = "1.4.6"
+version = "1.4.7"
 description = "A universal and generative physics engine"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
@@ -26,7 +26,6 @@ dependencies = [
     # Cross-platform library to get various kind of CPU information such as model name
     "py-cpuinfo",
     "mujoco>=3.2.5",
-    "moviepy>=2.0.0",
     # Streams video frames to file, for 'camera.start_recording' and the 'VideoFile' recorder
     "av",
     # Compresses the frames of trajectory files, fast enough for the writer thread to keep pace with stepping
@@ -63,7 +62,8 @@ dependencies = [
     # Use by `RigidGeom.visualize_sdf` to render SDF as level 0 marching cubes
     "scikit-image",
     # Convex decomposition library
-    "coacd>=1.0.12",
+    # * 1.0.14 makes the decomposition independent of thread scheduling, so a fixed seed reproduces it
+    "coacd>=1.0.14",
     # Ray casting used in mesh to height field conversion
     "rtree",
     # Used for loading raytracing special texture images used by LuisaRender

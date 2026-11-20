@@ -71,7 +71,7 @@ def test_visual_parse(model_name):
     usd_file = os.path.join(usd_asset_path, f"{model_name}.usdz")
 
     mesh_scene = build_mesh_scene(glb_file, scale=1.0)
-    usd_scene = build_usd_scene(usd_file, scale=1.0, vis_mode="visual", is_stage=False)
+    usd_scene = build_usd_scene(usd_file, scale=1.0, is_stage=False)
 
     compare_mesh_scene(mesh_scene, usd_scene, tol=5e-6)
 
@@ -82,7 +82,7 @@ def test_parse_nodegraph(usd_file):
     asset_path = get_hf_dataset(pattern=usd_file)
     usd_file = os.path.join(asset_path, usd_file)
 
-    usd_scene = build_usd_scene(usd_file, scale=1.0, vis_mode="visual", is_stage=False)
+    usd_scene = build_usd_scene(usd_file, scale=1.0, is_stage=False)
 
     texture0 = usd_scene.entities[0].vgeoms[0].vmesh.surface.diffuse_texture
     texture1 = usd_scene.entities[0].vgeoms[1].vmesh.surface.diffuse_texture
@@ -95,7 +95,7 @@ def test_parse_nodegraph(usd_file):
 @pytest.mark.required
 def test_usdz_packaged_texture_resolution(usdz_packaged_texture_usd):
     scene_file, texture_image = usdz_packaged_texture_usd
-    usd_scene = build_usd_scene(scene_file, scale=1.0, vis_mode="visual", fixed=True)
+    usd_scene = build_usd_scene(scene_file, scale=1.0, fixed=True)
     texture = usd_scene.entities[0].vgeoms[0].vmesh.surface.diffuse_texture
     assert isinstance(texture, gs.textures.ImageTexture)
     assert_equal(texture.image_array, texture_image)
@@ -116,7 +116,6 @@ def test_bake(usd_file, tmp_path):
     usd_scene = build_usd_scene(
         usd_fullpath,
         scale=1.0,
-        vis_mode="visual",
         is_stage=is_stage,
         fixed=True,
     )
@@ -273,7 +272,7 @@ def test_uv_size_mismatch_no_crash(asset_tmp_path):
     stage.Save()
 
     # This should NOT raise an exception — it should warn and discard UVs
-    usd_scene = build_usd_scene(usd_file, scale=1.0, vis_mode="collision", fixed=True)
+    usd_scene = build_usd_scene(usd_file, scale=1.0, fixed=True)
     assert len(usd_scene.entities) > 0
 
 

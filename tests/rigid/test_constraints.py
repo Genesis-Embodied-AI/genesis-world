@@ -4,6 +4,7 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.render_context import Lines
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -90,6 +91,11 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
     HANGING_BOX_POS = (0.0, 1.0, 0.48)
 
     scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            vis=gs.options.RigidVisOptions(
+                constraints=True,
+            ),
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.8, 0.0, 0.6),
             camera_lookat=(0.2, 0.0, 0.3),
@@ -134,6 +140,14 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
             file=connected_boxes,
             pos=(0.0, -1.0, 0.0),
         ),
+    )
+    # The camera watches the cube and the fixed box of the third environment, which a weld added at runtime binds
+    cam = scene.add_camera(
+        res=(128, 128),
+        pos=(0.3, 2.2, 1.2),
+        lookat=(0.3, 0.5, 0.3),
+        env_idx=2,
+        debug=True,
     )
     scene.build(n_envs=4, env_spacing=(3.0, 3.0))
 
@@ -218,6 +232,20 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
     assert_allclose(box_welded.get_pos(), welded_pos, tol=1e-3)
     assert_allclose(box_welded.get_quat(), welded_quat, tol=1e-3)
 
+    # The marker of the connect constraint ends at its anchor on the hung box, which the constraint holds at the pivot
+    connect_line = next(shape for shape in scene.sim.render_context.get_markers() if isinstance(shape, Lines))
+    pivot_pos = tensor_to_array(boxes.get_link("box_fixed").get_pos()) + connect.eq_data[:3]
+    assert_allclose(connect_line.end[:, 0], pivot_pos, tol=1e-3)
+
+    # A weld added at runtime is drawn as a line while it exists, the line going away once the weld is removed
+    rgb_before, *_ = cam.render(rgb=True, force_render=True)
+    scene.rigid_solver.add_weld_constraint(cube.base_link.idx, fixed_box.base_link.idx, envs_idx=[2])
+    rgb_added, *_ = cam.render(rgb=True, force_render=True)
+    scene.rigid_solver.delete_weld_constraint(cube.base_link.idx, fixed_box.base_link.idx, envs_idx=[2])
+    rgb_removed, *_ = cam.render(rgb=True, force_render=True)
+    assert np.abs(rgb_added.astype(np.float32) - rgb_before.astype(np.float32)).max() > 100.0
+    assert_equal(rgb_removed, rgb_before)
+
 
 @pytest.mark.required
 def test_dynamic_screw(swinging_spindle, show_viewer, tol):
@@ -243,6 +271,9 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
             integrator=gs.integrator.Euler,
             max_dynamic_constraints=8,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(3.0, -5.0, 1.85),
             camera_lookat=(3.0, 0.0, 0.5),
@@ -260,7 +291,6 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
                 offset_euler=(90.0, 0.0, 0.0),
                 fixed=True,
             ),
-            vis_mode="collision",
         )
         for x in (0.0, 1.0, 2.0, 3.0)
     )
@@ -270,7 +300,6 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
                 size=(0.1, 0.1, 0.02),
                 pos=(x, 0.0, NUT_Z),
             ),
-            vis_mode="collision",
         )
         for x in (0.0, 1.0, 2.0, 3.0)
     )
@@ -281,14 +310,12 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
             pos=(4.0, 0.0, 0.5 * POST_HEIGHT),
             fixed=True,
         ),
-        vis_mode="collision",
     )
     nut_resting = scene.add_entity(
         gs.morphs.Box(
             size=(0.1, 0.1, 0.02),
             pos=(4.0, 0.0, POST_HEIGHT + 0.015),
         ),
-        vis_mode="collision",
     )
     # The spindle swings, carrying a free nut and a nut sharing its kinematic tree, which slides and turns on it
     # through two joints.
@@ -297,7 +324,6 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
             file=swinging_spindle,
             pos=(6.0, 0.0, 0.0),
         ),
-        vis_mode="collision",
     )
     scene.build(n_envs=2, env_spacing=(0.0, 1.5))
 

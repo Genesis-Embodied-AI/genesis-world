@@ -236,9 +236,8 @@ def test_drone_propellers_force_application(n_envs, substeps, show_viewer, tol):
 
     # The propellers drawn twice without a step in between turn by the angle of that step alone
     propellers_vgeom_idx = [drone.get_link(name).vgeoms[0].idx for name in drone.morph.propellers_link_name]
-    drone.update_propeller_vgeoms()
     propellers_quat = scene.rigid_solver.get_vgeoms_quat(propellers_vgeom_idx)
-    drone.update_propeller_vgeoms()
+    drone.set_qpos(drone.get_qpos())
     assert_allclose(scene.rigid_solver.get_vgeoms_quat(propellers_vgeom_idx), propellers_quat, tol=gs.EPS)
 
 
@@ -248,6 +247,9 @@ def test_drone_advanced(show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.005,
+        ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.5, 0.0, 1.5),
@@ -266,7 +268,6 @@ def test_drone_advanced(show_viewer):
                 merge_fixed_links=merge_fixed_links,
                 pos=(0.0, offset, 1.5),
             ),
-            vis_mode="collision",
             visualize_contact=True,
         )
         drones.append(drone)

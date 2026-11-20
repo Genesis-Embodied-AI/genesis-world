@@ -19,6 +19,7 @@ RECORDING_DEFAULT_FPS = 60
 class Camera(BuildableMixin, RBC):
     """
     A camera which can be used to render RGB, depth, and segmentation images.
+
     Supports either rasterizer or raytracer for rendering, specified by `scene.renderer`.
 
     Parameters
@@ -28,7 +29,7 @@ class Camera(BuildableMixin, RBC):
     idx : int
         The index of the camera.
     model : str
-        Specifies the camera model. Options are 'pinhole' or 'thinlens'.
+        The projection of the camera: 'pinhole' or 'fisheye'.
     res : tuple of int, shape (2,)
         The resolution of the camera, specified as a tuple (width, height).
     pos : tuple of float, shape (3,)
@@ -39,10 +40,9 @@ class Camera(BuildableMixin, RBC):
         The up vector of the camera, defining its orientation, specified as (x, y, z).
     fov : float
         The vertical field of view of the camera in degrees.
-    aperture : float
-        The aperture size of the camera, controlling depth of field.
-    focus_dist : float | None
-        The focus distance of the camera. If None, it will be auto-computed using `pos` and `lookat`.
+    lens : genesis.options.ThinLens | None
+        The lens of a pinhole camera, which makes it a thin-lens camera blurring what lies away from its focus distance,
+        None for a sharp image.
     GUI : bool
         Whether to display the camera's rendered image in a separate GUI window.
     spp : int, optional
@@ -62,25 +62,24 @@ class Camera(BuildableMixin, RBC):
     env_idx : int, optional
         The index of the environment to track the camera.
     debug : bool, optional
-        Whether to use the debug camera. It enables to create cameras that can used to monitor / debug the
-        simulation without being part of the "sensors". Their output is rendered by the usual simple Rasterizer
-        systematically, no matter if BatchRayTracer is enabled. This way, it is possible to record the
-        simulation with arbitrary resolution and camera pose, without interfering with what robots can perceive
-        from their environment. Defaults to False.
+        Whether the camera is a debug camera, which draws what the interactive viewer draws without its interaction:
+        the markers, and each entity in its debug representation while the viewer shows it (see ``VisOptions.debug``).
+        The Rasterizer renders it whatever the renderer of the scene, so that it records the simulation at any
+        resolution and from any pose without interfering with what robots perceive from their environment. Defaults to
+        False.
     """
 
     def __init__(
         self,
         visualizer,
         idx=0,
-        model="pinhole",  # pinhole or thinlens
+        model="pinhole",
         res=(320, 320),
         pos=(0.5, 2.5, 3.5),
         lookat=(0.5, 0.5, 0.5),
         up=(0.0, 0.0, 1.0),
         fov=30,
-        aperture=2.8,
-        focus_dist=None,
+        lens=None,
         GUI=False,
         spp=256,
         denoise=True,
@@ -92,11 +91,10 @@ class Camera(BuildableMixin, RBC):
     ):
         self._idx = idx
         self._uid = gs.UID()
-        self._model = model
+        self._model = model if lens is None else "thinlens"
         self._res = res
         self._fov = fov
-        self._aperture = aperture
-        self._focus_dist = focus_dist
+        self._lens = lens
         self._GUI = GUI
         self._spp = spp
         self._denoise = denoise
@@ -120,6 +118,8 @@ class Camera(BuildableMixin, RBC):
         self._batch_renderer = None
 
         self._env_idx = int(env_idx) if env_idx is not None else None
+        # The index of the environment among the rendered ones, for a camera rendering its environment alone
+        self._render_env_idx = None
         self._envs_offset = None
 
         self._is_recording = False
@@ -137,11 +137,15 @@ class Camera(BuildableMixin, RBC):
         self._follow_smoothing = None
         self._follow_fix_orientation = None
 
-        if self._model not in ("pinhole", "thinlens", "fisheye"):
-            gs.raise_exception(f"Invalid camera model: {self._model}")
+        if model not in ("pinhole", "fisheye"):
+            gs.raise_exception(f"Invalid camera model: {model}")
+        if lens is not None and model != "pinhole":
+            gs.raise_exception("A lens applies to the pinhole camera model alone.")
 
-        if self._focus_dist is None:
-            self._focus_dist = np.linalg.norm(np.asarray(lookat) - np.asarray(pos))
+        # A lens focuses on the point the camera looks at unless it states its focus distance
+        if lens is not None and lens.focus_dist is None:
+            focus_dist = float(np.linalg.norm(np.subtract(lookat, pos)))
+            self._lens = lens.model_copy(update=dict(focus_dist=focus_dist))
 
     @gs.assert_unbuilt
     def build(self):
@@ -160,7 +164,9 @@ class Camera(BuildableMixin, RBC):
                 self._is_batched = False
                 self._raytracer.add_camera(self)
             else:
-                self._is_batched = self._visualizer.scene.n_envs > 0 and self._visualizer._context.split_envs
+                self._is_batched = (
+                    self._visualizer.scene.n_envs > 0 and self._visualizer._context.split_envs and self._env_idx is None
+                )
             if self._visualizer.scene.n_envs > 0:
                 if self._env_idx is None:
                     if not self._is_batched:
@@ -172,6 +178,11 @@ class Camera(BuildableMixin, RBC):
                             )
                 elif self._env_idx not in self._visualizer._context.rendered_envs_idx:
                     gs.raise_exception("Environment index bound to the camera not in 'VisOptions.rendered_envs_idx'.")
+                # A bound camera renders its environment alone when the environments are rendered separately. The
+                # raytracer lays out every environment side by side, so the channels the rasterizer renders for a
+                # raytraced camera keep that layout.
+                if self._raytracer is None and self._env_idx is not None and self._visualizer._context.split_envs:
+                    self._render_env_idx = self._visualizer._context.rendered_envs_idx.index(self._env_idx)
             else:
                 assert self._env_idx is None
 
@@ -422,8 +433,8 @@ class Camera(BuildableMixin, RBC):
 
         Note
         ----
-        If `split_envs` in `VisOptions` is set to True, each component will return a stack of images, with the
-        number of images equal to `len(rendered_envs_idx)`.
+        If `split_envs` in `VisOptions` is set to True, an unbound camera returns a stack of images, with the
+        number of images equal to `len(rendered_envs_idx)`. A bound camera returns one image of its environment.
 
         Parameters
         ----------
@@ -472,7 +483,7 @@ class Camera(BuildableMixin, RBC):
         else:
             self._rasterizer.update_scene(force_render)
             rgb_arr, depth_arr, seg_idxc_arr, normal_arr = self._rasterizer.render_camera(
-                self, rgb, depth, segmentation, normal=normal, split_envs=self._is_batched
+                self, rgb, depth, segmentation, normal=normal, split_envs=self._is_batched, env_idx=self._render_env_idx
             )
 
         # Colorize the segmentation map is necessary
@@ -556,7 +567,13 @@ class Camera(BuildableMixin, RBC):
         else:
             self._rasterizer.update_scene(force_render=False)
             _, depth_arr, _, _ = self._rasterizer.render_camera(
-                self, rgb=False, depth=True, segmentation=False, normal=False, split_envs=self._is_batched
+                self,
+                rgb=False,
+                depth=True,
+                segmentation=False,
+                normal=False,
+                split_envs=self._is_batched,
+                env_idx=self._render_env_idx,
             )
 
         # Convert OpenGL projection matrix to camera intrinsics
@@ -913,28 +930,27 @@ class Camera(BuildableMixin, RBC):
         return self._fov
 
     @property
-    def aperture(self):
-        """The aperture of the camera."""
-        return self._aperture
+    def lens(self) -> "gs.options.ThinLens | None":
+        """The lens of a thin-lens camera, its focus distance resolved, None for another camera."""
+        return self._lens
 
     @property
-    def focal_len(self):
-        """The focal length for thinlens camera. Returns -1 for pinhole camera."""
-        tan_half_fov = np.tan(np.deg2rad(self._fov / 2))
-        if self.model == "thinlens":
-            if self._res[0] > self._res[1]:
-                projected_pixel_size = min(0.036 / self._res[0], 0.024 / self._res[1])
-            else:
-                projected_pixel_size = min(0.036 / self._res[1], 0.024 / self._res[0])
-            image_dist = self._res[1] * projected_pixel_size / (2 * tan_half_fov)
-            return 1.0 / (1.0 / image_dist + 1.0 / self._focus_dist)
-        elif self.model in ("pinhole", "fisheye"):
-            return self._res[0] / (2.0 * tan_half_fov)
+    def aperture(self) -> float | None:
+        """Deprecated: use 'lens'. The f-number of the lens of a thin-lens camera, None for another camera."""
+        gs.logger.warning("'Camera.aperture' is deprecated. Use 'Camera.lens' instead.")
+        return None if self._lens is None else self._lens.aperture
 
     @property
-    def focus_dist(self):
-        """The focus distance of the camera."""
-        return self._focus_dist
+    def focal_len(self) -> float | None:
+        """Deprecated: use 'lens'. The focal length of the lens of a thin-lens camera, None for another camera."""
+        gs.logger.warning("'Camera.focal_len' is deprecated. Use 'Camera.lens' instead.")
+        return None if self._lens is None else self._lens.focal_len
+
+    @property
+    def focus_dist(self) -> float | None:
+        """Deprecated: use 'lens'. The focus distance of the lens of a thin-lens camera, None for another camera."""
+        gs.logger.warning("'Camera.focus_dist' is deprecated. Use 'Camera.lens' instead.")
+        return None if self._lens is None else self._lens.focus_dist
 
     @property
     def GUI(self):
@@ -976,8 +992,8 @@ class Camera(BuildableMixin, RBC):
         return self._env_idx
 
     @property
-    def debug(self):
-        """Whether the camera is a debug camera."""
+    def debug(self) -> bool:
+        """Whether the camera is a debug camera, which draws what the interactive viewer draws."""
         return self._debug
 
     @property

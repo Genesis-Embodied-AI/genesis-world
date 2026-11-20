@@ -8,7 +8,7 @@ import numba as nb
 import OpenGL.GL as GL
 import OpenGL.constant as GL_constant
 
-from .constants import RenderFlags, MAX_N_LIGHTS
+from .constants import RenderFlags, ViewFlags, MAX_N_LIGHTS
 from .light import DirectionalLight, PointLight, SpotLight
 from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
 from .numba_gl_wrapper import GLWrapper
@@ -240,6 +240,9 @@ class JITRenderer:
         self._update_buffer_fn = None
         self._buffer = dict()
         self._scene = scene
+        # The kind of view the next passes draw, whose meshes alone they draw (see 'Mesh.views'), which the caller of a
+        # render sets.
+        self.view = ViewFlags.NORMAL
         # Offset of each rendered environment in the pass drawing them side by side. Instance k of an
         # environment-instanced primitive (see Primitive.is_env_instanced) reads row k through an instance attribute
         # fed by 'env_offset_buffer', so the poses stay the true ones and a pass rendering one environment at a time
@@ -535,6 +538,8 @@ class JITRenderer:
         n_env = max((len(p.poses) for p in primitive_list if p.poses is not None), default=1)
         self.env_active = np.ones((n, n_env), np.bool_)
         self.n_indices = np.zeros(n, np.int32)  # positive: indices, negative: positions
+        # The views drawing each primitive (see 'Mesh.views')
+        self.views = np.zeros(n, np.int8)
         self.model_buffer_id = np.zeros(n, np.int32)
         self.inst_attr_start = np.zeros(n, np.int32)
         # Centre of each primitive in the frame of its node, per environment. Sorting on it rather than on the node
@@ -635,6 +640,7 @@ class JITRenderer:
             self.render_flags[i, 4] = primitive.is_floor and not floor_existed
             self.render_flags[i, 5] = node_list[i].mesh.is_transparent
             self.render_flags[i, 6] = node_list[i].mesh.is_marker
+            self.views[i] = node_list[i].mesh.views
             # A pass drawing one environment draws the instance of that environment of a per-environment instanced
             # primitive, and every instance of any other, which the culling below keeps to its environment
             self.render_flags[i, 7] = not primitive.is_env_instanced
@@ -669,17 +675,19 @@ class JITRenderer:
     @contextlib.contextmanager
     def _env_filtered_culling(self, env_idx):
         # Temporarily zero the index count of the primitives absent from env_idx (heterogeneous variants, and those
-        # standing in another environment), so their per-env draw renders nothing. Mirrors the SKIP_MARKERS approach
-        # used in forward_pass.
-        if env_idx < 0 or not self._has_env_filtered:
+        # standing in another environment), and of those the kind of view drawn leaves out (see 'view'), so their draw
+        # renders nothing. Mirrors the SKIP_MARKERS approach used in forward_pass.
+        inactive = (self.views & self.view) == 0
+        if env_idx >= 0 and self._has_env_filtered:
+            inactive |= (self.env_row >= 0) & (self.env_row != env_idx)
+            # Only the env filtered primitives carry one visibility per environment. Primitives standing in a single
+            # environment (env_row) alone may leave 'env_active' narrower than the rendered environments.
+            is_env_filtered = self.render_flags[:, 8].astype(bool)
+            if is_env_filtered.any():
+                inactive[is_env_filtered] |= ~self.env_active[is_env_filtered, env_idx]
+        if not inactive.any():
             yield
             return
-        inactive = (self.env_row >= 0) & (self.env_row != env_idx)
-        # Only the env filtered primitives carry one visibility per environment. Primitives standing in a single
-        # environment (env_row) alone may leave 'env_active' narrower than the rendered environments.
-        is_env_filtered = self.render_flags[:, 8].astype(bool)
-        if is_env_filtered.any():
-            inactive[is_env_filtered] |= ~self.env_active[is_env_filtered, env_idx]
         saved = self.n_indices[inactive].copy()
         self.n_indices[inactive] = 0
         try:
@@ -1455,27 +1463,39 @@ class JITRenderer:
                 self.gen_func_ptr()
             return self._update_normal_flat(vertices.reshape((-1, 3, 3)))
 
-    def update_buffer(self, node, buffer_name, data):
-        """Queue a single buffer update to be flushed during the next render pass.
+    def update_buffer(self, primitives, buffer_name, data):
+        """Queue the update of one buffer of several primitives, flushed during the next render pass.
 
-        The GL buffer id is resolved at flush time rather than here: a primitive is only added to the GL context
-        during its first render pass, so an id resolved at enqueue time would be -1 for any update queued before
-        that pass and the update would be silently dropped.
+        New vertex positions move the bounds of the bare geometry along, and new instance transforms the range the
+        instances span, a placed primitive getting that from its poses in bulk instead (see '_update_instances').
+
+        The GL buffer id is resolved at flush time rather than here: a primitive is only added to the GL context during
+        its first render pass, so an id resolved at enqueue time would be -1 for any update queued before that pass and
+        the update would be silently dropped.
+
+        Parameters
+        ----------
+        primitives : Sequence[Primitive]
+            The primitives.
+        buffer_name : str
+            The buffer, such as 'pos', 'normal', or 'model' for the instance transforms, uploaded transposed, the
+            translation in the last row.
+        data : Sequence[np.ndarray]
+            The new content of the buffer of each primitive.
         """
-        if node.mesh is None or len(node.mesh.primitives) != 1:
-            raise ValueError("Node must have one primitive")
-        primitive = node.mesh.primitives[0]
-        self._buffer[(primitive, buffer_name)] = data
-        # New vertex positions move the bounds of the bare geometry along, and new instance transforms (uploaded
-        # transposed, translation in the last row) the range the instances span. A placed primitive gets that from
-        # its poses in bulk instead (see '_update_instances').
-        i = self._primitive_index.get(primitive)
-        if i is not None and len(data):
-            if buffer_name == "pos":
-                self.bounds_geom[i, 0] = data.min(axis=0)
-                self.bounds_geom[i, 1] = data.max(axis=0)
-            elif buffer_name == "model" and not self.is_instance_placed[i]:
-                self._set_translation_bounds(np.array([i]), data[np.newaxis, :, 3, :3])
+        primitives_idx, translations = [], []
+        for primitive, primitive_data in zip(primitives, data):
+            self._buffer[(primitive, buffer_name)] = primitive_data
+            i = self._primitive_index.get(primitive)
+            if i is not None and len(primitive_data):
+                if buffer_name == "pos":
+                    self.bounds_geom[i, 0] = primitive_data.min(axis=0)
+                    self.bounds_geom[i, 1] = primitive_data.max(axis=0)
+                elif buffer_name == "model" and not self.is_instance_placed[i]:
+                    primitives_idx.append(i)
+                    translations.append(primitive_data[:, 3, :3])
+        if primitives_idx:
+            self._set_translation_bounds(np.array(primitives_idx), np.stack(translations))
         self._scene.bump_revision()
 
     def flush_buffer(self):

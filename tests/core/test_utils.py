@@ -10,6 +10,7 @@ from unittest.mock import call, patch
 import numpy as np
 import torch
 
+import av
 import igl
 import pytest
 import scipy.linalg
@@ -749,25 +750,17 @@ def test_polar_decomposition(side, tol):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("side", ["right", "left"])
 @pytest.mark.parametrize("is_pure", [False, True])
-def test_polar_pure_rotation(is_pure, tol):
-    M, N = 3, 3  # Square matrices only
+def test_polar_pure_rotation(is_pure, side, tol):
+    # Matrices of negative determinant, whose orthogonal factor is a reflection unless it moves into the other factor
+    np_A = np.random.randn(4, 3, 3).astype(gs.np_float)
+    np_A[np.linalg.det(np_A) > 0.0, :, -1] *= -1.0
 
-    # Create a matrix that will have det(U) = -1 by using a reflection
-    np_A = np.random.randn(M, N).astype(gs.np_float) @ np.diag([1, 1, -1])
-
-    np_U, np_P = gu.polar(np_A, pure_rotation=is_pure)
-
-    # Check determinants
-    np_det = np.linalg.det(np_U)
-    if is_pure:
-        assert (np_det - 1.0) < tol, "With pure_rotation, det should be 1 (pure rotation)"
-    else:
-        assert abs(np_det - 1.0) < tol, "Without pure_rotation, det might be -1 (reflection)"
-
-    # Reconstruction should still work
-    np_recon = np_U @ np_P
-    assert_allclose(np_A, np_recon, tol=tol)
+    for A in (np_A, np_A[0], torch.tensor(np_A, device=gs.device), torch.tensor(np_A[0], device=gs.device)):
+        U, P = map(tensor_to_array, gu.polar(A, pure_rotation=is_pure, side=side))
+        assert_allclose(np.linalg.det(U), 1.0 if is_pure else -1.0, tol=tol)
+        assert_allclose(U @ P if side == "right" else P @ U, tensor_to_array(A), tol=tol)
 
 
 @pytest.mark.required
@@ -1409,6 +1402,21 @@ def test_build_guard_requires_buildable_mixin():
             @gs.assert_built
             def step(self):
                 pass
+
+
+@pytest.mark.required
+def test_animate(tmp_path):
+    colors = ((255, 0, 0), (0, 255, 0), (0, 0, 255))
+    # The alpha channel of the first image is dropped, which gives it the shape of the others
+    imgs = [
+        np.full((48, 64, 4), (*colors[0], 128), dtype=np.uint8),
+        *(np.full((48, 64, 3), color, dtype=np.uint8) for color in colors[1:]),
+    ]
+    video_path = tmp_path / "video.mp4"
+    gs.tools.animate(imgs, video_path, fps=30)
+    with av.open(video_path) as container:
+        frames = np.stack([frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)])
+    assert_allclose(frames, np.array(colors)[:, None, None], atol=5)
 
 
 if __name__ == "__main__":

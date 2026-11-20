@@ -41,6 +41,9 @@ def main():
             # sink through the flanks and wobble, so it advances faster than the pitch instead of being held to it.
             constraint_timeconst=4e-3,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.2, 0.1, 0.1),
             camera_lookat=(0.0, 0.0, 0.03),
@@ -68,7 +71,6 @@ def main():
             fixed=True,
         ),
         material=steel,
-        vis_mode="collision",
     )
 
     # Nut: pre-engaged at the top of the shaft (base at z = 24 mm, top ~42 mm just below the tip), so it screws the
@@ -81,7 +83,6 @@ def main():
             convexify=False,
         ),
         material=steel,
-        vis_mode="collision",
     )
 
     scene.build()

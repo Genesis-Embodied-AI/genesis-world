@@ -2,7 +2,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from pydantic import Field, StrictBool, StrictInt, model_validator
+from pydantic import Field, StrictBool, model_validator
 
 import genesis as gs
 from genesis.datatypes import List
@@ -66,6 +66,10 @@ class ViewerOptions(Options):
         True, and explicitly setting either to True alongside enable_gui raises an error. Scene editing
         controls (Rebuild Scene, Add Entity, per-entity remove) are visible but disabled unless the scene
         is managed by a gs.InteractiveScene that supports them.
+    update_on_setters : bool, optional
+        Whether the viewer shows the changes of a setter (``set_pos``, ``set_qpos``, ...) right away, without waiting
+        for a step. A workaround for a viewer lagging behind a tight loop of setters, such as a debugging script: False
+        speeds it up, at the cost of showing these changes only at its next refresh. Defaults to True.
     """
 
     res: PositiveVec2IType | None = None
@@ -82,6 +86,7 @@ class ViewerOptions(Options):
     enable_help_text: StrictBool = True
     enable_default_keybinds: StrictBool = True
     enable_gui: StrictBool = False
+    update_on_setters: StrictBool = True
     # Deprecated alias for refresh_rate, resolved in model_post_init.
     max_FPS: PositiveInt | None = None
 
@@ -129,20 +134,75 @@ class AmbientLight(Options):
     intensity: float
 
 
+class ThinLens(Options):
+    """
+    The lens of a thin-lens camera, which blurs what lies away from its focus distance (depth of field).
+
+    Parameters
+    ----------
+    aperture : float, optional
+        The f-number of the lens: its focal length over the diameter of its opening. A smaller f-number widens the
+        opening and blurs more what lies away from the focus distance. Defaults to 2.8.
+    focal_len : float, optional
+        The focal length of the lens in meters. At the same f-number, a longer focal length widens the opening and blurs
+        more what lies away from the focus distance, while the field of view of the camera alone sets what it sees.
+        Defaults to 0.05.
+    focus_dist : float | None, optional
+        The distance in meters at which the camera is in focus, that from its position to the point it looks at if None.
+        Defaults to None.
+    """
+
+    aperture: PositiveFloat = 2.8
+    focal_len: PositiveFloat = 0.05
+    focus_dist: PositiveFloat | None = None
+
+
+class EntityVisOptions(Options):
+    """
+    How the debug view of the scene draws an entity (see ``VisOptions.debug``), set as the ``vis`` of its entity spec.
+
+    Parameters
+    ----------
+    debug : bool | None, optional
+        Whether the interactive viewer and the debug cameras show the entity in its debug representation, whatever
+        ``VisOptions.debug`` asks for the other entities, or as it looks if False. None follows ``VisOptions.debug``.
+        Set it to inspect a few entities while the rest of the scene keeps its looks. Defaults to None.
+    debug_vis_mode : str | None, optional
+        The debug representation of the entity, showing what the simulation sees: 'collision' (the collision geoms of a
+        rigid entity) or 'sdf' (the surface of the signed distance field of its collision geoms, valid when the physics
+        of the scene loads these fields), 'particle' (the particles of an entity of the MPM, SPH or PBD solver), 'tet'
+        (the surface of the tetrahedra of an FEM entity). None takes the first of these the kind of entity accepts.
+        Defaults to None.
+    """
+
+    debug: StrictBool | None = None
+    debug_vis_mode: Literal["collision", "particle", "sdf", "tet"] | None = None
+
+
 class VisOptions(Options):
     """
     This configures visualization-related properties that are independent of the viewer or camera.
 
     Parameters
     ----------
+    debug : bool
+        Whether the interactive viewer and the debug cameras (see the ``debug`` argument of ``scene.add_camera``) show
+        the scene as the simulation sees it rather than as it looks, which the "Debug View" control of the interactive
+        viewer toggles for both. Each entity then takes its debug representation (see ``EntityVisOptions``): the
+        collision geometry of a rigid entity, the particles of a particle-based one, the tetrahedra of an FEM one. A
+        scene whose other cameras show it as it looks holds both representations, at the cost of the memory and the draw
+        calls of both. Defaults to False.
     show_world_frame : bool
-        Whether to visualize the world frame. Default to False.
+        Whether to draw the world frame, a marker that the interactive viewer and the debug cameras draw. Default to
+        False.
     world_frame_size : float
         The length (in meters) of the world frame's axes.
     show_link_frame : bool
-        Whether to visualize the frames of each RigidLink. Default to False.
+        Deprecated: use ``RigidOptions(vis=RigidVisOptions(link_frames=True))``. Whether to draw the frame of each
+        link.
     link_frame_size : float
-        The length (in meters) of the link frames' axes.
+        Deprecated: use ``RigidOptions(vis=RigidVisOptions(link_frame_size=...))``. The length (in meters) of the axes
+        of the link frames.
     show_cameras : bool
         Whether to render the cameras added to the scene, together with their frustums. Default to False.
     shadow : bool
@@ -156,18 +216,21 @@ class VisOptions(Options):
         lighting and shadows identical in every environment, at the cost of one render per environment. Merged, a
         camera returns one image of the whole grid from a viewpoint bound to one environment, which is cheaper and
         shows the environments next to each other. This is only an option for Rasterizer, and applies to the scene
-        cameras, debug cameras included. Camera sensors and BatchRender always render the environments split. Defaults
-        to False.
+        cameras, those showing the debug representation included. Camera sensors and BatchRender always render the
+        environments split. Defaults to False.
     background_color : tuple of float, shape (3,)
         The color of the scene background.
     ambient_light : tuple of float, shape (3,)
         The color of the scene's ambient light.
     visualize_mpm_boundary : bool
-        Whether to visualize the boundary of the MPM Solver.
+        Deprecated: use ``MPMOptions(vis=ParticleVisOptions(boundary=True))``. Whether to draw the boundary of
+        the MPM solver.
     visualize_sph_boundary : bool
-        Whether to visualize the boundary of the SPH Solver.
+        Deprecated: use ``SPHOptions(vis=ParticleVisOptions(boundary=True))``. Whether to draw the boundary of
+        the SPH solver.
     visualize_pbd_boundary : bool
-        Whether to visualize the boundary of the PBD Solver.
+        Deprecated: use ``PBDOptions(vis=PBDVisOptions(boundary=True))``. Whether to draw the boundary of
+        the PBD solver.
     segmentation_level : str
         The segmentation level used for segmentation mask rendering. Should be one of ['entity', 'link', 'geom'].
         Defaults to 'link'.
@@ -175,12 +238,12 @@ class VisOptions(Options):
         How particles in the scene should be rendered. Should be one of ['sphere', 'tet']. Defaults to 'sphere'.
     particle_size_scale : float
         Scale applied to actual particle size for rendering. Defaults to 1.0.
-    contact_force_scale : float = 0.02
-        Scale in m.N^{-1} for contact arrow visualization, e.g. the force arrow representing 10N will be 0.2m long if
-        scale is 0.02. Defaults to 0.01.
+    contact_force_scale : float
+        Deprecated: use ``RigidOptions(vis=RigidVisOptions(contact_force_scale=...))``. The length of the arrow of a
+        contact force per newton, in meters.
     n_support_neighbors : int
-        Number of supporting neighbor particles used to compute vertex position of the visual mesh. Used for rendering
-        deformable bodies. Defaults to 12.
+        Deprecated: use ``n_support_neighbors`` of ``ParticleVisOptions``, the ``vis`` options of the MPM and PBD
+        solvers.
     rendered_envs_idx : list, optional
         Indices of the environments that will be rendered. If not provided, all the environments will be considered.
         Defaults to None.
@@ -190,24 +253,25 @@ class VisOptions(Options):
         Lights added to the scene.
     """
 
+    debug: StrictBool = False
     show_world_frame: StrictBool = False
     world_frame_size: float = 1.0
-    show_link_frame: StrictBool = False
-    link_frame_size: float = 0.2
+    show_link_frame: StrictBool | None = None
+    link_frame_size: PositiveFloat | None = None
     show_cameras: StrictBool = False
     shadow: StrictBool = True
     plane_reflection: StrictBool = False
     split_envs: StrictBool = False
     background_color: UnitIntervalVec3Type = (0.04, 0.08, 0.12)
     ambient_light: UnitIntervalVec3Type = (0.1, 0.1, 0.1)
-    visualize_mpm_boundary: StrictBool = False
-    visualize_sph_boundary: StrictBool = False
-    visualize_pbd_boundary: StrictBool = False
+    visualize_mpm_boundary: StrictBool | None = None
+    visualize_sph_boundary: StrictBool | None = None
+    visualize_pbd_boundary: StrictBool | None = None
     segmentation_level: Literal["entity", "link", "geom"] = "link"
     render_particle_as: Literal["sphere", "tet"] = "sphere"
     particle_size_scale: PositiveFloat = 1.0
-    contact_force_scale: PositiveFloat = 0.01
-    n_support_neighbors: StrictInt = 12
+    contact_force_scale: PositiveFloat | None = None
+    n_support_neighbors: PositiveInt | None = None
     rendered_envs_idx: IArrayType | None = None
     lights: LightArray = List((DirectionalLight(dir=(-1, -1, -1), color=(1.0, 1.0, 1.0), intensity=5.0),))
 
@@ -232,4 +296,18 @@ class VisOptions(Options):
             if data.get("split_envs") is not None:
                 raise ValueError("Cannot specify both 'env_separate_rigid' and 'split_envs'.")
             data["split_envs"] = env_separate_rigid
+        for name, replacement in (
+            ("show_link_frame", "'RigidOptions(vis=RigidVisOptions(link_frames={}))'"),
+            ("link_frame_size", "'RigidOptions(vis=RigidVisOptions(link_frame_size={}))'"),
+            ("contact_force_scale", "'RigidOptions(vis=RigidVisOptions(contact_force_scale={}))'"),
+            ("visualize_mpm_boundary", "'MPMOptions(vis=ParticleVisOptions(boundary={}))'"),
+            ("visualize_sph_boundary", "'SPHOptions(vis=ParticleVisOptions(boundary={}))'"),
+            ("visualize_pbd_boundary", "'PBDOptions(vis=PBDVisOptions(boundary={}))'"),
+            ("n_support_neighbors", "'MPMOptions(vis=ParticleVisOptions(n_support_neighbors={}))'"),
+        ):
+            value = data.get(name)
+            if value is not None:
+                gs.logger.warning(
+                    f"Visualization option '{name}' is deprecated. Use {replacement.format(value)} instead."
+                )
         return data

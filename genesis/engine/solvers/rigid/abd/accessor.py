@@ -48,8 +48,12 @@ def kernel_set_links_pos(
         i_l = links_idx[i_l_]
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
 
-        if dyn_info.links.parent_idx[I_l] == -1 and dyn_info.links.is_fixed[I_l]:
+        # The link takes the pose of a fixed root at once, as forward kinematics would, for a setter leaving forward
+        # kinematics to the next step, whose update of the cartesian space skips the fixed links.
+        i_fr = dyn_info.links.fixed_root_idx[I_l]
+        if i_fr != -1:
             for j in qd.static(range(3)):
+                dyn_state.fixed_roots.pos[i_fr, i_b][j] = pos[i_b_, i_l_, j]
                 dyn_state.links.pos[i_l, i_b][j] = pos[i_b_, i_l_, j]
         else:
             q_start = dyn_info.links.q_start[I_l]
@@ -215,8 +219,11 @@ def kernel_set_links_quat(
         i_l = links_idx[i_l_]
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
 
-        if dyn_info.links.parent_idx[I_l] == -1 and dyn_info.links.is_fixed[I_l]:
+        # See kernel_set_links_pos
+        i_fr = dyn_info.links.fixed_root_idx[I_l]
+        if i_fr != -1:
             for j in qd.static(range(4)):
+                dyn_state.fixed_roots.quat[i_fr, i_b][j] = quat[i_b_, i_l_, j]
                 dyn_state.links.quat[i_l, i_b][j] = quat[i_b_, i_l_, j]
         else:
             q_start = dyn_info.links.q_start[I_l]
@@ -958,8 +965,8 @@ def kernel_get_terrain_height(
             and col <= col_max + 1
         )
         if is_valid:
-            row = qd.min(qd.max(row, 0.0), qd.cast(row_max, gs.qd_float))
-            col = qd.min(qd.max(col, 0.0), qd.cast(col_max, gs.qd_float))
+            row = qd.math.clamp(row, 0.0, qd.cast(row_max, gs.qd_float))
+            col = qd.math.clamp(col, 0.0, qd.cast(col_max, gs.qd_float))
             i_row = qd.min(qd.cast(qd.floor(row), gs.qd_int), row_max - 1)
             i_col = qd.min(qd.cast(qd.floor(col), gs.qd_int), col_max - 1)
             frac_row = row - i_row
@@ -1022,37 +1029,6 @@ def kernel_set_drone_rpm(
 
 
 @qd.kernel(fastcache=True)
-def kernel_update_drone_propeller_vgeoms(
-    propellers_vgeom_idxs: qd.types.ndarray(),
-    propellers_revs: qd.types.ndarray(),
-    propellers_spin: qd.types.ndarray(),
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
-):
-    """
-    Place the vgeom of each propeller of a drone entity on its link, turned by the angle its revolutions accumulated.
-    """
-
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_pp, i_b in qd.ndrange(*propellers_revs.shape, axes=qd.static(eoa(dyn_state.vgeoms.quat))):
-        i_vg = propellers_vgeom_idxs[i_pp]
-        rad = propellers_revs[i_pp, i_b] * propellers_spin[i_pp] * rigid_info.substep_dt[None] * qd.math.pi / 30.0
-        i_l = dyn_info.vgeoms.link_idx[i_vg]
-        # Placed from the pose of its link rather than its stored pose, so that drawing twice turns it once
-        _, vgeom_quat = gu.qd_transform_pos_quat_by_trans_quat(
-            dyn_info.vgeoms.pos[i_vg],
-            dyn_info.vgeoms.quat[i_vg],
-            dyn_state.links.pos[i_l, i_b],
-            dyn_state.links.quat[i_l, i_b],
-        )
-        dyn_state.vgeoms.quat[i_vg, i_b] = gu.qd_transform_quat_by_quat(
-            gu.qd_rotvec_to_quat(qd.Vector([0.0, 0.0, rad], dt=gs.qd_float)), vgeom_quat
-        )
-
-
-@qd.kernel(fastcache=True)
 def kernel_set_geom_friction(geoms_idx: qd.i32, friction: float, dyn_info: DynInfo):
     dyn_info.geoms.friction[geoms_idx] = friction
 
@@ -1095,22 +1071,3 @@ def kernel_set_geoms_friction_rolling(
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g_ in range(geoms_idx.shape[0]):
         dyn_info.geoms.friction_rolling[geoms_idx[i_g_]] = friction_rolling[i_g_]
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_vverts(
-    vvert_start: qd.i32,
-    envs_idx: qd.types.ndarray(),
-    vverts: qd.types.ndarray(),
-    dyn_state: DynState,
-    rigid_config: qd.template(),
-):
-    n_envs_in = envs_idx.shape[0]
-    n_vverts_in = vverts.shape[1]
-
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_b_, i_vv_ in qd.ndrange(n_envs_in, n_vverts_in):
-        i_b = envs_idx[i_b_]
-        i_vv = vvert_start + i_vv_
-        for j in qd.static(range(3)):
-            dyn_state.vverts.pos[i_vv, i_b][j] = vverts[i_b_, i_vv_, j]

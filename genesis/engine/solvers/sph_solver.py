@@ -39,7 +39,6 @@ from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import EntityDescription
-    from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
 
@@ -331,7 +330,6 @@ class SPHSolver(ParticleSolver):
         self._particles_vel = self.sph_state.particles.vel
         self._particles_is_active = self.sph_state.particles.is_active
         self._particles_mass = self.sph_info.particles.mass
-        self._build_render(has_vverts=False)
 
         if self.is_active:
             for entity in self.entities:
@@ -375,8 +373,6 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
         )
         self._entities.append(entity)
         self._n_particles += entity.n_particles
-        self._n_vverts += entity.n_vverts
-        self._n_vfaces += entity.n_vfaces
         return entity
 
     def add_particles(self, is_active: bool, particle_start: int, material: SPH.Base, pos: np.ndarray) -> None:

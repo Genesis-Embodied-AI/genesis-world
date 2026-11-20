@@ -9,7 +9,7 @@ import sys
 import weakref
 import zipfile
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, BinaryIO, Literal, NamedTuple, overload
 
@@ -25,6 +25,17 @@ from genesis.engine.entities.base_entity import Entity, EntityDescription
 from genesis.engine.entities.rigid_entity import KinematicEntity
 from genesis.engine.force_fields import ForceField
 from genesis.engine.materials.base import Material
+from genesis.engine.render_context import (
+    ArrayRef,
+    Arrows,
+    Lines,
+    MeshGeometry,
+    Points,
+    RenderContext,
+    ScopedRenderContext,
+    Shape,
+    StaticMeshBatch,
+)
 from genesis.engine.states.solvers import SimState, SimulatorCheckpoint
 from genesis.options import (
     BaseCouplerOptions,
@@ -37,6 +48,7 @@ from genesis.options import (
     SceneOptions,
     SimOptions,
     SPHOptions,
+    ThinLens,
     ViewerOptions,
     VisOptions,
 )
@@ -51,7 +63,7 @@ from genesis.repr_base import RBC
 from genesis.typing import IndexType
 from genesis.utils import serialization
 from genesis.utils.data import Namespace, namespace
-from genesis.utils.misc import BuildableMixin, sanitize_index, tensor_to_array
+from genesis.utils.misc import BuildableMixin, tensor_to_array
 from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME, pixel_less_textures
 from genesis.utils.tools import RunningMean
 from genesis.utils.warnings import warn_once
@@ -246,6 +258,9 @@ class Scene(BuildableMixin, RBC):
         self._n_sample_steps = 0
         self._sample_periods_sum = 0.0
 
+        # The part of the render context holding the markers drawn with 'draw_debug_*', set as the scene builds
+        self._render_context: "SceneScopedRenderContext | None" = None
+
         # visualizer
         self._visualizer = Visualizer(
             scene=self,
@@ -293,9 +308,11 @@ class Scene(BuildableMixin, RBC):
             if getattr(self, "_sim", None) is not None:
                 self._sim.destroy()
                 self._sim = None
-                # The opt-in requests of the namespace hold callables bound to the components of the simulator, which
-                # would keep its data alive with the scene (see 'opt_in').
+                # The opt-in requests of the namespace hold callables bound to the components of the simulator, and the
+                # scoped render context of the scene its render context, either of which would keep the data of the
+                # simulator alive with the scene (see 'opt_in').
                 self._namespace = None
+                self._render_context = None
 
                 # Reference cycles leave the Quadrants arrays of the simulator to a later garbage collection, which
                 # aborts the process if it runs on a thread without their CUDA context, e.g. the viewer render thread.
@@ -379,11 +396,12 @@ class Scene(BuildableMixin, RBC):
         surface : gs.surfaces.Surface | None, optional
             The surface of the entity. If None, use ``gs.surfaces.Default()``.
         visualize_contact : bool | None, optional
-            Whether to visualize contact forces applied to this entity as arrows in the viewer and rendered images.
-            The `RayTracer` renderer draws no arrows. If None, defaults to False.
+            Whether the contacts of the entity are drawn as markers, arrows that the interactive viewer and the debug
+            cameras draw. Each contact is read back and drawn at every frame, so reserve it for the entities being
+            inspected. If None, defaults to False.
         vis_mode : str | None, optional
-            The visualization mode of the entity. This is a handy shortcut for setting `surface.vis_mode` without
-            explicitly creating a surface object.
+            Deprecated: the material decides how the entity is drawn. The shortcut of ``surface.vis_mode`` (see
+            ``Surface.vis_mode``).
         name : str | None, optional
             User-specified name for the entity. If not provided, an auto-generated name will be assigned
             based on the morph type and entity UID (e.g., "box_a1b2c3d4"). Must be unique within the scene.
@@ -413,35 +431,34 @@ class Scene(BuildableMixin, RBC):
         if surface.double_sided is None:
             surface.double_sided = isinstance(material, (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth))
 
-        # validate and populate default surface.vis_mode considering the kind of entity
-        if isinstance(spec, (gs.entities.Rigid, gs.entities.Kinematic)):
-            vis_modes = ("visual", "collision", "sdf")
-        elif isinstance(
-            material,
-            (
-                gs.materials.PBD.Liquid,
-                gs.materials.PBD.Particle,
-                gs.materials.MPM.Liquid,
-                gs.materials.MPM.Sand,
-                gs.materials.MPM.Snow,
-                gs.materials.SPH.Liquid,
-            ),
-        ):
-            vis_modes = ("particle", "recon")
-        elif isinstance(spec, (gs.entities.PBD, gs.entities.MPM, gs.entities.SPH)):
-            vis_modes = ("visual", "particle", "recon")
-        elif isinstance(spec, gs.entities.FEM):
-            vis_modes = ("visual",)
-        else:
-            # The visual of a hybrid entity is the one of its outer soft part
-            vis_modes = ("particle", "visual")
-        if surface.vis_mode is None:
-            surface.vis_mode = vis_modes[0]
-        if surface.vis_mode not in vis_modes:
-            gs.raise_exception(
-                f"Unsupported `surface.vis_mode` for gs.entities.{type(spec).__name__}: '{surface.vis_mode}'. "
-                f"Expected one of: {list(vis_modes)}."
-            )
+        # The material decides how the entity is drawn (see 'Material.structure'). How the debug view draws the entity
+        # resolves here on a copy of its vis options (see 'Spec._check_vis'), the parts of a hybrid entity resolving
+        # their own. A deprecated 'vis_mode' naming a debug representation stays on the surface, the scoped contexts
+        # showing the entity in that representation in the scene as it looks too, and is cleared otherwise.
+        vis = gs.options.EntityVisOptions() if spec.vis is None else spec.vis.model_copy()
+        if surface.vis_mode is not None:
+            if surface.vis_mode in spec._debug_vis_modes:
+                # The default debug representation of the entity needs no 'debug_vis_mode'
+                vis_repr = "debug=True"
+                if surface.vis_mode != spec._debug_vis_modes[0]:
+                    vis_repr = f'debug=True, debug_vis_mode="{surface.vis_mode}"'
+                warn_once(
+                    self,
+                    f"'vis_mode=\"{surface.vis_mode}\"' is deprecated. Set "
+                    f"'vis=gs.options.EntityVisOptions({vis_repr})' on the entity spec instead, which the interactive "
+                    "viewer and the debug cameras show.",
+                )
+                vis.debug_vis_mode = surface.vis_mode
+            else:
+                warn_once(
+                    self,
+                    f"'vis_mode=\"{surface.vis_mode}\"' is deprecated. Leave it unset, since the material decides how "
+                    "an entity is drawn.",
+                )
+                surface.vis_mode = None
+        if not isinstance(spec, gs.entities.Hybrid) and vis.debug_vis_mode is None and spec._debug_vis_modes:
+            vis.debug_vis_mode = spec._debug_vis_modes[0]
+        spec = spec._frozen_copy(update={"vis": vis})
 
         return self._sim.add_entity(surface, spec)
 
@@ -498,11 +515,10 @@ class Scene(BuildableMixin, RBC):
         surface : gs.surfaces.Surface | None, optional
             The surface of the stage. If None, use ``gs.surfaces.Default()`` for all morphs.
         visualize_contact : bool | None, optional
-            Whether to visualize contact forces applied to this stage as arrows in the viewer and rendered images.
-            The `RayTracer` renderer draws no arrows. If None, defaults to False.
+            Whether the contacts of the entities of the stage are drawn as markers (see ``visualize_contact`` of
+            ``Scene.add_entity``). If None, defaults to False.
         vis_mode : str | None, optional
-            The visualization mode of the stage. This is a handy shortcut for setting `surface.vis_mode` without
-            explicitly creating a surface object.
+            Deprecated: the material decides how the entities are drawn (see ``vis_mode`` of ``Scene.add_entity``).
         spec : gs.entities.Rigid | gs.entities.Kinematic | None, optional
             The spec to construct the entities of the stage from.
 
@@ -712,7 +728,7 @@ class Scene(BuildableMixin, RBC):
         lookat=(0.5, 0.5, 0.5),
         up=(0.0, 0.0, 1.0),
         fov=30,
-        aperture=2.0,
+        aperture=None,
         focus_dist=None,
         GUI=False,
         spp=256,
@@ -721,25 +737,23 @@ class Scene(BuildableMixin, RBC):
         far=20.0,
         env_idx=None,
         debug=False,
+        lens=None,
     ):
         """
         Add a camera to the scene.
 
-        The camera model can be either 'pinhole', 'thinlens' or 'fisheye':
-        - The 'pinhole' model is a simple camera model that captures light rays from a single point in space.
-        - The 'thinlens' model is a more complex camera model that simulates a lens with a finite aperture size,
-          allowing for depth of field effects. It is only supported by the Raytracer.
+        The camera model can be either 'pinhole' or 'fisheye':
+        - The 'pinhole' model is a simple camera model that captures light rays from a single point in space. Given a
+          `lens`, it becomes a thin-lens camera simulating a lens of finite aperture, which blurs what lies away from
+          its focus distance (depth of field). A lens is only supported by the Raytracer.
         - The 'fisheye' model is a camera model that simulates a fisheye lens, allowing for wide-angle views. It is
           only supported by the BatchRenderer.
-
-        Warning
-        -------
-        When 'pinhole' is used, the `aperture` and `focal_len` parameters are ignored.
 
         Parameters
         ----------
         model : str
-            Specifies the camera model. Options are 'pinhole' or 'thinlens'.
+            The projection of the camera: 'pinhole' or 'fisheye'. Deprecated: 'thinlens' stands for a pinhole camera with
+            a `lens`.
         res : tuple of int, shape (2,)
             The resolution of the camera, specified as a tuple (width, height).
         pos : tuple of float, shape (3,)
@@ -750,10 +764,10 @@ class Scene(BuildableMixin, RBC):
             The up vector of the camera, defining its orientation, specified as (x, y, z).
         fov : float
             The vertical field of view of the camera in degrees.
-        aperture : float
-            The aperture size of the camera, controlling depth of field.
+        aperture : float | None
+            Deprecated: use `lens`. The f-number of the lens of a 'thinlens' camera, 2.0 if None.
         focus_dist : float | None
-            The focus distance of the camera. If None, it will be auto-computed using `pos` and `lookat`.
+            Deprecated: use `lens`. The focus distance of the lens of a 'thinlens' camera.
         GUI : bool
             Whether to display the camera's rendered image in a separate GUI window.
         spp : int, optional
@@ -775,21 +789,33 @@ class Scene(BuildableMixin, RBC):
             that this option is unrelated to which environment is being rendering on the scene. Default to None for
             batched renderers (ie BatchRender), 'rendered_envs_idx[0]' otherwise (ie Raytracer or Rasterizer).
         debug : bool
-            Whether to use the debug camera. It enables to create cameras that can used to monitor / debug the
-            simulation without being part of the "sensors". Their output is rendered by the usual simple Rasterizer
-            systematically, no matter if BatchRender and RayTracer is enabled. This way, it is possible to record the
-            simulation with arbitrary resolution and camera pose, without interfering with what robots can perceive
-            from their environment. Defaults to False.
+            Whether the camera is a debug camera, which draws what the interactive viewer draws without its
+            interaction: the markers, and each entity in its debug representation while the viewer shows it (see
+            ``VisOptions.debug``). The Rasterizer renders it whatever the renderer of the scene, so that it records the
+            simulation at any resolution and from any pose without interfering with what robots perceive from their
+            environment. Defaults to False.
+        lens : gs.options.ThinLens | None
+            The lens of a pinhole camera, which makes it a thin-lens camera, None for a sharp image. Defaults to None.
 
         Returns
         -------
         camera : genesis.Camera
             The created camera object.
         """
+        if model == "thinlens" or aperture is not None or focus_dist is not None:
+            gs.logger.warning(
+                "'model=\"thinlens\"', 'aperture' and 'focus_dist' are deprecated. Use 'lens=gs.options.ThinLens(...)' "
+                "instead."
+            )
+            if model == "thinlens":
+                if lens is not None:
+                    gs.raise_exception("'lens' and the deprecated 'model=\"thinlens\"' cannot be given together.")
+                lens = ThinLens(aperture=2.0 if aperture is None else aperture, focus_dist=focus_dist)
+                model = "pinhole"
         if denoise is None:
             denoise = sys.platform != "darwin"
         return self._visualizer.add_camera(
-            res, pos, lookat, up, model, fov, aperture, focus_dist, GUI, spp, denoise, near, far, env_idx, debug
+            res, pos, lookat, up, model, fov, lens, GUI, spp, denoise, near, far, env_idx, debug
         )
 
     @overload
@@ -827,7 +853,6 @@ class Scene(BuildableMixin, RBC):
             memory and simulation time from the start, emitted or not. Default is 20000.
         surface : gs.surfaces.Surface | None, optional
             The surface of the emitted particles. Defaults to ``gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))``.
-            Its ``vis_mode`` defaults to 'particle'.
         spec : gs.entities.MPM | gs.entities.SPH | gs.entities.PBD | None, optional
             The entity spec of the emitted particles, which replaces the material and the surface.
 
@@ -863,10 +888,6 @@ class Scene(BuildableMixin, RBC):
         surface = emitter_spec.surface
         if surface is None:
             surface = gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))
-        if surface.vis_mode is None:
-            surface = surface.model_copy(update={"vis_mode": "particle"})
-        if surface.vis_mode == "visual":
-            gs.raise_exception("surface.vis_mode='visual' is not supported for fluid emitters.")
 
         morph = gs.morphs.Nowhere(n_particles=max_particles)
         entity = self.add_entity(spec=emitter_spec.model_copy(update={"morph": morph, "surface": surface}))
@@ -958,6 +979,9 @@ class Scene(BuildableMixin, RBC):
 
                 with namespace(self._namespace):
                     self._sim.build(n_envs)
+                self._render_context = self._sim.render_context.register(
+                    self, rendered_envs_idx=self.options.vis.rendered_envs_idx, n_envs=self._sim.n_envs
+                )
 
                 # reset state
                 self._reset()
@@ -1175,6 +1199,8 @@ class Scene(BuildableMixin, RBC):
         """
         Draws a line in the scene for visualization.
 
+        The line is a marker drawn by the interactive viewer and the debug cameras.
+
         Parameters
         ----------
         start : array_like, shape (3,)
@@ -1188,18 +1214,21 @@ class Scene(BuildableMixin, RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.Lines
             The created debug object.
         """
+        (start, end), is_shared = self._render_context.broadcast_to_envs((start, end), value_ndim=1, is_tiled=False)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_line(start, end, radius, color)
+            return self._render_context.add(
+                Lines(start[:, None], end[:, None], radius, tuple(color), is_shared=is_shared)
             )
 
     @gs.assert_built
     def draw_debug_arrow(self, pos, vec=(0, 0, 1), radius=0.01, color=(1.0, 0.0, 0.0, 0.5)):
         """
         Draws an arrow in the scene for visualization.
+
+        The arrow is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1214,19 +1243,23 @@ class Scene(BuildableMixin, RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
-            The created debug object.
+        marker : genesis.engine.render_context.Arrows | None
+            The created debug object, None for a vector of zero length.
         """
+        (pos, vec), is_shared = self._render_context.broadcast_to_envs((pos, vec), value_ndim=1, is_tiled=False)
+        if (torch.linalg.norm(vec, dim=-1) <= gs.EPS).all():
+            return None
         with self._visualizer.viewer_lock:
-            node = self._visualizer.context.make_debug_arrow(pos, vec, radius, color)
-            if node is not None:
-                self._visualizer.context.add_debug_node(node)
-            return node
+            return self._render_context.add(
+                Arrows(pos[:, None], vec[:, None], radius, tuple(color), is_shared=is_shared)
+            )
 
     @gs.assert_built
     def draw_debug_frame(self, T, axis_length=1.0, origin_size=0.015, axis_radius=0.01, color=None):
         """
         Draws a 3-axis coordinate frame in the scene for visualization.
+
+        The frame is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1243,18 +1276,19 @@ class Scene(BuildableMixin, RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.StaticMeshBatch
             The created debug object.
         """
+        (T,), _ = self._render_context.broadcast_to_envs((T,), value_ndim=2, is_tiled=True)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_frame(T, axis_length, origin_size, axis_radius, color)
-            )
+            return self._render_context.add_frames(T[:, None], axis_length, origin_size, axis_radius, color)
 
     @gs.assert_built
     def draw_debug_frames(self, Ts, axis_length=1.0, origin_size=0.015, axis_radius=0.01, color=None):
         """
         Draws 3-axis coordinate frames in the scene for visualization.
+
+        The frames are a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1271,18 +1305,19 @@ class Scene(BuildableMixin, RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.StaticMeshBatch
             The created debug object.
         """
+        (Ts,), is_shared = self._render_context.broadcast_to_envs((Ts,), value_ndim=3, is_tiled=False)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_frames(Ts, axis_length, origin_size, axis_radius, color)
-            )
+            return self._render_context.add_frames(Ts, axis_length, origin_size, axis_radius, color, is_shared)
 
     @gs.assert_built
     def draw_debug_mesh(self, mesh, pos=np.zeros(3), T=None):
         """
         Draws a mesh in the scene for visualization.
+
+        The mesh is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1291,20 +1326,26 @@ class Scene(BuildableMixin, RBC):
         pos : array_like, shape (3,), optional
             The position of the mesh in the scene.
         T : array_like, shape (4, 4) | None, optional
-            The transformation matrix of the mesh. If None, the mesh will be drawn at the position specified by `pos`. Otherwise, `T` has a higher priority than `pos`.
+            The transformation matrix of the mesh. If None, the mesh will be drawn at the position specified by `pos`.
+            Otherwise, `T` has a higher priority than `pos`.
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.StaticMeshBatch
             The created debug object.
         """
+        if T is None:
+            T = gu.trans_to_T(tensor_to_array(torch.as_tensor(pos, dtype=gs.tc_float)))
+        (T,), _ = self._render_context.broadcast_to_envs((T,), value_ndim=2, is_tiled=True)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(self._visualizer.context.make_debug_mesh(mesh, pos, T))
+            return self._render_context.add_meshes(mesh, T[:, None], is_shared=False)
 
     @gs.assert_built
     def draw_debug_sphere(self, pos, radius=0.01, color=(1.0, 0.0, 0.0, 0.5)):
         """
         Draws a sphere in the scene for visualization.
+
+        The sphere is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1317,18 +1358,24 @@ class Scene(BuildableMixin, RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.StaticMeshBatch
             The created debug object.
         """
+        (pos,), _ = self._render_context.broadcast_to_envs((pos,), value_ndim=1, is_tiled=True)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_sphere(pos, radius, color)
+            return self._render_context.add_meshes(
+                mu.create_sphere(radius=radius, color=color),
+                gu.trans_to_T(pos)[:, None],
+                is_shared=False,
+                is_smooth=True,
             )
 
     @gs.assert_built
     def draw_debug_spheres(self, poss, radius=0.01, color=(1.0, 0.0, 0.0, 0.5)):
         """
         Draws multiple spheres in the scene for visualization.
+
+        The spheres are a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1341,13 +1388,12 @@ class Scene(BuildableMixin, RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.Points
             The created debug object.
         """
+        (poss,), is_shared = self._render_context.broadcast_to_envs((poss,), value_ndim=2, is_tiled=False)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_spheres(poss, radius, color)
-            )
+            return self._render_context.add(Points(poss, radius, tuple(color), is_shared=is_shared))
 
     @gs.assert_built
     def draw_debug_box(
@@ -1359,6 +1405,8 @@ class Scene(BuildableMixin, RBC):
     ):
         """
         Draws a box in the scene for visualization.
+
+        The box is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1373,40 +1421,49 @@ class Scene(BuildableMixin, RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.StaticMeshBatch
             The created debug object.
         """
+        mesh = mu.create_box(
+            bounds=tensor_to_array(torch.as_tensor(bounds)),
+            wireframe=wireframe,
+            wireframe_radius=wireframe_radius,
+            color=color,
+        )
+        (T,), is_shared = self._render_context.broadcast_to_envs((np.eye(4),), value_ndim=2, is_tiled=False)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_box(
-                    bounds, color, wireframe=wireframe, wireframe_radius=wireframe_radius
-                )
-            )
+            return self._render_context.add_meshes(mesh, T[:, None], is_shared)
 
     @gs.assert_built
     def draw_debug_points(self, poss, colors=(1.0, 0.0, 0.0, 0.5)):
         """
         Draws points in the scene for visualization.
 
+        The points are a marker drawn by the interactive viewer and the debug cameras.
+
         Parameters
         ----------
         poss : array_like, shape (N, 3)
             The positions of the points.
-        colors : array_like, shape (4,), optional
-            The color of the points in RGBA format.
+        colors : array_like, shape (4,) | shape (N, 4), optional
+            The color of the points in RGBA format, one for all of them or one per point.
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.Points
             The created debug object.
         """
+        (poss,), is_shared = self._render_context.broadcast_to_envs((poss,), value_ndim=2, is_tiled=False)
+        colors = np.broadcast_to(colors, (poss.shape[1], 4)).astype(gs.np_float)
         with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(self._visualizer.context.make_debug_points(poss, colors))
+            return self._render_context.add(Points(poss, radius=0.0, color=colors, is_shared=is_shared))
 
     @gs.assert_built
     def draw_debug_frustum(self, camera, color=(1.0, 1.0, 1.0, 0.3)):
         """
         Draws a camera frustum in the scene for visualization.
+
+        The frustum is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1418,19 +1475,17 @@ class Scene(BuildableMixin, RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.StaticMeshBatch
             The created debug object.
         """
-        with self._visualizer.viewer_lock:
-            mesh = mu.create_camera_frustum(camera, color)
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_mesh(mesh, T=camera.transform)
-            )
+        return self.draw_debug_mesh(mu.create_camera_frustum(camera, color), T=camera.transform)
 
     @gs.assert_built
     def draw_debug_trajectory(self, poss, radius=0.002, color=(1.0, 0.5, 0.0, 0.8)):
         """
         Draws a trajectory as a series of connected lines in the scene for visualization.
+
+        The trajectory is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1443,23 +1498,21 @@ class Scene(BuildableMixin, RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
-            The created debug object (a single merged mesh of all segments).
+        marker : genesis.engine.render_context.StaticMeshBatch | None
+            The created debug object (a single merged mesh of all segments), None for fewer than two points.
         """
-
-        poss = np.asarray(poss)
+        poss = tensor_to_array(torch.as_tensor(poss))
         if len(poss) < 2:
             return None
-
         segments = [mu.create_line(poss[i], poss[i + 1], radius, color) for i in range(len(poss) - 1)]
-        merged = trimesh.util.concatenate(segments)
-        with self._visualizer.viewer_lock:
-            return self._visualizer.context.add_debug_node(self._visualizer.context.make_debug_mesh(merged))
+        return self.draw_debug_mesh(trimesh.util.concatenate(segments))
 
     @gs.assert_built
     def draw_debug_path(self, qposs, entity, link_idx=-1, density=0.3, frame_scaling=1.0):
         """
         Draws a planned joint trajectory in the scene for visualization.
+
+        The path is a marker drawn by the interactive viewer and the debug cameras.
 
         Parameters
         ----------
@@ -1479,7 +1532,7 @@ class Scene(BuildableMixin, RBC):
 
         Returns
         -------
-        node : genesis.ext.pyrender.mesh.Mesh
+        marker : genesis.engine.render_context.StaticMeshBatch
             The created debug object representing the visualized trajectory.
 
         Notes
@@ -1488,22 +1541,19 @@ class Scene(BuildableMixin, RBC):
         The density parameter reduces FK computational load by sampling fewer points, with 1.0 representing the whole
         trajectory.
         """
-        with self._visualizer.viewer_lock:
-            N = len(qposs)
-            density = np.clip(density, 0.0, 1.0)
-            N_new = int(N * density)
-            indices = torch.linspace(0, N - 2, N_new, dtype=int)
+        N = len(qposs)
+        density = np.clip(density, 0.0, 1.0)
+        N_new = int(N * density)
+        indices = torch.linspace(0, N - 2, N_new, dtype=int)
 
-            Ts = np.zeros((N_new, 4, 4))
-            for i in range(N_new):
-                pos, quat = self.rigid_solver.forward_kinematics_query(entity, qposs[indices[i]])
-                Ts[i] = tensor_to_array(gu.trans_quat_to_T(pos[link_idx], quat[link_idx]))
+        Ts = np.zeros((N_new, 4, 4))
+        for i in range(N_new):
+            pos, quat = self.rigid_solver.forward_kinematics_query(entity, qposs[indices[i]])
+            Ts[i] = tensor_to_array(gu.trans_quat_to_T(pos[link_idx], quat[link_idx]))
 
-            return self._visualizer.context.add_debug_node(
-                self._visualizer.context.make_debug_frames(
-                    Ts, axis_length=frame_scaling * 0.1, origin_size=0.001, axis_radius=frame_scaling * 0.005
-                )
-            )
+        return self.draw_debug_frames(
+            Ts, axis_length=frame_scaling * 0.1, origin_size=0.001, axis_radius=frame_scaling * 0.005
+        )
 
     @gs.assert_built
     def render_all_cameras(
@@ -1556,15 +1606,34 @@ class Scene(BuildableMixin, RBC):
 
         Parameters
         ----------
-        objs : tuple of genesis.ext.pyrender.mesh.Mesh
-            The debug objects to update, i.e. visualizer nodes returned by ``draw_debug_*`` methods. Currently only
-            individual sphere, frame, mesh, and arrow objects (returned by ``draw_debug_sphere``, ``draw_debug_frame``,
-            ``draw_debug_mesh``, and ``draw_debug_arrow`` respectively) are supported.
+        objs : tuple of genesis.engine.render_context.Shape
+            The debug objects to update, as returned by ``draw_debug_*`` methods. Only individual sphere, frame, mesh,
+            and arrow objects (returned by ``draw_debug_sphere``, ``draw_debug_frame``, ``draw_debug_mesh``, and
+            ``draw_debug_arrow`` respectively) are supported.
         poses : tuple of array_like, each of shape (4, 4)
-            The new transformation matrices for each debug object.
+            The new transformation matrices for each debug object, scale and shear included, one for every environment
+            or one per rendered environment, an object drawn once for every environment taking a single one. An arrow
+            takes the length its transform scales along its axis, its shaft and its head keeping their size, its length
+            standing for the magnitude it shows.
         """
         with self._visualizer.viewer_lock:
-            self._visualizer.context.update_debug_objects(objs, poses)
+            for marker, pose in zip(objs, poses):
+                (poses_T,), is_shared = self._render_context.broadcast_to_envs(
+                    (pose,), value_ndim=2, is_tiled=not marker.is_shared
+                )
+                if is_shared != marker.is_shared:
+                    gs.raise_exception("A marker shared by every environment takes a single transform.")
+                if isinstance(marker, StaticMeshBatch) and len(marker) == 1:
+                    marker.pos[:, 0], marker.quat[:, 0], marker.scale[:, 0] = gu.T_to_trans_quat_scale(poses_T)
+                elif isinstance(marker, Arrows) and marker.pos.shape[1] == 1:
+                    # The arrow keeps its length along the z axis of its new transform
+                    marker.vec[:, 0] = poses_T[:, :3, 2] * torch.linalg.norm(marker.vec[:, 0], dim=-1, keepdim=True)
+                    marker.pos[:, 0] = poses_T[:, :3, 3]
+                else:
+                    gs.raise_exception(
+                        "This method is only supported by individual spheres, frames, meshes, and arrows."
+                    )
+            self._sim.render_context.invalidate((self._render_context,))
 
     @gs.assert_built
     def clear_debug_object(self, obj):
@@ -1572,7 +1641,7 @@ class Scene(BuildableMixin, RBC):
         Clears the specified debug object from the scene.
         """
         with self._visualizer.viewer_lock:
-            self._visualizer.context.clear_debug_object(obj)
+            self._render_context.remove(obj)
 
     @gs.assert_built
     def clear_debug_objects(self):
@@ -1580,7 +1649,7 @@ class Scene(BuildableMixin, RBC):
         Clears all the debug objects in the scene.
         """
         with self._visualizer.viewer_lock:
-            self._visualizer.context.clear_debug_objects()
+            self._render_context.remove()
 
     @gs.assert_built
     def get_time(self, envs_idx=None):
@@ -1621,6 +1690,12 @@ class Scene(BuildableMixin, RBC):
         if self._pre_step_callbacks:
             omitted_kinds["pre_step_callback"] += len(self._pre_step_callbacks)
         surfaces = [entity.surface for entity in self.entities]
+        surfaces += [
+            patch.options.surface
+            for entity in self.entities
+            for patch in entity.spec.patches
+            if isinstance(patch.options, gs.options.VGeom) and patch.options.surface is not None
+        ]
         if isinstance(self.options.renderer, gs.renderers.RayTracer) and self.options.renderer.env_surface is not None:
             surfaces.append(self.options.renderer.env_surface)
         omitted_kinds.update(name for surface in surfaces for name in pixel_less_textures(surface))
@@ -2074,3 +2149,150 @@ class Scene(BuildableMixin, RBC):
           depending on the material type and the configured segmentation level.
         """
         return self._visualizer.segmentation_idx_dict
+
+
+class SceneScopedRenderContext(ScopedRenderContext[Scene]):
+    """The markers drawn with ``scene.draw_debug_*`` (see 'Scene.draw_debug_line'), until cleared.
+
+    A marker given once is shared by every environment, drawn once where it stands (see 'Shape.is_shared'), except a
+    single sphere, frame or mesh, drawn in every environment. A marker given per rendered environment (see
+    ``VisOptions.rendered_envs_idx``) is drawn in each of them (see 'broadcast_to_envs').
+
+    `rendered_envs_idx` are the environments the renderers draw, all of them if None, and `n_envs` is the number of
+    parallel environments of the scene.
+    """
+
+    def __init__(
+        self, scene: Scene, context: RenderContext, rendered_envs_idx: "Sequence[int] | None", n_envs: int
+    ) -> None:
+        super().__init__(scene, context)
+        self._markers: list[Shape] = []
+        self._n_envs_ = max(n_envs, 1)
+        self._rendered_envs_idx = list(range(self._n_envs_) if rendered_envs_idx is None else rendered_envs_idx)
+
+    def broadcast_to_envs(
+        self, values: "Sequence[np.typing.ArrayLike]", value_ndim: int, is_tiled: bool
+    ) -> tuple[list[torch.Tensor], bool]:
+        """Broadcast the values a user passes to ``scene.draw_debug_*`` over the environments of a marker.
+
+        Parameters
+        ----------
+        values : Sequence[array_like]
+            The values, each given once, or once per rendered environment with a leading dimension (see
+            ``VisOptions.rendered_envs_idx``).
+        value_ndim : int
+            The number of dimensions of a value given once.
+        is_tiled : bool
+            Whether values all given once are repeated in every environment, rather than making a marker shared by every
+            environment.
+
+        Returns
+        -------
+        tuple[list[torch.Tensor], bool]
+            The values, holding a single row for a marker shared by every environment, a row per environment otherwise,
+            the environments left out of the renders repeating the first. Then whether the marker is shared by every
+            environment, which values all given once make unless `is_tiled`.
+        """
+        # The rows are on the device from the start, since 'Scene.update_debug_objects' writes them in place
+        values = [torch.as_tensor(value, dtype=gs.tc_float, device=gs.device) for value in values]
+        is_shared = not is_tiled and all(value.ndim == value_ndim for value in values)
+        values_rows = []
+        for value in values:
+            rows = value.new_empty((1 if is_shared else self._n_envs_, *value.shape[value.ndim - value_ndim :]))
+            if value.ndim > value_ndim:
+                if len(value) != len(self._rendered_envs_idx):
+                    gs.raise_exception(
+                        f"A value per rendered environment holds {len(self._rendered_envs_idx)} rows, got {len(value)}."
+                    )
+                rows[:] = value[0]
+                rows[self._rendered_envs_idx] = value
+            else:
+                rows[:] = value
+            values_rows.append(rows)
+        return values_rows, is_shared
+
+    @property
+    def sources(self) -> tuple[()]:
+        return ()
+
+    def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:
+        return tuple(self._markers)
+
+    def add(self, marker: Shape | None) -> Shape | None:
+        """Draw a marker until it is removed, and return it, nothing for None."""
+        if marker is not None:
+            self._markers.append(marker)
+            self._context.invalidate((self,))
+        return marker
+
+    def add_meshes(
+        self, mesh: trimesh.Trimesh, poses_T: torch.Tensor, is_shared: bool, is_smooth: bool = False
+    ) -> StaticMeshBatch:
+        """Draw copies of a mesh at some transforms, scale and shear included.
+
+        Parameters
+        ----------
+        mesh : trimesh.Trimesh
+            The mesh.
+        poses_T : torch.Tensor
+            The transform of each copy in each environment, or in all of them.
+        is_shared : bool
+            Whether `poses_T` holds the transforms of every environment at once.
+        is_smooth : bool, optional
+            Whether the copies are drawn smooth. Defaults to False.
+        """
+        geometry = MeshGeometry(
+            surface=None,
+            visual=mesh.visual,
+            verts_ref=ArrayRef(mesh.vertices),
+            normals_ref=ArrayRef(mesh.vertex_normals),
+            faces_ref=ArrayRef(mesh.faces),
+            is_smooth=is_smooth,
+        )
+        pos, quat, scale = gu.T_to_trans_quat_scale(poses_T)
+        return self.add(
+            StaticMeshBatch(
+                geometries=(geometry,) * poses_T.shape[1], pos=pos, quat=quat, scale=scale, is_shared=is_shared
+            )
+        )
+
+    def add_frames(
+        self,
+        poses_T: torch.Tensor,
+        axis_length: float,
+        origin_size: float,
+        axis_radius: float,
+        color: "Sequence[float] | None",
+        is_shared: bool = False,
+    ) -> StaticMeshBatch:
+        """Draw coordinate frames at some transforms (see 'add_meshes').
+
+        Parameters
+        ----------
+        poses_T : torch.Tensor
+            The transform of each frame (see 'add_meshes').
+        axis_length : float
+            The length of the axes.
+        origin_size : float
+            The size of the sphere at the origin.
+        axis_radius : float
+            The radius of the axes.
+        color : Sequence[float] | None
+            The RGBA color of every axis, None for the colors of the axes.
+        is_shared : bool, optional
+            See 'add_meshes'. Defaults to False.
+        """
+        mesh = trimesh.creation.axis(origin_size=origin_size, axis_radius=axis_radius, axis_length=axis_length)
+        if color is not None:
+            visual = trimesh.visual.ColorVisuals()
+            visual._data["vertex_colors"] = np.tile(mu.color_f32_to_u8(color), (len(mesh.vertices), 1))
+            mesh.visual = visual
+        return self.add_meshes(mesh, poses_T, is_shared)
+
+    def remove(self, marker: Shape | None = None) -> None:
+        """Stop drawing a marker, every marker if None."""
+        if marker is None:
+            self._markers.clear()
+        elif marker in self._markers:
+            self._markers.remove(marker)
+        self._context.invalidate((self,))

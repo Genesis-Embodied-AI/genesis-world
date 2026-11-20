@@ -30,6 +30,9 @@ def create_sph_scene(show_viewer, particle_size=0.01, gravity=-9.81, mu=0.005):
             lower_bound=(-0.5, -0.5, 0.0),
             upper_bound=(0.5, 0.5, 1),
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         show_viewer=show_viewer,
     )
 
@@ -48,7 +51,6 @@ def create_sph_scene(show_viewer, particle_size=0.01, gravity=-9.81, mu=0.005):
         ),
         surface=gs.surfaces.Default(
             color=(0.4, 0.8, 1.0),
-            vis_mode="particle",
         ),
     )
 
@@ -424,10 +426,10 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
     # A late reordering of the packing drops a particle at most from its site on the cubic lattice into a hollow of the
     # close-packed layer below, by the difference of their layer spacings at the same density, in free fall.
     speed_max = np.sqrt(2.0 * GRAVITY * (1.0 - 4.0 ** (1.0 / 3.0) / np.sqrt(3.0)) * PARTICLE_SIZE)
-    n_steps = 150
+    n_steps = 170
     for i_step in range(n_steps):
         scene.step()
-        if is_tilt_checked and i_step >= 100:
+        if is_tilt_checked and i_step >= 120:
             pressures = qd_to_numpy(sph_solver.sph_state.particles_reordered.p, transpose=True)[1]
             positions = qd_to_numpy(sph_solver.sph_state.particles_reordered.pos, transpose=True)[1]
             heights = positions @ (-gravity_tilted / GRAVITY)
@@ -437,12 +439,12 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
             ).any(axis=-1)
             is_deep_wall = is_wall & (depths > 4 * PARTICLE_SIZE)
             tilted_ratios.append(pressures[is_deep_wall].mean() / (rho_rest * GRAVITY * depths[is_deep_wall]).mean())
-        if i_step >= 100:
+        if i_step >= 120:
             assert (liquid.get_particles_vel()[0].norm(dim=-1) < speed_max).all()
             pressures = qd_to_numpy(sph_solver.sph_state.particles_reordered.p, transpose=True)[0]
             heights = qd_to_numpy(sph_solver.sph_state.particles_reordered.pos, transpose=True)[0, :, 2]
             p_bottom = pressures[heights < 0.05].mean()
-            if i_step >= 130:
+            if i_step >= 150:
                 assert_allclose(p_bottom, weight_per_area, rtol=0.5)
             p_bottoms.append(p_bottom)
             p_middles.append(pressures[(heights >= 0.2) & (heights < 0.25)].mean())

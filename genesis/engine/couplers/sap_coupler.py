@@ -31,6 +31,7 @@ from genesis.engine.bvh import (
     func_bvh_query_leaves,
     func_bvh_traverse,
     get_bvh_data,
+    get_meshes_trees,
     kernel_build_instances_tree,
 )
 from genesis.engine.solvers.base_solver import CheckpointMixin, ErrnoMixin, ErrorCode
@@ -90,7 +91,6 @@ from genesis.utils.misc import (
     qd_to_numpy,
     tensor_to_array,
 )
-from genesis.utils.raycast_qd import get_solver_meshes
 
 if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
@@ -6951,7 +6951,10 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
         self.query_results = BVHQueryResults(
             sizes=dict(query_results=self.max_contact_candidates, bvh_trees=fem_solver.n_envs_)
         )
-        # The tets crossing the plane of a triangle alone take a result, as the candidates of the pairs require
+        # The tets crossing the plane of a triangle alone take a result, as the candidates of the pairs require. The
+        # triangles of each collision geom make a mesh in the frame of the geom.
+        dyn_info = rigid_solver.dyn_info
+        faces_range = tuple((geom.face_start, geom.face_end) for geom in rigid_solver.geoms)
         self.query = InstancesQuery(
             RigidFacesQuery(
                 self.query_results,
@@ -6962,7 +6965,7 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
                 rigid_solver.dyn_info.verts,
                 rigid_solver.dyn_info.faces,
             ),
-            get_solver_meshes(rigid_solver, is_visual=False),
+            get_meshes_trees(rigid_solver, dyn_info.verts.init_pos, dyn_info.faces.verts_idx, faces_range),
             rigid_solver.dyn_state.geoms,
         )
 

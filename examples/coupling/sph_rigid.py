@@ -19,9 +19,11 @@ def main():
         sph_options=gs.options.SPHOptions(
             lower_bound=(0.0, -1.0, 0.0),
             upper_bound=(1.0, 1.0, 2.4),
+            vis=gs.options.ParticleVisOptions(
+                boundary=True,
+            ),
         ),
         vis_options=gs.options.VisOptions(
-            visualize_sph_boundary=True,
             rendered_envs_idx=[0],
         ),
         viewer_options=gs.options.ViewerOptions(

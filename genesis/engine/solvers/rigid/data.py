@@ -7,7 +7,7 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.solvers.base_solver import VFACES, VVERTS, ErrorCode
+from genesis.engine.solvers.base_solver import ErrorCode
 from genesis.utils.data import ENVS, Config, Data, DataKind, Size, field, is_opted_in
 from genesis.utils.simt import ExactSums
 
@@ -30,6 +30,7 @@ LINKS = Size("links")
 JOINTS = Size("joints")
 GEOMS = Size("geoms")
 ROOTS = Size("roots")
+FIXED_ROOTS = Size("fixed_roots")
 TREES = Size("trees")
 # The links of every tree level by level, and the children of every link (see trees_levels_links_idx in RigidInfo)
 TREES_LEVELS_LINKS = Size("trees_levels_links")
@@ -160,8 +161,6 @@ FACES = Size("faces")
 EDGES = Size("edges")
 FREE_VERTS = Size("free_verts")
 FIXED_VERTS = Size("fixed_verts")
-CUSTOM_VVERTS = Size("custom_vverts")
-VGEOMS = Size("vgeoms")
 CANDIDATE_EQUALITIES = Size("candidate_equalities")
 DOFS_INFO_ENVS = Size("dofs_info_envs")
 LINKS_INFO_ENVS = Size("links_info_envs")
@@ -240,16 +239,16 @@ class LinksInfo(Data, kind=DataKind.INFO, shape=(LINKS, LINKS_INFO_ENVS)):
     quat: qd.Tensor = field((float, 4))
     invweight: qd.Tensor = field((float, 2))
     is_fixed: qd.Tensor = field(bool)
+    # The slot of a fixed root link in FixedRootsState, -1 for every other link
+    fixed_root_idx: qd.Tensor = field(int)
     inertial_pos: qd.Tensor = field((float, 3))
     inertial_quat: qd.Tensor = field((float, 4))
     inertial_i: qd.Tensor = field((float, (3, 3)))
     inertial_mass: qd.Tensor = field(float)
     entity_idx: qd.Tensor = field(int)
-    # The geoms and visual geoms of each link, which heterogeneous environments vary
+    # The geoms of each link, which heterogeneous environments vary
     geom_start: qd.Tensor = field(int)
     geom_end: qd.Tensor = field(int)
-    vgeom_start: qd.Tensor = field(int)
-    vgeom_end: qd.Tensor = field(int)
 
 
 class LinksState(Data, kind=DataKind.DERIVED, shape=(LINKS, ENVS)):
@@ -266,10 +265,8 @@ class LinksState(Data, kind=DataKind.DERIVED, shape=(LINKS, ENVS)):
     crb_mass: qd.Tensor = field(float, grad=True)
     cdd_vel: qd.Tensor = field((float, 3), grad=True)
     cdd_ang: qd.Tensor = field((float, 3), grad=True)
-    # The pose of a fixed root link is state, which forward kinematics leaves as set (see
-    # func_forward_kinematics_link_bw), the poses of the other links being recomputed from the positions of the dofs.
-    pos: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
-    quat: qd.Tensor = field((float, 4), kind=DataKind.STATE, grad=True)
+    pos: qd.Tensor = field((float, 3), grad=True)
+    quat: qd.Tensor = field((float, 4), grad=True)
     pos_bw: qd.Tensor = field((float, 3), shape=(LINKS, LINK_BW_SLOTS, ENVS), grad=True)
     quat_bw: qd.Tensor = field((float, 4), shape=(LINKS, LINK_BW_SLOTS, ENVS), grad=True)
     i_pos: qd.Tensor = field((float, 3), grad=True)
@@ -406,55 +403,6 @@ class VertsState(Data, kind=DataKind.DERIVED):
     pos: qd.Tensor = field((float, 3))
 
 
-class VVertsInfo(Data, kind=DataKind.CONSTANT, shape=(VVERTS,)):
-    """The vertices of the visual meshes of the rigid geoms, in the frame of their visual geom."""
-
-    init_pos: qd.Tensor = field((float, 3))
-    init_vnormal: qd.Tensor = field((float, 3))
-    vgeom_idx: qd.Tensor = field(int)
-    vverts_state_idx: qd.Tensor = field(int)
-
-
-class VVertsState(Data, kind=DataKind.STATE, shape=(CUSTOM_VVERTS, ENVS)):
-    """The world positions of the visual vertices of the entities opted into custom visual vertices.
-
-    They are state, since 'set_vverts' writes them from one step to the next.
-    """
-
-    pos: qd.Tensor = field(
-        (float, 3),
-        oversize_hint="Consider opting fewer kinematic entities into 'enable_custom_vverts=True', or reducing "
-        "'n_envs'.",
-    )
-
-
-class VFacesInfo(Data, kind=DataKind.CONSTANT, shape=(VFACES,)):
-    """The triangles of the visual meshes of the rigid geoms."""
-
-    vverts_idx: qd.Tensor = field((int, 3))
-    vgeom_idx: qd.Tensor = field(int)
-
-
-class VGeomsInfo(Data, kind=DataKind.CONSTANT, shape=(VGEOMS,)):
-    """The model parameters of each visual geom of the rigid solver: its pose on its link, mesh ranges and color."""
-
-    pos: qd.Tensor = field((float, 3))
-    quat: qd.Tensor = field((float, 4))
-    link_idx: qd.Tensor = field(int)
-    vvert_start: qd.Tensor = field(int)
-    vvert_end: qd.Tensor = field(int)
-    vface_start: qd.Tensor = field(int)
-    vface_end: qd.Tensor = field(int)
-    color: qd.Tensor = field((float, 4))
-
-
-class VGeomsState(Data, kind=DataKind.DERIVED, shape=(VGEOMS, ENVS)):
-    """The world pose of each visual geom of the rigid solver in each environment."""
-
-    pos: qd.Tensor = field((float, 3))
-    quat: qd.Tensor = field((float, 4))
-
-
 class EqualitiesInfo(Data, kind=DataKind.INFO, shape=(CANDIDATE_EQUALITIES, ENVS)):
     """The equality constraints of each environment: type, bound objects, data and solver parameters."""
 
@@ -480,6 +428,13 @@ class EntitiesInfo(Data, kind=DataKind.INFO, shape=(ENTITIES,)):
     gravity_compensation: qd.Tensor = field(float)
 
 
+class FixedRootsState(Data, kind=DataKind.STATE, shape=(FIXED_ROOTS, ENVS)):
+    """The pose of each fixed root link in each environment, which forward kinematics copies into its link."""
+
+    pos: qd.Tensor = field((float, 3), grad=True)
+    quat: qd.Tensor = field((float, 4), grad=True)
+
+
 class EntitiesState(Data, kind=DataKind.STATE, shape=(ENTITIES, ENVS)):
     """The hibernation flag of each entity of the rigid solver in each environment."""
 
@@ -497,9 +452,6 @@ class DynInfo(Data):
     verts: VertsInfo = field(labels=DYNAMICS)
     faces: FacesInfo = field(labels=DYNAMICS)
     edges: EdgesInfo = field(labels=DYNAMICS)
-    vverts: VVertsInfo
-    vfaces: VFacesInfo
-    vgeoms: VGeomsInfo
     equalities: EqualitiesInfo = field(labels=DYNAMICS)
 
 
@@ -513,8 +465,7 @@ class DynState(Data):
     geoms: GeomsState = field(labels=DYNAMICS)
     free_verts: VertsState = field(shape=(FREE_VERTS, ENVS), labels=DYNAMICS)
     fixed_verts: VertsState = field(shape=(FIXED_VERTS,), labels=DYNAMICS)
-    vverts: VVertsState
-    vgeoms: VGeomsState
+    fixed_roots: FixedRootsState
 
 
 class RigidConfig(Config):
@@ -663,12 +614,9 @@ class RigidData(Data):
             links=solver.n_links_,
             joints=solver.n_joints_,
             roots=solver.n_roots_,
+            fixed_roots=solver.n_fixed_roots_,
             trees=solver.n_trees_,
             entities=solver.n_entities_,
-            vverts=solver.n_vverts_,
-            custom_vverts=solver.n_custom_vverts_,
-            vfaces=solver.n_vfaces_,
-            vgeoms=solver.n_vgeoms_,
             dofs_info_envs=solver.n_envs_ if options.batch_dofs_info else (),
             links_info_envs=solver.n_envs_ if options.batch_links_info else (),
             joints_info_envs=solver.n_envs_ if options.batch_joints_info else (),

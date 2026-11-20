@@ -9,7 +9,6 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-import genesis.utils.linalg as lu
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_forward_kinematics_root
 from genesis.engine.solvers.rigid.data import (
     ENTITY_DOFS,
@@ -35,9 +34,8 @@ class IKState(Data, kind=DataKind.SCRATCH):
 
     # Spatial Jacobian of one target, rebuilt per target link and copied into the stacked block
     jacobian: qd.Tensor = field(float, shape=(6, ENTITY_DOFS, ENVS))
-    # Jacobian of all targets stacked, and its transpose
+    # Jacobian of all targets stacked
     jacobian_stacked: qd.Tensor = field(float, shape=(IK_ERRORS, ENTITY_DOFS, ENVS))
-    jacobian_stacked_t: qd.Tensor = field(float, shape=(ENTITY_DOFS, IK_ERRORS, ENVS))
     # Damped normal matrix J J^T + damping^2 I, its LU factors with their forward-substitution scratch, and its inverse
     mat: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
     lu_lower: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
@@ -209,10 +207,11 @@ def func_forward_kinematics_scratch(
                 else:
                     pos = pos + joints_xaxis[i_j - joint_offset, i_col_out] * q_delta
 
-        # Fixed root links keep their live pose, exactly like the solver FK (users may overwrite them manually).
-        if dyn_info.links.parent_idx[I_l] == -1 and dyn_info.links.is_fixed[I_l]:
-            pos = dyn_state.links.pos[i_l, i_b]
-            quat = dyn_state.links.quat[i_l, i_b]
+        # See func_forward_kinematics_link
+        i_fr = dyn_info.links.fixed_root_idx[I_l]
+        if i_fr != -1:
+            pos = dyn_state.fixed_roots.pos[i_fr, i_b]
+            quat = gu.qd_normalize(dyn_state.fixed_roots.quat[i_fr, i_b], rigid_info.EPS[None])
         links_pos[i_l - link_offset, i_col_out] = pos
         links_quat[i_l - link_offset, i_col_out] = quat
 
@@ -580,27 +579,62 @@ def func_inverse_kinematics(
                                 ik_state.jacobian[i_error + 3, i_d, i_b] * targets.rot_mask[i_error]
                             )
 
-                lu.mat_transpose(ik_state.jacobian_stacked, ik_state.jacobian_stacked_t, n_error_dims, n_dofs, i_b)
-                lu.mat_mul(
-                    ik_state.jacobian_stacked,
-                    ik_state.jacobian_stacked_t,
-                    ik_state.mat,
-                    n_error_dims,
-                    n_dofs,
-                    n_error_dims,
-                    i_b,
-                )
-                lu.mat_add_eye(ik_state.mat, damping**2, n_error_dims, i_b)
-                lu.mat_inverse(
-                    ik_state.mat,
-                    ik_state.lu_lower,
-                    ik_state.lu_upper,
-                    ik_state.lu_y,
-                    ik_state.inv,
-                    n_error_dims,
-                    i_b,
-                )
-                lu.mat_mul_vec(ik_state.inv, ik_state.err_pose, ik_state.vec, n_error_dims, n_error_dims, i_b)
+                # Damped normal matrix J J^T + damping^2 I
+                for i_error in range(n_error_dims):
+                    for j_error in range(n_error_dims):
+                        ik_state.mat[i_error, j_error, i_b] = 0.0
+                        for i_d_ in range(n_dofs):
+                            ik_state.mat[i_error, j_error, i_b] = ik_state.mat[i_error, j_error, i_b] + (
+                                ik_state.jacobian_stacked[i_error, i_d_, i_b]
+                                * ik_state.jacobian_stacked[j_error, i_d_, i_b]
+                            )
+                    ik_state.mat[i_error, i_error, i_b] = ik_state.mat[i_error, i_error, i_b] + damping**2
+
+                # LU factorization of the damped normal matrix
+                for i_error in range(n_error_dims):
+                    for j_error in range(i_error, n_error_dims):
+                        val = ik_state.mat[i_error, j_error, i_b]
+                        for k_error in range(i_error):
+                            val = (
+                                val
+                                - ik_state.lu_lower[i_error, k_error, i_b] * ik_state.lu_upper[k_error, j_error, i_b]
+                            )
+                        ik_state.lu_upper[i_error, j_error, i_b] = val
+                    for j_error in range(i_error + 1, n_error_dims):
+                        val = ik_state.mat[j_error, i_error, i_b]
+                        for k_error in range(i_error):
+                            val = (
+                                val
+                                - ik_state.lu_lower[j_error, k_error, i_b] * ik_state.lu_upper[k_error, i_error, i_b]
+                            )
+                        ik_state.lu_lower[j_error, i_error, i_b] = val / ik_state.lu_upper[i_error, i_error, i_b]
+
+                # Inverse of the damped normal matrix, by forward then backward substitution of each identity column
+                for k_error in range(n_error_dims):
+                    for i_error in range(n_error_dims):
+                        val = gs.qd_float(0.0)
+                        for j_error in range(i_error):
+                            val = val + ik_state.lu_lower[i_error, j_error, i_b] * ik_state.lu_y[k_error, j_error, i_b]
+                        if i_error == k_error:
+                            ik_state.lu_y[k_error, i_error, i_b] = 1.0 - val
+                        else:
+                            ik_state.lu_y[k_error, i_error, i_b] = -val
+                    for i_error_ in range(n_error_dims):
+                        i_error = n_error_dims - 1 - i_error_
+                        val = gs.qd_float(0.0)
+                        for j_error in range(i_error + 1, n_error_dims):
+                            val = val + ik_state.lu_upper[i_error, j_error, i_b] * ik_state.inv[j_error, k_error, i_b]
+                        ik_state.inv[i_error, k_error, i_b] = (
+                            ik_state.lu_y[k_error, i_error, i_b] - val
+                        ) / ik_state.lu_upper[i_error, i_error, i_b]
+
+                for i_error in range(n_error_dims):
+                    ik_state.vec[i_error, i_b] = 0.0
+                    for j_error in range(n_error_dims):
+                        ik_state.vec[i_error, i_b] = (
+                            ik_state.vec[i_error, i_b]
+                            + ik_state.inv[i_error, j_error, i_b] * ik_state.err_pose[j_error, i_b]
+                        )
 
                 for i_d_ in range(entity_n_dofs):
                     ik_state.delta_qpos[i_d_, i_b] = 0
@@ -608,7 +642,7 @@ def func_inverse_kinematics(
                     i_d = targets.dofs_idx[i_d_]
                     for j in range(n_error_dims):
                         ik_state.delta_qpos[i_d, i_b] = ik_state.delta_qpos[i_d, i_b] + (
-                            ik_state.jacobian_stacked_t[i_d_, j, i_b] * ik_state.vec[j, i_b]
+                            ik_state.jacobian_stacked[j, i_d_, i_b] * ik_state.vec[j, i_b]
                         )
 
                 for i_d_ in range(entity_n_dofs):

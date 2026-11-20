@@ -1,7 +1,7 @@
+import dataclasses
 import functools
 import math
 import os
-import pickle
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
@@ -22,7 +22,7 @@ from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
 from genesis.typing import Matrix3x3Type, Vec3FType
 from genesis.utils import serialization
-from genesis.utils.cache import OwnedCache, get_gsd_path, get_hashkey, get_remesh_cache
+from genesis.utils.cache import OwnedCache, get_gsd_path, get_hashkey
 from genesis.utils.misc import redirect_libc_stderr
 
 if TYPE_CHECKING:
@@ -37,19 +37,20 @@ class InertialProperties(NamedTuple):
     i: Matrix3x3Type
 
 
-class SDFGrid(NamedTuple):
-    """Signed distance field (SDF) of a geometry sampled at the nodes of a regular grid.
-
-    'value' and 'grad' hold the signed distance and its gradient at each node, 'closest_verts_idx' the index of the
-    vertex of the geometry closest to each node, 'max_value' the largest signed distance of the grid, and
-    'T_mesh_to_sdf' the transform from the mesh frame to the grid frame, in which the nodes sit at integer coordinates.
-    """
+@dataclasses.dataclass(frozen=True)
+class SDFGrid:
+    """Signed distance field (SDF) of a geometry sampled at the nodes of a regular grid."""
 
     value: np.ndarray
+    """Signed distance at each node."""
     grad: np.ndarray
+    """Gradient of the signed distance at each node."""
     closest_verts_idx: np.ndarray
+    """Index of the vertex of the geometry closest to each node."""
     max_value: float
+    """Largest signed distance of the grid."""
     T_mesh_to_sdf: np.ndarray
+    """Transform from the mesh frame to the grid frame, in which the nodes sit at integer coordinates."""
 
 
 class SupportTable(NamedTuple):
@@ -151,7 +152,7 @@ class Mesh(RBC, serialization.SerializationMixin):
     ):
         self._uid = gs.UID()
         self._mesh = mesh  # .copy() FIXME: For some reason forcing copy is causing some tests to fails...
-        self._surface = surface
+        self._surface: Surface | None = None
         if uvs is not None:
             uvs = uvs.astype(gs.np_float, copy=False)
         self._uvs = uvs
@@ -177,16 +178,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             assert scale.ndim == 1 and scale.size in (1, 3)
             self._mesh.apply_scale(scale)
 
-        if self._surface.requires_uv:  # check uvs here
-            if self._uvs is None:
-                if "mesh_path" in self._metadata:
-                    gs.logger.warning(
-                        f"Texture given but asset missing uv info (or failed to load): {self._metadata['mesh_path']}"
-                    )
-                else:
-                    gs.logger.warning("Texture given but asset missing uv info (or failed to load).")
-        else:
-            self._uvs = None
+        self.set_surface(surface)
 
         if convexify:
             self.convexify()
@@ -231,16 +223,17 @@ class Mesh(RBC, serialization.SerializationMixin):
         """
         if self._mesh.vertices.shape[0] > 3 and len(self._mesh.faces) > decimate_face_num:
             self._mesh.process(validate=True)
-            self._mesh = trimesh.Trimesh(
-                *fast_simplification.simplify(
-                    self._mesh.vertices,
-                    self._mesh.faces,
-                    target_count=decimate_face_num,
-                    agg=decimate_aggressiveness,
-                    lossless=(decimate_aggressiveness == 0),
-                ),
-            )
-            self._metadata["decimated"] = True
+            if len(self._mesh.faces) > decimate_face_num:
+                self._mesh = trimesh.Trimesh(
+                    *fast_simplification.simplify(
+                        self._mesh.vertices,
+                        self._mesh.faces,
+                        target_count=decimate_face_num,
+                        agg=decimate_aggressiveness,
+                        lossless=(decimate_aggressiveness == 0),
+                    ),
+                )
+                self._metadata["decimated"] = True
 
         self.clear_visuals()
 
@@ -249,7 +242,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         """
         Remesh for tetrahedralization.
         """
-        cache = get_remesh_cache(self.verts, self.faces, edge_len_abs, edge_len_ratio, fix)
+        cache = mu.get_remesh_cache(self.verts, self.faces, edge_len_abs, edge_len_ratio, fix)
 
         remeshed = cache.load()
         if remeshed is not None:
@@ -664,6 +657,41 @@ class Mesh(RBC, serialization.SerializationMixin):
         self._surface.update_texture(color_texture=color_texture, opacity_texture=opacity_texture, force=True)
         self.update_trimesh_visual()
 
+    def set_surface(self, surface: Surface) -> None:
+        """Replace the surface of the mesh, the textures the given surface leaves unset keeping their current images.
+
+        Every other field takes the value of the given surface, its defaults included, so a surface of another type
+        renders as that type does. A mesh being made takes the surface as given, and keeps the visual of its asset.
+        """
+        if self._surface is None:
+            # The meshes of an asset share its surface, so that the images of its textures are held once
+            self._surface = surface
+        else:
+            surface_fields = type(surface).model_fields
+            # The shortcut fields, which the surface holds resolved into its textures, are set apart from them, since
+            # the validation refuses both.
+            fields, shortcuts = {}, {}
+            for name, value in surface:
+                if name in surface.model_fields_set:
+                    (shortcuts if surface_fields[name].exclude else fields)[name] = value
+            for name, value in self._surface:
+                if (
+                    name in surface_fields
+                    and name not in fields
+                    and not surface_fields[name].exclude
+                    and isinstance(value, gs.textures.Texture)
+                ):
+                    fields[name] = value
+            self._surface = type(surface)(**fields).model_copy(update=shortcuts)
+            self.update_trimesh_visual()
+        if self._surface.requires_uv and self._uvs is None:
+            if "mesh_path" in self._metadata:
+                gs.logger.warning(
+                    f"Texture given but asset missing uv info (or failed to load): {self._metadata['mesh_path']}"
+                )
+            else:
+                gs.logger.warning("Texture given but asset missing uv info (or failed to load).")
+
     def update_trimesh_visual(self):
         """
         Update the trimesh obj's visual attributes using its surface and uvs.
@@ -777,11 +805,10 @@ class Mesh(RBC, serialization.SerializationMixin):
         return self._surface
 
     @property
-    def uvs(self):
-        """
-        UVs of the mesh.
-        """
-        return self._uvs
+    def uvs(self) -> "np.typing.NDArray | None":
+        """The uvs of the mesh, None when its surface samples no texture."""
+        # The asset uvs stay held, since a surface sampling a texture may replace the current one (see 'set_surface')
+        return self._uvs if self._surface.requires_uv else None
 
     @property
     def area(self):
@@ -804,7 +831,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         rescales it: what a file carries is the geometry as it now stands, so reading one back processes nothing.
         """
         return {
-            "geometry": _exported_geometry(self.trimesh, exporting),
+            "geometry": exporting.value(self.trimesh, trimesh.Trimesh),
             "uvs": None if self.uvs is None else exporting.array(self.uvs),
             "surface": exporting.value(self.surface, Surface),
             "metadata": exporting.value(self.metadata, Any),
@@ -819,7 +846,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         the geometry.
         """
         mesh = cls(
-            mesh=_loaded_geometry(raw["geometry"], loading),
+            mesh=loading.value(raw["geometry"], trimesh.Trimesh),
             surface=loading.value(raw["surface"], Surface),
             uvs=None if raw["uvs"] is None else loading.array(raw["uvs"]),
             # The metadata says what was already done to the geometry, so it is handed back rather than acted on again
@@ -851,8 +878,8 @@ def _get_sdf_grid(
         gs.logger.debug(f"Preprocessed file (`.gsd`) found in cache: {gsd_path}.")
         try:
             with open(gsd_path, "rb") as file:
-                sdf_grid = pickle.load(file)
-        except (EOFError, ModuleNotFoundError, pickle.UnpicklingError, TypeError, MemoryError):
+                sdf_grid = serialization.load_record(file, SDFGrid)
+        except (ValueError, MemoryError):
             gs.logger.info("Ignoring corrupted cache.")
 
     if sdf_grid is None:
@@ -921,7 +948,7 @@ def _get_sdf_grid(
         )
         os.makedirs(os.path.dirname(gsd_path), exist_ok=True)
         with open(gsd_path, "wb") as file:
-            pickle.dump(sdf_grid, file)
+            serialization.export_record(file, sdf_grid, SDFGrid)
 
     return sdf_grid
 
@@ -1108,34 +1135,3 @@ def _get_support_table(verts: np.ndarray, support_res: int) -> SupportTable:
     is_slot = candidates_rank < 2
     slots_vid[cells_idx[is_slot], candidates_rank[is_slot]] = verts_idx[is_slot]
     return SupportTable(slots_vid, verts_idx[~is_slot], np.bincount(cells_idx[~is_slot], minlength=n_geom_cells))
-
-
-def _exported_geometry(mesh: trimesh.Trimesh, exporting: serialization.Exporting) -> dict:
-    """Export the geometry of a trimesh: its vertices, the faces joining them, their normals and their colours.
-
-    Only colours the mesh states are exported. Asking a mesh coloured by anything else for its vertex colours makes
-    trimesh invent a default one per vertex, which a file would then carry as if the author had chosen it.
-    """
-    colours = mesh.visual.vertex_colors if mesh.visual.kind == "vertex" else None
-    return {
-        "verts": exporting.array(mesh.vertices),
-        "faces": exporting.array(mesh.faces),
-        "normals": exporting.array(mesh.vertex_normals),
-        "colours": None if colours is None else exporting.array(colours),
-    }
-
-
-def _loaded_geometry(raw: dict, loading: serialization.Loading) -> trimesh.Trimesh:
-    """Recreate the trimesh as it was exported, with the vertices, faces and normals the file holds."""
-    mesh = trimesh.Trimesh(
-        vertices=loading.array(raw["verts"]),
-        faces=loading.array(raw["faces"]),
-        vertex_normals=loading.array(raw["normals"]),
-        process=False,
-    )
-    if raw["colours"] is not None:
-        mesh.visual.vertex_colors = loading.array(raw["colours"])
-    return mesh
-
-
-serialization.register(trimesh.Trimesh, _exported_geometry, _loaded_geometry)

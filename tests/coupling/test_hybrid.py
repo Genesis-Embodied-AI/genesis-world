@@ -118,9 +118,12 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
             enable_CPIC=True,
             lower_bound=(-0.5, -1.0, 0.0),
             upper_bound=(0.5, 1.0, 1),
+            vis=gs.options.ParticleVisOptions(
+                boundary=True,
+            ),
         ),
         vis_options=gs.options.VisOptions(
-            visualize_mpm_boundary=True,
+            debug=True,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_fov=30,
@@ -142,7 +145,6 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
         ),
         surface=gs.surfaces.Default(
             color=(1.0, 0.4, 0.4),
-            vis_mode="visual",
         ),
     )
 
@@ -154,7 +156,6 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
         ),
         surface=gs.surfaces.Default(
             color=(0.3, 0.3, 1.0),
-            vis_mode="particle",
         ),
     )
 
@@ -967,7 +968,7 @@ def test_sap_rigid_floor_contact(xml_path, asset_tmp_path, show_viewer):
         assert_allclose(entity_depths, entity_rest_depths, rtol=5e-3)
 
 
-@pytest.mark.required("sparse")
+@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["long_chain"])
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_sap_long_kinematic_chain(xml_path, show_viewer):

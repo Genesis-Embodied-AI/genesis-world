@@ -1,4 +1,6 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
+
+from genesis.constants import STRUCTURE
 
 from .base import Material
 
@@ -15,9 +17,8 @@ class Kinematic[EntityT: "Entity"](Material[EntityT]):
 
     Parameters
     ----------
-    use_visual_raycasting : bool, optional
-        Expose this entity's visual mesh to every consumer that casts against visual geometry: raycaster sensors, and
-        viewer plugins built on RaycasterViewerPlugin with use_visual_geom set. Each such consumer then re-scans the
-        entity's visual triangles as it moves, so reserve it for the entities meant to be sensed or picked.
-        Default is False.
+    use_visual_raycasting : bool | None, optional
+        Deprecated: use ``use_visual_raycasting`` of the entity spec (see ``gs.entities.Kinematic``).
     """
+
+    structure: ClassVar[STRUCTURE] = STRUCTURE.RIGID

@@ -290,6 +290,9 @@ def test_mesh_to_heightfield(tmp_path, show_viewer):
         sim_options=gs.options.SimOptions(
             gravity=(5, 0, -5),
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0, -5, 7),
             camera_lookat=(10, 15, 4),
@@ -304,14 +307,12 @@ def test_mesh_to_heightfield(tmp_path, show_viewer):
             height_field=hf_terrain,
             pos=translation,
         ),
-        vis_mode="collision",
     )
     ball = scene.add_entity(
         gs.morphs.Sphere(
             pos=(10, 15, 7),
             radius=1,
         ),
-        vis_mode="collision",
     )
     scene.build()
 

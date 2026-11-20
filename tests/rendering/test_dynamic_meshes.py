@@ -6,7 +6,8 @@ import pytest
 import trimesh
 
 import genesis as gs
-from genesis.utils.misc import qd_to_numpy, tensor_to_array
+from genesis.engine.render_context import DynamicMesh
+from genesis.utils.misc import tensor_to_array
 
 from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_VIEWER
 from ..utils.assertions import assert_allclose, assert_equal, rgb_array_to_png_bytes
@@ -93,7 +94,7 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
             color=(0.2, 0.4, 0.8, 1.0),
         ),
     )
-    scene.add_entity(
+    worm = scene.add_entity(
         morph=gs.morphs.Mesh(
             file="meshes/worm/worm.obj",
             pos=(0.3, 0.3, 0.001),
@@ -110,16 +111,20 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
         ),
     )
     liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.65),
-            size=(0.4, 0.4, 0.4),
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="random",
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.4, 0.8, 1.0),
-            vis_mode="particle",
+        spec=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.65),
+                size=(0.4, 0.4, 0.4),
+            ),
+            material=gs.materials.SPH.Liquid(
+                sampler="random",
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.4, 0.8, 1.0),
+            ),
+            vis=gs.options.EntityVisOptions(
+                debug=True,
+            ),
         ),
     )
     scene.build(n_envs=4, env_spacing=(2.0, 2.0))
@@ -134,6 +139,11 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
     is_liquid_active = liquid.get_particles_active()
     is_liquid_active[3, ::2] = False
     liquid.set_particles_active(is_liquid_active)
+    # The worm tears in the third environment, its upper half lifted away from the lower one
+    worm_pos = worm.get_particles_pos()
+    is_worm_upper = worm_pos[2, :, 2] > worm_pos[2, :, 2].mean()
+    worm_pos[2, is_worm_upper, 2] += 0.5
+    worm.set_particles_pos(worm_pos)
 
     pyrender_viewer = scene.visualizer.viewer._pyrender_viewer
     assert pyrender_viewer.is_active
@@ -144,6 +154,18 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
     )
 
     assert rgb_array_to_png_bytes(rgb_arr) == png_snapshot
+
+    # The torn worm is drawn as the surface reconstructed from its particles in its environment, two pieces rather than
+    # its skinned mesh stretched over the gap between them, which it keeps in the others.
+    worm_skinned, worm_torn = (
+        shape
+        for shape in scene.sim.render_context.get_shapes(debug=False)
+        if isinstance(shape, DynamicMesh) and shape.seg_keys.entity == worm.idx
+    )
+    assert_equal(worm_skinned.is_active, (True, True, False, True))
+    assert_equal(worm_torn.envs_idx, (2,))
+    worm_torn_mesh = trimesh.Trimesh(tensor_to_array(worm_torn.verts[0]), tensor_to_array(worm_torn.faces))
+    assert len(worm_torn_mesh.split(only_watertight=False)) >= 2
 
 
 @pytest.mark.required
@@ -206,7 +228,6 @@ def test_deformable_uv_textures(renderer_type, renderer, show_viewer, png_snapsh
         ),
         material=gs.materials.PBD.Cloth(),
         surface=gs.surfaces.Default(
-            vis_mode="visual",
             diffuse_texture=gs.textures.ImageTexture(
                 image_path="textures/checker.png",
             ),
@@ -225,7 +246,6 @@ def test_deformable_uv_textures(renderer_type, renderer, show_viewer, png_snapsh
             nu=0.4,
         ),
         surface=gs.surfaces.Default(
-            vis_mode="visual",
             diffuse_texture=gs.textures.ImageTexture(
                 image_path="textures/checker.png",
             ),
@@ -256,6 +276,12 @@ def test_deformable_uv_textures(renderer_type, renderer, show_viewer, png_snapsh
 @pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
 def test_set_vverts(renderer, show_viewer):
+    sphere_tri = trimesh.creation.icosphere(subdivisions=2, radius=0.2)
+    sphere_verts = np.array(sphere_tri.vertices, dtype=gs.np_float)
+    squashed_verts = sphere_verts * np.array((1.0, 1.0, 0.2))
+    lifted_verts = sphere_verts + np.array((0.0, 0.0, 10.0))
+    HET_POSITIONS = ((-0.5, 0.3, 0.3), (-0.5, 0.3, 0.6))
+
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, -1.5, 0.5),
@@ -275,12 +301,45 @@ def test_set_vverts(renderer, show_viewer):
         ),
     )
     entity = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.2,
-            pos=(0.0, 0.0, 0.5),
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.MeshSet(
+                files=(sphere_tri,),
+                pos=(0.0, 0.0, 0.5),
+                fixed=True,
+            ),
+            dynamic_vertices=gs.surfaces.DynamicVertices(
+                variants={"sphere": None, "squashed": squashed_verts, "lifted": lifted_verts},
+                is_batched=True,
+            ),
+        ),
+    )
+    # The entity shows DynamicVertices on its first visual geom alone, its second one following the pose of its link
+    arm_spec = gs.entities.Rigid(
+        morph=gs.morphs.URDF(
+            file="urdf/simple/two_link_arm.urdf",
+            pos=(0.45, 0.3, 0.2),
             fixed=True,
-            enable_custom_vverts=True,
+        ),
+        dynamic_vertices=gs.surfaces.DynamicVertices(
+            is_batched=True,
+        ),
+    )
+    arm_spec.select(gs.indices.VGeom.at(1)).set(
+        gs.options.VGeom(
+            dynamic_vertices=None,
+        )
+    )
+    arm = scene.add_entity(spec=arm_spec)
+    # A heterogeneous entity, whose visual geom of each variant shows DynamicVertices in the environments holding it
+    het = scene.add_entity(
+        spec=gs.entities.Rigid(
+            morph=(
+                gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=HET_POSITIONS[0], fixed=True),
+                gs.morphs.Box(size=(0.15, 0.15, 0.15), pos=HET_POSITIONS[1], fixed=True),
+            ),
+            dynamic_vertices=gs.surfaces.DynamicVertices(
+                is_batched=True,
+            ),
         ),
     )
     cam = scene.add_camera(
@@ -290,69 +349,71 @@ def test_set_vverts(renderer, show_viewer):
     )
     scene.build(n_envs=3)
 
-    # vfaces_info covers all vgeoms in global vvert space, not just opt-in entities.
-    solver = scene.rigid_solver
-    vfaces_idx = qd_to_numpy(solver.dyn_info.vfaces.vverts_idx)
-    assert vfaces_idx.shape[0] == solver.n_vfaces
-    for vg in solver.vgeoms:
-        assert_equal(vfaces_idx[vg.vface_start : vg.vface_end], vg.init_vfaces + vg._vvert_start)
-
-    scene.step()
-    scene.visualizer.update_visual_states()
-    fk_vverts = tensor_to_array(entity.get_vverts())
-
-    # Render baseline through FK path before any set_vverts, to compare deformed vs FK pixels.
+    # Every environment shows the first variant, the mesh of the asset placed at the pose of the visual geom
+    sphere_vverts = sphere_verts + np.array((0.0, 0.0, 0.5))
+    assert_allclose(entity.get_vverts(), sphere_vverts, tol=gs.EPS)
     rgb_baseline = tensor_to_array(cam.render(rgb=True, force_render=True)[0])
 
-    # User-driven vverts survive step() because FK does not overwrite the custom buffer.
-    entity.set_vverts(7.0)
+    # A variant is shown by name in some environments, and survives steps
+    entity.set_vverts(envs_idx=[1], variant="squashed")
     scene.step()
-    scene.visualizer.update_visual_states()
-    assert_equal(entity.get_vverts(), 7.0)
+    vverts = entity.get_vverts()
+    assert_allclose(vverts[[0, 2]], sphere_vverts, tol=gs.EPS)
+    assert_allclose(vverts[1], squashed_verts + np.array((0.0, 0.0, 0.5)), tol=gs.EPS)
+    # A variant given by position is shown in every environment, which overlap in the image, so that the sphere
+    # lifted out of the frame leaves it.
+    entity.set_vverts(variant=2)
+    rgb_lifted = tensor_to_array(cam.render(rgb=True)[0])
+    assert np.abs(rgb_lifted.astype(np.float32) - rgb_baseline.astype(np.float32)).mean() > 5.0
 
-    # A strong out-of-frame override visibly changes the render through the per-env vverts path.
-    entity.set_vverts((0.0, 0.0, 10.0))
-    rgb_deformed = tensor_to_array(cam.render(rgb=True, force_render=True)[0])
-    assert np.abs(rgb_deformed - rgb_baseline).mean() > 5.0
+    # The batched variant takes vertices per environment in the frame of the visual geom, which follows its link
+    batched_verts = np.stack((sphere_verts * 2.0, sphere_verts * 0.5))
+    entity.set_vverts(batched_verts, envs_idx=[0, 2])
+    entity.set_pos((0.0, 0.0, 0.6))
+    vverts = entity.get_vverts()
+    assert_allclose(vverts[[0, 2]], batched_verts + np.array((0.0, 0.0, 0.6)), tol=gs.EPS)
+    assert_allclose(vverts[1], lifted_verts + np.array((0.0, 0.0, 0.6)), tol=gs.EPS)
 
-    # set_vverts(None) re-runs FK over the entity's vgeoms and writes the result back.
-    entity.set_vverts(None)
-    scene.step()
-    scene.visualizer.update_visual_states()
-    assert_allclose(entity.get_vverts(), fk_vverts, tol=gs.EPS)
+    # A reset shows the first variant again in every environment
+    scene.reset()
+    assert_allclose(entity.get_vverts(), sphere_vverts, tol=gs.EPS)
     rgb_restored = tensor_to_array(cam.render(rgb=True, force_render=True)[0])
     if sys.platform == "darwin" and scene.visualizer.is_software:
         assert np.abs(rgb_restored.astype(np.float32) - rgb_baseline.astype(np.float32)).mean() < 1.0
     else:
         assert_equal(rgb_restored, rgb_baseline)
 
-    # Vgeom-level write affects only the slice owned by that vgeom.
-    vg = entity.vgeoms[0]
-    vg.set_vverts(3.0)
-    scene.step()
-    scene.visualizer.update_visual_states()
-    after_vg = entity.get_vverts()
-    assert_equal(after_vg[..., vg.vvert_start : vg.vvert_end, :], 3.0)
-    entity.set_vverts(None)
-
-    # get_vverts returns a copy: mutating the result does not change the underlying buffer.
+    # get_vverts returns a copy: mutating the result does not change the vertices drawn.
     copy = entity.get_vverts()
     copy[:] = 99.0
     assert (entity.get_vverts() != 99.0).any()
 
-    # Mix user-driven and FK-driven envs in the same entity.
-    entity.set_vverts(7.0, envs_idx=0)
-    entity.set_vverts(9.0, envs_idx=[2])
-    scene.step()
-    scene.visualizer.update_visual_states()
-    v = entity.get_vverts()
-    assert_equal(v[0], 7.0)
-    assert_allclose(v[1], fk_vverts[1], tol=gs.EPS)
-    assert_equal(v[2], 9.0)
+    # The visual geoms of an entity show DynamicVertices or follow their link each on its own
+    dynamic_vgeom, posed_vgeom = arm.vgeoms
+    posed_vverts = posed_vgeom.get_vverts()
+    dynamic_vgeom.set_vverts(np.zeros((dynamic_vgeom.n_vverts, 3)))
+    assert_allclose(dynamic_vgeom.get_vverts(), dynamic_vgeom.get_pos()[:, None], tol=gs.EPS)
+    assert_allclose(posed_vgeom.get_vverts(), posed_vverts, tol=gs.EPS)
 
-    # set_vverts requires the entity's morph to be created with ``enable_custom_vverts=True``.
-    with pytest.raises(gs.GenesisException, match="enable_custom_vverts=True"):
-        plane.set_vverts(0.0)
+    # The visual geom of a heterogeneous variant shows the vertices written in the environments holding it, at the pose
+    # of the variant, the other environments left as they are.
+    for het_vgeom, het_pos in zip(het.vgeoms, HET_POSITIONS):
+        envs_held = het_vgeom.active_envs_idx
+        vverts_before = tensor_to_array(het_vgeom.get_vverts())
+        het_vgeom.set_vverts(np.zeros((het_vgeom.n_vverts, 3)), envs_idx=envs_held)
+        vverts = tensor_to_array(het_vgeom.get_vverts())
+        assert_allclose(vverts[envs_held], het_pos, tol=gs.EPS)
+        envs_other = np.setdiff1d(np.arange(scene.n_envs), envs_held)
+        assert_allclose(vverts[envs_other], vverts_before[envs_other], tol=gs.EPS)
+
+    with pytest.raises(gs.GenesisException, match="DynamicVertices"):
+        plane.set_vverts(None)
+    with pytest.raises(gs.GenesisException, match="single visual geom"):
+        arm.set_vverts(None)
+    with pytest.raises(gs.GenesisException, match="No variant is named"):
+        entity.set_vverts(variant="cube")
+    with pytest.raises(gs.GenesisException, match="not both"):
+        entity.set_vverts(squashed_verts, variant="squashed")
 
 
 @pytest.mark.required
@@ -433,11 +494,15 @@ def test_set_vverts_sphere_to_box(renderer, show_viewer):
         ),
     )
     deformable = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=(sphere_tri,),
-            pos=pos_deformable,
-            fixed=True,
-            enable_custom_vverts=True,
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.MeshSet(
+                files=(sphere_tri,),
+                pos=pos_deformable,
+                fixed=True,
+            ),
+            dynamic_vertices=gs.surfaces.DynamicVertices(
+                variants=(None, cube_verts),
+            ),
         ),
     )
     cam = scene.add_camera(
@@ -463,10 +528,14 @@ def test_set_vverts_sphere_to_box(renderer, show_viewer):
     mask_deformable_sphere = cam.render(rgb=False, segmentation=True, force_render=True)[2] > 0
     assert int((mask_deformable_sphere ^ mask_sphere).sum()) < sphere_tolerance
 
-    deformable.set_vverts(cube_verts + np.array(pos_deformable, dtype=gs.np_float))
-    mask_deformable_box = cam.render(rgb=False, segmentation=True, force_render=True)[2] > 0
+    deformable.set_vverts(variant=1)
+    mask_deformable_box = cam.render(rgb=False, segmentation=True)[2] > 0
     assert_equal(mask_deformable_box, mask_box)
 
     deformable.set_vverts(None)
-    mask_deformable_restored = cam.render(rgb=False, segmentation=True, force_render=True)[2] > 0
+    mask_deformable_restored = cam.render(rgb=False, segmentation=True)[2] > 0
     assert int((mask_deformable_restored ^ mask_sphere).sum()) < sphere_tolerance
+
+    # Writing vertices takes the batched variant, which these DynamicVertices leave out
+    with pytest.raises(gs.GenesisException, match="is_batched=True"):
+        deformable.set_vverts(cube_verts)

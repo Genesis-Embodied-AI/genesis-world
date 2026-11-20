@@ -324,7 +324,7 @@ def test_error_handling(tmp_path, caplog):
         ),
     )
     step_video_path = tmp_path / "step.mp4"
-    step_video_frames = [np.zeros((64, 64, 3), dtype=np.uint8)] * 2 + [np.full((64, 64, 3), 0.5)]
+    step_video_frames = [np.zeros((64, 64, 3), dtype=np.uint8)] * 2 + [np.zeros((32, 64, 3), dtype=np.uint8)]
     scene.add_recorder(
         data_func=lambda: step_video_frames.pop(0),
         rec_options=gs.recorders.VideoFile(
@@ -370,9 +370,8 @@ def test_error_handling(tmp_path, caplog):
             break
         time.sleep(0.01)
     assert not stepped_recorder.is_alive
-    # A normalized floating-point frame cannot be represented and is reported, rather than truncated to a black one. The
-    # step recording it is aborted.
-    with pytest.raises(gs.GenesisException, match="integer type"):
+    # A frame of another shape than the first frame of its video is reported, and the step recording it is aborted
+    with pytest.raises(gs.GenesisException, match="first frame of the video"):
         scene.step()
     with pytest.raises(gs.GenesisException, match="Unsupported data type"):
         scene.step()

@@ -116,6 +116,10 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
         )
     )
 
+    with pytest.raises(gs.GenesisException, match="requires entity_idx >= 0"):
+        scene.add_sensor(gs.sensors.Contact())
+    with pytest.raises(gs.GenesisException, match="requires entity_idx >= 0"):
+        scene.add_sensor(gs.sensors.ContactForce())
     scene.build(n_envs=n_envs)
 
     # Move CoM to get unbalanced forces on each contact points

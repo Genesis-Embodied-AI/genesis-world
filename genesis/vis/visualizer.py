@@ -134,9 +134,7 @@ class Visualizer(BuildableMixin, RBC):
         self._renderer = None
         self._is_built = False
 
-    def add_camera(
-        self, res, pos, lookat, up, model, fov, aperture, focus_dist, GUI, spp, denoise, near, far, env_idx, debug
-    ):
+    def add_camera(self, res, pos, lookat, up, model, fov, lens, GUI, spp, denoise, near, far, env_idx, debug):
         cam_idx = len([camera for camera in self._cameras if camera.debug == debug])
         camera = Camera(
             self,
@@ -147,8 +145,7 @@ class Visualizer(BuildableMixin, RBC):
             lookat,
             up,
             fov,
-            aperture,
-            focus_dist,
+            lens,
             GUI,
             spp,
             denoise,
@@ -200,16 +197,18 @@ class Visualizer(BuildableMixin, RBC):
         self._context.build(self._scene)
 
         if self._viewer is not None:
-            # Setter changes are shown in the viewer right away, syncing the solver that changed alone. The window only
-            # repaints when a refresh is due, so that a loop of setters does not pay one repaint per call.
+            # Setter changes, of the state of a solver or of the appearance of an entity, are shown in the viewer right
+            # away, the nodes of the shapes whose scoped context refreshed alone being updated (see
+            # 'RasterizerContext._sync_shapes'). The window only repaints when a refresh is due, so that a loop of
+            # setters does not pay one repaint per call.
+            on_setter = Subscriber(to=frozenset((StateChange.GEOMETRY,)), callback=lambda change, envs_idx: self.sync())
             for solver in self._scene.sim.active_solvers:
-                solver.subscribe(
-                    Subscriber(
-                        to=frozenset((StateChange.GEOMETRY,)),
-                        callback=lambda change, envs_idx, solver=solver: self.sync(frozenset((solver,))),
-                    )
-                )
-
+                solver.subscribe(on_setter)
+            self._scene.sim.render_context.subscribe(
+                Subscriber(to=frozenset((StateChange.VISUAL,)), callback=lambda change, envs_idx: self.sync())
+            )
+            # The window draws its first frames as it builds, which show the scene once its nodes exist
+            self._context.update(force_render=True)
             self._viewer.build(self._scene)
             self.viewer_lock = self._viewer.lock
 
@@ -219,6 +218,10 @@ class Visualizer(BuildableMixin, RBC):
 
         for camera in self._cameras:
             camera.build()
+
+        # The nodes of the shared renderers are made once every view drawn from them is known, so that they hold the
+        # representations these views show alone (see 'RasterizerContext.add_view').
+        self._context.update(force_render=True)
 
         # Batch renderer needs to be built after cameras are built
         if self._batch_renderer is not None:
@@ -230,19 +233,22 @@ class Visualizer(BuildableMixin, RBC):
         # Make sure that the viewer is fully compiled and in a clean state
         self.reset()
 
-    def sync(self, solvers=None):
+    def sync(self):
         """Sync every renderer with the current state of the scene.
 
         The renderers shared with the interactive viewer sync right away, while the raytracer and the batch renderer
         sync at their next render. The interactive viewer then refreshes when a refresh is due (see 'Viewer.update').
-        `solvers` restricts the sync of the shared renderers to those solvers, whose state changed since the last sync
-        (see 'RasterizerContext.update').
         """
         if self._raytracer is not None:
             self._raytracer.reset()
         if self._batch_renderer is not None:
             self._batch_renderer.reset()
-        self._context.update(force_render=True, solvers=solvers)
+        # Without 'ViewerOptions.update_on_setters', the renderers shared with the viewer sync at its next refresh, or
+        # at the next render of a camera, so that a loop of setters does not pay one sync per call.
+        if self._viewer is None or self._viewer.update_on_setters:
+            self._context.update(force_render=True)
+        else:
+            self._context.reset()
         if self._viewer is not None:
             self._viewer.update()
 
@@ -268,15 +274,11 @@ class Visualizer(BuildableMixin, RBC):
         else:
             self.update_on_sim_step(advanced=True, auto=auto)
 
-    def update_visual_states(self, force_render: bool = False, solvers=None):
-        """
-        Update all visualization-only variables here.
-
-        `solvers` restricts the update of the render data to those solvers, all the active ones if None.
-        """
-        # Early return if already updated previously
+    def update_cameras(self, force_render: bool = False) -> None:
+        """Move the cameras attached to a link or following an entity, once per step unless forced to."""
         if not force_render and self._t >= self.scene.sim.cur_step_global:
             return
+        self._t = self._scene.sim.cur_step_global
 
         for camera in self._cameras:
             if camera.is_built:
@@ -284,21 +286,6 @@ class Visualizer(BuildableMixin, RBC):
                     camera.move_to_attach()
                 elif camera._followed_entity is not None:
                     camera.update_following()
-
-        for solver in self._scene.sim.active_solvers if solvers is None else solvers:
-            # The rigid solver derives from the kinematic one
-            if isinstance(solver, gs.engine.solvers.KinematicSolver):
-                # drone propellers
-                for entity in solver.entities:
-                    if isinstance(entity, gs.engine.entities.DroneEntity):
-                        entity.update_propeller_vgeoms()
-            elif isinstance(
-                solver, (gs.engine.solvers.MPMSolver, gs.engine.solvers.SPHSolver, gs.engine.solvers.PBDSolver)
-            ):
-                solver.update_render_fields()
-
-        if solvers is None:
-            self._t = self._scene.sim.cur_step_global
 
     def colorize_seg_idxc_arr(self, seg_idxc_arr):
         if self._batch_renderer is not None:
@@ -340,6 +327,23 @@ class Visualizer(BuildableMixin, RBC):
     @property
     def context(self):
         return self._context
+
+    @property
+    def link_frames(self) -> bool:
+        """Whether the frames of the links of every kinematic and rigid entity are drawn (see
+        ``KinematicVisOptions.link_frames``)."""
+        sim = self._scene.sim
+        solvers = (sim.kinematic_solver, sim.rigid_solver)
+        return all(solver.render_context.link_frames for solver in solvers if solver.is_active)
+
+    @gs.assert_built
+    def set_link_frames(self, link_frames: bool) -> None:
+        """Draw the frames of the links of every kinematic and rigid entity, or stop drawing them (see
+        ``KinematicVisOptions.link_frames``)."""
+        sim = self._scene.sim
+        for solver in (sim.kinematic_solver, sim.rigid_solver):
+            if solver.is_active:
+                solver.render_context.set_link_frames(link_frames)
 
     @property
     def raytracer(self):

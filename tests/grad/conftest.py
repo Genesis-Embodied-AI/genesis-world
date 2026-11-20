@@ -152,6 +152,19 @@ def grad_revolute():
 
 
 @pytest.fixture(scope="session")
+def grad_fixed_base():
+    mjcf = ET.Element("mujoco", model="fixed_base")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    # A base without geometry takes a pose of its own in each environment. The arm hangs off the origin of the base, so
+    # that its position follows the orientation of the base, and the hinge sits off the origin of the arm, so that the
+    # velocity of the arm moves the origin, and with it the gradient the pose of the base receives.
+    base = ET.SubElement(worldbody, "body", name="base", pos="0 0 0")
+    ET.SubElement(base, "inertial", mass="1.0", pos="0 0 0", diaginertia="0.1 0.1 0.1")
+    _add_hinge_arm(base, "arm", "0.2 0.1 0", joint_pos="-0.1 0 0", stiffness="2.0")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def grad_revolute_frictionloss():
     mjcf = ET.Element("mujoco", model="revolute_frictionloss")
     worldbody = ET.SubElement(mjcf, "worldbody")

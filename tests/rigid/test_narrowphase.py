@@ -339,7 +339,6 @@ def scene_add_sphere(tmp_path: Path, scene: gs.Scene, radius: float) -> "RigidEn
             file=sphere_path,
             align=False,
         ),
-        vis_mode="collision",
         visualize_contact=True,
     )
     return cast("RigidEntity", entity_sphere)
@@ -354,7 +353,6 @@ def scene_add_capsule(tmp_path: Path, scene: gs.Scene, half_length: float, radiu
             file=capsule_path,
             align=False,
         ),
-        vis_mode="collision",
         visualize_contact=True,
     )
     return cast("RigidEntity", entity_capsule)
@@ -379,6 +377,9 @@ class AnalyticalVsGJKSceneCreator:
         )
         # Scene 1: Using ORIGINAL analytical collision detection
         self.scene_analytical = gs.Scene(
+            vis_options=gs.options.VisOptions(
+                debug=True,
+            ),
             viewer_options=viewer_options,
             show_viewer=self.show_viewer,
         )
@@ -397,6 +398,9 @@ class AnalyticalVsGJKSceneCreator:
         self.scene_gjk = gs.Scene(
             rigid_options=gs.options.RigidOptions(
                 use_gjk_collision=True,
+            ),
+            vis_options=gs.options.VisOptions(
+                debug=True,
             ),
             viewer_options=viewer_options,
             show_viewer=self.show_viewer,
@@ -461,7 +465,12 @@ def test_capsule_analytical_accuracy(tmp_path: Path, show_viewer: bool, tol: flo
     # Sum of radii: 0.2
     # Expected penetration: 0.2 - 0.15 = 0.05
 
-    scene = gs.Scene(show_viewer=show_viewer)
+    scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
+        show_viewer=show_viewer,
+    )
 
     _cap1 = scene_add_capsule(tmp_path=tmp_path, scene=scene, half_length=0.25, radius=0.1)
     cap2 = scene_add_capsule(tmp_path=tmp_path, scene=scene, half_length=0.25, radius=0.1)
@@ -526,7 +535,6 @@ def scene_add_box(tmp_path: Path, scene: gs.Scene, size) -> "RigidEntity":
             file=box_path,
             align=False,
         ),
-        vis_mode="collision",
         visualize_contact=True,
     )
     return cast("RigidEntity", entity_box)
@@ -765,6 +773,9 @@ def test_split_vs_monolithic_narrowphase(
             enable_mujoco_compatibility=enable_mujoco_compatibility,
             use_gjk_collision=True,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         show_viewer=show_viewer,
     )
     capsule_a = scene_add_capsule(tmp_path, scene, half_length=half_length, radius=radius)
@@ -774,7 +785,6 @@ def test_split_vs_monolithic_narrowphase(
             size=(0.3, 0.3, 0.3),
             pos=(10.0, 0.0, 0.0),
         ),
-        vis_mode="collision",
     )
     # The monolithic arm runs GJK on one state per environment, which the split arm leaves unused
     with namespace(scene._namespace):
@@ -844,6 +854,9 @@ def test_contact_patch_full_box_box_manifold(show_viewer: bool) -> None:
             use_gjk_collision=True,
             enable_contact_patch=True,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, -0.6, 0.5),
             camera_lookat=(0.0, 0.0, 0.15),
@@ -856,7 +869,6 @@ def test_contact_patch_full_box_box_manifold(show_viewer: bool) -> None:
             pos=(0.0, 0.0, 0.0),
             fixed=True,
         ),
-        vis_mode="collision",
     )
     scene.add_entity(
         gs.morphs.Box(
@@ -864,7 +876,6 @@ def test_contact_patch_full_box_box_manifold(show_viewer: bool) -> None:
             pos=(0.0, 0.0, 0.199),
             euler=(0, 0, 45),
         ),
-        vis_mode="collision",
     )
     scene.build(n_envs=2)
     scene.step()
@@ -1059,6 +1070,9 @@ def test_maximum_contact_area(show_viewer, tol):
         rigid_options=gs.options.RigidOptions(
             use_gjk_collision=True,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, -60.0, 60.0),
             camera_lookat=(0.0, 0.0, 0.0),
@@ -1067,12 +1081,10 @@ def test_maximum_contact_area(show_viewer, tol):
     )
     scene.add_entity(
         morph=[gs.morphs.MeshSet(files=(mesh,), fixed=True) for mesh in bases_mesh],
-        vis_mode="collision",
     )
     top = scene.add_entity(
         morph=[gs.morphs.MeshSet(files=(mesh,)) for mesh in tops_mesh],
         visualize_contact=True,
-        vis_mode="collision",
     )
     scene.build(n_envs=len(SCALES) * N_YAWS, env_spacing=(6.0, 6.0))
 
@@ -1151,6 +1163,9 @@ def test_mesh_support_exactness(show_viewer, tol):
         rigid_options=gs.options.RigidOptions(
             enable_mujoco_compatibility=True,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(4.0, -15.0, 8.0),
             camera_lookat=(4.0, 0.0, 0.0),
@@ -1163,7 +1178,6 @@ def test_mesh_support_exactness(show_viewer, tol):
                 files=(mesh,),
                 pos=(4.0 * i_e, 0.0, 0.0),
             ),
-            vis_mode="collision",
         )
         for i_e, mesh in enumerate((*meshes, meshes[-1]))
     ]

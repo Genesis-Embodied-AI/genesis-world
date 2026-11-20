@@ -1,12 +1,12 @@
 import math
-from typing import Any, ClassVar, Literal, Self
+from typing import Annotated, Any, ClassVar, Literal, Self
 
 import numpy as np
 
 from pydantic import Field, StrictBool, field_validator, model_validator
 
 import genesis as gs
-from genesis.typing import FArrayType, UnitInterval, ValidFloat
+from genesis.typing import FArrayType, FGridArrayType, UnitInterval, ValidFloat
 from genesis.utils import mesh as mu
 from genesis.utils.cache import OwnedCache, get_hashkey
 
@@ -18,6 +18,42 @@ MetalType = Literal["aluminium", "gold", "copper", "brass", "iron", "titanium", 
 
 
 ############################ Base ############################
+
+
+class DynamicVertices(Options):
+    """
+    The vertices of a visual geom switching at runtime between variants, or written per environment by the user.
+
+    The vertices lie in the frame of the visual geom, which keeps following its link. Each parallel environment shows
+    one of a fixed set of variants declared here, or the batched variant if any, which holds one set of vertices per
+    environment written at runtime. Once the scene is built, ``vgeom.set_vverts(vverts)`` writes the batched variant in
+    the selected environments and shows it, and ``vgeom.set_vverts(variant=...)`` shows a variant there by position or
+    by name, the mesh of the asset whatever the variants for None, the default. Giving both raises.
+    ``vgeom.get_vverts`` returns the vertices as drawn, in the world. Every renderer and the ray casting on visual geoms
+    draw them. They are appearance, which checkpoints leave out, and a reset shows the first variant again. Only the
+    visual geoms of rigid and kinematic entities admit them, through ``gs.options.VGeom.dynamic_vertices`` or the
+    ``dynamic_vertices`` of the entity spec.
+
+    Parameters
+    ----------
+    variants : tuple[array_like | None, ...] | dict[str, array_like | None], optional
+        The vertices an environment switches between, each the position of every vertex of the visual geom in its frame,
+        of shape (n_vverts, 3), or None for the mesh of the asset. A mapping names them, so that they are shown by name
+        as well as by position. Each variant costs the memory of the vertices of the visual geom. Every environment
+        shows the first variant at build and after a reset. Default is one variant, the mesh of the asset.
+    is_batched : bool, optional
+        Whether the visual geom holds a batched variant, whose vertices are written per environment at runtime. It costs
+        the memory of the vertices of the visual geom in every environment, so leave it off when switching between the
+        variants suffices. Defaults to False.
+    """
+
+    variants: (
+        Annotated[tuple[FGridArrayType | None, ...], Field(min_length=1, strict=False)]
+        | Annotated[dict[str, FGridArrayType | None], Field(min_length=1)]
+    ) = (None,)
+    is_batched: StrictBool = False
+
+
 class Surface(Options):
     """
     Base class for all surfaces types in Genesis.
@@ -53,12 +89,10 @@ class Surface(Options):
         Default roughness value when `roughness` is not set and the asset does not have a roughness texture. Defaults
         to 1.0.
     vis_mode : str | None, optional
-        How the entity should be visualized, e.g.
-        - 'visual': Render the entity's visual geometry.
-        - 'collision': Render the entity's collision geometry.
-        - 'particle': Render the entity's particle representation (if applicable).
-        - 'sdf': Render the reconstructed surface mesh of the entity's sdf.
-        - 'recon': Render the reconstructed surface mesh of the entity's particle representation.
+        Deprecated: the material decides how the entity is drawn outside of the debug view, as a mesh ('visual') or as
+        the surface reconstructed from its particles ('recon'). This field accepts that value, or a debug
+        representation of the entity (see ``gs.options.EntityVisOptions``), which then shows the entity in every view,
+        debug or not. Set the ``vis`` options of the entity spec instead.
     smooth : bool, optional
         Whether to smooth face normals by interpolating vertex normals.
     double_sided : bool | None, optional
@@ -68,11 +102,9 @@ class Surface(Options):
         The cutoff angle of emission. Defaults to 180.0.
     normal_diff_clamp : float, optional
         Controls the threshold for computing surface normals by interpolating vertex normals.
-    recon_backend : str, optional
-        Backend for surface reconstruction. 'splashsurf' extracts a smooth surface from the density of the particles,
-        but requires all of them to share the same radius. 'levelset' wraps the union of the spheres of the particles,
-        which supports a radius per particle at the cost of a bumpier surface. 'openvdb' is a deprecated alias of
-        'levelset'. Defaults to 'splashsurf'.
+    recon_backend : str | None, optional
+        Deprecated: use ``recon_backend`` of the ``vis`` options of the particle solver (see ``ParticleVisOptions``),
+        which this value sets, a conflicting value raising. Defaults to None.
     generate_foam : bool, optional
         Whether to generate foam particles for visual effects for particle-based entities.
     foam_options : gs.options.FoamOptions, optional
@@ -95,15 +127,19 @@ class Surface(Options):
     double_sided: StrictBool | None = None
     cutoff: float = 180.0
     normal_diff_clamp: float = 180.0
-    recon_backend: Literal["splashsurf", "levelset"] = "splashsurf"
+    recon_backend: Literal["splashsurf", "levelset"] | None = None
     generate_foam: StrictBool = False
     foam_options: FoamOptions = Field(default_factory=FoamOptions)
 
     @field_validator("recon_backend", mode="before")
     @classmethod
-    def _rename_openvdb_backend(cls, value: Any) -> Any:
+    def _deprecate_recon_backend(cls, value: Any) -> Any:
+        if value is not None:
+            gs.logger.warning(
+                "'surface.recon_backend' is deprecated. Use 'recon_backend' of 'ParticleVisOptions', the 'vis' options "
+                "of the particle solver, instead."
+            )
         if value == "openvdb":
-            gs.logger.warning("Surface reconstruction backend 'openvdb' is deprecated. Use 'levelset' instead.")
             return "levelset"
         return value
 
@@ -123,13 +159,18 @@ class Surface(Options):
         ):
             if texture_field not in cls.model_fields:
                 continue
-            field = cls.model_fields.get(shortcut)
-            value = data.get(shortcut, field.default if field is not None else None)
-            if value is None:
-                continue
+            # The default of a shortcut fills an unset texture alone, which keeps the textures of a surface validated
+            # again from them (see 'Mesh.set_surface').
+            value = data.get(shortcut)
             if data.get(texture_field) is not None:
-                gs.raise_exception(f"'{shortcut}' and '{texture_field}' cannot both be set.")
-            data[texture_field] = ColorTexture(color=value)
+                if value is not None:
+                    gs.raise_exception(f"'{shortcut}' and '{texture_field}' cannot both be set.")
+                continue
+            if value is None:
+                field = cls.model_fields.get(shortcut)
+                value = None if field is None else field.default
+            if value is not None:
+                data[texture_field] = ColorTexture(color=value)
 
         # Mirror the roughness shortcut into default_roughness unless the user passed an explicit value.
         if "default_roughness" not in data and "roughness" in cls.model_fields:

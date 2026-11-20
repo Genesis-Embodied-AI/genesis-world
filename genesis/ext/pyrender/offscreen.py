@@ -10,7 +10,7 @@ from OpenGL.GL import *
 
 import genesis as gs
 
-from .constants import RenderFlags
+from .constants import RenderFlags, ViewFlags
 
 
 class OffscreenRenderer(object):
@@ -75,7 +75,8 @@ class OffscreenRenderer(object):
         shadow=False,
         plane_reflection=False,
         split_envs=False,
-        skip_markers=False,
+        env_idx=None,
+        debug_view=False,
     ):
         """Render a scene with the given set of flags.
 
@@ -120,10 +121,12 @@ class OffscreenRenderer(object):
         if split_envs:
             flags |= RenderFlags.ENV_SEPARATE
 
-        if skip_markers:
-            flags |= RenderFlags.SKIP_MARKERS
-        else:
+        # A debug view draws the markers, seen through what hides them, and the debug representation of the entities
+        if debug_view:
             flags |= RenderFlags.MARKER_XRAY
+        else:
+            flags |= RenderFlags.SKIP_MARKERS
+        renderer.jit.view = ViewFlags.DEBUG if debug_view else ViewFlags.NORMAL
 
         if seg:
             seg_node_map = self._seg_node_map
@@ -137,7 +140,7 @@ class OffscreenRenderer(object):
         first_pass_done = False
         if rgb or depth or seg:
             flags |= RenderFlags.OFFSCREEN
-            retval = renderer.render(scene, flags, seg_node_map)
+            retval = renderer.render(scene, flags, seg_node_map, env_idx=env_idx)
             assert retval is not None
             first_pass_done = True
         else:
@@ -150,11 +153,13 @@ class OffscreenRenderer(object):
             flags = RenderFlags.FLAT | RenderFlags.OFFSCREEN
             if split_envs:
                 flags |= RenderFlags.ENV_SEPARATE
-            if skip_markers:
+            if not debug_view:
                 flags |= RenderFlags.SKIP_MARKERS
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-            normal_arr, *_ = renderer.render(scene, flags, is_first_pass=not first_pass_done, force_skip_shadows=True)
+            normal_arr, *_ = renderer.render(
+                scene, flags, is_first_pass=not first_pass_done, force_skip_shadows=True, env_idx=env_idx
+            )
             retval = (*retval, normal_arr)
 
             renderer._program_cache = old_cache

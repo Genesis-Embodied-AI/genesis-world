@@ -6,9 +6,11 @@ import pytest
 
 import genesis as gs
 import genesis.utils.geom as gu
+import genesis.utils.mesh as mu
+from genesis.engine.render_context import Points
 
 from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_VIEWER
-from ..utils.assertions import assert_allclose, rgb_array_to_png_bytes
+from ..utils.assertions import assert_allclose, assert_equal, rgb_array_to_png_bytes
 from .conftest import RENDERER_TYPE
 
 
@@ -32,8 +34,8 @@ def test_draw_debug(renderer, show_viewer):
         up=(0.0, 0.0, 1.0),
         res=(640, 640),
         env_idx=2,
-        debug=True,
         GUI=show_viewer,
+        debug=True,
     )
     scene.build(n_envs=3)
 
@@ -94,6 +96,19 @@ def test_draw_debug(renderer, show_viewer):
     rgb_array, *_ = cam.render(rgb=True, depth=False, segmentation=False, colorize_seg=False, normal=False)
     assert_allclose(np.std(rgb_array.reshape((-1, 3)), axis=0), 0.0, tol=gs.EPS)
 
+    # A mesh is drawn at the scale of its transform, and placed again at the scale of the new one
+    boxes_T = gu.trans_to_T(np.array(((0.0, 0.0, 0.5), (0.0, 0.0, 0.5))))
+    boxes_T[:, :3, :3] *= np.array((2.0, 4.0))[:, None, None]
+    box_obj = scene.draw_debug_mesh(mu.create_box(extents=(0.1, 0.1, 0.1), color=(0.0, 0.0, 1.0, 1.0)), T=boxes_T[0])
+    box_widths = []
+    for box_T in boxes_T:
+        if box_widths:
+            scene.update_debug_objects([box_obj], [box_T])
+        rgb_array, *_ = cam.render(rgb=True, depth=False, segmentation=False, colorize_seg=False, normal=False)
+        box_cols = np.flatnonzero((rgb_array != rgb_array[0, 0]).any(axis=(0, 2)))
+        box_widths.append(box_cols[-1] - box_cols[0])
+    assert_allclose(box_widths[1] / box_widths[0], 2.0, tol=0.1)
+
 
 @pytest.mark.slow  # ~250s
 @pytest.mark.required
@@ -147,7 +162,7 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
             rho=200.0,
         ),
     )
-    scene.add_sensor(
+    contact_sensor = scene.add_sensor(
         gs.sensors.Contact(
             entity_idx=ground_box.idx,
             draw_debug=True,
@@ -190,6 +205,14 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
             debug_ray_hit_color=(0.5, 1.0, 1.0, 1.0),
         )
     )
+    # Behind the camera, so that moving it changes nothing in view
+    kinematic_box = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(2.4, 2.4, 2.2),
+        ),
+        material=gs.materials.Kinematic(),
+    )
 
     scene.build(n_envs=n_envs)
 
@@ -213,8 +236,29 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
     # A sensor reading is a step output, so a setter moving the scene hides the debug drawing of the sensors until the
     # next step rather than showing the previous reading at the new pose. The pink sphere of the contact sensor marks
     # the contact of the ground box, and it stays hidden once a setter lifts the box, right away and after a step.
+    # A setter on a solver the readings of no sensor depend on keeps the debug drawing of every sensor.
     PINK_LOWER, PINK_UPPER = (200, 60, 200), (255, 190, 255)
     assert ((PINK_LOWER <= rgb_arr) & (rgb_arr <= PINK_UPPER)).all(axis=-1).any()
+    # The sphere the user hides is gone until shown again
+    (contact_sphere,) = (
+        marker
+        for marker in scene.sim.render_context.get_markers()
+        if isinstance(marker, Points) and marker.color == (1.0, 0.5, 1.0, 1.0)
+    )
+    pink_pixel_counts = []
+    for hidden in (True, False):
+        contact_sensor.render_context.set_hidden(contact_sphere, hidden)
+        rgb_shown, *_ = pyrender_viewer.render_offscreen(
+            pyrender_viewer._camera_node, pyrender_viewer._renderer, rgb=True, depth=False, seg=False, normal=False
+        )
+        pink_pixel_counts.append(((PINK_LOWER <= rgb_shown) & (rgb_shown <= PINK_UPPER)).all(axis=-1).sum())
+    assert pink_pixel_counts[0] < pink_pixel_counts[1]
+    assert_equal(rgb_shown, rgb_arr)
+    kinematic_box.set_pos((2.4, 2.4, 2.4))
+    rgb_arr_kept, *_ = pyrender_viewer.render_offscreen(
+        pyrender_viewer._camera_node, pyrender_viewer._renderer, rgb=True, depth=False, seg=False, normal=False
+    )
+    assert_equal(rgb_arr_kept, rgb_arr)
     ground_box.set_pos((-0.25, 0.0, 0.3))
     for _ in range(2):
         rgb_arr, *_ = pyrender_viewer.render_offscreen(

@@ -4,12 +4,13 @@ import numpy as np
 import torch
 
 import genesis as gs
-from genesis.repr_base import RBC
 from genesis.constants import IMAGE_TYPE
-from genesis.utils.misc import BuildableMixin, qd_to_torch
+from genesis.engine.render_context import DynamicMesh
+from genesis.repr_base import RBC
+from genesis.utils.misc import BuildableMixin, tensor_to_array
 
 from .camera import Camera
-from .rasterizer_context import SegmentationColorMap
+from .rasterizer_context import SEGMENTATION_LEVELS, SegmentationColorMap
 
 # Optional imports for platform-specific functionality
 try:
@@ -43,62 +44,50 @@ class GenesisGeomRetriever(BuildableMixin):
 
     @gs.assert_unbuilt
     def build(self):
-        self.n_vgeoms = self.rigid_solver.n_vgeoms
-        self.geom_idxc = []
-        vgeoms = self.rigid_solver.vgeoms
-        for vgeom in vgeoms:
-            seg_key = self.get_seg_key(vgeom)
-            seg_idxc = self.seg_color_map.seg_key_to_idxc(seg_key)
-            self.geom_idxc.append(seg_idxc)
-        self.geom_idxc = torch.tensor(self.geom_idxc, dtype=torch.int32, device=gs.device)
-        self.seg_color_map.generate_seg_colors()
+        # The visual geoms of the rigid solver, those of the kinematic entities being left out, are the static mesh
+        # batches of its scoped context.
+        if any(isinstance(shape, DynamicMesh) for shape in self.rigid_solver.render_context.get_shapes()):
+            gs.raise_exception(
+                "BatchRenderer draws the visual meshes of the rigid entities posed by their link, and no "
+                "'gs.surfaces.DynamicVertices'."
+            )
+        self.geometries = [
+            geometry for batch in self.rigid_solver.render_context.get_shapes() for geometry in batch.geometries
+        ]
+        self.n_vgeoms = len(self.geometries)
+        level = SEGMENTATION_LEVELS.index(self.seg_level)
+        self.geom_idxc = torch.tensor(
+            [self.seg_color_map.seg_key_to_idxc(geometry.seg_keys[level]) for geometry in self.geometries],
+            dtype=torch.int32,
+            device=gs.device,
+        )
 
         self._is_built = True
-
-    def get_seg_key(self, vgeom):
-        if self.seg_level == "geom":
-            return (vgeom.entity.idx, vgeom.link.idx, vgeom.idx)
-        elif self.seg_level == "link":
-            return (vgeom.entity.idx, vgeom.link.idx)
-        elif self.seg_level == "entity":
-            return vgeom.entity.idx
-        else:
-            gs.raise_exception(f"Unsupported segmentation level: {self.seg_level}")
 
     # FIXME: Use a kernel to do it efficiently
     @gs.assert_built
     def retrieve_rigid_meshes_static(self):
         args = {}
-        vgeoms = self.rigid_solver.vgeoms
-
-        # Retrieve geom data
-        mesh_vertices = self.rigid_solver.dyn_info.vverts.init_pos.to_numpy()
-        mesh_faces = self.rigid_solver.dyn_info.vfaces.vverts_idx.to_numpy()
-        mesh_vertex_offsets = self.rigid_solver.dyn_info.vgeoms.vvert_start.to_numpy()
-        mesh_face_starts = self.rigid_solver.dyn_info.vgeoms.vface_start.to_numpy()
-        mesh_face_ends = self.rigid_solver.dyn_info.vgeoms.vface_end.to_numpy()
-        total_uv_size = 0
+        meshes_verts = [geometry.verts for geometry in self.geometries]
+        meshes_faces = [geometry.faces for geometry in self.geometries]
+        mesh_vertex_counts = np.array([len(verts) for verts in meshes_verts], dtype=np.int32)
+        mesh_face_counts = np.array([len(faces) for faces in meshes_faces], dtype=np.int32)
         mesh_uvs = []
         mesh_uv_offsets = []
-        for i in range(self.n_vgeoms):
-            mesh_faces[mesh_face_starts[i] : mesh_face_ends[i]] -= mesh_vertex_offsets[i]
-
-        geom_data_ids = []
-        for vgeom in vgeoms:
-            seg_key = self.get_seg_key(vgeom)
-            seg_id = self.seg_color_map.seg_key_to_idxc(seg_key)
-            geom_data_ids.append(seg_id)
-            if vgeom.uvs is not None:
-                mesh_uvs.append(vgeom.uvs.astype(np.float32))
+        total_uv_size = 0
+        for geometry in self.geometries:
+            if geometry.uvs is not None:
+                mesh_uvs.append(geometry.uvs.astype(np.float32))
                 mesh_uv_offsets.append(total_uv_size)
-                total_uv_size += vgeom.uvs.shape[0]
+                total_uv_size += len(geometry.uvs)
             else:
                 mesh_uv_offsets.append(-1)
 
-        args["mesh_vertices"] = mesh_vertices
-        args["mesh_vertex_offsets"] = mesh_vertex_offsets
-        args["mesh_faces"] = mesh_faces
-        args["mesh_face_offsets"] = mesh_face_starts
+        # The adapter reads 32-bit floats and indices
+        args["mesh_vertices"] = tensor_to_array(torch.cat(meshes_verts), dtype=np.float32)
+        args["mesh_vertex_offsets"] = np.cumsum(mesh_vertex_counts, dtype=np.int32) - mesh_vertex_counts
+        args["mesh_faces"] = tensor_to_array(torch.cat(meshes_faces), dtype=np.int32)
+        args["mesh_face_offsets"] = np.cumsum(mesh_face_counts, dtype=np.int32) - mesh_face_counts
         args["mesh_texcoords"] = np.concatenate(mesh_uvs, axis=0) if mesh_uvs else np.empty((0, 2), np.float32)
         args["mesh_texcoord_offsets"] = np.array(mesh_uv_offsets, np.int32)
         args["geom_types"] = np.full((self.n_vgeoms,), 7, dtype=np.int32)  # 7 stands for mesh
@@ -107,17 +96,24 @@ class GenesisGeomRetriever(BuildableMixin):
         args["geom_sizes"] = np.ones((self.n_vgeoms, 3), dtype=np.float32)
         args["enabled_geom_groups"] = self.default_enabled_geom_groups
 
-        # Heterogeneous entities: a vgeom variant may exist in only a subset of envs
-        # (vgeom.active_envs_mask). Emit an optional [num_worlds, num_geoms] visibility
-        # mask (1 = visible, 0 = hidden) so each variant renders only where it is active;
-        # omitted for homogeneous scenes (legacy + back-compat with older Madrona).
-        if any(vgeom.active_envs_mask is not None for vgeom in vgeoms):
-            num_worlds = max(self.rigid_solver.n_envs, 1)
-            geom_env_mask = np.ones((num_worlds, self.n_vgeoms), dtype=np.int32)
-            for vgeom in vgeoms:
-                if vgeom.active_envs_mask is not None:
-                    geom_env_mask[:, vgeom.idx] = vgeom.active_envs_mask.detach().cpu().numpy()
-            args["geom_env_mask"] = geom_env_mask
+        # Heterogeneous entities: a mesh may exist in only a subset of envs. Emit an optional [num_worlds, num_geoms]
+        # visibility mask (1 = visible, 0 = hidden) so each variant renders only where it is active, omitted for
+        # homogeneous scenes.
+        batches = self.rigid_solver.render_context.get_shapes()
+        if any(batch.is_active is not None for batch in batches):
+            # The masks view the render context, which lays the environments out last, and their concatenation keeps
+            # that layout, while the adapter reads them row by row.
+            args["geom_env_mask"] = np.ascontiguousarray(
+                np.concatenate(
+                    [
+                        np.ones((len(batch.envs), len(batch)), dtype=np.int32)
+                        if batch.is_active is None
+                        else tensor_to_array(batch.is_active, dtype=np.int32)
+                        for batch in batches
+                    ],
+                    axis=1,
+                )
+            )
 
         # Retrieve material data
         geom_mat_ids = []
@@ -137,8 +133,8 @@ class GenesisGeomRetriever(BuildableMixin):
         texture_data = []
         total_texture_size = 0
 
-        for vgeom in vgeoms:
-            geom_surface = vgeom.surface
+        for geometry in self.geometries:
+            geom_surface = geometry.surface
             geom_textures = geom_surface.get_rgba(batch=True).textures
 
             geom_texture_indices = []
@@ -216,10 +212,9 @@ class GenesisGeomRetriever(BuildableMixin):
     # FIXME: Use a kernel to do it efficiently
     @gs.assert_built
     def retrieve_rigid_state_torch(self):
-        geom_pos = qd_to_torch(self.rigid_solver.dyn_state.vgeoms.pos)
-        geom_rot = qd_to_torch(self.rigid_solver.dyn_state.vgeoms.quat)
-        geom_pos = geom_pos.transpose(0, 1).contiguous()
-        geom_rot = geom_rot.transpose(0, 1).contiguous()
+        batches = self.rigid_solver.render_context.get_shapes()
+        geom_pos = torch.cat([batch.pos for batch in batches], dim=1)
+        geom_rot = torch.cat([batch.quat for batch in batches], dim=1)
         return geom_pos, geom_rot
 
 
@@ -318,7 +313,7 @@ class BatchRenderer(BuildableMixin, RBC):
 
         self._renderer = MadronaBatchRendererAdapter(
             geom_retriever=self._geom_retriever,
-            gpu_id=gs.device.index if gs.device.index is not None else 0,
+            gpu_id=gpu_id,
             num_worlds=max(self._visualizer.scene.n_envs, 1),
             num_lights=len(self._lights),
             cam_fovs_tensor=_make_tensor([camera.fov for camera in self._cameras]),
@@ -449,7 +444,7 @@ class BatchRenderer(BuildableMixin, RBC):
                 self._data_cache[(img_type, cache_key)] = rendered[img_type]
 
         # Return in the required order, or None if not requested
-        return tuple(self._data_cache[(img_type, cache_key)] if needed[img_type] else None for img_type in IMAGE_TYPE)
+        return tuple(self._data_cache[(img_type, cache_key)] if request[img_type] else None for img_type in IMAGE_TYPE)
 
     def colorize_seg_idxc_arr(self, seg_idxc_arr):
         return self._geom_retriever.seg_color_map.colorize_seg_idxc_arr(seg_idxc_arr)

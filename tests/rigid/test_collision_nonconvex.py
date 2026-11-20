@@ -21,6 +21,9 @@ from ..utils.collision import display_collision_pairs, get_genuine_interpenetrat
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_collision(show_viewer):
     scene = gs.Scene(
+        # vis_options=gs.options.VisOptions(
+        #     debug=True,
+        # ),
         show_viewer=show_viewer,
         show_FPS=False,
     )
@@ -32,7 +35,6 @@ def test_collision(show_viewer):
             euler=(100, -10, 0),
             convexify=False,
         ),
-        # vis_mode="collision",
     )
     ball = scene.add_entity(
         gs.morphs.Sphere(
@@ -66,6 +68,9 @@ def test_nonwatertight_collision(show_viewer):
         rigid_options=gs.options.RigidOptions(
             max_collision_pairs=20,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.0, 15.0, 3.0),
             camera_lookat=(2.0, 0.0, -2.0),
@@ -83,7 +88,6 @@ def test_nonwatertight_collision(show_viewer):
             convexify=False,
             fixed=True,
         ),
-        vis_mode="collision",
     )
     obj = scene.add_entity(
         gs.morphs.Box(
@@ -135,6 +139,9 @@ def test_inner_corner_multi_contact(obj_shape, show_viewer, tmp_path):
         rigid_options=gs.options.RigidOptions(
             max_collision_pairs=20,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             # Frame the L-corner (wall at x=0.9, floor at z=0) where the object settles.
             camera_pos=(0.6, -2.2, 0.55),
@@ -152,7 +159,6 @@ def test_inner_corner_multi_contact(obj_shape, show_viewer, tmp_path):
             fixed=True,
         ),
         visualize_contact=True,
-        vis_mode="collision",
     )
     obj_surface = gs.surfaces.Default(color=(0.5, 0.7, 0.9, 1.0))
     if obj_shape == "box":
@@ -162,7 +168,6 @@ def test_inner_corner_multi_contact(obj_shape, show_viewer, tmp_path):
                 pos=(0.8 - INIT_GAP, 0.0, 0.1 + INIT_GAP),
             ),
             surface=obj_surface,
-            vis_mode="collision",
         )
     else:
         sphere_radius = 0.1
@@ -174,7 +179,6 @@ def test_inner_corner_multi_contact(obj_shape, show_viewer, tmp_path):
                 convexify=False,
             ),
             surface=obj_surface,
-            vis_mode="collision",
         )
     scene.build()
 
@@ -234,6 +238,9 @@ def test_tunneling(show_viewer):
         sim_options=gs.options.SimOptions(
             dt=0.002,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.2, 0.2, 1.0),
             camera_lookat=(0.0, 0.0, 0.0),
@@ -249,7 +256,6 @@ def test_tunneling(show_viewer):
             fixed=True,
             convexify=False,
         ),
-        vis_mode="collision",
     )
     rod = scene.add_entity(
         gs.morphs.Mesh(
@@ -257,7 +263,6 @@ def test_tunneling(show_viewer):
             pos=(0.0, 0.0, 0.2),
             convexify=False,
         ),
-        vis_mode="collision",
         visualize_contact=True,
     )
     scene.build()
@@ -275,6 +280,9 @@ def test_overlap(show_viewer):
             dt=0.001,
             gravity=(0, 0, 0),
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, 0.3, 0.15),
             camera_lookat=(0.0, 0.0, 0.0),
@@ -288,7 +296,6 @@ def test_overlap(show_viewer):
             pos=(-0.051, 0.0, 0.0),
             convexify=False,
         ),
-        vis_mode="collision",
     )
     b = scene.add_entity(
         gs.morphs.Mesh(
@@ -297,7 +304,6 @@ def test_overlap(show_viewer):
             euler=(0, 0, 90),
             convexify=False,
         ),
-        vis_mode="collision",
         visualize_contact=True,
     )
     # Two compact solid meshes barely touching along their local OBB diagonal, away from the stirrers. The
@@ -360,6 +366,9 @@ def test_shell_crossing_recovery(show_viewer):
             dt=0.004,
             gravity=(0, 0, 0),
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.17, 0.21, 0.6),
             camera_lookat=(0.04, -0.02, 0.5),
@@ -376,7 +385,6 @@ def test_shell_crossing_recovery(show_viewer):
                     pos=(0.0, 0.0, 0.5 * i_cup),
                     convexify=False,
                 ),
-                vis_mode="collision",
                 # visualize_contact=True,
             )
         )
@@ -448,6 +456,9 @@ def test_concentric_contact(direction, show_viewer):
             # the flanks and advance faster than the pitch).
             constraint_timeconst=4e-3,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, -0.2, 0.1),
             camera_lookat=(0.0, 0.0, 0.03),
@@ -469,7 +480,6 @@ def test_concentric_contact(direction, show_viewer):
             fixed=True,
         ),
         material=steel,
-        vis_mode="collision",
     )
     nut = scene.add_entity(
         gs.morphs.Mesh(
@@ -480,7 +490,6 @@ def test_concentric_contact(direction, show_viewer):
             convexify=False,
         ),
         material=steel,
-        vis_mode="collision",
         # visualize_contact=True,
     )
     scene.build()
@@ -578,6 +587,9 @@ def test_concave_slanted_wall(timestep, decimate, show_viewer):
             # sustained shear of the nested stack, and the tower topples within a few thousand steps.
             friction_cone=gs.friction_cone.elliptic,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(-0.6, 0.6, 0.5),
             camera_lookat=(-0.25, 0.0, 0.3),
@@ -600,7 +612,6 @@ def test_concave_slanted_wall(timestep, decimate, show_viewer):
                 decimate=decimate,
                 file_meshes_are_zup=True,
             ),
-            vis_mode="collision",
             # visualize_contact=(i in (0, NUM_BOWLS - 1)),
         )
     scene.build()
@@ -637,6 +648,9 @@ def test_mesh_repair(convexify, show_viewer, gjk_collision):
         rigid_options=gs.options.RigidOptions(
             use_gjk_collision=gjk_collision,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.3, 0.4, 0.01),
             camera_lookat=(0.3, 0.0, 0.0),
@@ -651,7 +665,6 @@ def test_mesh_repair(convexify, show_viewer, gjk_collision):
             pos=(0.4, 0.0, -0.54),
             fixed=True,
         ),
-        vis_mode="collision",
     )
     asset_path = get_hf_dataset(pattern="spoon.glb")
     obj = scene.add_entity(
@@ -662,7 +675,6 @@ def test_mesh_repair(convexify, show_viewer, gjk_collision):
             convexify=convexify,
             scale=1.0,
         ),
-        vis_mode="collision",
         visualize_contact=True,
     )
     scene.build()
@@ -718,6 +730,9 @@ def test_convexify(euler, show_viewer, gjk_collision):
         rigid_options=gs.options.RigidOptions(
             use_gjk_collision=gjk_collision,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.0, 0.5, 2.5),
             camera_lookat=(0.0, 0.0, 0.5),
@@ -731,7 +746,6 @@ def test_convexify(euler, show_viewer, gjk_collision):
             fixed=True,
             pos=(0.0, 1.0, 0.0),
         ),
-        vis_mode="collision",
     )
     scene.add_entity(
         gs.morphs.Mesh(
@@ -744,7 +758,6 @@ def test_convexify(euler, show_viewer, gjk_collision):
             #     threshold=0.08,
             # ),
         ),
-        vis_mode="collision",
     )
     objs = []
     for i, (asset_name, xml_file) in enumerate(
@@ -756,7 +769,6 @@ def test_convexify(euler, show_viewer, gjk_collision):
                 file=f"{asset_path}/{asset_name}/{xml_file}",
                 pos=(OBJ_OFFSET_X * (1.5 - i), OBJ_OFFSET_Y * (i - 1.5), 0.1 if euler == (90, 0, 90) else 0.4),
             ),
-            vis_mode="collision",
             visualize_contact=True,
         )
         objs.append(obj)
@@ -877,6 +889,9 @@ def test_many_objects_collision(convexify, show_viewer, tol):
         rigid_options=gs.options.RigidOptions(
             max_collision_pairs=8000,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.5, 0.2, 1.6),
             camera_lookat=(0.0, 0.0, 0.3),
@@ -891,7 +906,6 @@ def test_many_objects_collision(convexify, show_viewer, tol):
             euler=(90, 0, 90),
             convexify=convexify,
         ),
-        vis_mode="collision",
     )
     assets = (("mug_1", "output.xml"), ("donut_0", "output.xml"), ("cup_2", "model.xml"), ("apple_15", "model.xml"))
     asset_files = {name: f"{get_hf_dataset(pattern=f'{name}/*')}/{name}/{xml}" for name, xml in assets}
@@ -910,7 +924,6 @@ def test_many_objects_collision(convexify, show_viewer, tol):
                     euler=(90.0, 0.0, 0.0) + np.random.uniform(-0.2, 0.2, 3),
                     convexify=convexify,
                 ),
-                vis_mode="collision",
             )
         )
     scene.build()
