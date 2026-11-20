@@ -2479,8 +2479,8 @@ class RigidEntity(KinematicEntity):
         The integral term is ki * integral((q_target - q) dt) under position control, with ki in N/(m*s) (or
         N*m/(rad*s) for a rotational dof), and ki * integral((v_target - v) dt) under velocity control, with ki in N/m
         (or N*m/rad for a rotational dof).
-        It restarts from zero on `scene.reset`, on any pose write of the link of the dof (`set_pos`, `set_quat`,
-        `set_qpos`, `set_dofs_position`), and on any step under force control or with a zero gain.
+        It restarts from zero on a reset to the initial state, on any pose write of the link of the dof (`set_pos`,
+        `set_quat`, `set_qpos`, `set_dofs_position`), and on any step under force control or with a zero gain.
 
         Parameters
         ----------
