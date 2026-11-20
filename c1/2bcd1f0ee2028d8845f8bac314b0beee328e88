@@ -1,0 +1,31 @@
+examples/deformable/mpm_ice_cream.py
+  s_6331e9b5eb051b::t_9aa1c7aaca4c34 113-120
+  s_6331e9b5eb051b::t_6bb4394aba1557 89-90
+  s_6331e9b5eb051b::t_b231bb3e674b85 22,24
+  s_6331e9b5eb051b::t_0ad92eebad31c6 88,105,121-122,125,134,138-139,176
+examples/README.md
+  s_6331e9b5eb051b::t_b231bb3e674b85 68
+README.md
+  s_6331e9b5eb051b::t_b231bb3e674b85 63
+examples/deformable/mpm_roll_dough.py
+  s_6331e9b5eb051b::t_d77087ca5ddcdf 36,199-200
+  s_6331e9b5eb051b::t_592bde4e43ae7e 1-2,5-11,28,30-35,37-44,47,50-51,58,60-62,64,73,78-80,88-90,106,118-119,125,140-141,143,147,163,165-166,170,185,187-190,193-198,201-202,226
+  s_6331e9b5eb051b::t_323dab1b335bf3 3-4
+  s_6331e9b5eb051b::t_d000e841ae59d4 12-27,29,45-46,48-49,52-57,59,63,65-72,74-77,81-87,91-105,107-117,120-124,126-139,142,144-146,148-162,164,167-169,171-184,186,191-192,203-225,227-232
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c12bcd1f0ee2028d8845f8bac314b0beee328e88",
+  "prompts": {},
+  "sessions": {
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
