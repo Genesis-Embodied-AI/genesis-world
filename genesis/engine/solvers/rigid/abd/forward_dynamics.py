@@ -1866,12 +1866,17 @@ def func_midpoint_eligible(
 def func_midpoint_has_fixed_children(
     i_l: int, i_b: int, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
-    """Whether the body of the free root holds links other than the root itself."""
+    """Whether the body of the free root holds links other than the root itself.
+
+    A link bringing neither mass nor geometry leaves the body as it is, so it is left out. The inert links of a
+    heterogeneous environment are such links (see '_dispatch_heterogeneous_kinematics').
+    """
     has_fixed_children = False
     for j_l in range(i_l + 1, rigid_info.links_root_end[i_l]):
         J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
         if dyn_info.links.root_idx[J_l] == i_l:
-            has_fixed_children = True
+            if dyn_info.links.inertial_mass[J_l] > 0.0 or dyn_info.links.geom_end[J_l] > dyn_info.links.geom_start[J_l]:
+                has_fixed_children = True
     return has_fixed_children
 
 

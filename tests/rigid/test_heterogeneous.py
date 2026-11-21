@@ -70,6 +70,8 @@ def test_physics_parity(
     ARMS_LINKS_IDX = ((0, 1, 2), (0, 1, 2, 3), (0, 1, 4))
     ARMS_DOFS_IDX = ((0, 1), (0, 1, 2), (0, 3))
     ARMS_KP = 20.0
+    ARMS_KV = 0.5
+    ARMS_MASS = 2.0
     ARMS_TARGET = 1.2
 
     dual_arm_files = (fixed_base_dual_arm, fixed_base_dual_arm_high_damping)
@@ -165,11 +167,14 @@ def test_physics_parity(
         for joint in link.joints:
             assert_equal(joint.active_envs_idx, envs_idx)
 
-    # The position control drives every dof of the arms, those of the links an environment does not carry included
-    het_arms.set_dofs_kp(ARMS_KP)
+    # The position control drives every dof of the arms, those of the links an environment does not carry included,
+    # and the total mass is rescaled over every link, the massless ones standing for the links it does not carry too
+    for arms in (het_arms, *ref_arms):
+        arms.set_mass(ARMS_MASS)
+        arms.set_dofs_kp(ARMS_KP)
+        arms.set_dofs_kv(ARMS_KV)
     het_arms.control_dofs_position(np.full((len(VARIANTS), het_arms.n_dofs), ARMS_TARGET))
-    for i_env, ref_arm in enumerate(ref_arms):
-        ref_arm.set_dofs_kp(ARMS_KP)
+    for ref_arm in ref_arms:
         ref_arm.control_dofs_position(np.full((len(VARIANTS), ref_arm.n_dofs), ARMS_TARGET))
 
     # At init each variant sits at its own placement; the relative getter strips its offset (and inertial alignment) to

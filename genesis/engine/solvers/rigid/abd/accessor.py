@@ -336,9 +336,12 @@ def func_set_link_mass(
     """Set the mass of one link, scaling its inertia by the same factor if requested."""
     I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
     if qd.static(is_inertia_scaled):
-        ratio = inertial_mass / dyn_info.links.inertial_mass[I_l]
-        for j1, j2 in qd.static(qd.ndrange(3, 3)):
-            dyn_info.links.inertial_i[I_l][j1, j2] = dyn_info.links.inertial_i[I_l][j1, j2] * ratio
+        # A massless link has no inertia to scale, and the ratio is undefined. The inert links of a heterogeneous
+        # environment are massless (see '_dispatch_heterogeneous_kinematics').
+        if dyn_info.links.inertial_mass[I_l] > 0.0:
+            ratio = inertial_mass / dyn_info.links.inertial_mass[I_l]
+            for j1, j2 in qd.static(qd.ndrange(3, 3)):
+                dyn_info.links.inertial_i[I_l][j1, j2] = dyn_info.links.inertial_i[I_l][j1, j2] * ratio
     dyn_info.links.inertial_mass[I_l] = inertial_mass
 
 
