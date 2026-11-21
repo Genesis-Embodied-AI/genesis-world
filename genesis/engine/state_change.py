@@ -483,6 +483,11 @@ class ChangeLog:
         excluded_entries = tuple(_tracked_entry(excluded_array)[1] for excluded_array in excluded)
         return production.is_stale(excluded_entries, None if changes is None else tuple(map(int, changes)))
 
+    def is_written_since_step(self, *arrays: Any) -> bool:
+        """Whether a launch or a refresh wrote some tracked derived or scratch arrays since the last step, on the host."""
+        bulk, entries_owner_bulk = self._bulk, self._entries_owner_bulk
+        return any([entries_owner_bulk[_tracked_entry(array)[1]] == bulk for array in arrays])
+
     def refresh(self, array: Any) -> None:
         """Refresh a derived array in the environments it is stale in, through the method computing it (see
         'register_refreshes').

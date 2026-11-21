@@ -111,6 +111,7 @@ from .abd.forward_dynamics import (
     func_integrate,
     func_update_acc,
     kernel_compute_smooth_qacc,
+    kernel_factor_mass_mat,
     kernel_forward_dynamics_without_qacc,
     kernel_integrate,
     kernel_refresh_invweight_and_meaninertia,
@@ -129,6 +130,7 @@ from .abd.forward_kinematics import (
 )
 from .abd.manual_bw import kernel_manual_compute_qacc_bw
 from .abd.misc import (
+    MASS_MAT_ASSEMBLY,
     kernel_apply_links_external_wrench,
     kernel_apply_links_external_wrench_at_pos,
     kernel_clear_external_force,
@@ -1306,11 +1308,41 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     @mutates(derived=True)
     def _update_mass_mat(self, envs_idx: torch.Tensor | None) -> None:
-        # The mass matrix and its factor are assembled at the current configuration, from the poses of the links, which
-        # the launch refreshes first as it reads them (see 'genesis.engine.state_change')
+        # The mass matrix is assembled at the current configuration, from the poses of the links, which the launch
+        # refreshes first as it reads them (see 'genesis.engine.state_change')
         if envs_idx is None or envs_idx.dtype == torch.bool:
             envs_idx = self._envs_idx
         kernel_update_mass_mat(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
+
+    @mutates(derived=True)
+    def _update_mass_mat_factor(self, envs_idx: torch.Tensor | None) -> None:
+        if envs_idx is None or envs_idx.dtype == torch.bool:
+            envs_idx = self._envs_idx
+        kernel_factor_mass_mat(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
+
+    def _get_mass_mat_assembly(self) -> int:
+        # A sleeping tree keeps the mass matrix of its last awake substep, which any write since the last step replaced.
+        # A refresh of the getter leaves nothing to recompute where it computed what the substep does: no implicit
+        # damping term in the matrix, the derived quantities current at the start of the substep, and no gradient.
+        # The fused solve of the smooth acceleration runs in the factor pass, which it needs then.
+        rigid_info, changelog = self.rigid_info, self.changelog
+        mass_mat_arrays = (rigid_info.mass_mat, rigid_info.mass_mat_L, rigid_info.mass_mat_D_inv)
+        mass_mat_assembly = MASS_MAT_ASSEMBLY.AWAKE
+        if self._use_hibernation and changelog.is_written_since_step(*mass_mat_arrays):
+            mass_mat_assembly = MASS_MAT_ASSEMBLY.ALL
+        elif not (
+            self._enable_mujoco_compatibility
+            or self._requires_grad
+            or self._integrator == gs.integrator.approximate_implicitfast
+            or changelog.is_stale(rigid_info.mass_mat)
+        ):
+            mass_mat_assembly = MASS_MAT_ASSEMBLY.NONE
+            if self.rigid_config.enable_fused_smooth_acc_solve or any(
+                [changelog.is_stale(array) for array in mass_mat_arrays[1:]]
+            ):
+                mass_mat_assembly = MASS_MAT_ASSEMBLY.FACTOR
+        # A kernel takes its runtime scalars as native Python numbers
+        return int(mass_mat_assembly)
 
     @mutates(derived=True)
     def _update_forward_kinematics(self, envs_idx: torch.Tensor | None) -> None:
@@ -1340,6 +1372,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         )
         if is_recording or self._enable_mujoco_compatibility:
             is_forward_pos_updated = is_forward_vel_updated = False
+        mass_mat_assembly = self._get_mass_mat_assembly()
 
         # The wrenches the other solvers summed exactly over the previous substep join the external wrench of the links
         if self._is_external_wrench_exact:
@@ -1387,6 +1420,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients
             # launches the substep kernels one by one.
             kernel_step_1(
+                mass_mat_assembly,
                 self.dyn_state,
                 self.constraint_solver.constraint_state,
                 self.dyn_info,
@@ -1400,7 +1434,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 update_qvel(self.dyn_state, self.rigid_info, self.rigid_config)
             else:
                 self._func_constraint_force()
-                kernel_step_2(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno)
+                kernel_step_2(
+                    mass_mat_assembly, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno
+                )
         else:
             # The work before the constraint solve is captured as three graphs, since the compile time of a kernel grows
             # faster than its size while one more graph replay costs next to nothing. The collision detection takes a
@@ -1411,6 +1447,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             collider._contact_data_cache.clear()
             constraint_solver._eq_const_info_cache.clear()
             kernel_substep_dynamics(
+                mass_mat_assembly,
                 self.dyn_state,
                 collider.collider_state,
                 constraint_solver.constraint_state,
@@ -1443,6 +1480,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     constraint_solver._n_iterations,
                 )
             kernel_substep_post(
+                mass_mat_assembly,
                 self.dyn_state,
                 collider.collider_state,
                 constraint_solver.constraint_state,
@@ -1686,7 +1724,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # (see 'substep_pre_coupling')
             with untracked_launches():
                 update_qacc_from_qvel_delta(self.dyn_state, self.rigid_info, self.rigid_config)
-                kernel_step_2(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno)
+                kernel_step_2(
+                    self._get_mass_mat_assembly(),
+                    self.dyn_state,
+                    self.dyn_info,
+                    self.rigid_info,
+                    self.rigid_config,
+                    self._errno,
+                )
             self.changelog.record_step()
             self.changelog.record_arrays((self.rigid_info.qpos, self.dyn_state.dofs.vel))
         elif isinstance(self.sim.coupler, IPCCoupler):
@@ -3330,6 +3375,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
 @qd.func
 def func_step_1(
+    mass_mat_assembly: qd.template(),
     dyn_state: DynState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -3353,11 +3399,14 @@ def func_step_1(
     if qd.static(not is_forward_vel_updated):
         func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
-    func_forward_dynamics(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward)
+    func_forward_dynamics(
+        mass_mat_assembly, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward
+    )
 
 
 @qd.kernel(fastcache=True)
 def kernel_step_1(
+    mass_mat_assembly: int,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -3373,6 +3422,7 @@ def kernel_step_1(
     marks back (see func_mark_link_constrained).
     """
     func_step_1(
+        mass_mat_assembly,
         dyn_state,
         constraint_state,
         dyn_info,
@@ -3388,7 +3438,12 @@ def kernel_step_1(
 
 @qd.func
 def func_step_2(
-    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template(), errno: qd.Tensor
+    mass_mat_assembly: qd.template(),
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+    errno: qd.Tensor,
 ):
     # Position, Velocity and Acceleration data must be consistent when computing links acceleration, otherwise it
     # would not corresponds to anyting physical. There is no other way than doing this right before integration,
@@ -3398,7 +3453,7 @@ def func_step_2(
     # A substep whose launches are recorded for its backward pass runs these steps as one launch each (see
     # 'RigidSolver.substep').
     func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=True, is_backward=False)
-    func_integrate(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
+    func_integrate(mass_mat_assembly, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
     func_copy_next_to_curr(dyn_state, rigid_info, rigid_config, errno)
     func_clear_external_wrench(dyn_state, dyn_info, rigid_info, rigid_config)
     if qd.static(not rigid_config.enable_mujoco_compatibility):
@@ -3410,14 +3465,20 @@ def func_step_2(
 
 @qd.kernel(fastcache=True)
 def kernel_step_2(
-    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template(), errno: qd.Tensor
+    mass_mat_assembly: int,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+    errno: qd.Tensor,
 ):
     """Run the second half of a substep on its own (see func_step_2)."""
-    func_step_2(dyn_state, dyn_info, rigid_info, rigid_config, errno)
+    func_step_2(mass_mat_assembly, dyn_state, dyn_info, rigid_info, rigid_config, errno)
 
 
 @qd.kernel(graph=True, fastcache=True)
 def kernel_substep_dynamics(
+    mass_mat_assembly: int,
     dyn_state: DynState,
     collider_state: ColliderState,
     constraint_state: ConstraintState,
@@ -3431,9 +3492,11 @@ def kernel_substep_dynamics(
 ):
     """Run the forward dynamics of a substep, then assemble its equality constraints, captured as one graph.
 
-    enable_constraint selects the assembly of the equality constraints.
+    mass_mat_assembly selects the kinematic trees whose mass matrix is assembled and factored (see MASS_MAT_ASSEMBLY),
+    and enable_constraint the assembly of the equality constraints.
     """
     func_step_1(
+        mass_mat_assembly,
         dyn_state,
         constraint_state,
         dyn_info,
@@ -3466,6 +3529,7 @@ def kernel_substep_inequality(
 
 @qd.kernel(graph=True, fastcache=True)
 def kernel_substep_post(
+    mass_mat_assembly: int,
     dyn_state: DynState,
     collider_state: ColliderState,
     constraint_state: ConstraintState,
@@ -3485,7 +3549,7 @@ def kernel_substep_post(
         func_resolve_post(
             dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, noslip, errno
         )
-    func_step_2(dyn_state, dyn_info, rigid_info, rigid_config, errno)
+    func_step_2(mass_mat_assembly, dyn_state, dyn_info, rigid_info, rigid_config, errno)
 
 
 # The colors of the arrows of the force and of the normal of a contact

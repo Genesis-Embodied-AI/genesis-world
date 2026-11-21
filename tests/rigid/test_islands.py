@@ -6,7 +6,7 @@ import pytest
 import trimesh
 
 import genesis as gs
-from genesis.utils.misc import no_read_guard, qd_to_numpy, tensor_to_array
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -811,7 +811,7 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
         scene.step()
     assert_allclose(z0 - box_pos.get_pos()[..., 2], free_fall_drop, tol=tol)
     # A body moved by a setter loses the contacts found at its previous pose, with their forces, while a body still
-    # asleep keeps those it rests on
+    # asleep keeps those it rests on.
     assert box_vel.get_contacts(is_padded=True)["valid_mask"].any()
     assert (box_vel.get_links_net_contact_force()[..., 2] > 0.5 * box_vel.get_mass() * G).all()
     assert qd_to_numpy(
@@ -930,11 +930,10 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
     assert ((invweight_before - box_mass.base_link.get_invweight()).abs() > 1e-3).all()
 
     # The mean inertia the constraint solve is quoted on is the mean of the mass-matrix diagonal, so a mass written on
-    # a woken tree is in it; a tree left asleep would hold its contribution at whatever it last ran with. The matrix it
-    # is the mean of is the one the weights were solved with, which the mass matrix holds as the setter left it.
-    with no_read_guard():
-        diagonal = qd_to_numpy(solver.rigid_info.mass_mat, transpose=True).diagonal(axis1=-2, axis2=-1)
-    assert_allclose(qd_to_numpy(solver.rigid_info.meaninertia), diagonal.mean(axis=-1), tol=tol)
+    # a woken tree is in it; a tree left asleep would hold its contribution at whatever it last ran with.
+    mass_mat = solver.get_mass_mat()
+    diagonal = mass_mat.diagonal(dim1=-2, dim2=-1) if mass_mat.ndim > 2 else mass_mat.diagonal()
+    assert_allclose(qd_to_numpy(solver.rigid_info.meaninertia), diagonal.mean(dim=-1), tol=tol)
 
     invweight_before = box_armature.get_dofs_invweight()
     box_armature.set_dofs_armature([ARMATURE] * 6)

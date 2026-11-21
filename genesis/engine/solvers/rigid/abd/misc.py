@@ -1,3 +1,5 @@
+from enum import IntEnum
+
 import quadrants as qd
 
 import genesis as gs
@@ -122,6 +124,30 @@ def func_wakeup_link(
 
         # The entity owning this link now has an awake link
         dyn_state.entities.is_hibernated[dyn_info.links.entity_idx[link_I], i_b] = False
+
+
+class MASS_MAT_ASSEMBLY(IntEnum):
+    """Select the kinematic trees whose mass matrix a substep assembles and factors (see func_forward_dynamics).
+
+    A sleeping tree keeps the mass matrix and the factor of its last awake substep (see func_is_awake_tree), which a
+    write of the mass matrix outside the step overwrites, and a refresh of the mass matrix outside the step may leave
+    the substep nothing to compute.
+
+    A kernel takes the selection as a runtime argument, and a func passing it on to its loops as a template, which
+    aliases the argument: a scalar a func binds at the top level of a kernel is a statement autodiff cannot reverse.
+    """
+
+    AWAKE = 0
+    """Assemble and factor the awake trees."""
+
+    ALL = 1
+    """Assemble and factor every tree, the sleeping ones included."""
+
+    FACTOR = 2
+    """Factor the awake trees, whose mass matrix is current."""
+
+    NONE = 3
+    """Neither, the mass matrix of the awake trees and its factor being current."""
 
 
 @qd.func

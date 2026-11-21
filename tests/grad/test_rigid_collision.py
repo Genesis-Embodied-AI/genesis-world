@@ -573,6 +573,7 @@ def test_contact_detection_jacobian_matches_fd(grad_capsule):
 @pytest.mark.debug(False)
 def test_constraint_solver_backward_matches_fd(monkeypatch):
     # Engine modules resolve gs dtypes at import time, which requires gs.init: import after initialization
+    from genesis.engine.solvers.rigid.abd.misc import MASS_MAT_ASSEMBLY
     from genesis.engine.solvers.rigid.constraint.solver import func_solve_body, func_solve_init
     from genesis.engine.solvers.rigid.rigid_solver import kernel_step_1
 
@@ -650,11 +651,12 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
     monkeypatch.setattr(constraint_solver, "resolve", constraint_solver_resolve)
 
     kernel_step_1(
-        rigid_solver.dyn_state,
-        constraint_solver.constraint_state,
-        rigid_solver.dyn_info,
-        rigid_solver.rigid_info,
-        rigid_solver.rigid_config,
+        mass_mat_assembly=int(MASS_MAT_ASSEMBLY.AWAKE),
+        dyn_state=rigid_solver.dyn_state,
+        constraint_state=constraint_solver.constraint_state,
+        dyn_info=rigid_solver.dyn_info,
+        rigid_info=rigid_solver.rigid_info,
+        rigid_config=rigid_solver.rigid_config,
         is_forward_pos_updated=True,
         is_forward_vel_updated=True,
         is_static_pose_updated=True,

@@ -909,6 +909,66 @@ def test_mass_block_partition(xml_path, show_viewer, tol):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("use_hibernation", [False, True])
+@pytest.mark.parametrize("integrator", [gs.integrator.approximate_implicitfast, gs.integrator.Euler])
+def test_mass_matrix_getter(integrator, use_hibernation, show_viewer, tol):
+    BOX_SIZE = 0.1
+    ARMATURE = 0.2
+    DAMPING = 5.0
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            integrator=integrator,
+            use_hibernation=use_hibernation,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.8, 0.8, 0.5),
+            camera_lookat=(0.0, 0.0, 0.1),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    box_rest = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            pos=(0.0, 0.0, 0.5 * BOX_SIZE),
+        ),
+    )
+    box_drop = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            pos=(0.03, 0.0, 0.3),
+        ),
+    )
+    scene.build(n_envs=2)
+    for box in (box_rest, box_drop):
+        box.set_dofs_armature(ARMATURE)
+        box.set_dofs_damping(DAMPING)
+    # Both boxes fall freely in the second environment, whose accelerations the factor of the mass matrix alone solves,
+    # no constraint solve correcting them.
+    box_rest.set_pos([[0.0, 0.0, 1.5]], envs_idx=[1])
+    state = scene.get_state()
+
+    # The mass matrix holds the armature, and none of the implicit damping terms a step folds into it
+    assert_allclose(
+        box_rest.get_mass_mat()[..., :3, :3], (tensor_to_array(box_rest.get_mass()) + ARMATURE) * np.eye(3), tol=tol
+    )
+
+    # Reading the mass matrix or its factor before a step leaves the trajectory as it is without reading them, the
+    # dropped box falling freely, and the resting box falling asleep under hibernation until the dropped one lands.
+    qpos_read = []
+    for i_step in range(30):
+        box_rest.get_mass_mat(decompose=i_step % 2 == 1)
+        scene.step()
+        qpos_read.append(scene.rigid_solver.get_qpos())
+    scene.reset(state)
+    for i_step in range(30):
+        scene.step()
+        assert_equal(scene.rigid_solver.get_qpos(), qpos_read[i_step])
+
+
+@pytest.mark.required
 @pytest.mark.parametrize(
     "box_position, n_envs",
     [
