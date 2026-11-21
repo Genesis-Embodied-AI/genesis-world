@@ -71,7 +71,13 @@ class RigidVisGeomDescription(BaseRigidGeomDescription):
     """Describe one geometry a link is drawn with: where it sits on the link, and the mesh drawn there."""
 
     vmesh: "gs.Mesh"
+    """Mesh the geom is drawn with, the tessellation of the shape that 'type' names."""
     dynamic_vertices: DynamicVertices | None = None
+    """Vertex variants the geom switches between at runtime, or None to always draw 'vmesh'."""
+    type: GEOM_TYPE = GEOM_TYPE.MESH
+    """Shape of the geom, a primitive or a mesh."""
+    data: np.ndarray | None = None
+    """Dimensions of the primitive that 'type' names, laid out as in 'RigidGeom.data', or None for a mesh."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -769,7 +775,11 @@ class KinematicEntityDescription(EntityDescription):
         if morph.visualization:
             g_infos.append(
                 dict(
-                    contype=0, conaffinity=0, vmesh=gs.Mesh.from_trimesh(tmesh, surface=self.surface, metadata=metadata)
+                    contype=0,
+                    conaffinity=0,
+                    vmesh=gs.Mesh.from_trimesh(tmesh, surface=self.surface, metadata=metadata),
+                    type=geom_type,
+                    data=geom_data,
                 )
             )
         if (morph.contype or morph.conaffinity) and morph.collision:

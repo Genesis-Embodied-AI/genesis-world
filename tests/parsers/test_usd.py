@@ -359,6 +359,29 @@ def test_negative_scale_reflection(usd_scene):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("model_name", ["scaled_primitives_usd"])
+def test_primitive_inertia_under_scale(usd_scene):
+    entities = {entity.links[0].name: entity for entity in usd_scene.entities}
+
+    # A primitive keeps its shape where its data carry the scale, and its mass is exact
+    uniform_sphere = entities["/root/uniform_sphere"]
+    assert uniform_sphere.geoms[0].type == gs.GEOM_TYPE.SPHERE
+    assert_allclose(uniform_sphere.get_mass(), 1000.0 * 4.0 / 3.0 * np.pi * 0.2**3, rtol=1e-6)
+    stretched_box = entities["/root/stretched_box"]
+    assert stretched_box.geoms[0].type == gs.GEOM_TYPE.BOX
+    assert_allclose(stretched_box.get_mass(), 1000.0 * 0.2**3 * 6.0, rtol=1e-6)
+
+    # A scale the shape cannot carry leaves the geom as its mesh, whose mass follows the drawn shape: an ellipsoid within
+    # its tessellation error, and a parallelepiped of the volume of the scaled cube.
+    stretched_sphere = entities["/root/stretched_sphere"]
+    assert stretched_sphere.geoms[0].type == gs.GEOM_TYPE.MESH
+    assert_allclose(stretched_sphere.get_mass(), 1000.0 * 4.0 / 3.0 * np.pi * 0.1 * 0.3 * 0.3, rtol=0.05)
+    sheared_box = entities["/root/sheared_box"]
+    assert sheared_box.geoms[0].type == gs.GEOM_TYPE.MESH
+    assert_allclose(sheared_box.get_mass(), 1000.0 * 0.2**3 * 3.0, rtol=1e-6)
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["nested_collision_joint_usd"])
 def test_nested_collision_joint_targets(usd_scene):
     assert len(usd_scene.entities) == 1
