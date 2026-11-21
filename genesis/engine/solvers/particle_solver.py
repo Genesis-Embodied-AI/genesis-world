@@ -147,9 +147,9 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         # Overwriting the positions of the particles clears the errors their former state flagged
         self.clear_errno(envs_idx)
 
-    def get_particles_pos(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
+    def get_particles_pos(self, particles_idx=None, envs_idx=None, *, copy: bool | None = True) -> torch.Tensor:
         """Get the position of some particles, the same in every environment (see 'set_particles_pos')."""
-        tensor = self._read_data(self._particles_pos, envs_idx, particles_idx, copy=True)
+        tensor = self._read_data(self._particles_pos, envs_idx, particles_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
@@ -162,9 +162,9 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
 
-    def get_particles_vel(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
+    def get_particles_vel(self, particles_idx=None, envs_idx=None, *, copy: bool | None = True) -> torch.Tensor:
         """Get the velocity of some particles, the same in every environment (see 'set_particles_pos')."""
-        tensor = self._read_data(self._particles_vel, envs_idx, particles_idx, copy=True)
+        tensor = self._read_data(self._particles_vel, envs_idx, particles_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
@@ -177,9 +177,9 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         kernel_set_values(particles_idx, envs_idx, actives, self._particles_is_active)
         self._reset_particles(particles_idx, envs_idx, reset_deformation=False)
 
-    def get_particles_active(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
+    def get_particles_active(self, particles_idx=None, envs_idx=None, *, copy: bool | None = True) -> torch.Tensor:
         """Get whether some particles take part in the simulation (see 'set_particles_pos')."""
-        tensor = self._read_data(self._particles_is_active, envs_idx, particles_idx, copy=True)
+        tensor = self._read_data(self._particles_is_active, envs_idx, particles_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_particles_mass(self, particles_idx=None, envs_idx=None) -> torch.Tensor:

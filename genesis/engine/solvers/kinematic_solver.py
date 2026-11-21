@@ -987,13 +987,13 @@ class KinematicSolver(Solver):
             heights = heights[..., 0]
         return heights
 
-    def get_links_pos(self, links_idx=None, envs_idx=None, *, relative=False):
+    def get_links_pos(self, links_idx=None, envs_idx=None, *, relative=False, copy: bool | None = True):
         idx = links_idx if isinstance(links_idx, int) else slice(None)
         if not gs.use_zerocopy:
             _, links_idx, envs_idx = self._sanitize_io_variables(
                 None, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
             )
-        tensor = self._read_data(self.dyn_state.links.pos, envs_idx, links_idx, copy=True)
+        tensor = self._read_data(self.dyn_state.links.pos, envs_idx, links_idx, copy=copy)
         if relative and not self._links_offset_pos_is_identity[idx].all():
             quat = self._read_data(self.dyn_state.links.quat, envs_idx, links_idx)
             offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
@@ -1001,20 +1001,20 @@ class KinematicSolver(Solver):
             tensor = tensor - _offset_world_shift(offset_pos, offset_quat, quat)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_links_quat(self, links_idx=None, envs_idx=None, *, relative=False):
-        tensor = self._read_data(self.dyn_state.links.quat, envs_idx, links_idx, copy=True)
+    def get_links_quat(self, links_idx=None, envs_idx=None, *, relative=False, copy: bool | None = True):
+        tensor = self._read_data(self.dyn_state.links.quat, envs_idx, links_idx, copy=copy)
         idx = links_idx if isinstance(links_idx, int) else slice(None)
         if relative and not self._links_offset_quat_is_identity[idx].all():
             offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
             tensor = gu.transform_quat_by_quat(gu.inv_quat(offset_quat), tensor)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_joints_anchor_pos(self, joints_idx=None, envs_idx=None):
-        tensor = qd_to_torch(self.dyn_state.joints.xanchor, envs_idx, joints_idx, transpose=True, copy=True)
+    def get_joints_anchor_pos(self, joints_idx=None, envs_idx=None, *, copy: bool | None = True):
+        tensor = qd_to_torch(self.dyn_state.joints.xanchor, envs_idx, joints_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_joints_anchor_axis(self, joints_idx=None, envs_idx=None):
-        tensor = qd_to_torch(self.dyn_state.joints.xaxis, envs_idx, joints_idx, transpose=True, copy=True)
+    def get_joints_anchor_axis(self, joints_idx=None, envs_idx=None, *, copy: bool | None = True):
+        tensor = qd_to_torch(self.dyn_state.joints.xaxis, envs_idx, joints_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_vgeoms_pos(self, vgeoms_idx=None, envs_idx=None, *, relative=False):
@@ -1070,27 +1070,27 @@ class KinematicSolver(Solver):
         )
         return _tensor
 
-    def get_links_ang(self, links_idx=None, envs_idx=None):
-        tensor = self._read_data(self.dyn_state.links.cd_ang, envs_idx, links_idx, copy=True)
+    def get_links_ang(self, links_idx=None, envs_idx=None, *, copy: bool | None = True):
+        tensor = self._read_data(self.dyn_state.links.cd_ang, envs_idx, links_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_qpos(self, qs_idx=None, envs_idx=None):
-        tensor = self._read_data(self.qpos, envs_idx, qs_idx, copy=True)
+    def get_qpos(self, qs_idx=None, envs_idx=None, *, copy: bool | None = True):
+        tensor = self._read_data(self.qpos, envs_idx, qs_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_dofs_velocity(self, dofs_idx=None, envs_idx=None):
-        tensor = self._read_data(self.dyn_state.dofs.vel, envs_idx, dofs_idx, copy=True)
+    def get_dofs_velocity(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
+        tensor = self._read_data(self.dyn_state.dofs.vel, envs_idx, dofs_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_dofs_position(self, dofs_idx=None, envs_idx=None):
+    def get_dofs_position(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
         """Read current DOF positions."""
-        tensor = self._read_data(self.dyn_state.dofs.pos, envs_idx, dofs_idx, copy=True)
+        tensor = self._read_data(self.dyn_state.dofs.pos, envs_idx, dofs_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_dofs_limit(self, dofs_idx=None, envs_idx=None):
+    def get_dofs_limit(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
         if not self._options.batch_dofs_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
-        tensor = qd_to_torch(self.dyn_info.dofs.limit, envs_idx, dofs_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_info.dofs.limit, envs_idx, dofs_idx, transpose=True, copy=copy)
         if self.n_envs == 0 and self._options.batch_dofs_info:
             tensor = tensor[0]
         return tensor[..., 0], tensor[..., 1]
@@ -1121,7 +1121,7 @@ class KinematicSolver(Solver):
     # --------------------------------- Jacobian & IK ------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def get_links_jacobian(self, link_idx, dof_start, n_dofs, local_point=None):
+    def get_links_jacobian(self, link_idx, dof_start, n_dofs, local_point=None, *, copy: bool | None = True):
         """Spatial Jacobian of a link-local point, as (n_envs, 6, n_dofs), for the entity owning that link.
 
         dof_start offsets the entity degrees of freedom into the solver and n_dofs narrows the shared buffer down to
@@ -1143,7 +1143,7 @@ class KinematicSolver(Solver):
                 self.rigid_config,
                 self.n_envs_,
             )
-        return qd_to_torch(jacobian, transpose=True, copy=True)[..., :n_dofs]
+        return qd_to_torch(jacobian, transpose=True, copy=copy)[..., :n_dofs]
 
     def forward_kinematics_query(self, entity, qpos, envs_idx=None):
         """Link poses one entity would have at the given configuration, leaving the live configuration as it was.
@@ -1815,7 +1815,12 @@ class KinematicScopedRenderContext(SolverScopedRenderContext[KinematicSolver]):
         self._context.invalidate((self,), change=StateChange.VISUAL)
 
     def get_vgeoms_pose(
-        self, vgeoms_idx: "IndexType | None" = None, envs_idx: "IndexType | None" = None, *, is_quat: bool
+        self,
+        vgeoms_idx: "IndexType | None" = None,
+        envs_idx: "IndexType | None" = None,
+        *,
+        is_quat: bool,
+        copy: bool | None = True,
     ) -> torch.Tensor:
         """Return a copy of the world position or orientation of some visual geoms of the solver.
 

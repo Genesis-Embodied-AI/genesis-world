@@ -533,7 +533,7 @@ class GravityMixin(BuildableMixin):
         gravity = broadcast_tensor(gravity, gs.tc_float, (len(envs_idx), 3), ("envs_idx", ""))
         kernel_set_gravity(gravity.contiguous(), envs_idx, self._gravity)
 
-    def get_gravity(self, envs_idx=None):
+    def get_gravity(self, envs_idx=None, *, copy: bool | None = True):
         """
         Get the gravity acting on the bodies of this solver, in m/s^2.
 
@@ -549,7 +549,7 @@ class GravityMixin(BuildableMixin):
         """
         if self._gravity is None:
             gs.raise_exception(f"{type(self).__name__} holds no body for a gravity to act on.")
-        tensor = qd_to_torch(self._gravity, envs_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self._gravity, envs_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
 
