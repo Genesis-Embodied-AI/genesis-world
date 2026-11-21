@@ -196,6 +196,7 @@ def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
         (gu.z_up_to_R, [[3]], [[3, 3]]),
         (gu.z_up_to_R, [[3], [3], [3, 3]], [[3, 3]]),
         (gu.pos_lookat_up_to_T, [[3], [3], [3]], [[4, 4]]),
+        (gu.inv_T, [[4, 4]], [[4, 4]]),
         (gu.inv_transform_by_T, [[5, 3], [4, 4]], [[5, 3]]),
         (partial(polar, pure_rotation=False, side="left", tol=tol), [[3, 3]], [[3, 3], [3, 3]]),
         (partial(polar, pure_rotation=False, side="right", tol=tol), [[3, 3]], [[3, 3], [3, 3]]),
@@ -263,6 +264,10 @@ def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
                 assert_allclose(T, T_true, tol=tol)
         for args, T_true in (((trans_, quat_), T_trans_R), ((None, quat_), T_R), ((trans_, None), T_trans)):
             assert_allclose(gu.trans_quat_to_T(*args), T_true, tol=tol)
+
+        # inv_T returns the per-element inverse for batched and single transforms alike
+        T = gu.trans_quat_to_T(trans_, quat_)
+        assert_allclose(tensor_to_array(gu.inv_T(T) @ T), np.broadcast_to(np.eye(4), (*batch_shape, 4, 4)), tol=tol)
 
         # Inputs of mixed precisions give a transform of the higher one
         for trans_mixed, R_mixed in ((trans.astype(np.float16), R), (trans, R.astype(np.float16))):

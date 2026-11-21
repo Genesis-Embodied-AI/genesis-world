@@ -995,9 +995,10 @@ def inv_T(T):
         gs.raise_exception(f"the input must be torch.Tensor or np.ndarray. got: {type(T)=}")
 
     trans, R = T[..., :3, 3], T[..., :3, :3]
+    R_T = R.swapaxes(-1, -2)
     T_inv[..., 3, 3] = 1.0
-    T_inv[..., :3, 3] = -R.T @ trans
-    T_inv[..., :3, :3] = R.T
+    T_inv[..., :3, 3] = -(R_T @ trans[..., None])[..., 0]
+    T_inv[..., :3, :3] = R_T
 
     return T_inv
 
