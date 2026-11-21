@@ -1,6 +1,9 @@
+import contextlib
+import functools
 import queue
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -159,6 +162,13 @@ class Recorder[T](BuildableMixin):
             error, self._error = self._error, None
             gs.raise_exception_from(f"[{type(self).__name__}] Processing failed in the background: {error}", error)
 
+    def _stop_at_exit(self):
+        # Exit hook, called through a weak proxy: the recorder may be gone already, or destroyed by
+        # 'RecorderManager.stop', which leaves nothing to stop.
+        with contextlib.suppress(ReferenceError):
+            if self._is_built:
+                self.stop()
+
     @gs.assert_built
     def join_thread(self):
         """Wait for the processor thread to finish."""
@@ -177,7 +187,7 @@ class Recorder[T](BuildableMixin):
             try:
                 # Note that it is necessary to rely on private threading atexit because functions registered using
                 # 'atexit.register' are called AFTER 'threading._shutdown', causing deadlock for non-daemon threads.
-                threading._register_atexit(self.stop)
+                threading._register_atexit(functools.partial(Recorder._stop_at_exit, weakref.proxy(self)))
             except AttributeError:
                 pass
         else:
