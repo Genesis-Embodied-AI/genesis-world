@@ -1,0 +1,135 @@
+examples/rendering/rasterizer_render_async.py
+  s_6331e9b5eb051b::t_1f5b7fe246fcef 4-5,16-21,84,86
+examples/sensors/camera_backends.py
+  s_6331e9b5eb051b::t_e77e01a5f6f768 9
+  s_6331e9b5eb051b::t_3625449a4726c2 201-211
+examples/sensors/lidar_go2.py
+  s_6331e9b5eb051b::t_7859e0f58b8457 4-5,7,209-236
+examples/rigid/mini_golf.py
+  s_6331e9b5eb051b::t_23154dc465e8ef 10,311,316-333
+examples/rigid/bin_picking.py
+  s_6331e9b5eb051b::t_4bf8da9940cd0f 240-244,246-247,249-251,253-255,270-321
+  s_6331e9b5eb051b::t_3edaef56ba4b64 10
+examples/sensors/depth_camera_deforming_mesh.py
+  s_6331e9b5eb051b::t_5b531eac5d79e3 3-4,236-246
+examples/interaction/keyboard_teleop.py
+  s_6331e9b5eb051b::t_d27d8d84926435 3,182-195,197-222
+  s_6331e9b5eb051b::t_4bba34ce441a3c 1,175-177,180-181
+examples/rigid/screw_constraint.py
+  s_6331e9b5eb051b::t_276d5e417d09dd 3-5
+examples/rigid/rube_goldberg.py
+  s_6331e9b5eb051b::t_eb88559a0523fc 9,305-316
+  s_6331e9b5eb051b::t_8269efe8ef5c89 317
+examples/fluids/mpm_hose.py
+  s_6331e9b5eb051b::t_1f5b7fe246fcef 8-11,182-187,189-191,193-195,206-227
+examples/rigid/jenga.py
+  s_6331e9b5eb051b::t_bada1c3af437e2 11,207-213,215-217,219-221,234-280
+examples/deformable/fem_vertex_constraints.py
+  s_6331e9b5eb051b::t_22ee03e5dabbea 5-6,182-188,190-192,194
+examples/interaction/mouse_interaction.py
+  s_6331e9b5eb051b::t_97e36dff838b43 4,122-133
+  s_6331e9b5eb051b::t_f6ea631e3c00ba 3
+examples/rigid/contype.py
+  s_6331e9b5eb051b::t_e77e01a5f6f768 10-11,107-112
+examples/multiphysics/rigid_mpm_snowplow.py
+  s_6331e9b5eb051b::t_d979d5c83efe8d 6-7,9,176,202-226
+examples/rigid/drone_teleop.py
+  s_6331e9b5eb051b::t_d3f57b6cabb30a 151-152,154
+  s_6331e9b5eb051b::t_d4a32e2fd4a8c0 4-6,117-121,123,148-150,153,155-181
+examples/rl/go2_terrain_eval.py
+  s_6331e9b5eb051b::t_7282f49cda3ab2 7,9,157-163,167-168
+  s_6331e9b5eb051b::t_bf3201a12f07db 164-166
+examples/rigid/drone_fly_route.py
+  s_6331e9b5eb051b::t_02cd0239c6ebf9 5-7,134,136-144
+examples/rendering/batch_renderer_franka.py
+  s_6331e9b5eb051b::t_bf3201a12f07db 143,152-155
+  s_6331e9b5eb051b::t_c1b0d467b7d4b4 4-5,134-142,144-151
+examples/multiphysics/rigid_mpm_fruit_ninja.py
+  s_6331e9b5eb051b::t_69a5a7dbe0f12b 8-9,11,297,302-330
+examples/multiphysics/soft_grasp.py
+  s_6331e9b5eb051b::t_b4c02cc6aa2336 8
+  s_6331e9b5eb051b::t_354b109f9b590d 10,232-269,272-274
+  s_6331e9b5eb051b::t_b4f910f093d5e7 270-271
+examples/parallel/franka_heterogeneous_grasp.py
+  s_6331e9b5eb051b::t_56292b598593bb 27
+  s_6331e9b5eb051b::t_5dab8958597ae0 134-144,146-167
+examples/rigid/merge_entities.py
+  s_6331e9b5eb051b::t_02eb94955583b0 156
+  s_6331e9b5eb051b::t_5ddb144d4114cd 3-5,155,157-159,161-171
+examples/sensors/tactile_peg_insertion.py
+  s_6331e9b5eb051b::t_c868b5e7266996 10,381-403,407-425
+examples/sensors/imu_franka.py
+  s_6331e9b5eb051b::t_2ed355d2e1bf21 6,143-155,158,161,163-178
+examples/rigid/delta_robot.py
+  s_6331e9b5eb051b::t_2d511c462c5180 10
+  s_6331e9b5eb051b::t_1f5b7fe246fcef 382
+  s_6331e9b5eb051b::t_5bd6196c442361 356
+  s_6331e9b5eb051b::t_1be019219e60b4 343-344,346-355,357-381,383-384
+  s_6331e9b5eb051b::t_09d5a344ef0b12 15,317,334-337,340-342
+examples/sensors/joint_torque_franka.py
+  s_6331e9b5eb051b::t_5103fdd06889aa 14,148-157
+examples/multiphysics/ipc_fold_towel.py
+  s_6331e9b5eb051b::t_6c67b9d6e6f454 266-268
+  s_6331e9b5eb051b::t_38e6f8637e159e 287
+  s_6331e9b5eb051b::t_d5acbd990893f6 10-11,13,174,206-264,269-278,280-286,288-306
+examples/rigid/usd_kitchen.py
+  s_6331e9b5eb051b::t_053b1b786361db 12-15,145-146,148,158-162
+examples/rigid/torsional_grasp.py
+  s_6331e9b5eb051b::t_5c878d3fbd7c3a 9,115-129
+examples/deformable/pbd_jelly_delivery.py
+  s_6331e9b5eb051b::t_48559fcc9818af 8-9,11,299-323,325-355
+.github/contributing/EXAMPLES.md
+  s_6331e9b5eb051b::t_d61bd0b23a92fc 66-74
+examples/rigid/ik_shadow_hand.py
+  s_6331e9b5eb051b::t_ed8b066f503550 5,119-129
+examples/multiphysics/sph_mpm_bathtub.py
+  s_6331e9b5eb051b::t_f9862f47a2086a 8-9,11,298-320
+examples/deformable/mpm_roll_dough.py
+  s_6331e9b5eb051b::t_e77e01a5f6f768 8-10,222,224-235
+examples/deformable/pbd_tablecloth.py
+  s_6331e9b5eb051b::t_bf3201a12f07db 8-9,173
+  s_6331e9b5eb051b::t_57560c671b3d54 10-11,174-177,179-181,183-185,187-189,191-193,210-229,232-244
+  s_6331e9b5eb051b::t_9ccdcd087295df 230-231
+  s_6331e9b5eb051b::t_d1fdce595c7175 172
+examples/parallel/franka_grasp_bottle.py
+  s_6331e9b5eb051b::t_341895781a8a4f 3,102-151
+examples/deformable/pbd_flags_in_wind.py
+  s_6331e9b5eb051b::t_1f5b7fe246fcef 5-6,8,155-169
+examples/rigid/usd_fridge.py
+  s_6331e9b5eb051b::t_bdaf05dbfb7aa9 112-119
+  s_6331e9b5eb051b::t_053b1b786361db 3
+examples/sensors/tactile_sandbox.py
+  s_6331e9b5eb051b::t_d0e5ef49ae7ff8 8,10,398,491-518
+examples/rigid/diffik_controller.py
+  s_6331e9b5eb051b::t_35d6681030f228 3
+  s_6331e9b5eb051b::t_40be295c018e37 139-149
+examples/fluids/sph_pour.py
+  s_6331e9b5eb051b::t_ceb5d87c2ccdae 240-241
+  s_6331e9b5eb051b::t_34f88d4dfaf6b1 8
+  s_6331e9b5eb051b::t_11d5a060aeba4e 9,226-238,242-251,253-257
+examples/rigid/stack_rings.py
+  s_6331e9b5eb051b::t_1619f71004726d 9,190,214,216-234,237,241-258
+  s_6331e9b5eb051b::t_ae6e6327c3adad 235-236,238-240
+examples/sensors/surface_distance_shadowhand.py
+  s_6331e9b5eb051b::t_73ce93f3b7450e 6,8,167-168,171-186
+examples/rigid/wrecking_ball.py
+  s_6331e9b5eb051b::t_7c206d34c1d2ff 9,259-260,263,265-280
+examples/interaction/imgui_joint_control.py
+  s_6331e9b5eb051b::t_97e36dff838b43 11,89-105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fa3cd694e3386e92c0d94958cd61260a9ce345f6",
+  "prompts": {},
+  "sessions": {
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
