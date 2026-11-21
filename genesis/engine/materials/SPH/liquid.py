@@ -1,6 +1,7 @@
 from genesis.typing import NonNegativeFloat, PositiveFloat
 
-from .base import Base, SamplerType
+from ..base import SamplerType
+from .base import Base
 
 
 class Liquid(Base):

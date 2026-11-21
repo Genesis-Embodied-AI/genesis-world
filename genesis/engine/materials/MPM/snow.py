@@ -6,7 +6,7 @@ from pydantic import StrictBool, model_validator
 import genesis as gs
 from genesis.constants import STRUCTURE
 
-from .base import SamplerType
+from ..base import SamplerType
 from .elasto_plastic import ElastoPlastic
 
 

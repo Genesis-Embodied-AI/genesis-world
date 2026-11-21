@@ -8,7 +8,8 @@ import genesis as gs
 from genesis.constants import STRUCTURE
 from genesis.typing import PositiveFloat, ValidFloat
 
-from .base import Base, SamplerType
+from ..base import SamplerType
+from .base import Base
 
 
 @qd.data_oriented

@@ -38,9 +38,10 @@ class Emitter(RBC):
 
     def reset(self):
         """
-        Reset the emitter's internal particle index to start emitting from the beginning.
+        Reset the emitter's internal particle index and accumulated droplet length to start emitting from the beginning.
         """
         self._next_particle = 0
+        self._acc_droplet_len = 0.0
 
     def emit(
         self,
@@ -141,35 +142,7 @@ class Emitter(RBC):
                 gu.z_up_to_R(direction) @ gu.axis_angle_to_R(np.array([0.0, 0.0, 1.0], dtype=gs.np_float), theta),
             )
 
-            check_particles_inside_boundary(positions, self.solver.boundary_lower, self.solver.boundary_upper)
-
-            n_particles = len(positions)
-
-            # Expand vels with batch dimension
-            vels = speed * direction
-
-            if n_particles > self._entity.n_particles:
-                gs.raise_exception(
-                    f"Number of particles to emit ({n_particles}) at the current step is larger than the maximum "
-                    f"number of particles ({self._entity.n_particles})."
-                )
-
-            particles_idx = torch.arange(
-                self._next_particle, self._next_particle + n_particles, dtype=gs.tc_int, device=gs.device
-            )
-
-            self._entity.set_particles_pos(positions, particles_idx)
-            self._entity.set_particles_vel(vels, particles_idx)
-            self._entity.set_particles_active(gs.ACTIVE, particles_idx)
-
-            self._next_particle += n_particles
-
-            # recycle particles
-            if self._next_particle + n_particles > self._entity.n_particles:
-                self._next_particle = 0
-
-            gs.logger.debug(f"Emitted {n_particles} particles. Next particle index: {self._next_particle}.")
-
+            self._emit_particles(positions, speed * direction)
         else:
             gs.logger.debug("Droplet length is too short for current step. Skipping to next step.")
 
@@ -194,6 +167,9 @@ class Emitter(RBC):
         """
         assert self._entity is not None
 
+        if not 0.0 < source_radius < float("inf"):
+            gs.raise_exception(f"The radius of the source must be positive and finite, got {source_radius}.")
+
         pos = np.asarray(pos, dtype=gs.np_float)
 
         if particle_size is None:
@@ -206,12 +182,12 @@ class Emitter(RBC):
             sampler=self._entity.sampler,
         )
         positions = pos + positions_
-
-        check_particles_inside_boundary(positions, self.solver.boundary_lower, self.solver.boundary_upper)
-
         dists = np.linalg.norm(positions_, axis=1)
         positions[dists < gs.EPS] = gs.EPS
-        vels = (speed / (dists[:, None] + gs.EPS)) * positions_
+        self._emit_particles(positions, (speed / (dists[:, None] + gs.EPS)) * positions_)
+
+    def _emit_particles(self, positions, vels):
+        check_particles_inside_boundary(positions, self.solver.boundary_lower, self.solver.boundary_upper)
 
         n_particles = len(positions)
         if n_particles > self._entity.n_particles:
@@ -220,19 +196,16 @@ class Emitter(RBC):
                 f"of particles ({self._entity.n_particles})."
             )
 
+        # The particles are recycled from the first one once an emission would run past the last one
+        if self._next_particle + n_particles > self._entity.n_particles:
+            self._next_particle = 0
         particles_idx = torch.arange(
             self._next_particle, self._next_particle + n_particles, dtype=gs.tc_int, device=gs.device
         )
-
         self._entity.set_particles_pos(positions, particles_idx)
         self._entity.set_particles_vel(vels, particles_idx)
         self._entity.set_particles_active(gs.ACTIVE, particles_idx)
-
-        self._next_particle += n_particles
-
-        # recycle particles
-        if self._next_particle + n_particles > self._entity.n_particles:
-            self._next_particle = 0
+        self._next_particle = (self._next_particle + n_particles) % self._entity.n_particles
 
         gs.logger.debug(f"Emitted {n_particles} particles. Next particle index: {self._next_particle}.")
 
