@@ -681,7 +681,8 @@ class KinematicSolver(Solver):
         """Write the link frames and the joint and dof parameters of each heterogeneous variant to the envs carrying it.
 
         The init kernels broadcast those of the primary to every environment, while heterogeneous simulation batches
-        the link, joint and dof info (see 'build').
+        the link, joint and dof info (see 'build'). An environment simulates the links its variant does not carry as
+        inert links (see 'get_variants_kinematics'): their joints are fixed there, so their dof and q ranges are empty.
         """
         entities = [entity for entity in self._entities if entity._desc.variants]
         if not entities:
@@ -690,6 +691,11 @@ class KinematicSolver(Solver):
         # Field layout, batch second, since the arrays are written back as fields
         links_pos = qd_to_numpy(self.dyn_info.links.pos, transpose=False, copy=True)
         links_quat = qd_to_numpy(self.dyn_info.links.quat, transpose=False, copy=True)
+        links_q_end = qd_to_numpy(self.dyn_info.links.q_end, transpose=False, copy=True)
+        links_dof_end = qd_to_numpy(self.dyn_info.links.dof_end, transpose=False, copy=True)
+        links_n_dofs = qd_to_numpy(self.dyn_info.links.n_dofs, transpose=False, copy=True)
+        joints_type = qd_to_numpy(self.dyn_info.joints.type, transpose=False, copy=True)
+        joints_dof_end = qd_to_numpy(self.dyn_info.joints.dof_end, transpose=False, copy=True)
         joints_pos = qd_to_numpy(self.dyn_info.joints.pos, transpose=False, copy=True)
         joints_sol_params = qd_to_numpy(self.dyn_info.joints.sol_params, transpose=False, copy=True)
         dofs_info = self.dyn_info.dofs
@@ -709,6 +715,11 @@ class KinematicSolver(Solver):
 
         for entity in entities:
             variants_links, variants_j_descs, _, envs_variant_idx = get_variants_kinematics(entity, n_envs=self.n_envs_)
+            for i_l, link in enumerate(entity.links):
+                envs_is_carried = np.array([i_l in variant.links_idx for variant in entity._desc.variants])
+                (link.active_envs_idx,) = np.nonzero(envs_is_carried[envs_variant_idx])
+                for joint in link.joints:
+                    joint.active_envs_idx = link.active_envs_idx
             links_slice = slice(entity.link_start, entity.link_end)
             variants_links_pos = np.stack([[l_desc.pos for l_desc in links] for links in variants_links])
             variants_links_quat = np.stack([[l_desc.quat for l_desc in links] for links in variants_links])
@@ -720,6 +731,26 @@ class KinematicSolver(Solver):
                 continue
             variants_joints = [[asdict(j_desc) for j_desc in j_descs] for j_descs in variants_j_descs]
             joints_slice = slice(entity.joint_start, entity.joint_end)
+            variants_joints_type = np.array([[j_fields["type"] for j_fields in joints] for joints in variants_joints])
+            joints_type[joints_slice] = variants_joints_type[envs_variant_idx].swapaxes(0, 1)
+            # The dof and q ranges of a joint, and of the link holding it, are empty in an environment holding it fixed
+            variants_joints_is_moving = variants_joints_type != gs.JOINT_TYPE.FIXED
+            variants_joints_n_dofs = variants_joints_is_moving * np.array([joint.n_dofs for joint in entity.joints])
+            variants_joints_n_qs = variants_joints_is_moving * np.array([joint.n_qs for joint in entity.joints])
+            joints_dof_start = np.array([joint.dof_start for joint in entity.joints])
+            joints_dof_end[joints_slice] = (joints_dof_start + variants_joints_n_dofs)[envs_variant_idx].swapaxes(0, 1)
+            links_joint_start = np.array([link.joint_start - entity.joint_start for link in entity.links])
+            links_joint_end = np.array([link.joint_end - entity.joint_start for link in entity.links])
+            for values, links_start, variants_joints_n in (
+                (links_n_dofs, 0, variants_joints_n_dofs),
+                (links_dof_end, np.array([link.dof_start for link in entity.links]), variants_joints_n_dofs),
+                (links_q_end, np.array([link.q_start for link in entity.links]), variants_joints_n_qs),
+            ):
+                variants_joints_cumsum = np.pad(np.cumsum(variants_joints_n, axis=1), ((0, 0), (1, 0)))
+                variants_links_n = (
+                    variants_joints_cumsum[:, links_joint_end] - variants_joints_cumsum[:, links_joint_start]
+                )
+                values[links_slice] = (links_start + variants_links_n)[envs_variant_idx].swapaxes(0, 1)
             variants_joints_pos = np.stack([[j_fields["pos"] for j_fields in joints] for joints in variants_joints])
             joints_pos[joints_slice] = variants_joints_pos[envs_variant_idx].swapaxes(0, 1)
             variants_sol_params = np.stack(
@@ -738,6 +769,11 @@ class KinematicSolver(Solver):
 
         self.dyn_info.links.pos.from_numpy(links_pos)
         self.dyn_info.links.quat.from_numpy(links_quat)
+        self.dyn_info.links.q_end.from_numpy(links_q_end)
+        self.dyn_info.links.dof_end.from_numpy(links_dof_end)
+        self.dyn_info.links.n_dofs.from_numpy(links_n_dofs)
+        self.dyn_info.joints.type.from_numpy(joints_type)
+        self.dyn_info.joints.dof_end.from_numpy(joints_dof_end)
         self.dyn_info.joints.pos.from_numpy(joints_pos)
         self.dyn_info.joints.sol_params.from_numpy(joints_sol_params)
         for (field, _), dofs_value in zip(dofs_fields, dofs_values):

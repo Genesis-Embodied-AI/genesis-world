@@ -35,14 +35,16 @@ def _add_free_body(mjcf, name, geom_type, geom_size, pos, rgba=None):
     ET.SubElement(body, "joint", name=f"{name}_root", type="free")
 
 
-def _build_fixed_base_dual_arm(shoulder_damping, right_arm_parent):
+def _build_fixed_base_dual_arm(shoulder_damping, right_arm_parent, n_forearms=0):
     """Generate a URDF of a torso the world carries and two one-link arms hanging from it by damped shoulders.
 
     The arms are mounted close enough that they overlap once they hang at rest, so that they touch when they fall under
     gravity.
 
-    'right_arm_parent' names the link the right shoulder hangs from. Both shoulders sit at the same offset from the
-    frame of their parent, so hanging the right arm from the left one changes the kinematic tree alone.
+    'right_arm_parent' names the link the right shoulder hangs from, None leaving the right arm out. Both shoulders sit
+    at the same offset from the frame of their parent, so hanging the right arm from the left one changes the kinematic
+    tree alone. 'n_forearms' chains that many forearms from the tip of the left arm, each hanging from the tip of the
+    previous one by a damped elbow.
     """
     robot = ET.Element("robot", name="dual_arm")
     torso = ET.SubElement(robot, "link", name="torso")
@@ -52,6 +54,8 @@ def _build_fixed_base_dual_arm(shoulder_damping, right_arm_parent):
     for tag in ("visual", "collision"):
         ET.SubElement(ET.SubElement(ET.SubElement(torso, tag), "geometry"), "box", size="0.1 0.3 0.1")
     for side, sign in (("left", 1.0), ("right", -1.0)):
+        if side == "right" and right_arm_parent is None:
+            continue
         link = ET.SubElement(robot, "link", name=f"{side}_arm")
         inertial = ET.SubElement(link, "inertial")
         ET.SubElement(inertial, "origin", xyz=f"{sign * 0.15} 0 0")
@@ -65,6 +69,23 @@ def _build_fixed_base_dual_arm(shoulder_damping, right_arm_parent):
         ET.SubElement(joint, "parent", link="torso" if side == "left" else right_arm_parent)
         ET.SubElement(joint, "child", link=f"{side}_arm")
         ET.SubElement(joint, "origin", xyz=f"{sign * 0.05} 0 0")
+        ET.SubElement(joint, "axis", xyz="0 1 0")
+        ET.SubElement(joint, "limit", lower="-3.14", upper="3.14", effort="100", velocity="10")
+        ET.SubElement(joint, "dynamics", damping=str(shoulder_damping))
+    for i_forearm in range(n_forearms):
+        link = ET.SubElement(robot, "link", name=f"left_forearm_{i_forearm}")
+        inertial = ET.SubElement(link, "inertial")
+        ET.SubElement(inertial, "origin", xyz="0.1 0 0")
+        ET.SubElement(inertial, "mass", value="0.5")
+        ET.SubElement(inertial, "inertia", ixx="0.0005", iyy="0.002", izz="0.002", ixy="0", ixz="0", iyz="0")
+        for tag in ("visual", "collision"):
+            geom_prop = ET.SubElement(link, tag)
+            ET.SubElement(geom_prop, "origin", xyz="0.1 0 0")
+            ET.SubElement(ET.SubElement(geom_prop, "geometry"), "box", size="0.2 0.1 0.1")
+        joint = ET.SubElement(robot, "joint", name=f"left_elbow_{i_forearm}", type="revolute")
+        ET.SubElement(joint, "parent", link="left_arm" if i_forearm == 0 else f"left_forearm_{i_forearm - 1}")
+        ET.SubElement(joint, "child", link=f"left_forearm_{i_forearm}")
+        ET.SubElement(joint, "origin", xyz="0.3 0 0" if i_forearm == 0 else "0.2 0 0")
         ET.SubElement(joint, "axis", xyz="0 1 0")
         ET.SubElement(joint, "limit", lower="-3.14", upper="3.14", effort="100", velocity="10")
         ET.SubElement(joint, "dynamics", damping=str(shoulder_damping))
@@ -84,6 +105,11 @@ def fixed_base_dual_arm_high_damping():
 @pytest.fixture(scope="session")
 def fixed_base_dual_arm_chained():
     return _build_fixed_base_dual_arm(shoulder_damping=0.5, right_arm_parent="left_arm")
+
+
+@pytest.fixture(scope="session")
+def fixed_base_single_arm_with_forearms():
+    return _build_fixed_base_dual_arm(shoulder_damping=0.5, right_arm_parent=None, n_forearms=2)
 
 
 @pytest.fixture(scope="session")

@@ -13,7 +13,7 @@ import math
 import os
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from itertools import chain
 from typing import Any, Self
 
@@ -229,6 +229,26 @@ class RigidJointDescription:
         if self.dofs_act_gain is None:
             self.dofs_act_gain = np.zeros(self.n_dofs)
 
+    def inert(self) -> Self:
+        """Describe this joint as an environment simulates it when its heterogeneous variant does not carry its link.
+
+        The joint is fixed, so its degrees of freedom belong to no joint there: no motion, force or actuation reaches
+        them, and they stay at rest.
+        """
+        # A unit armature is the whole row of such a dof in the mass matrix, which keeps the matrix positive definite,
+        # and its zero motion axes keep it out of every Jacobian and of the averages of the mass matrix (see
+        # func_is_dof_moving).
+        return RigidJointDescription(
+            name=self.name,
+            type=gs.JOINT_TYPE.FIXED,
+            n_qs=self.n_qs,
+            n_dofs=self.n_dofs,
+            dofs_motion_ang=np.zeros((self.n_dofs, 3)),
+            dofs_motion_vel=np.zeros((self.n_dofs, 3)),
+            dofs_armature=np.ones(self.n_dofs),
+            dofs_force_range=np.zeros((self.n_dofs, 2)),
+        )
+
 
 @dataclass(kw_only=True)
 class KinematicLinkDescription:
@@ -250,6 +270,23 @@ class KinematicLinkDescription:
     is_aligned: bool = False
     joints: list["RigidJointDescription"] = field(default_factory=list)
     vgeoms: list[RigidVisGeomDescription] = field(default_factory=list)
+
+    def inert(self, **changes) -> Self:
+        """Describe this link as an environment simulates it when its heterogeneous variant does not carry it.
+
+        The link stands welded onto the frame of its parent, without geometry. 'changes' sets other fields, as
+        'dataclasses.replace' does.
+        """
+        return replace(
+            self,
+            pos=gu.zero_pos(),
+            quat=gu.identity_quat(),
+            offset_pos=gu.zero_pos(),
+            offset_quat=gu.identity_quat(),
+            is_aligned=False,
+            vgeoms=[],
+            **changes,
+        )
 
 
 @dataclass(kw_only=True)
@@ -273,6 +310,23 @@ class RigidLinkDescription(KinematicLinkDescription):
     geoms: list[RigidGeomDescription] = field(default_factory=list)
     contact_exclusions: list[str] = field(default_factory=list)
 
+    def inert(self, **changes) -> Self:
+        """Describe this link as an environment simulates it when its heterogeneous variant does not carry it.
+
+        The link is massless, welded onto the frame of its parent and without geometry, its inverse weight left for
+        the solver's refresh to complete (see 'KinematicLinkDescription.inert').
+        """
+        return super().inert(
+            inertial_pos=gu.zero_pos(),
+            inertial_quat=gu.identity_quat(),
+            inertia=np.zeros((3, 3), dtype=gs.np_float),
+            mass=0.0,
+            invweight=np.full((2,), fill_value=-1.0, dtype=gs.np_float),
+            geoms=[],
+            contact_exclusions=[],
+            **changes,
+        )
+
 
 @dataclass
 class RigidEqualityDescription:
@@ -289,9 +343,10 @@ class RigidEqualityDescription:
 class KinematicVariantLinkDescription:
     """What one variant of a heterogeneous entity gives one link: its frame, its joints and its visual geoms.
 
-    Every variant shares the kinematic topology of the primary, so its links hang from the same parents through joints
-    of the same names, types and numbers of degrees of freedom. The frame of the link in its parent and the parameters
-    of its joints are the variant's own, which every environment carrying it simulates.
+    The link hangs from the link its parent in the variant maps to, through joints of the same types and numbers of
+    degrees of freedom as those of the entity link (see 'KinematicEntityDescription._load_heterogeneous_morphs'). The
+    frame of the link in its parent and the parameters of its joints are the variant's own, which every environment
+    carrying it simulates.
     """
 
     pos: np.ndarray
@@ -320,8 +375,11 @@ class RigidVariantLinkDescription(KinematicVariantLinkDescription):
 class KinematicVariantDescription:
     """Describe one variant of a heterogeneous entity: where it stands, and what it gives each link.
 
-    A heterogeneous entity holds one set of links and dispatches a variant per environment, so a variant is described
-    beside those links rather than as an entity of its own.
+    A heterogeneous entity holds one set of links, the merge of the kinematic trees of every variant, and dispatches a
+    variant per environment, so a variant is described beside those links rather than as an entity of its own.
+
+    An environment simulates every link its variant does not carry as an inert link (see
+    'KinematicLinkDescription.inert' and 'RigidJointDescription.inert').
 
     'default_armature' is the default rotor inertia of its morph, None for a morph without one. Every joint a motor
     could drive gets one, a revolute or prismatic joint moving a link on its own: a motor's rotor is real inertia, and
@@ -331,9 +389,15 @@ class KinematicVariantDescription:
     """
 
     init_qpos: np.ndarray
+    """The initial configuration of the variant in the generalized coordinates of the entity, zero for those of the
+    links it does not carry."""
     offset_pos: np.ndarray
     offset_quat: np.ndarray
+    links_idx: list[int]
+    """The entity links the variant carries, in ascending order."""
     links: list[KinematicVariantLinkDescription] = field(default_factory=list)
+    """What the variant gives each link of 'links_idx', in the same order. The primary describes its links as the
+    entity links themselves, so its own list stays empty."""
     default_armature: float | None = None
 
 
@@ -387,13 +451,17 @@ def is_link_fixed(links: Sequence[KinematicLinkDescription], idx: int) -> bool:
 class Resolution:
     """Transient state of one resolution, dropped once the description is complete.
 
-    'links_inertial_info' holds one entry per link, then one per variant of that link, in resolution order. The align
-    anchoring consumes it (see 'LinkInertialInfo').
+    'links_inertial_info' holds one list per link, with one entry per variant in variant order, None for a variant that
+    does not carry the link. The align anchoring consumes it (see 'LinkInertialInfo').
+
+    'variants_eqs_info' holds the parsed equality constraints of every variant but the primary, each with the index of
+    its variant, naming the links and joints they bind as the entity names them.
     """
 
     options: Options
     is_mujoco_compatible: bool
-    links_inertial_info: list[list[LinkInertialInfo]] = field(default_factory=list)
+    links_inertial_info: list[list[LinkInertialInfo | None]] = field(default_factory=list)
+    variants_eqs_info: list[tuple[int, dict[str, Any]]] = field(default_factory=list)
 
 
 @dataclass
@@ -492,10 +560,17 @@ class KinematicEntityDescription(EntityDescription):
         self._align_free_roots(resolution)
 
     def _load_heterogeneous_morphs(self, resolution: Resolution):
-        """Load heterogeneous morphs (additional geometry variants for parallel environments).
+        """Merge the kinematic tree of every heterogeneous variant into the links of the entity.
 
-        Each variant is loaded as additional geoms/vgeoms attached to links.
-        Each variant is described beside the links (see 'KinematicVariantDescription').
+        Each variant is described beside the links (see 'KinematicVariantDescription'). The variants merge in order,
+        each into the tree the previous ones left. The root of a variant maps to the root of the entity, through joints
+        of the same types and numbers of degrees of freedom. Every other link of a variant maps to an entity link that
+        hangs from the entity link its parent maps to, through joints of the same types and numbers of degrees of
+        freedom, that the world carries if and only if it carries the variant link, and that no other link of the
+        variant maps to. The candidate of the same name comes first, then the first one in order. A link without any
+        candidate adds an entity link, placed after the last descendant of its parent so that every subtree keeps a
+        contiguous range of links. Where the entity already holds the name of that link or of one of its joints, the
+        name takes the suffix '_<i>', 'i' being the index of the variant among the morphs.
         """
         if not len(self.spec.morphs) > 1:
             return
@@ -504,107 +579,155 @@ class KinematicEntityDescription(EntityDescription):
         # MJCF/URDF with several free root bodies) would cross-contaminate the roots' offsets and init poses.
         if sum(l_desc.parent_idx == -1 for l_desc in self.links) > 1:
             gs.raise_exception("Heterogeneous morphs are not supported on multi-root entities.")
+        root_joints_signature = tuple((j_desc.type, j_desc.n_dofs) for j_desc in self.links[0].joints)
 
-        # Track per-variant init_qpos and base-link offset for per-environment dispatch (primary first). Each variant
-        # accumulates its own below so an asymmetric variant is aligned exactly like its homogeneous equivalent.
-        init_qpos_chunks = [j_desc.init_qpos for l_desc in self.links for j_desc in l_desc.joints]
-        self.variants.append(
-            KinematicVariantDescription(
-                init_qpos=np.concatenate(init_qpos_chunks) if init_qpos_chunks else np.array([], dtype=gs.np_float),
-                offset_pos=self.links[0].offset_pos,
-                offset_quat=self.links[0].offset_quat,
-                # Only a scene or robot description file yields a robot link, and those morphs state a default armature.
-                default_armature=self.spec.morphs[0].default_armature if any(l.is_robot for l in self.links) else None,
-            )
-        )
+        # The entity links each variant carries, with the description and the initial configuration it gives each of
+        # them, the primary first. A link the merge inserts shifts the entity indices of the links after it.
+        variants_links_idx = [list(range(len(self.links)))]
+        variants_links = [[]]
+        variants_links_init_qpos = [
+            [np.concatenate([np.zeros(0), *(j_desc.init_qpos for j_desc in l_desc.joints)]) for l_desc in self.links]
+        ]
+        variants_offset = [(self.links[0].offset_pos, self.links[0].offset_quat)]
+        # Only a scene or robot description file yields a robot link, and those morphs state a default armature.
+        variants_default_armature = [
+            self.spec.morphs[0].default_armature if any(l.is_robot for l in self.links) else None
+        ]
 
-        n_links = len(self.links)
-
-        # Load additional heterogeneous variants
-        for morph in self.spec.morphs[1:]:
+        for i_variant, morph in enumerate(self.spec.morphs[1:], start=1):
+            # The COM/principal-axis anchoring of the floating base is deferred to '_align_free_roots', which runs once
+            # every variant is described, so only the morph pose offset is composed here.
+            offset_pos = np.array(morph.offset_pos, dtype=gs.np_float)
+            offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
             if isinstance(morph, (gs.morphs.URDF, gs.morphs.MJCF)):
-                # Parse variant scene file
-                v_l_infos, v_links_j_infos, v_links_g_infos, _ = self._parse_scene(morph, resolution)
+                v_l_infos, v_links_j_infos, v_links_g_infos, v_eqs_info = self._parse_scene(morph, resolution)
+                if sum(v_l_info["parent_idx"] == -1 for v_l_info in v_l_infos) > 1:
+                    gs.raise_exception("Heterogeneous morphs are not supported on multi-root entities.")
 
-                # Validate that the variant has the same joint structure as the primary
-                if len(v_l_infos) != n_links:
-                    gs.raise_exception(
-                        f"Heterogeneous variant has {len(v_l_infos)} links, "
-                        f"but primary has {n_links}. All variants must have the same link count."
+                # Map every link of the variant to an entity link, adding the entity links it lacks
+                v_links_idx, v_links_is_fixed, v_links_joints = [], [], []
+                for v_l_info, v_j_infos in zip(v_l_infos, v_links_j_infos):
+                    v_parent_idx = v_l_info["parent_idx"]
+                    joints_signature = tuple((j_info["type"], j_info["n_dofs"]) for j_info in v_j_infos)
+                    is_fixed = all(j_info["type"] is gs.JOINT_TYPE.FIXED for j_info in v_j_infos) and (
+                        v_parent_idx == -1 or v_links_is_fixed[v_parent_idx]
                     )
-                for i_l, (l_desc, v_l_info, v_j_infos) in enumerate(zip(self.links, v_l_infos, v_links_j_infos)):
-                    if v_l_info["parent_idx"] != l_desc.parent_idx:
-                        gs.raise_exception(
-                            f"Link parent mismatch at link {i_l} ('{l_desc.name}'): primary hangs it from link "
-                            f"{l_desc.parent_idx}, variant from link {v_l_info['parent_idx']}. All variants must share "
-                            "the kinematic topology of the primary."
-                        )
-                    primary_joints = l_desc.joints
-                    if len(v_j_infos) != len(primary_joints):
-                        gs.raise_exception(
-                            f"Heterogeneous variant link {i_l} has {len(v_j_infos)} joints, "
-                            f"but primary has {len(primary_joints)}."
-                        )
-                    for p_joint, v_j_info in zip(primary_joints, v_j_infos):
-                        if p_joint.name != v_j_info["name"]:
-                            gs.raise_exception(
-                                f"Joint name mismatch at link {i_l}: primary has '{p_joint.name}', "
-                                f"variant has '{v_j_info['name']}'. All variants must have the same joint names."
-                            )
-                        if p_joint.type != v_j_info["type"]:
-                            gs.raise_exception(
-                                f"Joint type mismatch for '{p_joint.name}': primary has {p_joint.type}, "
-                                f"variant has {v_j_info['type']}."
-                            )
-                        if p_joint.n_dofs != v_j_info["n_dofs"]:
-                            gs.raise_exception(
-                                f"DoF count mismatch for joint '{p_joint.name}': primary has {p_joint.n_dofs}, "
-                                f"variant has {v_j_info['n_dofs']}."
-                            )
+                    v_links_is_fixed.append(is_fixed)
+                    v_joints = [description_from_info(RigidJointDescription, j_info) for j_info in v_j_infos]
+                    v_links_joints.append(v_joints)
 
-                # The links a variant excludes from collision are named as the primary names them, links being matched
-                # by their place in the shared kinematic topology
+                    if v_parent_idx == -1:
+                        # Whether the base is fixed or free decides which links the world carries, and with them the
+                        # vertices every environment shares, so all variants must agree on it
+                        if joints_signature != root_joints_signature:
+                            gs.raise_exception(
+                                "The root link of every heterogeneous variant must hang from the world through joints "
+                                f"of the same types and numbers of degrees of freedom. Variant {i_variant} has "
+                                f"{joints_signature}, while the primary has {root_joints_signature}."
+                            )
+                        i_l = 0
+                    else:
+                        parent_idx = v_links_idx[v_parent_idx]
+                        candidates_idx = [
+                            j_l
+                            for j_l, l_desc in enumerate(self.links)
+                            if l_desc.parent_idx == parent_idx
+                            and tuple((j_desc.type, j_desc.n_dofs) for j_desc in l_desc.joints) == joints_signature
+                            and j_l not in v_links_idx
+                            and is_link_fixed(self.links, j_l) == is_fixed
+                        ]
+                        i_l = next(
+                            (j_l for j_l in candidates_idx if self.links[j_l].name == v_l_info["name"]),
+                            candidates_idx[0] if candidates_idx else None,
+                        )
+                    if i_l is None:
+                        i_l = parent_idx + 1
+                        while i_l < len(self.links):
+                            i_ancestor = self.links[i_l].parent_idx
+                            while i_ancestor > parent_idx:
+                                i_ancestor = self.links[i_ancestor].parent_idx
+                            if i_ancestor != parent_idx:
+                                break
+                            i_l += 1
+                        for l_desc in self.links:
+                            if l_desc.parent_idx >= i_l:
+                                l_desc.parent_idx += 1
+                            if l_desc.root_idx is not None and l_desc.root_idx >= i_l:
+                                l_desc.root_idx += 1
+                        for links_idx in (*variants_links_idx, v_links_idx):
+                            links_idx[:] = [j_l + 1 if j_l >= i_l else j_l for j_l in links_idx]
+                        resolution.links_inertial_info.insert(i_l, [None] * i_variant)
+
+                        links_name = {l_desc.name for l_desc in self.links}
+                        joints_name = {j_desc.name for l_desc in self.links for j_desc in l_desc.joints}
+                        names = [v_l_info["name"], *(j_desc.name for j_desc in v_joints)]
+                        names_taken = [links_name, *([joints_name] * len(v_joints))]
+                        names = [
+                            f"{name}_{i_variant}" if name in taken else name for name, taken in zip(names, names_taken)
+                        ]
+                        if any(name in taken for name, taken in zip(names, names_taken)):
+                            gs.raise_exception(
+                                f"Heterogeneous variant {i_variant} adds the link '{v_l_info['name']}', whose name or "
+                                "whose joint names are taken even with the variant suffix. Rename them in the asset."
+                            )
+                        # The entity link describes the link as the primary has it: inert. The variants carrying it
+                        # describe their own frame, inertial and geoms, and its joints give the entity their types.
+                        self.links.insert(
+                            i_l,
+                            self.links[parent_idx].inert(
+                                name=names[0],
+                                parent_idx=parent_idx,
+                                is_robot=bool(v_l_info["is_robot"]),
+                                joints=[replace(j_desc, name=name) for j_desc, name in zip(v_joints, names[1:])],
+                            ),
+                        )
+                    v_links_idx.append(i_l)
+
+                # The links a variant excludes from collision are named as the entity names the links they map to
                 v_links_name = [v_l_info["name"] for v_l_info in v_l_infos]
                 for v_l_info in v_l_infos:
                     v_l_info["contact_exclusions"] = [
-                        self.links[v_links_name.index(name)].name for name in v_l_info.get("contact_exclusions", ())
+                        self.links[v_links_idx[v_links_name.index(name)]].name
+                        for name in v_l_info.get("contact_exclusions", ())
                     ]
+                # So are the links and joints its equality constraints bind
+                v_links_entity_name = {name: self.links[i_l].name for name, i_l in zip(v_links_name, v_links_idx)}
+                v_joints_name = {
+                    v_j_desc.name: j_desc.name
+                    for v_joints, i_l in zip(v_links_joints, v_links_idx)
+                    for v_j_desc, j_desc in zip(v_joints, self.links[i_l].joints)
+                }
+                for e_info in v_eqs_info:
+                    names = v_joints_name if e_info["type"] == EQUALITY_TYPE.JOINT else v_links_entity_name
+                    objs_name = tuple(names.get(name, name) for name in e_info["objs_name"])
+                    resolution.variants_eqs_info.append((i_variant, {**e_info, "objs_name": objs_name}))
 
-                # Post-process each link's geoms. The COM/principal-axis anchoring of the floating base is deferred
-                # to '_align_free_roots' (where the resolved per-variant composite inertia is known); here
-                # only the morph pose offset is composed into the variant's init_qpos and offset.
-                offset_pos = np.array(morph.offset_pos, dtype=gs.np_float)
-                offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
                 v_links_path = [v_l_info["path"] for v_l_info in v_l_infos]
                 self._resolve_geoms_values(morph, v_links_path, v_links_g_infos, resolution)
-                cg_vg_infos = []
-                for v_l_info, v_g_infos in zip(v_l_infos, v_links_g_infos):
-                    cg_infos, vg_infos = self._resolve_geoms(morph, v_g_infos, v_l_info["is_robot"])
-                    cg_vg_infos.append((cg_infos, vg_infos))
-
-                # Extract variant's init_qpos from parsed joint infos, composing the morph offset into the free joint so
-                # relative getters report the variant's authored frame.
-                variant_init_qpos_parts = []
-                for v_l_info, v_j_infos in zip(v_l_infos, v_links_j_infos):
-                    is_root = v_l_info["parent_idx"] == -1
-                    for j_info in v_j_infos:
-                        qpos = j_info["init_qpos"]
-                        if is_root and j_info["type"] == gs.JOINT_TYPE.FREE:
-                            init_pos, init_quat = gu.transform_pos_quat_by_trans_quat(
-                                np.array(morph.offset_pos, dtype=gs.np_float),
-                                np.array(morph.offset_quat, dtype=gs.np_float),
-                                qpos[:3],
-                                qpos[3:7],
-                            )
-                            qpos = np.concatenate([init_pos, init_quat])
-                        variant_init_qpos_parts.append(qpos)
-
-                # Resolve each link's inertial for this variant and stash it for the align anchor.
-                is_inertia_recomputed = morph.recompute_inertia
-                variant_links = []
-                for i_link, (v_l_info, v_j_infos, (cg_infos, vg_infos)) in enumerate(
-                    zip(v_l_infos, v_links_j_infos, cg_vg_infos)
+                v_links, v_links_init_qpos = [], []
+                for v_l_info, v_j_infos, v_g_infos, v_joints, i_l in zip(
+                    v_l_infos, v_links_j_infos, v_links_g_infos, v_links_joints, v_links_idx
                 ):
+                    # Compose the morph pose offset into the root link frame, exactly as '_align_link' composes it for
+                    # the primary, and into its free joint so relative getters report the variant's authored frame
+                    link_pos, link_quat = v_l_info["pos"], v_l_info["quat"]
+                    joints_init_qpos = [j_info["init_qpos"] for j_info in v_j_infos]
+                    if v_l_info["parent_idx"] == -1:
+                        link_pos, link_quat = gu.transform_pos_quat_by_trans_quat(
+                            offset_pos, offset_quat, link_pos, link_quat
+                        )
+                        for i_j, j_info in enumerate(v_j_infos):
+                            if j_info["type"] == gs.JOINT_TYPE.FREE:
+                                qpos = j_info["init_qpos"]
+                                init_pos, init_quat = gu.transform_pos_quat_by_trans_quat(
+                                    offset_pos, offset_quat, qpos[:3], qpos[3:7]
+                                )
+                                joints_init_qpos[i_j] = np.concatenate([init_pos, init_quat])
+                    v_links_init_qpos.append(np.concatenate([np.zeros(0), *joints_init_qpos]))
+
+                    # Resolve the inertial of the link for this variant and stash it for the align anchor
+                    cg_infos, vg_infos = self._resolve_geoms(morph, v_g_infos, v_l_info["is_robot"])
+                    is_inertia_recomputed = morph.recompute_inertia
                     inertial_info = self._resolve_inertial(
                         None if is_inertia_recomputed else v_l_info.get("inertial_mass"),
                         None if is_inertia_recomputed else v_l_info.get("inertial_pos"),
@@ -615,36 +738,23 @@ class KinematicEntityDescription(EntityDescription):
                         bool(v_l_info["is_robot"]),
                         resolution,
                     )
-                    resolution.links_inertial_info[i_link].append(inertial_info)
-                    v_joints = [description_from_info(RigidJointDescription, j_info) for j_info in v_j_infos]
-                    # A root link carries the morph pose offset, exactly as '_align_link' composes it for the primary
-                    link_pos, link_quat = v_l_info["pos"], v_l_info["quat"]
-                    if v_l_info["parent_idx"] == -1:
-                        link_pos, link_quat = gu.transform_pos_quat_by_trans_quat(
-                            offset_pos, offset_quat, link_pos, link_quat
-                        )
-                    variant_links.append(
+                    resolution.links_inertial_info[i_l].append(inertial_info)
+                    v_links.append(
                         self._describe_variant_link(
-                            i_link,
-                            v_l_info,
-                            link_pos,
-                            link_quat,
-                            v_joints,
-                            cg_infos,
-                            vg_infos,
-                            morph,
-                            inertial_info,
+                            i_l, v_l_info, link_pos, link_quat, v_joints, cg_infos, vg_infos, morph, inertial_info
                         )
                     )
-                self.variants.append(
-                    KinematicVariantDescription(
-                        init_qpos=np.concatenate(variant_init_qpos_parts) if variant_init_qpos_parts else np.array([]),
-                        offset_pos=offset_pos,
-                        offset_quat=offset_quat,
-                        links=variant_links,
-                        default_armature=morph.default_armature,
-                    )
-                )
+
+                # The links this variant does not carry
+                for links_inertial_info in resolution.links_inertial_info:
+                    if len(links_inertial_info) == i_variant:
+                        links_inertial_info.append(None)
+
+                v_links_order = np.argsort(v_links_idx)
+                variants_links_idx.append([v_links_idx[i] for i in v_links_order])
+                variants_links.append([v_links[i] for i in v_links_order])
+                variants_links_init_qpos.append([v_links_init_qpos[i] for i in v_links_order])
+                variants_default_armature.append(morph.default_armature)
 
             elif isinstance(morph, (gs.morphs.Mesh, gs.morphs.Primitive)):
                 if isinstance(morph, gs.morphs.Mesh):
@@ -655,11 +765,6 @@ class KinematicEntityDescription(EntityDescription):
                     gs.raise_exception("Mixing fixed and non-fixed morphs in heterogeneous entities is not supported.")
                 self._resolve_geoms_values(morph, [(self.links[0].name,)], [g_infos], resolution)
                 cg_infos, vg_infos = self._resolve_geoms(morph, g_infos, is_robot=False)
-
-                # The COM/principal-axis anchoring is deferred to '_align_free_roots', which runs once every variant
-                # is described. Compose only the morph pose offset here.
-                offset_pos = np.array(morph.offset_pos, dtype=gs.np_float)
-                offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
 
                 # Mesh/Primitive variants have no explicit inertial; the anchor inertia comes from their geometry.
                 inertial_info = self._resolve_inertial(None, None, None, None, cg_infos, vg_infos, False, resolution)
@@ -686,25 +791,35 @@ class KinematicEntityDescription(EntityDescription):
                 if morph.fixed:
                     init_qpos = np.array((), dtype=gs.np_float)
                 else:
-                    init_pos, init_quat = gu.transform_pos_quat_by_trans_quat(
-                        np.array(morph.offset_pos, dtype=gs.np_float),
-                        np.array(morph.offset_quat, dtype=gs.np_float),
-                        np.array(morph.pos, dtype=gs.np_float),
-                        np.array(morph.quat, dtype=gs.np_float),
-                    )
-                    init_qpos = np.concatenate([init_pos, init_quat])
-                self.variants.append(
-                    KinematicVariantDescription(
-                        init_qpos=init_qpos,
-                        offset_pos=offset_pos,
-                        offset_quat=offset_quat,
-                        links=[variant_link],
-                    )
-                )
+                    init_qpos = np.concatenate([link_pos, link_quat])
+                variants_links_idx.append([0])
+                variants_links.append([variant_link])
+                variants_links_init_qpos.append([init_qpos])
+                variants_default_armature.append(None)
             else:
                 gs.raise_exception(
                     f"Heterogeneous morphs only support URDF, MJCF, Primitive, and Mesh, got: {type(morph).__name__}."
                 )
+            variants_offset.append((offset_pos, offset_quat))
+
+        # Lay the initial configuration of every variant out over the generalized coordinates of the entity
+        links_q_start = np.cumsum([0, *(sum(j_desc.n_qs for j_desc in l_desc.joints) for l_desc in self.links)])
+        for links_idx, links, links_init_qpos, (offset_pos, offset_quat), default_armature in zip(
+            variants_links_idx, variants_links, variants_links_init_qpos, variants_offset, variants_default_armature
+        ):
+            init_qpos = np.zeros(links_q_start[-1], dtype=gs.np_float)
+            for i_l, link_init_qpos in zip(links_idx, links_init_qpos):
+                init_qpos[links_q_start[i_l] : links_q_start[i_l] + len(link_init_qpos)] = link_init_qpos
+            self.variants.append(
+                KinematicVariantDescription(
+                    init_qpos=init_qpos,
+                    offset_pos=offset_pos,
+                    offset_quat=offset_quat,
+                    links_idx=links_idx,
+                    links=links,
+                    default_armature=default_armature,
+                )
+            )
 
     def _describe_variant_link(
         self, i_link, v_l_info, link_pos, link_quat, joints, cg_infos, vg_infos, morph, inertial_info
@@ -1254,15 +1369,31 @@ class KinematicEntityDescription(EntityDescription):
             # chain rather than a single rigid body: its joint-space mass is not diagonal and the frames of its moving
             # children are not re-expressed here, so such roots are skipped.
             subtree = [i_root]
-            is_articulated = False
+            articulated_links_idx = []
             for i_l, l_desc in enumerate(links):
                 if i_l == i_root or l_desc.parent_idx not in subtree:
                     continue
                 if any(j_desc.n_dofs for j_desc in l_desc.joints):
-                    is_articulated = True
-                    break
-                subtree.append(i_l)
-            if is_articulated:
+                    articulated_links_idx.append(i_l)
+                else:
+                    subtree.append(i_l)
+
+            # The links each variant carries, by entity index, the primary describing its own as the entity links
+            if variants:
+                variants_links = [{i_l: links[i_l] for i_l in variants[0].links_idx}]
+                variants_links += [dict(zip(variant.links_idx, variant.links)) for variant in variants[1:]]
+            else:
+                variants_links = [dict(enumerate(links))]
+            variants_is_articulated = [
+                any(i_l in variant_links for i_l in articulated_links_idx) for variant_links in variants_links
+            ]
+            if any(variants_is_articulated):
+                # The alignment moves the frame of the free root, which every environment shares the structure of
+                if not all(variants_is_articulated):
+                    gs.raise_exception(
+                        f"Link '{root.name}': some heterogeneous variants articulate this free root and others do not, "
+                        "so it can be aligned for none of them. Set 'align=False' on the morphs."
+                    )
                 root.is_aligned = False
                 continue
 
@@ -1270,17 +1401,17 @@ class KinematicEntityDescription(EntityDescription):
             # have. The anchor composes the fixed subtree's inertia and moves the body frame to its center of mass
             # and principal axes. It re-expresses the variant geoms, so the geometry keeps its world pose, and folds
             # into the variant offset and init_qpos.
-            for i_v in range(len(resolution.links_inertial_info[i_root])):
-                variant_links = links if i_v == 0 else variants[i_v].links
+            for i_v, variant_links in enumerate(variants_links):
+                variant_subtree = [i_l for i_l in subtree if i_l in variant_links]
                 pose_in_root = {i_root: (gu.zero_pos(), gu.identity_quat())}
-                for i_l in subtree[1:]:
+                for i_l in variant_subtree[1:]:
                     pose_in_root[i_l] = gu.transform_pos_quat_by_trans_quat(
                         variant_links[i_l].pos, variant_links[i_l].quat, *pose_in_root[links[i_l].parent_idx]
                     )
 
                 inertial_info = []
                 explicit_mass_flags = set()
-                for i_l in subtree:
+                for i_l in variant_subtree:
                     props, is_mass_explicit, _, _ = resolution.links_inertial_info[i_l][i_v]
                     # The stash holds the unit-density estimate, so a mass however small is a body of the composite, and
                     # only a link without geometry or authored mass is left out.
@@ -1325,7 +1456,7 @@ class KinematicEntityDescription(EntityDescription):
                 # Re-express the variant's visual geoms across the subtree so the body frame can move to (com_root,
                 # principal axes) while the world geometry stays fixed. The anchoring is undone by a transform
                 # conjugated into each link frame of the variant.
-                for i_l in subtree:
+                for i_l in variant_subtree:
                     link_pos, link_quat = pose_in_root[i_l]
                     pos, quat = gu.inv_transform_pos_quat_by_trans_quat(link_pos, link_quat, com_root, principal_quat)
                     pos, quat = gu.inv_transform_pos_quat_by_trans_quat(pos, quat, link_pos, link_quat)
@@ -1362,7 +1493,12 @@ class KinematicEntityDescription(EntityDescription):
                     root.quat = gu.transform_quat_by_quat(principal_quat, root.quat)
 
             # Densities set on links or geoms may move the center of mass off the anchor, so the body is unaligned
-            if any(info.has_set_density for i_l in subtree for info in resolution.links_inertial_info[i_l]):
+            # A variant not carrying a link holds no inertial info for it
+            if any(
+                info is not None and info.has_set_density
+                for i_l in subtree
+                for info in resolution.links_inertial_info[i_l]
+            ):
                 root.is_aligned = False
                 gs.logger.warning(
                     f"A density set on links or geoms of the body of link '{root.name}' may move its center of mass "
@@ -1695,6 +1831,36 @@ class RigidEntityDescription(KinematicEntityDescription):
         # Add equality constraints sequentially
         self.equalities.extend(description_from_info(RigidEqualityDescription, e_info) for e_info in eqs_info)
 
+    def _load_heterogeneous_morphs(self, resolution: Resolution):
+        """Merge the kinematic trees of the variants (see 'KinematicEntityDescription._load_heterogeneous_morphs').
+
+        The equality constraints of the primary bind every environment, so the links and joints they name must be
+        carried by every variant, and a variant stating a constraint the primary lacks is rejected: its environments
+        would simulate without it.
+        """
+        super()._load_heterogeneous_morphs(resolution)
+
+        names_partial = set()
+        for i_l, l_desc in enumerate(self.links):
+            if not all(i_l in variant.links_idx for variant in self.variants):
+                names_partial.add(l_desc.name)
+                names_partial.update(j_desc.name for j_desc in l_desc.joints)
+        for eq_desc in self.equalities:
+            if names_partial.intersection(eq_desc.objs_name):
+                gs.raise_exception(
+                    f"Equality constraint '{eq_desc.name}' binds {eq_desc.objs_name}, which some heterogeneous "
+                    "variants do not carry. An equality constraint of a heterogeneous entity must bind links and "
+                    "joints that every variant carries."
+                )
+        eqs_key = {(eq_desc.type, tuple(eq_desc.objs_name)) for eq_desc in self.equalities}
+        for i_variant, e_info in resolution.variants_eqs_info:
+            if (e_info["type"], e_info["objs_name"]) not in eqs_key:
+                gs.raise_exception(
+                    f"Equality constraint '{e_info['name']}' of heterogeneous variant {i_variant} binds "
+                    f"{e_info['objs_name']}, which no equality constraint of the first morph binds. Every environment "
+                    "takes the equality constraints of the first morph alone."
+                )
+
     def _align_free_roots(self, resolution: Resolution):
         links_alignment_inv = super()._align_free_roots(resolution)
 
@@ -1703,7 +1869,10 @@ class RigidEntityDescription(KinematicEntityDescription):
         # from it. The solver composes the body from its links each step, so the composite is diagonal there, see
         # '_init_tree_fields'.
         for (i_v, i_l), alignment_inv in links_alignment_inv.items():
-            link_desc = (self.links if i_v == 0 else self.variants[i_v].links)[i_l]
+            if i_v == 0:
+                link_desc = self.links[i_l]
+            else:
+                link_desc = self.variants[i_v].links[self.variants[i_v].links_idx.index(i_l)]
             for geom in link_desc.geoms:
                 geom.pos, geom.quat = gu.transform_pos_quat_by_trans_quat(geom.pos, geom.quat, *alignment_inv)
             link_desc.inertial_pos, link_desc.inertial_quat = gu.transform_pos_quat_by_trans_quat(

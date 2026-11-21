@@ -3,7 +3,18 @@ Heterogeneous Simulation Example
 ================================
 
 This example demonstrates heterogeneous simulation, where different parallel
-environments can have different geometry variants for the same entity.
+environments can have different variants of the same entity: objects of different
+shapes to grasp, and robot arms with different links, joints and numbers of
+degrees of freedom.
+
+Articulated Variants:
+    The robots beside the Franka are one entity made of four variants: a Franka
+    Panda arm (7 dofs), a UR5e (6 dofs), a KUKA iiwa (7 dofs) and a Shadow Hand
+    (24 dofs). The entity holds the union
+    of their kinematic trees, so its dofs cover every variant, and each environment
+    simulates the links and joints of its own variant alone. The dofs of the links
+    an environment does not carry stay at rest, whatever target they are given.
+    'active_envs_idx' lists the environments carrying each link and joint.
 
 Variant Assignment Rules:
     When passing a list of morphs to scene.add_entity(), variants are distributed
@@ -28,6 +39,7 @@ Usage:
     python heterogeneous_simulation.py -v -b 4  # 4 environments (matches 4 variants)
     python heterogeneous_simulation.py -v -b 8  # 8 environments (2 per variant)
     python heterogeneous_simulation.py -v -b 2  # 2 environments (only first 2 variants used)
+    python heterogeneous_simulation.py -r       # record all environments to 'out/heterogeneous_simulation.mp4'
 """
 
 import argparse
@@ -40,6 +52,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
     parser.add_argument("-b", "--num-envs", type=int, default=4, help="Number of parallel environments")
+    parser.add_argument("-r", "--record", action="store_true", help="Record the scene to video")
     args = parser.parse_args()
 
     gs.init(backend=gs.cpu, precision="32")
@@ -68,7 +81,41 @@ def main():
     grasping_object = scene.add_entity(
         morph=morphs_heterogeneous,
     )
-    scene.build(n_envs=args.num_envs, env_spacing=(1, 1))
+
+    # Define 4 articulated variants with different links, joints and numbers of dofs. Their bases are all fixed.
+    ARM_POS = (0.0, -0.8, 0.0)
+    HAND_POS = (0.0, -0.8, 0.3)
+    arm = scene.add_entity(
+        morph=[
+            gs.morphs.URDF(file="urdf/panda_bullet/panda_nohand.urdf", pos=ARM_POS, fixed=True),  # Variant 0, 7 dofs
+            gs.morphs.MJCF(file="xml/universal_robots_ur5e/ur5e.xml", pos=ARM_POS),  # Variant 1, 6 dofs
+            gs.morphs.URDF(file="urdf/kuka_iiwa/model.urdf", pos=ARM_POS, fixed=True),  # Variant 2, 7 dofs
+            gs.morphs.URDF(file="urdf/shadow_hand/shadow_hand.urdf", pos=HAND_POS, fixed=True),  # Variant 3, 24 dofs
+        ],
+    )
+
+    camera = None
+    if args.record:
+        camera = scene.add_camera(
+            res=(1280, 720),
+            pos=(5.0, -2.6, 3.0),
+            lookat=(0.3, 0.0, 0.2),
+            fov=40,
+        )
+    scene.build(n_envs=args.num_envs, env_spacing=(2, 2))
+    if args.record:
+        camera.start_recording(save_to_filename="out/heterogeneous_simulation.mp4")
+
+    # The dofs of the arm entity cover every variant, each environment carrying the joints of its own
+    print("heterogeneous arm dofs", arm.n_dofs)
+    for joint in arm.joints:
+        print(f"joint '{joint.name}' ({joint.n_dofs} dofs) in envs {joint.active_envs_idx}")
+    # Every dof of the entity follows the same swing around its initial position
+    ARM_SWING_AMPLITUDE = 0.4
+    ARM_SWING_PERIOD = 100
+    arm.set_dofs_kp(500.0)
+    arm.set_dofs_kv(50.0)
+    arm_qpos = arm.get_dofs_position()
 
     motors_dof = np.arange(7)
     fingers_dof = np.arange(7, 9)
@@ -97,7 +144,10 @@ def main():
     # hold
     for i in range(100):
         print("hold", i)
+        arm.control_dofs_position(arm_qpos + ARM_SWING_AMPLITUDE * np.sin(2 * np.pi * i / ARM_SWING_PERIOD))
         scene.step()
+        if args.record:
+            camera.render()
 
     # grasp
     finder_pos = 0.0
@@ -105,7 +155,10 @@ def main():
         print("grasp", i)
         franka.control_dofs_position(qpos[..., :-2], motors_dof)
         franka.control_dofs_position(np.array([[finder_pos, finder_pos]] * args.num_envs), fingers_dof)
+        arm.control_dofs_position(arm_qpos + ARM_SWING_AMPLITUDE * np.sin(2 * np.pi * i / ARM_SWING_PERIOD))
         scene.step()
+        if args.record:
+            camera.render()
 
     # lift
     qpos = franka.inverse_kinematics(
@@ -117,7 +170,15 @@ def main():
         print("lift", i)
         franka.control_dofs_position(qpos[..., :-2], motors_dof)
         franka.control_dofs_position(np.array([[finder_pos, finder_pos]] * args.num_envs), fingers_dof)
+        arm.control_dofs_position(arm_qpos + ARM_SWING_AMPLITUDE * np.sin(2 * np.pi * i / ARM_SWING_PERIOD))
         scene.step()
+        if args.record:
+            camera.render()
+
+    # The padding dofs of each environment are still at rest
+    print("heterogeneous arm dofs position", arm.get_dofs_position())
+    if args.record:
+        camera.stop_recording()
 
 
 if __name__ == "__main__":

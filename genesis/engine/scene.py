@@ -387,10 +387,16 @@ class Scene(BuildableMixin, RBC):
         morph : gs.morphs.Morph | list[gs.morphs.Morph]
             The morph of the entity. If a list of morphs is provided, the entity is heterogeneous (rigid and kinematic
             entities only): each parallel environment simulates one of them, the environments being split into
-            contiguous blocks of nearly equal size. The morphs must share their kinematic topology (the same links,
-            connected by joints of the same names, types and numbers of degrees of freedom), while their geometry,
-            inertia, link frames (e.g. a different 'scale', or a different pose for a fixed base) and joint parameters
-            may differ.
+            contiguous blocks of nearly equal size. The morphs may have different links, joints and degrees of
+            freedom, as long as their root links hang from the world through joints of the same types and numbers of
+            degrees of freedom. The entity holds the union of their kinematic trees: a link of a morph shares the
+            entity link hanging from the same parent through joints of the same types and numbers of degrees of
+            freedom, preferably the one of the same name, and adds a link otherwise. Its links, joints and dofs, and
+            those of its getters and setters, cover that union. In an environment whose morph does not carry a link,
+            the link is massless, welded onto its parent and without geometry, and its dofs stay at rest at zero
+            whatever parameters are set on them. The links and joints each environment carries are listed by their
+            'active_envs_idx'. Geometry, inertia, link frames (e.g. a different 'scale', or a different pose for a
+            fixed base) and joint parameters may differ as well.
         material : gs.materials.Material | None, optional
             The material of the entity. If None, use ``gs.materials.Rigid()``.
         surface : gs.surfaces.Surface | None, optional
