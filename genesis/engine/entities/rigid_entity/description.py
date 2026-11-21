@@ -1835,8 +1835,8 @@ class RigidEntityDescription(KinematicEntityDescription):
         """Merge the kinematic trees of the variants (see 'KinematicEntityDescription._load_heterogeneous_morphs').
 
         The equality constraints of the primary bind every environment, so the links and joints they name must be
-        carried by every variant, and a variant stating a constraint the primary lacks is rejected: its environments
-        would simulate without it.
+        carried by every variant, and every variant read from a file must state the same constraints with the same
+        parameters: its environments would otherwise simulate under constraints it does not state.
         """
         super()._load_heterogeneous_morphs(resolution)
 
@@ -1852,14 +1852,34 @@ class RigidEntityDescription(KinematicEntityDescription):
                     "variants do not carry. An equality constraint of a heterogeneous entity must bind links and "
                     "joints that every variant carries."
                 )
-        eqs_key = {(eq_desc.type, tuple(eq_desc.objs_name)) for eq_desc in self.equalities}
+        eqs_desc = {(eq_desc.type, tuple(eq_desc.objs_name)): eq_desc for eq_desc in self.equalities}
         for i_variant, e_info in resolution.variants_eqs_info:
-            if (e_info["type"], e_info["objs_name"]) not in eqs_key:
+            if (e_info["type"], e_info["objs_name"]) not in eqs_desc:
                 gs.raise_exception(
                     f"Equality constraint '{e_info['name']}' of heterogeneous variant {i_variant} binds "
                     f"{e_info['objs_name']}, which no equality constraint of the first morph binds. Every environment "
                     "takes the equality constraints of the first morph alone."
                 )
+        for i_variant, morph in enumerate(self.spec.morphs[1:], start=1):
+            if not isinstance(morph, (gs.morphs.URDF, gs.morphs.MJCF)):
+                continue
+            v_eqs_info = {
+                (e_info["type"], e_info["objs_name"]): e_info
+                for j_variant, e_info in resolution.variants_eqs_info
+                if j_variant == i_variant
+            }
+            for eq_key, eq_desc in eqs_desc.items():
+                e_info = v_eqs_info.get(eq_key)
+                if (
+                    e_info is None
+                    or not np.allclose(e_info["data"], eq_desc.data, atol=gs.EPS)
+                    or not np.allclose(e_info["sol_params"], eq_desc.sol_params, atol=gs.EPS)
+                ):
+                    gs.raise_exception(
+                        f"Heterogeneous variant {i_variant} states no equality constraint with the parameters of "
+                        f"'{eq_desc.name}' of the first morph, which binds {eq_desc.objs_name}. Every environment "
+                        "takes the equality constraints of the first morph alone."
+                    )
 
     def _align_free_roots(self, resolution: Resolution):
         links_alignment_inv = super()._align_free_roots(resolution)

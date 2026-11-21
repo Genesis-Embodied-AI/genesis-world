@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import pytest
 import torch
@@ -604,6 +606,11 @@ def test_unsupported_variants_raise(fixed_base_dual_arm, mimic_hinges):
         scene.add_entity(
             morph=[gs.morphs.URDF(file=fixed_base_dual_arm, fixed=True), gs.morphs.MJCF(file=mimic_hinges)]
         )
+    # A variant stating the same constraint with other parameters would be simulated under those of the first morph
+    mimic_hinges_geared = copy.deepcopy(mimic_hinges)
+    mimic_hinges_geared.find("equality/joint").set("polycoef", "0 2 0 0 0")
+    with pytest.raises(gs.GenesisException, match="with the parameters of"):
+        scene.add_entity(morph=[gs.morphs.MJCF(file=mimic_hinges), gs.morphs.MJCF(file=mimic_hinges_geared)])
 
     # A fixed base and a free base decide differently which links the world carries
     with pytest.raises(gs.GenesisException, match="root link"):
