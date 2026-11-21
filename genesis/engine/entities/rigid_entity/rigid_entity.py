@@ -2438,6 +2438,10 @@ class RigidEntity(KinematicEntity):
         """
         Set the entity's dofs' positional gains for the PD controller.
 
+        This makes the position controller of each dof a proportional-derivative (PD) controller, so the targets of
+        `control_dofs_position` are joint positions (m or rad) from then on. It replaces the gain and the position bias
+        that the asset gave the actuator of the dof, and keeps its velocity gain.
+
         Parameters
         ----------
         kp : array_like
@@ -2620,6 +2624,11 @@ class RigidEntity(KinematicEntity):
         """
         Control the entity's dofs' motor force. This is used for force/torque control.
 
+        The force is applied as given, clamped to the force range of the dof. A force that drives a dof against its
+        joint limit while its links are in contact with each other can push the dof past the limit and leave it stuck
+        there, so that a later position target or opposite force no longer moves it. A closing force of 20 N does this
+        to the fingers of the bundled Franka Panda MJCF.
+
         Parameters
         ----------
         force : array_like
@@ -2662,8 +2671,16 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def control_dofs_position(self, position, dofs_idx_local=None, envs_idx=None):
         """
-        Set the position controller's target position for the entity's dofs. The controller is a proportional term
-        plus a velocity damping term (virtual friction).
+        Set the position controller's target position for the entity's dofs.
+
+        The controller applies the force `gain * target + bias_0 + bias_1 * pos + bias_2 * vel` to each dof, clamped to
+        its force range. For a proportional-derivative (PD) actuator (`gain == -bias_1` and `bias_0 == 0`), this is a
+        proportional term plus a velocity damping term (virtual friction), `kp * (target - pos) - kv * vel`, and the
+        target is a joint position (m or rad). URDF assets and `set_dofs_kp` give every dof a PD actuator. An MJCF
+        actuator keeps the gain and bias written in the file, so its target can be in other control units until
+        `set_dofs_kp` is called. The finger actuator of the bundled Franka Panda MJCF
+        (`xml/franka_emika_panda/panda.xml`) takes targets from 0 (closed) to 255 (open at 0.04 m), and a target of 0.04
+        closes the fingers.
 
         Parameters
         ----------
