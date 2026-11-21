@@ -1,18 +1,17 @@
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import torch
 
 import trimesh
 
-import quadrants as qd
-
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.urdf as uu
 from genesis.ext.urdfpy.urdf import URDF
-from genesis.utils.array_class import GeomsInfo, LinksState
+from genesis.options.surfaces import Surface
 from genesis.utils.hybrid import (
     check_graph,
     compute_graph_attribute,
@@ -25,10 +24,24 @@ from genesis.utils.hybrid import (
 from genesis.utils.mesh import load_mesh
 
 from .base_entity import Entity
-from .mpm_entity import MPMEntity
+
+if TYPE_CHECKING:
+    from genesis.engine.scene import Scene
 
 
-@qd.data_oriented
+class MPMHybridPart(NamedTuple):
+    """The soft part of a hybrid entity, which RigidMPMHybrid drives toward the links of its rigid part."""
+
+    groups_link_idx: np.ndarray
+    groups_geom_idx: np.ndarray
+    groups_trans_local_to_global: np.ndarray
+    groups_quat_local_to_global: np.ndarray
+    groups_damping: np.ndarray
+    groups_soft_dv_coef: np.ndarray
+    particles_idx: np.ndarray
+    particles_init_pos: np.ndarray
+
+
 class HybridEntity(Entity):
     """
     A hybrid simulation entity composed of both rigid and soft components.
@@ -44,22 +57,29 @@ class HybridEntity(Entity):
         The index of the entity within the scene.
     scene : genesis.Scene
         The simulation scene where the entity is added.
-    material : genesis.materials.Hybrid
-        The hybrid material that includes both rigid and soft sub-materials,
-        and defines coupling behavior.
-    morph : genesis.morphs.Morph
-        The shape/morphology of the entity. Must be either a `URDF` or `Mesh`.
+    spec : gs.entities.Hybrid
+        The entity spec the entity is constructed from, whose morph, a URDF or a Mesh, gives its shape.
     surface : genesis.surfaces.Surface
         The surface properties applied to the soft part of the entity.
     """
 
-    def __init__(self, idx, scene, material, morph, surface, name: str | None = None):
-        super().__init__(idx, scene, morph, None, material, surface, name=name)
+    def __init__(
+        self,
+        idx: int,
+        scene: "Scene",
+        surface: Surface,
+        spec: "gs.entities.Hybrid",
+    ) -> None:
+        super().__init__(idx, scene, None, surface, spec)
 
+        morph = spec.morph
+        material = spec.material
         material_rigid = material.material_rigid
         material_soft = material.material_soft
 
         surface_rigid = gs.surfaces.Smooth(roughness=0.4)  # HACK hardcoded
+        # The soft part following the rigid links of its muscle groups, held without the default coupling alone
+        self._mpm_hybrid_part: MPMHybridPart | None = None
 
         assert isinstance(material_soft, gs.materials.MPM.Base)  # TODO: need FEM and PBD
 
@@ -132,62 +152,26 @@ class HybridEntity(Entity):
             material_soft.n_groups = len(link_idcs)
             self._muscle_group_cache = muscle_group
 
-            # set up info in Quadrants field
             if isinstance(material_soft, gs.materials.MPM.Base):
-                part_soft_info = qd.types.struct(
-                    link_idx=gs.qd_int,
-                    geom_idx=gs.qd_int,
-                    trans_local_to_global=gs.qd_vec3,
-                    quat_local_to_global=gs.qd_vec4,
-                ).field(shape=(material_soft.n_groups,), needs_grad=False, layout=qd.Layout.SOA)
-                part_soft_info.link_idx.from_numpy(np.asarray(link_idcs, dtype=gs.np_int))
-                part_soft_info.geom_idx.from_numpy(np.asarray(geom_idcs, dtype=gs.np_int))
-                part_soft_info.trans_local_to_global.from_numpy(np.asarray(trans_local_to_global, dtype=gs.np_float))
-                part_soft_info.quat_local_to_global.from_numpy(np.asarray(quat_local_to_global, dtype=gs.np_float))
-
-                part_soft_init_positions = qd.field(dtype=gs.qd_vec3, shape=(part_soft.init_particles.shape[0],))
-                part_soft_init_positions.from_numpy(part_soft.init_particles)
-
-                self._part_soft_info = part_soft_info
-                self._part_soft_init_positions = part_soft_init_positions
-            else:
-                raise ValueError(f"Cannot handle soft material {material_soft}")
-
-            # set coupling func
-            def wrap_func(func, before=False):
-                def wrapper(f):
-                    if before:
-                        self.update_soft_part(f)
-                    func(f)
-                    if not before:
-                        self.update_soft_part(f)
-
-                return wrapper
-
-            if isinstance(material_soft, gs.materials.MPM.Base):
-                # NOTE: coupling operating at particle level and here we modify post_coupling, i.e., update particle state after g2p
-                self._update_soft_part_at_pre_coupling = False
-                if self._update_soft_part_at_pre_coupling:
-                    part_soft.solver.substep_pre_coupling = wrap_func(
-                        part_soft.solver.substep_pre_coupling, before=True
-                    )
-                else:
-                    part_soft.solver.substep_post_coupling = wrap_func(
-                        part_soft.solver.substep_post_coupling, before=False
-                    )
+                n_particles = len(part_soft.init_particles)
+                self._mpm_hybrid_part = MPMHybridPart(
+                    groups_link_idx=np.asarray(link_idcs),
+                    groups_geom_idx=np.asarray(geom_idcs),
+                    groups_trans_local_to_global=np.asarray(trans_local_to_global),
+                    groups_quat_local_to_global=np.asarray(quat_local_to_global),
+                    groups_damping=np.full(material_soft.n_groups, material.damping),
+                    groups_soft_dv_coef=np.full(material_soft.n_groups, material.soft_dv_coef),
+                    particles_idx=np.arange(part_soft.particle_start, part_soft.particle_start + n_particles),
+                    particles_init_pos=part_soft.init_particles,
+                )
             else:
                 raise ValueError(f"Cannot handle soft material {material_soft}")
 
         # set members
         self._material_rigid = material_rigid
         self._part_rigid = part_rigid
-        self._solver_rigid = part_rigid.solver
         self._material_soft = material_soft
         self._part_soft = part_soft
-        self._solver_soft = part_soft.solver
-
-        # TODO: test with different dt
-        assert self._solver_rigid.dt == self._solver_soft.dt, "Rigid and soft solver should have the same dt for now"
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------
@@ -366,7 +350,8 @@ class HybridEntity(Entity):
     # ----------------------------------- instantiation ----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def build(self):
+    @gs.assert_unbuilt
+    def _build(self):
         """
         Finalize the hybrid entity setup during simulation build.
         """
@@ -377,78 +362,7 @@ class HybridEntity(Entity):
                 # no muscle direction as the soft body is actuated by rigid parts
             )
 
-    def update_soft_part(self, f):
-        """
-        Update the state of the soft part of the hybrid entity based on the current simulation frame.
-
-        Parameters
-        ----------
-        f : int
-            The current simulation frame index.
-        """
-        if isinstance(self._part_soft, MPMEntity):
-            self._kernel_update_soft_part_mpm(
-                f=f, geoms_info=self._solver_rigid.dyn_info.geoms, links_state=self._solver_rigid.dyn_state.links
-            )
-        else:
-            raise NotImplementedError
-
-    @qd.kernel
-    def _kernel_update_soft_part_mpm(self, f: qd.i32, geoms_info: GeomsInfo, links_state: LinksState):
-        for i_p_, i_b in qd.ndrange(self._part_soft.n_particles, self._part_soft._sim._B):
-            if self._solver_soft.particles_ng[f, i_p_, i_b].active:
-                i_global = i_p_ + self._part_soft.particle_start
-                f_ = f
-                if qd.static(not self._update_soft_part_at_pre_coupling):
-                    f_ = f + 1  # NOTE: this is after g2p and thus we use f + 1
-
-                # get corresponding link
-                group_idx = self._solver_soft.particles_info[i_global].muscle_group
-
-                link_idx = self._part_soft_info.link_idx[group_idx]
-                geom_idx = self._part_soft_info.geom_idx[group_idx]
-                trans_local_to_global = self._part_soft_info.trans_local_to_global[group_idx]
-                quat_local_to_global = self._part_soft_info.quat_local_to_global[group_idx]
-
-                g_pos_0 = geoms_info.pos[geom_idx]
-                g_quat_0 = geoms_info.quat[geom_idx]
-
-                # compute new pos in minimal coordinate using rigid-bodied dynamics
-                x_init_pos = self._part_soft_init_positions[i_p_]
-                x_init_local = gu.qd_inv_transform_by_trans_quat(
-                    x_init_pos, trans_local_to_global, quat_local_to_global
-                )
-                scaled_pos = gu.qd_transform_by_quat(gu.qd_inv_transform_by_quat(g_pos_0, g_quat_0), g_quat_0)
-                tx_pos, tx_quat = gu.qd_transform_pos_quat_by_trans_quat(
-                    scaled_pos, g_quat_0, links_state.pos[link_idx, i_b], links_state.quat[link_idx, i_b]
-                )
-                new_x_pos = gu.qd_transform_by_trans_quat(x_init_local, trans=tx_pos, quat=tx_quat)
-
-                # compute velocity in closed-loop setting
-                dt = self._solver_soft.substep_dt
-                dt_scale = (
-                    self._solver_soft.substep_dt / self._solver_rigid.dt
-                )  # NOTE: move soft part incrementally at soft solver's substeps
-                x_pos = self._solver_soft.particles.pos[f_, i_global, i_b]
-                xd_vel = (new_x_pos - x_pos) / dt
-                xd_vel *= dt_scale  # assume linear scaling between the timestep difference of soft/rigid solver
-
-                vel_d = xd_vel - self._solver_soft.particles.vel[f_, i_global, i_b]
-                vel_d *= qd.exp(-self._solver_soft.dt * self.material.damping)
-
-                # soft-to-rigid coupling
-                dt_for_rigid_acc = (
-                    self._solver_rigid.dt
-                )  # NOTE: use rigid dt here as we are sorta doing integration within soft solver substep
-                mass_real = self._solver_soft.particles_info[i_global].mass / self._solver_soft._particle_volume_scale
-                acc = vel_d / dt_for_rigid_acc
-                frc_vel = mass_real * acc
-                frc_ang = (x_pos - links_state.root_COM[link_idx, i_b]).cross(frc_vel)
-                links_state.cfrc_coupling_vel[link_idx, i_b] += frc_vel
-                links_state.cfrc_coupling_ang[link_idx, i_b] += frc_ang
-
-                # rigid-to-soft coupling # NOTE: this may lead to unstable feedback loop
-                self._solver_soft.particles.vel[f_, i_global, i_b] += vel_d * self.material.soft_dv_coef
+        self._is_built = True
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -470,19 +384,14 @@ class HybridEntity(Entity):
         return self._part_rigid
 
     @property
+    def mpm_hybrid_part(self) -> MPMHybridPart | None:
+        """The soft part that follows the rigid links of its muscle groups, None under default coupling."""
+        return self._mpm_hybrid_part
+
+    @property
     def part_soft(self):
         """The soft part of the hybrid entity."""
         return self._part_soft
-
-    @property
-    def solver_rigid(self):
-        """The solver associated with the rigid part of the hybrid entity."""
-        return self._solver_rigid
-
-    @property
-    def solver_soft(self):
-        """The solver associated with the soft part of the hybrid entity."""
-        return self._solver_soft
 
 
 # ------------------------------------------------------------------------------------

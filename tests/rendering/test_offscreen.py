@@ -102,6 +102,12 @@ def test_render_api(show_viewer, renderer_type, renderer):
             pytest.xfail("Flaky on MacOS with Apple Software Renderer.")
         raise
 
+    if IS_BATCHRENDER:
+        # An output already rendered in the step comes back along with one rendered for the first time
+        rgb_arr, *_ = camera.render(rgb=True, force_render=True)
+        rgb_arr_cached, *_ = camera.render(rgb=True, depth=True)
+        assert_equal(rgb_arr_cached, rgb_arr)
+
     if renderer_type == RENDERER_TYPE.RASTERIZER:
         # An entity whose pose blew up stays drawn where it last was, and follows its pose again once it is valid
         box.set_pos((float("nan"), 0.0, 0.0))
@@ -330,6 +336,10 @@ def test_render_api_advanced(tmp_path, n_envs, show_viewer, png_snapshot, render
         qvel[:6] = torch.as_tensor(np.random.rand(6), dtype=gs.tc_float, device=gs.device) - 0.5
         robot.set_dofs_velocity(qvel, envs_idx=([i] if n_envs else None))
 
+    # A marker in front of the robot, which the debug camera draws whatever the renderer of the scene, the Rasterizer
+    # rendering it, and the camera sharing its pose leaves out.
+    scene.draw_debug_sphere(pos=(0.3, 0.1, 0.9), radius=0.1, color=(1.0, 0.0, 1.0, 1.0))
+
     # Run a few simulation steps while monitoring the result
     cam_debug.start_recording(save_to_filename=(tmp_path / "video.mp4"))
 
@@ -421,6 +431,11 @@ def test_render_api_advanced(tmp_path, n_envs, show_viewer, png_snapshot, render
         assert rgb_debug.shape == (480, 640, 3)
 
     cam_debug.stop_recording()
+
+    rgb_0, *_ = cam_0.render(rgb=True)
+    for rgb_i, is_marker_drawn in ((rgb_debug, True), (tensor_to_array(rgb_0), False)):
+        red, green, blue = np.moveaxis(rgb_i, -1, 0)
+        assert ((red > 150) & (green < 80) & (blue > 150)).any() == is_marker_drawn
 
     # Every simulation step must have contributed exactly one frame at the default framerate, which is higher than
     # the step rate of this scene
@@ -800,12 +815,16 @@ def test_renders_heterogeneous_entities(n_envs, show_viewer, png_snapshot, rende
 
 
 @pytest.mark.parametrize(
-    "renderer_type",
-    [RENDERER_TYPE.RASTERIZER, RENDERER_TYPE.BATCHRENDER_RASTERIZER, RENDERER_TYPE.BATCHRENDER_RAYTRACER],
+    "renderer_type, is_debug",
+    [
+        (RENDERER_TYPE.RASTERIZER, False),
+        (RENDERER_TYPE.RASTERIZER, True),
+        (RENDERER_TYPE.BATCHRENDER_RASTERIZER, False),
+        (RENDERER_TYPE.BATCHRENDER_RAYTRACER, False),
+    ],
 )
 @pytest.mark.parametrize("segmentation_level", ["entity", "link", "geom"])
-@pytest.mark.parametrize("particle_mode", ["visual", "particle"])
-def test_segmentation_map(segmentation_level, particle_mode, renderer_type, renderer, show_viewer):
+def test_segmentation_map(segmentation_level, is_debug, renderer_type, renderer, show_viewer):
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
             enable_collision=False,  # Disable many physics features to speedup compilation
@@ -825,6 +844,7 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
             fem_sph=False,
         ),
         vis_options=gs.options.VisOptions(
+            debug=is_debug,
             segmentation_level=segmentation_level,
         ),
         renderer=renderer,
@@ -840,20 +860,21 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
         ),
     )
 
-    # We don't test "recon" for vis_mode because it is hard to install.
-    materials = ((gs.materials.Rigid(), "visual"),)
+    # Each duck is drawn as its material decides, the liquid as a reconstructed surface, and in the debug view as its
+    # kind of entity is by default, the kinematic duck drawing nothing since it is visual only.
+    materials = (gs.materials.Rigid(),)
     if renderer_type == RENDERER_TYPE.RASTERIZER:
         materials = (
             *materials,
-            (gs.materials.FEM.Elastic(), "visual"),
-            (gs.materials.MPM.Elastic(), particle_mode),
-            (gs.materials.PBD.Cloth(), particle_mode),
-            (gs.materials.SPH.Liquid(), "particle" if particle_mode == "visual" else particle_mode),
-            (gs.materials.Kinematic(), "visual"),
+            gs.materials.FEM.Elastic(),
+            gs.materials.MPM.Elastic(),
+            gs.materials.PBD.Cloth(),
+            gs.materials.SPH.Liquid(),
+            gs.materials.Kinematic(),
         )
 
     ducks = []
-    for i, (material, vis_mode) in enumerate(materials):
+    for i, material in enumerate(materials):
         col_idx, row_idx = i // 3 - 1, i % 3 - 1
         ducks.append(
             scene.add_entity(
@@ -865,7 +886,6 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
                 ),
                 surface=gs.surfaces.Default(
                     color=np.random.rand(3),
-                    vis_mode=vis_mode,
                 ),
             )
         )
@@ -877,33 +897,66 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
         lookat=(0, 0, 0.5),
         fov=40,
         GUI=show_viewer,
+        debug=is_debug,
     )
     scene.build()
 
-    # Segmentation count: background(1) + URDF links/entity + duck materials. Rigid and Kinematic ducks use
-    # add_rigid_node (tuple keys at link/geom level), other ducks use add_static_node (int keys). The URDF has
-    # 2 visual links. FEM entities use per-visual-geom tuple keys (entity.idx, i_g) only at "geom" level; at "link"
-    # and "entity" levels they fall back to a plain int entity.idx.
-    n_rigid_like = sum(isinstance(m, gs.materials.Kinematic) for m, _ in materials)
-    n_fem_geom = (
-        sum(isinstance(m, gs.materials.FEM.Elastic) for m, _ in materials) if segmentation_level == "geom" else 0
-    )
-    seg_num = len(materials) + (2 if segmentation_level == "entity" else 3)
     idx_dict = scene.segmentation_idx_dict
-    assert len(idx_dict) == seg_num
-    comp_key = 0
-    for seg_key in idx_dict.values():
-        if isinstance(seg_key, tuple):
-            comp_key += 1
-    # At entity level no tuple keys; at link level: 2 URDF links + rigid-like ducks; at geom level additionally
-    # one tuple per FEM visual geom (the FEM ducks have one each, so counting FEM entities suffices).
-    assert comp_key == (0 if segmentation_level == "entity" else 2 + n_rigid_like + n_fem_geom)
+    # The kinematic duck is visual only, which the debug view leaves out
+    debug_entities_idx = [
+        entity.idx
+        for entity in scene.entities
+        if isinstance(entity.material, gs.materials.Rigid) or not isinstance(entity.material, gs.materials.Kinematic)
+    ]
+    if is_debug:
+        # The debug view holds a key per collision geom of each rigid entity, and one per entity of the other kinds
+        rigid_keys = set()
+        for entity in scene.entities:
+            if isinstance(entity.material, gs.materials.Rigid):
+                for geom in entity.geoms:
+                    rigid_keys.add(
+                        {
+                            "entity": entity.idx,
+                            "link": (entity.idx, geom.link.idx),
+                            "geom": (entity.idx, geom.link.idx, geom.idx),
+                        }[segmentation_level]
+                    )
+        seg_keys = set(idx_dict.values()) - {-1}
+        assert rigid_keys <= seg_keys
+        with pytest.raises(gs.GenesisException, match="debug representations"):
+            scene.rigid_solver.render_context.get_shapes(debug_vis_mode="tet")
+        assert sorted(key if isinstance(key, int) else key[0] for key in seg_keys - rigid_keys) == [
+            entity.idx for entity in scene.entities if not isinstance(entity.material, gs.materials.Kinematic)
+        ]
+    else:
+        # Segmentation count: background(1) + URDF links/entity + duck materials. Rigid and Kinematic ducks hold tuple
+        # keys at link/geom level, other ducks int keys. The URDF has 2 visual links. FEM entities hold per-visual-geom
+        # tuple keys (entity.idx, i_g) only at "geom" level, and a plain int entity.idx at "link" and "entity" levels.
+        n_rigid_like = sum(isinstance(m, gs.materials.Kinematic) for m in materials)
+        n_fem_geom = (
+            sum(isinstance(m, gs.materials.FEM.Elastic) for m in materials) if segmentation_level == "geom" else 0
+        )
+        seg_num = len(materials) + (2 if segmentation_level == "entity" else 3)
+        assert len(idx_dict) == seg_num
+        n_tuple_keys = sum(isinstance(seg_key, tuple) for seg_key in idx_dict.values())
+        # At entity level no tuple keys; at link level: 2 URDF links + rigid-like ducks; at geom level additionally
+        # one tuple per FEM visual geom (the FEM ducks have one each, so counting FEM entities suffices).
+        assert n_tuple_keys == (0 if segmentation_level == "entity" else 2 + n_rigid_like + n_fem_geom)
 
     for i in range(2):
         scene.step()
         _, _, seg, _ = camera.render(rgb=False, depth=False, segmentation=True, colorize_seg=False, normal=False)
         seg = tensor_to_array(seg)
-        assert_equal(np.sort(np.unique(seg.flat)), np.arange(0, seg_num))
+        if is_debug:
+            # Some collision geoms hide behind others, so that every entity the physics sees shows in the image rather
+            # than every key.
+            seg_entities_idx = {
+                seg_key if isinstance(seg_key, int) else seg_key[0]
+                for seg_key in (idx_dict[seg_idx] for seg_idx in np.unique(seg.flat) if seg_idx > 0)
+            }
+            assert sorted(seg_entities_idx) == debug_entities_idx
+        else:
+            assert_equal(np.sort(np.unique(seg.flat)), np.arange(0, seg_num))
 
 
 @pytest.mark.required
@@ -915,6 +968,7 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
         vis_options=gs.options.VisOptions(
             # Disable shadows systematically for Rasterizer because they are forcibly disabled on CPU backend anyway
             shadow=(renderer_type != RENDERER_TYPE.RASTERIZER),
+            split_envs=(renderer_type == RENDERER_TYPE.RASTERIZER),
             segmentation_level="geom",
         ),
         renderer=renderer,
@@ -938,10 +992,11 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
         GUI=show_viewer,
         denoise=False,
     )
-    scene.build()
+    scene.build(n_envs=2)
 
-    # Move the entity after build so rendering exercises the per-sub-mesh vertex update path.
-    fem.set_position([0.0, 0.0, 0.2])
+    # Move the entity after build so rendering exercises the per-sub-mesh vertex update path. The second environment
+    # holds it lower, so that each environment of a split render shows its own copy.
+    fem.set_position([[0.0, 0.0, 0.2], [0.0, 0.0, 0.1]])
 
     # The Apple Software Renderer that macOS CI falls back to differs from hardware on anti-aliased channels, and
     # RayTracer is non-deterministic across GPUs; relax the pixel match for the color-like outputs in both cases.
@@ -954,10 +1009,16 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
         rgb, *_ = camera.render(rgb=True)
         assert rgb_array_to_png_bytes(rgb) == png_snapshot
     else:
-        rgb, depth, seg, normal = camera.render(rgb=True, depth=True, segmentation=True, colorize_seg=True, normal=True)
-        assert rgb_array_to_png_bytes(rgb) == png_snapshot
-        assert rgb_array_to_png_bytes(as_grayscale_image(tensor_to_array(depth))) == png_snapshot
-        assert rgb_array_to_png_bytes(normal) == png_snapshot
+        (rgb_0, _), (depth_0, _), (seg_0, seg_1), (normal_0, _) = camera.render(
+            rgb=True, depth=True, segmentation=True, colorize_seg=True, normal=True
+        )
+        # Each environment shows its own copy of the entity, held at a different height.
+        is_fem_0, is_fem_1 = (seg.any(axis=-1) for seg in (seg_0, seg_1))
+        assert is_fem_0.any() and is_fem_1.any()
+        assert (is_fem_0 != is_fem_1).any()
+        assert rgb_array_to_png_bytes(rgb_0) == png_snapshot
+        assert rgb_array_to_png_bytes(as_grayscale_image(tensor_to_array(depth_0))) == png_snapshot
+        assert rgb_array_to_png_bytes(normal_0) == png_snapshot
 
         # Segmentation ids are integer labels rasterized without anti-aliasing, so coverage is fixed by the OpenGL
         # fill rules and identical on every renderer: assert the map bit-exactly. This is the channel that proves
@@ -965,7 +1026,7 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
         png_snapshot.extension._std_err_threshold = 0.0
         png_snapshot.extension._ratio_err_threshold = 0.0
         png_snapshot.extension._blurred_kernel_size = 1
-        assert rgb_array_to_png_bytes(seg) == png_snapshot
+        assert rgb_array_to_png_bytes(seg_0) == png_snapshot
 
 
 @pytest.mark.required
@@ -1389,9 +1450,13 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
     BLUR_OFFSCREEN = 3
 
     scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            vis=gs.options.RigidVisOptions(
+                link_frames=True,
+            ),
+        ),
         vis_options=gs.options.VisOptions(
             show_world_frame=True,
-            show_link_frame=True,
             # Disable shadows systematically for Rasterizer because they are forcibly disabled on CPU backend anyway
             shadow=False,
             split_envs=True,
@@ -1400,6 +1465,8 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
         viewer_options=gs.options.ViewerOptions(
             res=CAM_RES,
             run_in_thread=False,
+            # A refresh period long enough for no refresh to fall between a setter and the frame drawn right after it
+            refresh_rate=1,
             # Far enough back for the whole ground to fit in frame, as every camera below requires
             camera_pos=(3.0, 0.3, 2.0),
             camera_lookat=(0.0, 0.0, 0.4),
@@ -1438,6 +1505,14 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
         fov=30,
         debug=True,
         GUI=show_viewer,
+    )
+    cam_bound = scene.add_camera(
+        res=CAM_RES,
+        pos=(3.5, 0.0, 2.5),
+        lookat=(0.0, 0.0, 0.5),
+        fov=30,
+        GUI=show_viewer,
+        env_idx=RENDERED_ENVS[1],
     )
     scene.build(n_envs=4, env_spacing=(0.3, 0.3))
 
@@ -1521,8 +1596,18 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
         up=(0.0, 1.0, 0.0),
         envs_idx=RENDERED_ENVS[1],
     )
-    rgb_env, *_ = cam.render(rgb=True)
-    assert_equal(rgb_env, rgb_after)
+    buffers_env = cam.render(rgb=True, depth=True, segmentation=True, normal=True)
+    assert_equal(buffers_env[0], rgb_after)
+    # A camera bound to a rendered environment renders that environment alone, as the batched camera does, whatever
+    # its index among the rendered environments
+    cam_bound.set_pose(
+        pos=(0.0, 0.0, 4.0),
+        lookat=(0.0, 0.0, 0.0),
+        up=(0.0, 1.0, 0.0),
+    )
+    buffers_bound = cam_bound.render(rgb=True, depth=True, segmentation=True, normal=True)
+    for buffer_bound, buffer_env in zip(buffers_bound, buffers_env):
+        assert_equal(buffer_bound, buffer_env[1])
     with pytest.raises(gs.GenesisException):
         cam.set_pose(pos=(0.0, 0.0, 4.0), envs_idx=0)
 
@@ -1534,13 +1619,13 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
     rgb, *_ = cam.render(rgb=True)
     assert rgb is not None
 
-    # Non-debug camera should NOT show markers — snapshot per env validates only robots are visible
+    # The camera without markers shows the robots alone in each environment
     png_snapshot.extension._std_err_threshold = STD_ERR_THR
     png_snapshot.extension._blurred_kernel_size = BLUR_OFFSCREEN
     for rgb_i in rgb:
         assert rgb_array_to_png_bytes(rgb_i) == png_snapshot
 
-    # Debug camera SHOULD show markers (frames, contact arrows) — snapshot per env validates markers
+    # The camera drawing the markers shows the frames and the contact arrows in each environment
     for rgb_debug_i in rgb_debug:
         assert rgb_array_to_png_bytes(rgb_debug_i) == png_snapshot
 
@@ -1567,6 +1652,22 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
     scene.step()
     rgb_debug_reset, *_ = cam_debug.render(rgb=True)
     assert_equal(rgb_debug_reset, rgb_debug)
+
+    # The contacts of the latest step no longer hold after a reset, so their arrows, cyan and magenta, leave the arm
+    # resting against the ground until the next step, while the frames of the links stay, and the arm in contact with
+    # nothing renders as before.
+    scene.reset(scene.get_state())
+    rgb_debug_hidden, *_ = cam_debug.render(rgb=True)
+    scene.step()
+    rgb_debug_step, *_ = cam_debug.render(rgb=True)
+    arrow_pixel_counts = []
+    for rgb_debug_i in (rgb_debug, rgb_debug_hidden, rgb_debug_step):
+        red, green, blue = np.moveaxis(rgb_debug_i[0], -1, 0)
+        is_arrow = (blue > 120) & (((green > 120) & (red < 60)) | ((red > 120) & (green < 60)))
+        arrow_pixel_counts.append(is_arrow.sum())
+    assert arrow_pixel_counts[0] > 0 and arrow_pixel_counts[1] == 0 and arrow_pixel_counts[2] > 0
+    assert (rgb_debug_hidden[0] != rgb[0]).any(axis=-1).sum() > 1000
+    assert_equal(rgb_debug_hidden[1], rgb_debug[1])
 
 
 @pytest.mark.required

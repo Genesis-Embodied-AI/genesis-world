@@ -1,9 +1,15 @@
+from typing import TYPE_CHECKING
+
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.states.entities import SPHEntityState
+from genesis.options.surfaces import Surface
 
 from .particle_entity import ParticleEntity
+
+if TYPE_CHECKING:
+    from genesis.engine.scene import Scene
+    from genesis.engine.solvers.sph_solver import SPHSolver
 
 
 @qd.data_oriented
@@ -17,10 +23,8 @@ class SPHEntity(ParticleEntity):
         The simulation scene.
     solver : Solver
         The solver handling the simulation logic.
-    material : Material
-        Material properties (e.g., density, stiffness).
-    morph : Morph
-        Morphological configuration.
+    spec : gs.entities.SPH
+        The entity spec the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface constraints or geometry.
     particle_size : float
@@ -32,10 +36,24 @@ class SPHEntity(ParticleEntity):
     """
 
     def __init__(
-        self, scene, solver, material, morph, surface, particle_size, idx, particle_start, name: str | None = None
-    ):
+        self,
+        scene: "Scene",
+        solver: "SPHSolver",
+        surface: Surface,
+        particle_size: float,
+        idx: int,
+        particle_start: int,
+        spec: "gs.entities.SPH",
+    ) -> None:
         super().__init__(
-            scene, solver, material, morph, surface, particle_size, idx, particle_start, need_skinning=False, name=name
+            scene,
+            solver,
+            surface,
+            particle_size,
+            idx,
+            particle_start,
+            need_skinning=False,
+            spec=spec,
         )
 
     def init_sampler(self):
@@ -47,7 +65,7 @@ class SPHEntity(ParticleEntity):
         GenesisException
             If the sampler is not one of the supported types: 'regular', 'pbs', or 'pbs-sdf_res'.
         """
-        self.sampler = self._material.sampler
+        self.sampler = self.material.sampler
 
         match self.sampler.split("-"):
             case ["regular"]:
@@ -66,34 +84,7 @@ class SPHEntity(ParticleEntity):
                 )
 
     def _add_particles_to_solver(self):
-        self._solver.add_particles(
-            self._sim.cur_substep_local,
-            self.active,
-            self._particle_start,
-            self._n_particles,
-            self._material.rho,
-            self._material.stiffness,
-            self._material.exponent,
-            self._material.mu,
-            self._material.gamma,
-            self._particles,
-        )
-
-    @gs.assert_built
-    def get_state(self):
-        """
-        Get the current state of the SPHEntity, a view of the state of the solver.
-
-        Returns
-        -------
-        state : SPHEntityState
-            The current particle state for the entity.
-        """
-        solver_state = self._solver.get_state(self._sim.cur_substep_local)
-        particles_slice = slice(self._particle_start, self._particle_start + self._n_particles)
-        return SPHEntityState(
-            self, self._sim.cur_step_global, solver_state.pos[:, particles_slice], solver_state.vel[:, particles_slice]
-        )
+        self._solver.add_particles(self.active, self._particle_start, self.material, self._particles)
 
     # ------------------------------------------------------------------------------------
     # ---------------------------------- io & control ------------------------------------

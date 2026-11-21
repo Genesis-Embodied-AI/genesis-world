@@ -13,6 +13,7 @@ from .utils import assert_grad_matches_fd, make_diff_scene_pair
     "model_name",
     [
         "grad_free",
+        "grad_fixed_base",
         "grad_revolute",
         "grad_prismatic",
         pytest.param("grad_spherical", marks=pytest.mark.required),
@@ -36,12 +37,17 @@ def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
     n_dofs = pair.entity_ana.n_dofs
     n_links = pair.entity_ana.n_links
 
-    # Single-link joints read the entity pose; multi-link topologies read the rigid-solver per-link pose.
+    # Single-link joints read the entity pose; multi-link topologies read the per-link poses.
     is_single_link = model_name in ("grad_free", "grad_revolute", "grad_prismatic", "grad_spherical")
     # (setter, output, input_seed) per joint, plus the position and quaternion target seeds. Single-step
     # force->position is only checked on cartpole, where its sensitivity clears the finite-difference floor.
     checks_by_joint = {
         "grad_free": ((("pos", "pos", 10), ("quat", "quat", 11), ("vel", "pos", 12), ("vel", "quat", 13)), 1, 2),
+        "grad_fixed_base": (
+            (("vel", "pos", 230), ("pos", "pos", 231), ("quat", "quat", 232), ("quat", "pos", 233)),
+            221,
+            222,
+        ),
         "grad_revolute": ((("vel", "quat", 31), ("force", "quat", 32)), 21, 22),
         "grad_prismatic": ((("vel", "pos", 50),), 41, 0),
         "grad_spherical": ((("vel", "quat", 71), ("force", "quat", 72)), 61, 62),
@@ -59,6 +65,7 @@ def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
     # Per-topology tolerances (fp64, fp32), pinned to the measured finite-difference floors
     fp64_tol, fp32_tol = {
         "grad_free": (2e-10, 5e-5),
+        "grad_fixed_base": (5e-10, 5e-5),
         "grad_revolute": (1e-10, 5e-7),
         "grad_prismatic": (1e-10, 5e-6),
         "grad_spherical": (1e-10, 1e-6),
@@ -67,6 +74,9 @@ def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
         "grad_cartpole": (1e-10, 5e-5),
         "grad_hopper": (1e-10, 1e-4),
     }[model_name]
+    # The positions the orientation of a fixed base moves sit far from their target, so the fp32 rollout rounds their
+    # loss above the floor of the other checks
+    fp32_tol_by_check = {("quat", "pos"): 5e-4}
 
     pos_shape = (B, 3) if is_single_link else (B, n_links, 3)
     quat_shape = (B, 4) if is_single_link else (B, n_links, 4)
@@ -115,9 +125,10 @@ def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
 
         def read_pose(entity, out=output, sl=is_single_link):
             if sl:
-                return entity.get_state().pos if out == "pos" else entity.get_state().quat
-            state = entity.solver.get_state()
-            return state.links_pos if out == "pos" else state.links_quat
+                return entity.get_pos() if out == "pos" else entity.get_quat()
+            # The poses of the links are those the configuration implies, which a step may leave pending
+            entity.solver.update_forward_pos()
+            return entity.get_links_pos(relative=False) if out == "pos" else entity.get_links_quat(relative=False)
 
         def clear_poses(scene, entity):
             poses.clear()
@@ -134,13 +145,14 @@ def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
         # The normalization of a quaternion makes its setter the most curved input, which bounds its step by the
         # truncation error. Every other step is bounded by the rounding error alone.
         fp64_eps, fp32_eps = (1.5e-5, 5e-3) if setter == "quat" else (3.6e-4, 1.2e-1)
+        tol = fp64_tol if precision == "64" else fp32_tol_by_check.get((setter, output), fp32_tol)
         assert_grad_matches_fd(
             pair,
             step_inputs,
             apply_fn,
             loss_fn,
-            rtol=fp64_tol if precision == "64" else fp32_tol,
-            atol=fp64_tol if precision == "64" else fp32_tol,
+            rtol=tol,
+            atol=tol,
             eps=fp64_eps if precision == "64" else fp32_eps,
             setup_fn=clear_poses,
             step_fn=push_and_append_pose,
@@ -198,9 +210,9 @@ def test_fk_multistep_force_grad_matches_fd(model_name, request, precision, show
 
     def loss_fn(scene, entity):
         if output == "state_pos":
-            pose = entity.get_state().pos
+            pose = entity.get_pos()
         elif output == "state_quat":
-            pose = entity.get_state().quat
+            pose = entity.get_quat()
         else:
             pose = entity.get_links_pos()
         return ((pose.reshape(-1) - target) ** 2).sum()
@@ -274,7 +286,7 @@ def test_per_step_pd_target_grad_matches_fd(n_envs, grad_free_with_revolute, pre
             dofs_readings.extend(
                 [
                     entity.get_dofs_control_force(),
-                    entity.solver.get_dofs_actuator_force(),
+                    entity.get_dofs_actuator_force(),
                     entity.get_dofs_force(),
                     entity.get_dofs_acc(),
                 ]

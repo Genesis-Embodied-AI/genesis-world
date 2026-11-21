@@ -12,9 +12,10 @@ that object returns the value the simulation currently uses.
 import math
 import os
 import xml.etree.ElementTree as ET
+from collections.abc import Sequence
 from dataclasses import dataclass, field, fields, replace
 from itertools import chain
-from typing import Any, Self, Sequence, TypeVar
+from typing import Any, Self
 
 import numpy as np
 
@@ -26,14 +27,10 @@ from genesis.engine.materials.base import Material
 from genesis.engine.mesh import InertialProperties
 from genesis.options.morphs import Morph
 from genesis.options.options import Options
-from genesis.options.surfaces import Surface
+from genesis.options.patches import resolve_patches_fields
+from genesis.options.surfaces import DynamicVertices, Surface
 from genesis.typing import PositiveVec3FType, PositiveVec3IType
-from genesis.utils import geom as gu
-from genesis.utils import mesh as mu
-from genesis.utils import mjcf as mju
-from genesis.utils import terrain as tu
-from genesis.utils import urdf as uu
-from genesis.utils.cache import MESH_CACHE_MATCH_RTOL
+from genesis.utils import geom as gu, gltf as gltf_utils, mesh as mu, mjcf as mju, terrain as tu, urdf as uu
 from genesis.utils.misc import get_assets_dir
 
 from ..base_entity import EntityDescription
@@ -57,6 +54,9 @@ from .inertial import (
 # Rounding a pose parsed from a file may carry, within which it reads as the identity
 POSE_EPS = 1e-9
 
+# Resolution of the signed distance field of a primitive, which resolves its shape exactly whatever its size
+PRIMITIVE_SDF_MAX_RES = 32
+
 
 @dataclass(kw_only=True)
 class BaseRigidGeomDescription:
@@ -71,6 +71,7 @@ class RigidVisGeomDescription(BaseRigidGeomDescription):
     """Describe one geometry a link is drawn with: where it sits on the link, and the mesh drawn there."""
 
     vmesh: "gs.Mesh"
+    dynamic_vertices: DynamicVertices | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -85,13 +86,13 @@ class SignedDistanceFieldDescription:
     """Whether the grid carries the gradient of the field."""
 
     @classmethod
-    def from_geometry(cls, mesh: "gs.Mesh", geom_type: GEOM_TYPE, material: Material) -> Self:
+    def from_geometry(cls, mesh: "gs.Mesh", geom_type: GEOM_TYPE, material: Material, max_res: int) -> Self:
         """Resolve the grid sampling the signed distance field (SDF) of a geometry, at the resolution its material asks.
 
         The grid extends past the bounding box of the geometry by a margin along each axis. Its cells have the size the
-        material asks, refined further for a closed non-convex geometry to fit 2 across its thinnest walls, and clipped
-        along each axis to the minimum and maximum resolutions of the material. A terrain carries no gradient, since it
-        derives its gradient from its height field instead.
+        material asks, refined further to fit 2 across the width of a convex geometry or the thinnest walls of a closed
+        non-convex one, and clipped along each axis to the minimum resolution of the material and to 'max_res'. A
+        terrain carries no gradient, since it derives its gradient from its height field instead.
         """
         # The vertices are a trimesh array subclass, which the grid parameters derived from them would carry into an
         # exported description
@@ -101,20 +102,28 @@ class SignedDistanceFieldDescription:
         # The cell size is anisotropic, each axis being sized to its own extent, so a thin slab gets fine resolution
         # perpendicular to its surface without bloating the cell count along its long axes. A uniform cell size would
         # leave primitive-vs-mesh contacts noisy whenever the smallest dimension of the primitive is below it.
-        cell_size_lower = grid_size / (material.sdf_max_res - 1)
+        cell_size_lower = grid_size / (max_res - 1)
         cell_size_upper = grid_size / max(material.sdf_min_res - 1, 2)
-        # A convex geom has no thin wall to tunnel through, so it keeps the target. A non-convex geom tunnels when the
+        # A thin convex geom, such as a piece of the convex decomposition of a thin shell, fits 2 cells across its
+        # width, so that the queries near its faces resolve the side they lie on. A non-convex geom tunnels when the
         # cell is coarser than its thinnest wall (its area-weighted p25 thickness), on all three axes: the certified
         # penetration bounds that hold shell contacts apart need lattice points near the contact in every direction,
-        # so a wall is finely sampled along its tangent axes too (see get_wall_thickness). The probe needs a closed
-        # surface, since inward rays escape an open mesh through its holes, and the mesh it probes stands for this
-        # collision mesh, so both share their watertightness.
+        # so a wall is finely sampled along its tangent axes too. For example, the thin vertical wall of a mug extends
+        # along the vertical axis although the only wall facing that axis is its thick bottom, so no axis can be
+        # coarsened to the thickness of the walls facing it. The probe needs a closed surface, since inward rays escape
+        # an open mesh through its holes, and the mesh it probes stands for this collision mesh, so both share their
+        # watertightness.
         sdf_tmesh = mesh.metadata.get("sdf_mesh", mesh.trimesh)
         cell_size_target = material.sdf_cell_size
-        if not mesh.is_convex:
+        if mesh.is_convex:
+            convex_width = mu.get_convex_width(
+                np.ascontiguousarray(sdf_tmesh.vertices), np.ascontiguousarray(sdf_tmesh.faces)
+            )
+            cell_size_target = min(cell_size_target, convex_width / 2.0)
+        else:
             if mesh.is_watertight:
                 wall_thickness = mu.get_wall_thickness(
-                    np.ascontiguousarray(sdf_tmesh.vertices), np.ascontiguousarray(sdf_tmesh.faces)
+                    np.ascontiguousarray(sdf_tmesh.vertices), np.ascontiguousarray(sdf_tmesh.faces), quantile=0.25
                 )
                 cell_size_target = min(cell_size_target, wall_thickness / 2.0)
             else:
@@ -156,6 +165,8 @@ class RigidGeomDescription(BaseRigidGeomDescription):
     friction_torsional: float
     friction_rolling: float
     sol_params: np.ndarray
+    # Whether the contacts of the geom are drawn as markers (see 'gs.options.Geom.visualize_contact')
+    visualize_contact: bool = False
 
 
 @dataclass
@@ -218,6 +229,26 @@ class RigidJointDescription:
         if self.dofs_act_gain is None:
             self.dofs_act_gain = np.zeros(self.n_dofs)
 
+    def inert(self) -> Self:
+        """Describe this joint as an environment simulates it when its heterogeneous variant does not carry its link.
+
+        The joint is fixed, so its degrees of freedom belong to no joint there: no motion, force or actuation reaches
+        them, and they stay at rest.
+        """
+        # A unit armature is the whole row of such a dof in the mass matrix, which keeps the matrix positive definite,
+        # and its zero motion axes keep it out of every Jacobian and of the averages of the mass matrix (see
+        # func_is_dof_moving).
+        return RigidJointDescription(
+            name=self.name,
+            type=gs.JOINT_TYPE.FIXED,
+            n_qs=self.n_qs,
+            n_dofs=self.n_dofs,
+            dofs_motion_ang=np.zeros((self.n_dofs, 3)),
+            dofs_motion_vel=np.zeros((self.n_dofs, 3)),
+            dofs_armature=np.ones(self.n_dofs),
+            dofs_force_range=np.zeros((self.n_dofs, 2)),
+        )
+
 
 @dataclass(kw_only=True)
 class KinematicLinkDescription:
@@ -240,6 +271,23 @@ class KinematicLinkDescription:
     joints: list["RigidJointDescription"] = field(default_factory=list)
     vgeoms: list[RigidVisGeomDescription] = field(default_factory=list)
 
+    def inert(self, **changes) -> Self:
+        """Describe this link as an environment simulates it when its heterogeneous variant does not carry it.
+
+        The link stands welded onto the frame of its parent, without geometry. 'changes' sets other fields, as
+        'dataclasses.replace' does.
+        """
+        return replace(
+            self,
+            pos=gu.zero_pos(),
+            quat=gu.identity_quat(),
+            offset_pos=gu.zero_pos(),
+            offset_quat=gu.identity_quat(),
+            is_aligned=False,
+            vgeoms=[],
+            **changes,
+        )
+
 
 @dataclass(kw_only=True)
 class RigidLinkDescription(KinematicLinkDescription):
@@ -249,6 +297,9 @@ class RigidLinkDescription(KinematicLinkDescription):
     the geometry estimate otherwise. A link the world carries holds what the asset states and None where it states
     nothing, until an attach sets it moving or the build resolves it. The inverse weight holds the asset value, zeros
     for a link the world carries, or the sentinel '-1.0', which the solver's refresh completes at build.
+
+    'contact_exclusions' names the links of the entity this one never collides with, whatever the collision bitmasks of
+    their geoms.
     """
 
     inertial_pos: np.ndarray | None
@@ -257,6 +308,24 @@ class RigidLinkDescription(KinematicLinkDescription):
     mass: float | None
     invweight: np.ndarray
     geoms: list[RigidGeomDescription] = field(default_factory=list)
+    contact_exclusions: list[str] = field(default_factory=list)
+
+    def inert(self, **changes) -> Self:
+        """Describe this link as an environment simulates it when its heterogeneous variant does not carry it.
+
+        The link is massless, welded onto the frame of its parent and without geometry, its inverse weight left for
+        the solver's refresh to complete (see 'KinematicLinkDescription.inert').
+        """
+        return super().inert(
+            inertial_pos=gu.zero_pos(),
+            inertial_quat=gu.identity_quat(),
+            inertia=np.zeros((3, 3), dtype=gs.np_float),
+            mass=0.0,
+            invweight=np.full((2,), fill_value=-1.0, dtype=gs.np_float),
+            geoms=[],
+            contact_exclusions=[],
+            **changes,
+        )
 
 
 @dataclass
@@ -291,7 +360,7 @@ class RigidVariantLinkDescription(KinematicVariantLinkDescription):
     """What one variant gives one simulated link: the geoms it adds, and the inertial resolved for them.
 
     A variant stands for the same asset loaded on its own, so its inertial resolves from its own file and its own
-    geometry.
+    geometry, and the links its geoms never collide with are those its own file excludes (see 'RigidLinkDescription').
     """
 
     mass: float
@@ -299,6 +368,7 @@ class RigidVariantLinkDescription(KinematicVariantLinkDescription):
     inertial_quat: np.ndarray
     inertia: np.ndarray
     geoms: list[RigidGeomDescription] = field(default_factory=list)
+    contact_exclusions: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -308,13 +378,8 @@ class KinematicVariantDescription:
     A heterogeneous entity holds one set of links, the merge of the kinematic trees of every variant, and dispatches a
     variant per environment, so a variant is described beside those links rather than as an entity of its own.
 
-    'links_idx' lists the entity links the variant carries, in ascending order, and 'links' describes each of them in
-    the same order. The primary describes its links as the entity links themselves, so its 'links' stays empty. An
-    environment simulates every link its variant does not carry as an inert link: a link of zero mass, welded onto the
-    frame of its parent, without geometry, and whose degrees of freedom stay at rest.
-
-    'init_qpos' holds the initial configuration of the variant in the generalized coordinates of the entity, zero for
-    those of the links the variant does not carry.
+    An environment simulates every link its variant does not carry as an inert link (see
+    'KinematicLinkDescription.inert' and 'RigidJointDescription.inert').
 
     'default_armature' is the default rotor inertia of its morph, None for a morph without one. Every joint a motor
     could drive gets one, a revolute or prismatic joint moving a link on its own: a motor's rotor is real inertia, and
@@ -324,11 +389,27 @@ class KinematicVariantDescription:
     """
 
     init_qpos: np.ndarray
+    """The initial configuration of the variant in the generalized coordinates of the entity, zero for those of the
+    links it does not carry."""
     offset_pos: np.ndarray
     offset_quat: np.ndarray
     links_idx: list[int]
+    """The entity links the variant carries, in ascending order."""
     links: list[KinematicVariantLinkDescription] = field(default_factory=list)
+    """What the variant gives each link of 'links_idx', in the same order. The primary describes its links as the
+    entity links themselves, so its own list stays empty."""
     default_armature: float | None = None
+
+
+def _balanced_variant_mapping(n_variants, B):
+    """Map N variants to B environments using balanced block assignment."""
+    if B >= n_variants:
+        base = B // n_variants
+        extra = B % n_variants
+        sizes = np.r_[np.full(extra, base + 1), np.full(n_variants - extra, base)]
+        return np.repeat(np.arange(n_variants), sizes)
+    else:
+        return np.arange(B)
 
 
 @dataclass
@@ -343,10 +424,7 @@ class KinematicAttachmentDescription:
     link_name: str
 
 
-DescriptionT = TypeVar("DescriptionT")
-
-
-def description_from_info(cls: type[DescriptionT], info: dict) -> DescriptionT:
+def description_from_info[DescriptionT](cls: type[DescriptionT], info: dict) -> DescriptionT:
     """Build one description of class 'cls' from what a parse states, taking the fields it declares and no others.
 
     A key the class declares no field for is dropped, and a field the parse states nothing for keeps its declared
@@ -391,16 +469,13 @@ class KinematicEntityDescription(EntityDescription):
     written into the geoms it overrides. A geom carries its mesh, so an entity is created from this alone, with no
     asset to read and no geometry to process again.
 
-    The morphs, material and surface it was given stand here as well, since a link states none of them: the material
-    carries the physics the geoms are simulated under, the surface how they are drawn, and a morph what a kind of
-    entity needs beyond its links - the propeller links of a drone, the grid of a terrain. 'morphs' lists every
-    morph the entity dispatches, the primary first, and a homogeneous entity lists exactly one.
+    The entity spec it was given stands here as well, since a link states none of what they hold: the material
+    carries the physics the geoms are simulated under, and a morph what a kind of entity needs beyond its links - the
+    propeller links of a drone, the grid of a terrain. The surface is the one resolved from the spec, which states
+    how the geoms are drawn.
     """
 
-    morphs: list[Morph]
     surface: Surface
-    visualize_contact: bool = False
-    name: str | None = None
     links: list[KinematicLinkDescription] = field(default_factory=list)
     variants: list[KinematicVariantDescription] = field(default_factory=list)
     attachment: KinematicAttachmentDescription | None = None
@@ -408,21 +483,18 @@ class KinematicEntityDescription(EntityDescription):
     @classmethod
     def resolve(
         cls,
-        morphs: Sequence[Morph],
-        material: Material,
+        spec: gs.entities.Spec,
         surface: Surface,
-        options: Options,
+        solver_options: Options,
         enable_mujoco_compatibility: bool,
-        visualize_contact: bool = False,
-        name: str | None = None,
     ) -> Self:
-        """Resolve what an entity is created with into the description it is built from.
+        """Resolve the entity spec an entity is created with into the description it is built from.
 
         This is where every asset a morph names is read and post-processed, so an entity created from the returned
-        description opens no file. 'morphs' lists the primary morph first, then one morph per heterogeneous variant.
-        'options' are those of the solver simulating the entity, which the parsers check the assets against.
+        description opens no file. 'surface' is the one resolved from the spec. 'solver_options' are those of the
+        solver simulating the entity, which the parsers check the assets against.
         """
-        morphs = list(morphs)
+        morphs = spec.morphs
         if len(morphs) > 1:
             if not all(
                 isinstance(morph, (gs.morphs.Primitive, gs.morphs.Mesh, gs.morphs.URDF, gs.morphs.MJCF))
@@ -435,17 +507,12 @@ class KinematicEntityDescription(EntityDescription):
                     "basic objects (ie Primitive, Mesh)."
                 )
 
-        if isinstance(material, gs.materials.Rigid):
-            # small sdf res is sufficient for primitives regardless of size
-            if isinstance(morphs[0], gs.morphs.Primitive):
-                material.sdf_max_res = 32
-
-        # Set material-dependent default options
+        # Set the default options that depend on the kind of entity
         for morph in morphs:
             if isinstance(morph, gs.morphs.FileMorph):
                 # Rigid entities will convexify geom by default
                 if morph.convexify is None:
-                    morph.convexify = isinstance(material, gs.materials.Rigid)
+                    morph.convexify = not isinstance(spec, gs.entities.Kinematic)
                 # Decimation simplifies away the very surface detail that a non-convex collision mesh is kept for, so
                 # it defaults off when convexify is off and on otherwise. Only applies to meshes that skip
                 # watertightening (already-watertight inputs); watertighten does its own feature-preserving QEM.
@@ -462,8 +529,9 @@ class KinematicEntityDescription(EntityDescription):
                 ):
                     morph.default_armature = None
 
-        desc = cls(morphs=morphs, material=material, surface=surface, visualize_contact=visualize_contact, name=name)
-        desc._load_morph(morphs[0], Resolution(options, enable_mujoco_compatibility))
+        desc = cls(spec, surface)
+        resolution = Resolution(solver_options, enable_mujoco_compatibility)
+        desc._load_morph(morphs[0], resolution)
         return desc
 
     def _load_morph(self, morph: Morph, resolution: Resolution):
@@ -500,7 +568,7 @@ class KinematicEntityDescription(EntityDescription):
         contiguous range of links. Where the entity already holds the name of that link or of one of its joints, the
         name takes the suffix '_<i>', 'i' being the index of the variant among the morphs.
         """
-        if not len(self.morphs) > 1:
+        if not len(self.spec.morphs) > 1:
             return
 
         # The per-variant offset and inertial alignment are tracked for a single root only; a multi-root entity (one
@@ -518,9 +586,11 @@ class KinematicEntityDescription(EntityDescription):
         ]
         variants_offset = [(self.links[0].offset_pos, self.links[0].offset_quat)]
         # Only a scene or robot description file yields a robot link, and those morphs state a default armature.
-        variants_default_armature = [self.morphs[0].default_armature if any(l.is_robot for l in self.links) else None]
+        variants_default_armature = [
+            self.spec.morphs[0].default_armature if any(l.is_robot for l in self.links) else None
+        ]
 
-        for i_variant, morph in enumerate(self.morphs[1:], start=1):
+        for i_variant, morph in enumerate(self.spec.morphs[1:], start=1):
             # The COM/principal-axis anchoring of the floating base is deferred to '_align_free_roots', which runs once
             # every variant is described, so only the morph pose offset is composed here.
             offset_pos = np.array(morph.offset_pos, dtype=gs.np_float)
@@ -530,8 +600,9 @@ class KinematicEntityDescription(EntityDescription):
                 if sum(v_l_info["parent_idx"] == -1 for v_l_info in v_l_infos) > 1:
                     gs.raise_exception("Heterogeneous morphs are not supported on multi-root entities.")
 
-                v_links_idx, v_links_is_fixed, v_links, v_links_init_qpos = [], [], [], []
-                for v_l_info, v_j_infos, v_g_infos in zip(v_l_infos, v_links_j_infos, v_links_g_infos):
+                # Map every link of the variant to an entity link, adding the entity links it lacks
+                v_links_idx, v_links_is_fixed, v_links_joints = [], [], []
+                for v_l_info, v_j_infos in zip(v_l_infos, v_links_j_infos):
                     v_parent_idx = v_l_info["parent_idx"]
                     joints_signature = tuple((j_info["type"], j_info["n_dofs"]) for j_info in v_j_infos)
                     is_fixed = all(j_info["type"] is gs.JOINT_TYPE.FIXED for j_info in v_j_infos) and (
@@ -539,6 +610,7 @@ class KinematicEntityDescription(EntityDescription):
                     )
                     v_links_is_fixed.append(is_fixed)
                     v_joints = [description_from_info(RigidJointDescription, j_info) for j_info in v_j_infos]
+                    v_links_joints.append(v_joints)
 
                     if v_parent_idx == -1:
                         # Whether the base is fixed or free decides which links the world carries, and with them the
@@ -594,36 +666,38 @@ class KinematicEntityDescription(EntityDescription):
                                 f"Heterogeneous variant {i_variant} adds the link '{v_l_info['name']}', whose name or "
                                 "whose joint names are taken even with the variant suffix. Rename them in the asset."
                             )
-                        # The entity link describes the link as the primary has it: absent. The variants carrying it
+                        # The entity link describes the link as the primary has it: inert. The variants carrying it
                         # describe their own frame, inertial and geoms, and its joints give the entity their types.
-                        l_desc = replace(
-                            self.links[parent_idx],
-                            name=names[0],
-                            parent_idx=parent_idx,
-                            pos=gu.zero_pos(),
-                            quat=gu.identity_quat(),
-                            offset_pos=gu.zero_pos(),
-                            offset_quat=gu.identity_quat(),
-                            is_robot=bool(v_l_info["is_robot"]),
-                            is_aligned=False,
-                            joints=[replace(j_desc, name=name) for j_desc, name in zip(v_joints, names[1:])],
-                            vgeoms=[],
+                        self.links.insert(
+                            i_l,
+                            self.links[parent_idx].inert(
+                                name=names[0],
+                                parent_idx=parent_idx,
+                                is_robot=bool(v_l_info["is_robot"]),
+                                joints=[replace(j_desc, name=name) for j_desc, name in zip(v_joints, names[1:])],
+                            ),
                         )
-                        if isinstance(l_desc, RigidLinkDescription):
-                            l_desc.inertial_pos = gu.zero_pos()
-                            l_desc.inertial_quat = gu.identity_quat()
-                            l_desc.inertia = np.zeros((3, 3), dtype=gs.np_float)
-                            l_desc.mass = 0.0
-                            l_desc.invweight = np.full((2,), fill_value=-1.0, dtype=gs.np_float)
-                            l_desc.geoms = []
-                        self.links.insert(i_l, l_desc)
                     v_links_idx.append(i_l)
 
+                # The links a variant excludes from collision are named as the entity names the links they map to
+                v_links_name = [v_l_info["name"] for v_l_info in v_l_infos]
+                for v_l_info in v_l_infos:
+                    v_l_info["contact_exclusions"] = [
+                        self.links[v_links_idx[v_links_name.index(name)]].name
+                        for name in v_l_info.get("contact_exclusions", ())
+                    ]
+
+                v_links_path = [v_l_info["path"] for v_l_info in v_l_infos]
+                self._resolve_geoms_values(morph, v_links_path, v_links_g_infos, resolution)
+                v_links, v_links_init_qpos = [], []
+                for v_l_info, v_j_infos, v_g_infos, v_joints, i_l in zip(
+                    v_l_infos, v_links_j_infos, v_links_g_infos, v_links_joints, v_links_idx
+                ):
                     # Compose the morph pose offset into the root link frame, exactly as '_align_link' composes it for
                     # the primary, and into its free joint so relative getters report the variant's authored frame
                     link_pos, link_quat = v_l_info["pos"], v_l_info["quat"]
                     joints_init_qpos = [j_info["init_qpos"] for j_info in v_j_infos]
-                    if v_parent_idx == -1:
+                    if v_l_info["parent_idx"] == -1:
                         link_pos, link_quat = gu.transform_pos_quat_by_trans_quat(
                             offset_pos, offset_quat, link_pos, link_quat
                         )
@@ -672,8 +746,9 @@ class KinematicEntityDescription(EntityDescription):
                     g_infos = self._load_mesh(morph, resolution, load_geom_only_for_heterogeneous=True)
                 else:
                     g_infos = self._load_primitive(morph, resolution, load_geom_only_for_heterogeneous=True)
-                if morph.fixed != self.morphs[0].fixed:
+                if morph.fixed != self.spec.morphs[0].fixed:
                     gs.raise_exception("Mixing fixed and non-fixed morphs in heterogeneous entities is not supported.")
+                self._resolve_geoms_values(morph, [(self.links[0].name,)], [g_infos], resolution)
                 cg_infos, vg_infos = self._resolve_geoms(morph, g_infos, is_robot=False)
 
                 # Mesh/Primitive variants have no explicit inertial; the anchor inertia comes from their geometry.
@@ -813,9 +888,11 @@ class KinematicEntityDescription(EntityDescription):
         if load_geom_only_for_heterogeneous:
             return g_infos
 
+        link_name = f"{link_name_prefix}_baselink"
+        self._resolve_geoms_values(morph, [(link_name,)], [g_infos], resolution)
         self._resolve_link(
             l_info=dict(
-                name=f"{link_name_prefix}_baselink",
+                name=link_name,
                 parent_idx=-1,
                 root_idx=None,
                 pos=np.array(morph.pos),
@@ -907,11 +984,11 @@ class KinematicEntityDescription(EntityDescription):
         if load_geom_only_for_heterogeneous:
             return g_infos
 
-        link_name = os.path.basename(morph.file).replace(".", "_")
-
+        link_name = f"{os.path.basename(morph.file).replace('.', '_')}_baselink"
+        self._resolve_geoms_values(morph, [(link_name,)], [g_infos], resolution)
         self._resolve_link(
             l_info=dict(
-                name=f"{link_name}_baselink",
+                name=link_name,
                 parent_idx=-1,
                 root_idx=None,
                 pos=link_pos,
@@ -953,8 +1030,10 @@ class KinematicEntityDescription(EntityDescription):
             l_infos, links_j_infos, links_g_infos, eqs_info = mju.parse_xml(morph, self.surface, resolution.options)
         elif isinstance(morph, (gs.morphs.URDF, gs.morphs.Drone)):
             # Custom "legacy" URDF parser for loading geometries (visual and collision) and equality constraints.
-            # This is necessary because Mujoco cannot parse visual geometries (meshes) reliably for URDF.
-            l_infos, links_j_infos, links_g_infos, eqs_info = uu.parse_urdf(morph, self.surface)
+            # This is necessary because Mujoco cannot parse visual geometries (meshes) reliably for URDF. The glTF meshes
+            # of the links share their images, which the parse drops along with each mesh (see 'glb_images_context').
+            with gltf_utils.glb_images_context():
+                l_infos, links_j_infos, links_g_infos, eqs_info = uu.parse_urdf(morph, self.surface)
 
             # Mujoco's unified MJCF+URDF parser for only link, joints, and collision geometries properties
             morph_ = morph.model_copy(update=dict(visualization=False))
@@ -1236,12 +1315,19 @@ class KinematicEntityDescription(EntityDescription):
         # Exclude joints with 0 dofs to align with Mujoco
         links_j_infos = [[j_info for j_info in link_j_infos if j_info["n_dofs"] > 0] for link_j_infos in links_j_infos]
 
+        # The names from the tree root down to each link, for 'gs.indices.Link'. Every parent precedes its children.
+        for l_info in l_infos:
+            parent_idx = l_info["parent_idx"]
+            l_info["path"] = (*l_infos[parent_idx]["path"], l_info["name"]) if parent_idx >= 0 else (l_info["name"],)
+
         return l_infos, links_j_infos, links_g_infos, eqs_info
 
     def _load_scene(self, morph, resolution: Resolution):
         l_infos, links_j_infos, links_g_infos, _eqs_info = self._parse_scene(morph, resolution)
 
         # Add (link, joints, geoms) tuples sequentially
+        links_path = [l_info["path"] for l_info in l_infos]
+        self._resolve_geoms_values(morph, links_path, links_g_infos, resolution)
         for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
             self._resolve_link(l_info, link_j_infos, link_g_infos, morph, resolution)
 
@@ -1252,9 +1338,13 @@ class KinematicEntityDescription(EntityDescription):
         variant, each against its own inertia and geoms. This delivers the 'align' option's promise (a COM-centered,
         principal-axis frame, which also conditions the constraint solve) for mesh and fixed-child bodies, not just
         primitives, while keeping a heterogeneous entity bit-identical to its variants' separate entities.
+
+        Returns the transform taking the coordinates of the authored frame of each link anchored to its anchored frame,
+        keyed by the variant and the index of the link.
         """
         links = self.links
         variants = self.variants
+        links_alignment_inv = {}
         for i_root, root in enumerate(links):
             if root.parent_idx != -1 or not root.is_aligned:
                 continue
@@ -1307,7 +1397,7 @@ class KinematicEntityDescription(EntityDescription):
                 inertial_info = []
                 explicit_mass_flags = set()
                 for i_l in variant_subtree:
-                    props, is_mass_explicit, _ = resolution.links_inertial_info[i_l][i_v]
+                    props, is_mass_explicit, _, _ = resolution.links_inertial_info[i_l][i_v]
                     # The stash holds the unit-density estimate, so a mass however small is a body of the composite, and
                     # only a link without geometry or authored mass is left out.
                     if props.mass <= 0.0:
@@ -1348,33 +1438,16 @@ class KinematicEntityDescription(EntityDescription):
                     continue
                 principal_quat = gu.R_to_quat(uu.principal_axes_rot(inertia_root))
 
-                # Re-express the variant's geoms across the subtree so the body frame can move to (com_root, principal
-                # axes) while the world geometry stays fixed. The anchoring is undone by a transform conjugated into
-                # each link frame of the variant, reused below for the inertial frame of a fixed child. A kinematic link
-                # has only visual geoms; a rigid link has both.
-                alignment_inv_in_link = {}
+                # Re-express the variant's visual geoms across the subtree so the body frame can move to (com_root,
+                # principal axes) while the world geometry stays fixed. The anchoring is undone by a transform
+                # conjugated into each link frame of the variant.
                 for i_l in variant_subtree:
                     link_pos, link_quat = pose_in_root[i_l]
                     pos, quat = gu.inv_transform_pos_quat_by_trans_quat(link_pos, link_quat, com_root, principal_quat)
                     pos, quat = gu.inv_transform_pos_quat_by_trans_quat(pos, quat, link_pos, link_quat)
-                    alignment_inv_in_link[i_l] = (pos, quat)
-                    link_desc = variant_links[i_l]
-                    geoms = list(link_desc.vgeoms)
-                    if isinstance(link_desc, (RigidLinkDescription, RigidVariantLinkDescription)):
-                        geoms += link_desc.geoms
-                    for geom in geoms:
+                    links_alignment_inv[(i_v, i_l)] = (pos, quat)
+                    for geom in variant_links[i_l].vgeoms:
                         geom.pos, geom.quat = gu.transform_pos_quat_by_trans_quat(geom.pos, geom.quat, pos, quat)
-
-                # Every link keeps its own mass and inertia. The inertial frame moves with the geoms into the anchored
-                # frame: getters and wrenches read it as 'link_COM', and the inverse weight derives from it. The solver
-                # composes the body from its links each step, so the composite is diagonal there (see
-                # '_init_tree_fields').
-                if isinstance(root, RigidLinkDescription):
-                    for i_l in variant_subtree:
-                        desc = variant_links[i_l]
-                        desc.inertial_pos, desc.inertial_quat = gu.transform_pos_quat_by_trans_quat(
-                            desc.inertial_pos, desc.inertial_quat, *alignment_inv_in_link[i_l]
-                        )
 
                 # Fold the anchoring into the offset (relative getters keep reporting the authored frame) and the root
                 # free-joint init_qpos (the body frame moves to old_pose o (com_root, principal), keeping the
@@ -1404,9 +1477,25 @@ class KinematicEntityDescription(EntityDescription):
                     root.pos = gu.transform_by_trans_quat(com_root, root.pos, root.quat)
                     root.quat = gu.transform_quat_by_quat(principal_quat, root.quat)
 
+            # Densities set on links or geoms may move the center of mass off the anchor, so the body is unaligned
+            # A variant not carrying a link holds no inertial info for it
+            if any(
+                info is not None and info.has_set_density
+                for i_l in subtree
+                for info in resolution.links_inertial_info[i_l]
+            ):
+                root.is_aligned = False
+                gs.logger.warning(
+                    f"A density set on links or geoms of the body of link '{root.name}' may move its center of mass "
+                    "off its frame. The body is simulated unaligned, its frame staying where 'align' puts it from the "
+                    "densities of the asset."
+                )
+
         # Only the estimates and the anchors need the inertial info. The alignment now lives in the persistent
         # geometry, offset and init_qpos.
         resolution.links_inertial_info.clear()
+
+        return links_alignment_inv
 
     def _resolve_link(self, l_info, j_infos, g_infos, morph, resolution: Resolution):
         """Describe one link from what a parse states about it, and add that description to the entity's own.
@@ -1449,21 +1538,58 @@ class KinematicEntityDescription(EntityDescription):
             vgeoms=[description_from_info(RigidVisGeomDescription, vg_info) for vg_info in vg_infos],
         )
 
-    def _resolve_geoms(self, morph, g_infos, is_robot):
+    def _resolve_geoms_values(
+        self,
+        morph: Morph,
+        links_path: list[tuple[str, ...]],
+        links_g_infos: list[list[dict[str, Any]]],
+        resolution: Resolution,
+    ) -> None:
+        """Write into the parsed visual geoms of one morph the surface and the DynamicVertices they take.
+
+        A value set through ``select`` overrides the surface and the DynamicVertices of the entity, and a surface given
+        as None keeps that of the entity. The values are written before post-processing, so that every piece of a geom
+        takes them. 'links_path' holds the names from the tree root down to each link. Each heterogeneous variant holds
+        what the entity selects: a selection holding no geom of the morph raises.
+        """
+        vg_infos, vgeoms_link_idx = [], []
+        for i_l, link_g_infos in enumerate(links_g_infos):
+            for g_info in link_g_infos:
+                if morph.visualization and not (g_info["contype"] or g_info["conaffinity"]):
+                    g_info["dynamic_vertices"] = self.spec.dynamic_vertices
+                    vg_infos.append(g_info)
+                    vgeoms_link_idx.append(i_l)
+        patches = [patch for patch in self.spec.patches if isinstance(patch.options, gs.options.VGeom)]
+        if not patches:
+            return
+        vgeoms_name = [g_info["vmesh"].metadata.get("name", "") for g_info in vg_infos]
+        fields_patch_idx = resolve_patches_fields(
+            patches,
+            ("surface", "dynamic_vertices"),
+            vgeoms_name,
+            np.array(vgeoms_link_idx, dtype=gs.np_int),
+            links_path,
+            parts_repr=f"visual geom of {morph}",
+        )
+        # A selected surface keeps the asset and entity textures for the maps it leaves unset (see 'Mesh.set_surface')
+        for name, vgeoms_patch_idx in fields_patch_idx.items():
+            for i_g in np.flatnonzero(vgeoms_patch_idx >= 0):
+                options = patches[vgeoms_patch_idx[i_g]].options
+                if name == "dynamic_vertices":
+                    vg_infos[i_g]["dynamic_vertices"] = options.dynamic_vertices
+                elif options.surface is not None:
+                    vg_infos[i_g]["vmesh"].set_surface(options.surface)
+
+    def _resolve_geoms(
+        self, morph: Morph, g_infos: list[dict[str, Any]], is_robot: bool
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Split what a parse states about the geoms of one link, and post-process its collision geometry.
 
         Post-processing convexifies the collision meshes, decomposing the ones a single hull cannot approximate within
         the threshold the morph carries. Both kinds of geometry stay as parsed info, so the inertial composition
         treats them alike and '_describe_geoms' resolves the collision coefficients later. A plain load and a
-        heterogeneous variant both go through here.
+        heterogeneous variant both go through here, once '_resolve_geoms_values' has written the values of each geom.
         """
-        # An explicitly set material density overrides any asset-authored per-geom density, as material friction does
-        # for authored frictions. Dropping the keys up front keeps the align anchor, its all-or-none source check,
-        # and the build-time inertial estimate consistently uniform-density.
-        if isinstance(self.material, gs.materials.Rigid) and self.material.rho is not None:
-            for g_info in g_infos:
-                g_info.pop("density", None)
-
         cg_infos, vg_infos = [], []
         for g_info in g_infos:
             is_col = g_info["contype"] or g_info["conaffinity"]
@@ -1506,7 +1632,7 @@ class KinematicEntityDescription(EntityDescription):
                 threshold = g_info.pop("decompose_error_threshold", decompose_error_threshold)
                 for options, options_cg_infos in cg_infos_by_options:
                     if options[:2] == (convexify, decimate) and math.isclose(
-                        options[2], threshold, rel_tol=MESH_CACHE_MATCH_RTOL
+                        options[2], threshold, rel_tol=mu.MESH_CACHE_MATCH_RTOL
                     ):
                         options_cg_infos.append(g_info)
                         break
@@ -1538,16 +1664,15 @@ class KinematicEntityDescription(EntityDescription):
     ):
         """Compute a link's load-time inertial data (see 'LinkInertialInfo').
 
-        The align-anchor inertial weighs each collision geom by its authored density, falling back to unit density,
-        so it never needs the material density - which a kinematic entity does not have. The geometry hint consumed
-        by '_describe_link' uses the resolved material density as fallback instead, and falls back to the visual
-        geoms for a link without collision geometry.
+        The align-anchor inertial weighs each collision geom by its authored density, falling back to unit density, so
+        it never needs a material density.
         """
         hint = compose_inertial_from_g_infos(cg_infos, rho=1.0)
         props = finalize_inertial(
             explicit_mass, explicit_com, explicit_quat, explicit_inertia, *hint, clamp_min_mass=False
         )
-        if explicit_mass is not None and explicit_mass > 0.0:
+        is_mass_given = explicit_mass is not None and explicit_mass > 0.0
+        if is_mass_given:
             is_mass_explicit = True
         else:
             geoms_with_density = sum(g_info.get("density") is not None for g_info in cg_infos)
@@ -1557,20 +1682,9 @@ class KinematicEntityDescription(EntityDescription):
                 is_mass_explicit = True
             else:
                 is_mass_explicit = None
-
-        dynamics_hint = None
-        if isinstance(self.material, gs.materials.Rigid):
-            rho = self.material.rho
-            if rho is None:
-                if resolution.is_mujoco_compatible:
-                    rho = RHO_MUJOCO
-                else:
-                    rho = RHO_ROBOT if is_robot else RHO_OBJECT
-
-            # The estimate comes from the collision geometry of the link when it has any, and from its visual
-            # geometry otherwise. A link with neither contributes nothing, so only the asset's values remain.
-            dynamics_hint = compose_inertial_from_g_infos(cg_infos or vg_infos, rho)
-        return LinkInertialInfo(props, is_mass_explicit, dynamics_hint)
+        # A density set on a geom changes nothing where the asset gives the mass of the link
+        has_set_density = not is_mass_given and any("rho" in g_info for g_info in cg_infos)
+        return LinkInertialInfo(props, is_mass_explicit, hint=None, has_set_density=has_set_density)
 
     def _align_link(self, l_info, j_infos, cg_infos, vg_infos, morph, resolution: Resolution):
         """Carry the morph pose offset into a root link, record the offset it leaves, and resolve its inertia.
@@ -1687,12 +1801,15 @@ class RigidEntityDescription(KinematicEntityDescription):
             inertial_quat=inertial.quat,
             inertia=inertial.inertia,
             geoms=self._describe_geoms(cg_infos),
+            contact_exclusions=[] if v_l_info is None else v_l_info.get("contact_exclusions", []),
         )
 
     def _load_scene(self, morph, resolution: Resolution):
         l_infos, links_j_infos, links_g_infos, eqs_info = self._parse_scene(morph, resolution)
 
         # Add (link, joints, geoms) tuples sequentially
+        links_path = [l_info["path"] for l_info in l_infos]
+        self._resolve_geoms_values(morph, links_path, links_g_infos, resolution)
         for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
             self._resolve_link(l_info, link_j_infos, link_g_infos, morph, resolution)
 
@@ -1719,22 +1836,158 @@ class RigidEntityDescription(KinematicEntityDescription):
                     "not carry."
                 )
 
+    def _align_free_roots(self, resolution: Resolution):
+        links_alignment_inv = super()._align_free_roots(resolution)
+
+        # The collision geoms and the inertial frame of each anchored link move with its visual geoms into the
+        # anchored frame. Getters and wrenches read the inertial frame as 'link_COM', and the inverse weight derives
+        # from it. The solver composes the body from its links each step, so the composite is diagonal there, see
+        # '_init_tree_fields'.
+        for (i_v, i_l), alignment_inv in links_alignment_inv.items():
+            if i_v == 0:
+                link_desc = self.links[i_l]
+            else:
+                link_desc = self.variants[i_v].links[self.variants[i_v].links_idx.index(i_l)]
+            for geom in link_desc.geoms:
+                geom.pos, geom.quat = gu.transform_pos_quat_by_trans_quat(geom.pos, geom.quat, *alignment_inv)
+            link_desc.inertial_pos, link_desc.inertial_quat = gu.transform_pos_quat_by_trans_quat(
+                link_desc.inertial_pos, link_desc.inertial_quat, *alignment_inv
+            )
+
+        # The anchors and the relative orientation of a connect or a weld are stated in the authored frames of its
+        # links, which the anchoring moves (see 'func_equality_links' for the data layout).
+        transform_identity = (gu.zero_pos(), gu.identity_quat())
+        links_idx = {link_desc.name: i_l for i_l, link_desc in enumerate(self.links)}
+        for eq_desc in self.equalities:
+            if eq_desc.type == EQUALITY_TYPE.JOINT:
+                continue
+            (pos1, quat1), (pos2, quat2) = [
+                links_alignment_inv.get((0, links_idx.get(name)), transform_identity) for name in eq_desc.objs_name
+            ]
+            data = eq_desc.data
+            if eq_desc.type == EQUALITY_TYPE.CONNECT:
+                data[:3] = gu.transform_by_trans_quat(data[:3], pos1, quat1)
+                data[3:6] = gu.transform_by_trans_quat(data[3:6], pos2, quat2)
+            else:
+                data[:3] = gu.transform_by_trans_quat(data[:3], pos2, quat2)
+                data[3:6] = gu.transform_by_trans_quat(data[3:6], pos1, quat1)
+                data[6:10] = gu.transform_quat_by_quat(gu.transform_quat_by_quat(gu.inv_quat(quat2), data[6:10]), quat1)
+
+    def _resolve_geoms_values(
+        self,
+        morph: Morph,
+        links_path: list[tuple[str, ...]],
+        links_g_infos: list[list[dict[str, Any]]],
+        resolution: Resolution,
+    ) -> None:
+        """Write into the parsed geoms of one morph the density and the friction coefficients they take, then the
+        values of their visual geoms (see 'KinematicEntityDescription._resolve_geoms_values').
+
+        A value set through ``gs.entities.Rigid.select`` overrides that of the material, which overrides that of the
+        asset, and a field a patch gives as None stands for the value of the asset. Geoms of different values never fuse
+        in post-processing.
+        """
+        cg_infos, geoms_link_idx = [], []
+        for i_l, link_g_infos in enumerate(links_g_infos):
+            for g_info in link_g_infos:
+                if morph.collision and (g_info["contype"] or g_info["conaffinity"]):
+                    cg_infos.append(g_info)
+                    geoms_link_idx.append(i_l)
+        # The values the asset states, which a field given as None on a patch stands for, the asset stating a density
+        # where a patch sets 'rho'. They are read before the material drops them.
+        asset_names = ["density" if name == "rho" else name for name in gs.options.Geom.model_fields]
+        geoms_asset_values = [{name: g_info.get(name) for name in asset_names} for g_info in cg_infos]
+        # A material value overrides the one each geom of the asset states. Dropping the density up front keeps the
+        # align anchor, its all-or-none source check and the inertia estimate uniform-density. The fields of a geom but
+        # the drawing of its contacts mirror those of the material.
+        for name, asset_name in zip(gs.options.Geom.model_fields, asset_names):
+            if name != "visualize_contact" and getattr(self.spec.material, name) is not None:
+                for link_g_infos in links_g_infos:
+                    for g_info in link_g_infos:
+                        g_info.pop(asset_name, None)
+        patches = [patch for patch in self.spec.patches if isinstance(patch.options, gs.options.Geom)]
+        if patches:
+            fields_patch_idx = resolve_patches_fields(
+                patches,
+                gs.options.Geom.model_fields,
+                [g_info["mesh"].metadata.get("name", "") for g_info in cg_infos],
+                np.array(geoms_link_idx, dtype=gs.np_int),
+                links_path,
+                parts_repr=f"collision geom of {morph}",
+            )
+            patches_values = [patch.options.model_dump() for patch in patches]
+            default_coefficients = {
+                "friction": gu.default_friction,
+                "friction_torsional": gu.default_friction_torsional,
+                "friction_rolling": gu.default_friction_rolling,
+            }
+            for name, geoms_patch_idx in fields_patch_idx.items():
+                for i_g in np.flatnonzero(geoms_patch_idx >= 0):
+                    value = patches_values[geoms_patch_idx[i_g]][name]
+                    g_info = cg_infos[i_g]
+                    if value is not None:
+                        g_info[name] = value
+                    elif name == "visualize_contact":
+                        # The value of the entity spec (see '_describe_geoms')
+                        g_info.pop(name, None)
+                    elif name == "rho":
+                        # The density of the asset, or else a None standing for the default density of the solver,
+                        # which depends on the link (see '_resolve_inertial'). A density set on a geom stays apart from
+                        # the asset's, since only the inertia estimate reads it.
+                        g_info.pop("density", None)
+                        g_info["rho"] = geoms_asset_values[i_g]["density"]
+                    else:
+                        # The coefficient of the asset, or the solver default when it states none
+                        asset_value = geoms_asset_values[i_g][name]
+                        g_info[name] = default_coefficients[name]() if asset_value is None else asset_value
+        super()._resolve_geoms_values(morph, links_path, links_g_infos, resolution)
+
+    def _resolve_inertial(
+        self, explicit_mass, explicit_com, explicit_quat, explicit_inertia, cg_infos, vg_infos, is_robot, resolution
+    ):
+        """Compute the load-time inertial data of a link, with the geometry estimate '_describe_link' consumes.
+
+        The estimate falls back to the material density and to the visual geoms of a link without collision geometry
+        (see 'KinematicEntityDescription._resolve_inertial').
+        """
+        inertial_info = super()._resolve_inertial(
+            explicit_mass, explicit_com, explicit_quat, explicit_inertia, cg_infos, vg_infos, is_robot, resolution
+        )
+        if resolution.is_mujoco_compatible:
+            default_rho = RHO_MUJOCO
+        else:
+            default_rho = RHO_ROBOT if is_robot else RHO_OBJECT
+        rho = default_rho if self.spec.material.rho is None else self.spec.material.rho
+        # The estimate comes from the collision geometry of the link when it has any, and from its visual geometry
+        # otherwise. A link with neither contributes nothing, so only the asset's values remain. The density set on a
+        # geom weighs in the estimate alone (see '_resolve_geoms_values'). A geom whose density was set to None takes
+        # the default density, written into it so that its description keeps the value a later recomputation of the
+        # inertia reads.
+        for g_info in cg_infos:
+            if "rho" in g_info and g_info["rho"] is None:
+                g_info["rho"] = default_rho
+        dynamics_g_infos = [
+            {**g_info, "density": g_info["rho"]} if "rho" in g_info else g_info for g_info in (cg_infos or vg_infos)
+        ]
+        return inertial_info._replace(hint=compose_inertial_from_g_infos(dynamics_g_infos, rho))
+
     def _describe_geoms(self, cg_infos):
         """Resolve what a parse stated about each collision geom into the description the geom is built from.
 
-        A coefficient is the material's where it states one, the asset's where the material states none, and the
-        solver's default where neither states any. What only the resolution needs stays behind in the parsed info
-        (see 'RigidGeomDescription').
+        A coefficient comes from the parsed geom (see '_resolve_geoms_values'), else the material, else the default.
         """
+        sdf_max_res = self.spec.material.sdf_max_res
+        if isinstance(self.spec.morphs[0], gs.morphs.Primitive):
+            sdf_max_res = min(sdf_max_res, PRIMITIVE_SDF_MAX_RES)
         cg_descs = []
         for g_info in cg_infos:
             coefficients = []
-            for material_coefficient, asset_coefficient, default_coefficient in (
-                (self.material.friction, g_info.get("friction"), gu.default_friction),
-                (self.material.friction_torsional, g_info.get("friction_torsional"), gu.default_friction_torsional),
-                (self.material.friction_rolling, g_info.get("friction_rolling"), gu.default_friction_rolling),
+            for name, material_coefficient, default_coefficient in (
+                ("friction", self.spec.material.friction, gu.default_friction),
+                ("friction_torsional", self.spec.material.friction_torsional, gu.default_friction_torsional),
+                ("friction_rolling", self.spec.material.friction_rolling, gu.default_friction_rolling),
             ):
-                coefficient = asset_coefficient if material_coefficient is None else material_coefficient
+                coefficient = g_info.get(name, material_coefficient)
                 coefficients.append(default_coefficient() if coefficient is None else coefficient)
             friction, friction_torsional, friction_rolling = coefficients
             cg_descs.append(
@@ -1746,12 +1999,18 @@ class RigidEntityDescription(KinematicEntityDescription):
                     mesh=g_info["mesh"],
                     contype=g_info["contype"],
                     conaffinity=g_info["conaffinity"],
-                    density=g_info.get("density"),
+                    density=g_info["rho"] if "rho" in g_info else g_info.get("density"),
                     friction=friction,
                     friction_torsional=friction_torsional,
                     friction_rolling=friction_rolling,
                     sol_params=g_info.get("sol_params", gu.default_solver_params()),
-                    sdf=SignedDistanceFieldDescription.from_geometry(g_info["mesh"], g_info["type"], self.material),
+                    visualize_contact=g_info.get("visualize_contact", self.spec.visualize_contact),
+                    sdf=SignedDistanceFieldDescription.from_geometry(
+                        g_info["mesh"],
+                        g_info["type"],
+                        self.spec.material,
+                        sdf_max_res,
+                    ),
                 )
             )
         return cg_descs
@@ -1885,6 +2144,7 @@ class RigidEntityDescription(KinematicEntityDescription):
             mass=inertial.mass,
             invweight=invweight,
             geoms=self._describe_geoms(cg_infos),
+            contact_exclusions=l_info.get("contact_exclusions", []),
         )
 
 
@@ -1922,6 +2182,7 @@ class TerrainEntityDescription(RigidEntityDescription):
                 )
             )
 
+        self._resolve_geoms_values(morph, [("baselink",)], [g_infos], resolution)
         self._resolve_link(
             l_info=dict(
                 name="baselink",

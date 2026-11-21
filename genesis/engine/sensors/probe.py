@@ -1,20 +1,21 @@
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Generic, TypeVar
+from typing import TYPE_CHECKING
 
 import numpy as np
-import quadrants as qd
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.render_context import Points, Shape
 from genesis.options.sensors.tactile import TactileProbeSensorOptionsMixin
-from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
+from genesis.utils.misc import BuildableMixin, concat_with_tensor, make_tensor_field, tensor_to_array
 
 if TYPE_CHECKING:
-    from genesis.ext.pyrender.mesh import Mesh
+    from genesis.engine.solvers.base_solver import Solver
     from genesis.options.sensors.options import SensorOptions
     from genesis.utils.ring_buffer import TensorRingBuffer
-    from genesis.vis.rasterizer_context import RasterizerContext
 
     from .sensor_manager import SensorManager
 
@@ -68,9 +69,6 @@ class ProbeSensorMetadataMixin:
     cache_col_n_channel_groups: list[int] = field(default_factory=list)
 
 
-ProbeSensorSharedMetadataT = TypeVar("ProbeSensorSharedMetadataT", bound=ProbeSensorMetadataMixin)
-
-
 def get_measured_bufs(
     shared_metadata: "ProbeSensorMetadataMixin",
     current_ground_truth_data_T: torch.Tensor,
@@ -84,7 +82,7 @@ def get_measured_bufs(
     return measured_slot, shared_metadata.measured_scratch_T
 
 
-class ProbeSensorMixin(Generic[ProbeSensorSharedMetadataT]):
+class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin](BuildableMixin):
     """Shared logic for registering this sensor's probes in ``ProbeSensorMetadataMixin`` fields."""
 
     # Number of channel groups per probe in the cache layout. Used by the per-cache-col probe-index builder.
@@ -104,9 +102,15 @@ class ProbeSensorMixin(Generic[ProbeSensorSharedMetadataT]):
         self._n_probes = int(np.prod(self._probe_layout_shape))
         self._probe_local_pos = raw_pos.reshape(self._n_probes, 3).contiguous()
         super().__init__(options, idx, shared_context, shared_metadata, manager)
+        self._probe_start_idx = -1
+        # The bounds between the radii the outer spheres of the probes are drawn with, and whether each radius is drawn
+        self._debug_radii_bounds: torch.Tensor | None = None
+        self._debug_radii_is_drawn: list[bool] = []
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         super().build()
+        self._probe_start_idx = self._shared_metadata.total_n_probes
         self._shared_metadata.sensor_probe_start = concat_with_tensor(
             self._shared_metadata.sensor_probe_start, self._shared_metadata.total_n_probes, expand=(1,)
         )
@@ -146,7 +150,7 @@ class ProbeSensorMixin(Generic[ProbeSensorSharedMetadataT]):
 
         # Tactile-specific options (probe_gain, dead_taxel_*) live on ``TactileProbeSensorOptionsMixin``; generic
         # probe sensors (e.g. SurfaceDistanceProbe) don't carry them and register defaults (gain 1, no dead).
-        B = self._manager._sim._B
+        B = self._manager.n_envs_
         opts = self._options
         is_tactile = isinstance(opts, TactileProbeSensorOptionsMixin)
         # Initial per-probe gain (probe_gain may be scalar or per-probe array).
@@ -329,162 +333,89 @@ class ProbeSensorMixin(Generic[ProbeSensorSharedMetadataT]):
     def n_probes(self) -> int:
         return self._n_probes
 
-    def _compute_probes_world_pos(self, context: "RasterizerContext", rendered_envs_idx: list[int]):
-        """
-        Transform probe positions from link-local to world frame for debug drawing.
+    @property
+    def _sources(self) -> "tuple[Solver, ...]":
+        # The probes sense the links and the contacts of the rigid solver
+        return tuple(dict.fromkeys((*super()._sources, self._shared_metadata.solver)))
 
-        'rendered_envs_idx' lists the rendered environments to draw, as indices into those of 'context'. Returns
-        ``(envs_idx, n_debug_envs, env_offsets, probe_world_flat)``, 'envs_idx' being the batch indices of those
-        environments. ``probe_world_flat`` is ``(n_debug_envs * n_probes, 3)`` with env-offset already added. Assumes
-        ``self._link`` is set (consumer inherits ``RigidSensorMixin``).
-        """
-        if self._manager._sim.n_envs > 0:
-            envs_idx = [context.rendered_envs_idx[i] for i in rendered_envs_idx]
-            n_debug_envs = len(envs_idx)
-            env_offsets = context.scene.envs_offset[np.asarray(envs_idx, dtype=gs.np_int)]
-            link_pos = self._link.get_pos(envs_idx, relative=False)[:, None, :]
-            link_quat = self._link.get_quat(envs_idx, relative=False)[:, None, :]
-            probe_world = gu.transform_by_trans_quat(
-                self._probe_local_pos.reshape(-1, 3)[None, :, :], link_pos, link_quat
-            )
-            probe_world = tensor_to_array(probe_world) + env_offsets[:, None, :]
-        else:
-            envs_idx = None
-            n_debug_envs = 1
-            env_offsets = None
-            link_pos = self._link.get_pos(envs_idx, relative=False).reshape(3)
-            link_quat = self._link.get_quat(envs_idx, relative=False).reshape(4)
-            probe_world = tensor_to_array(
-                gu.transform_by_trans_quat(self._probe_local_pos.reshape(-1, 3), link_pos, link_quat)
-            )
-        return envs_idx, n_debug_envs, env_offsets, probe_world.reshape(-1, 3)
+    def _update_probes_markers(
+        self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None, is_contact: torch.Tensor | None
+    ) -> tuple[Points, ...]:
+        """Return the markers of the probes, written in the environments `envs_idx` (see 'Sensor._update_markers').
 
-    def _draw_probe_spheres(
-        self,
-        context: "RasterizerContext",
-        probe_world: np.ndarray,
-        rgb,
-        probe_radii: np.ndarray | None = None,
-        probe_radii_noise: np.ndarray | None = None,
-    ) -> list:
-        """
-        Draw a small opaque center sphere and a translucent outer sensing sphere at each ``probe_world`` position.
-
-        ``probe_world`` is ``(N, 3)`` (already tiled over rendered envs). ``probe_radii`` and ``probe_radii_noise``
-        are the matching ``(N,)`` per-position nominal sensing radius and additive uniform noise; both default to
-        the per-probe values from shared metadata, tiled to match ``probe_world``. When noise is positive, each
-        outer sphere is drawn at a fresh sample ``clip(r + U(-noise, +noise), 0, inf)`` rounded to the nearest
-        ``noise`` magnitude so the unique-radius batches stay small. Returns the debug nodes, made without adding them
-        to the scene.
+        `markers` are those of the probes the latest call returned. `is_contact` tells whether each probe of a tactile
+        sensor is in contact, laid out as the readings of the sensor, whose last entry of history is drawn. It is None
+        for any other sensor.
         """
         options = self._options
-        rgb = tuple(float(c) for c in rgb)
-        center_color = (*rgb, 1.0)
-        objs = [
-            context.make_debug_spheres(
-                poss=probe_world,
-                radius=float(options.debug_probe_center_radius),
-                color=center_color,
+        probes_radii = self._shared_metadata.probe_radii[self._probe_start_idx : self._probe_start_idx + self._n_probes]
+        if not markers:
+            # A small opaque center sphere at each probe, those of a tactile sensor in contact taking its contact color
+            groups_rgb = (options.debug_probe_color,)
+            if isinstance(options, TactileProbeSensorOptionsMixin):
+                groups_rgb += (options.debug_contact_color,)
+            styles = [(options.debug_probe_center_radius, (*rgb, 1.0)) for rgb in groups_rgb]
+            if options.debug_probe_sphere_opacity > 0.0:
+                # A translucent outer sphere at each probe, of its sensing radius, or of a sample of its noised radius
+                # at each refresh rounded to the nearest multiple of the noise, so that four multiples around the
+                # nominal radius cover every sample, one marker per radius.
+                radii, noise = probes_radii, options.probe_radius_noise
+                if noise > 0.0:
+                    multiples = torch.floor((radii - noise).clamp(min=0.0) / noise)
+                    radii = (multiples[:, None] + torch.arange(4, dtype=gs.tc_float, device=gs.device)) * noise
+                radii = torch.unique(radii)
+                self._debug_radii_bounds = 0.5 * (radii[1:] + radii[:-1])
+                self._debug_radii_is_drawn = (radii > 0.0).tolist()
+                styles += [
+                    (radius, (*rgb, options.debug_probe_sphere_opacity))
+                    for rgb in groups_rgb
+                    for radius in radii[radii > 0.0].tolist()
+                ]
+            # Every marker draws a sphere at each probe, showing those of its group alone
+            pos = torch.zeros((self._manager.n_envs_, self._n_probes, 3), dtype=gs.tc_float, device=gs.device)
+            markers = tuple(
+                Points(pos, radius, color, is_active=torch.zeros(pos.shape[:-1], dtype=gs.tc_bool, device=gs.device))
+                for radius, color in styles
             )
-        ]
-        if options.debug_probe_sphere_opacity <= 0.0:
-            return objs
-        outer_color = (*rgb, float(options.debug_probe_sphere_opacity))
-        probe_start = int(self._shared_metadata.sensor_probe_start[self._idx].item())
-        probe_slice = slice(probe_start, probe_start + self._n_probes)
-        n_tile = probe_world.shape[0] // self._n_probes if self._n_probes > 0 else 0
-        n_tile = max(n_tile, 1)
-        if probe_radii is None:
-            per_probe = tensor_to_array(self._shared_metadata.probe_radii[probe_slice]).reshape(-1)
-            probe_radii = np.tile(per_probe, n_tile)
-        if probe_radii_noise is None:
-            per_probe_noise = tensor_to_array(self._shared_metadata.probe_radii_noise[probe_slice]).reshape(-1)
-            probe_radii_noise = np.tile(per_probe_noise, n_tile)
-        nz = probe_radii_noise > 0.0
-        if nz.any():
-            jitter = np.random.uniform(-1.0, 1.0, size=probe_radii.shape) * probe_radii_noise
-            noisy = np.maximum(0.0, probe_radii + jitter)
-            rounded = probe_radii.astype(float, copy=True)
-            rounded[nz] = np.round(noisy[nz] / probe_radii_noise[nz]) * probe_radii_noise[nz]
-            probe_radii = rounded
-        for r in np.unique(probe_radii):
-            if r <= 0.0:
-                continue
-            mask = probe_radii == r
-            objs.append(
-                context.make_debug_spheres(
-                    poss=probe_world[mask],
-                    radius=float(r),
-                    color=outer_color,
-                )
-            )
-        return objs
 
-    def _draw_debug_probes(
-        self,
-        context: "RasterizerContext",
-        rendered_envs_idx: list[int],
-        color_groups_fn: Callable[[list[int] | None], list[tuple]] | None = None,
-    ) -> tuple[list["Mesh"], list[int] | None, int, np.ndarray | None]:
-        """
-        Generic per-probe debug renderer.
-
-        For each provided color group, makes the two-sphere marker (small opaque center + translucent outer sensing
-        sphere) on the selected probe positions of the rendered environments 'rendered_envs_idx', given as indices into
-        those of 'context', without adding them to the scene.
-
-        ``color_groups_fn(envs_idx)`` returns a list of ``(rgb, mask)`` pairs, where ``rgb`` is a length-3 sequence
-        and ``mask`` is a flat ``(n_debug_envs * n_probes,)`` bool array (or tensor castable to bool) selecting
-        which probe positions take that color. Passing ``None`` falls back to a single group covering every probe
-        in the sensor's ``debug_probe_color`` (no contact-state assumption -- usable by any probe sensor).
-
-        Returns ``(nodes, envs_idx, n_debug_envs, env_offsets)``, the debug nodes then the environment layout, so that
-        subclasses can extend the drawing with additional debug geometry without recomputing the env layout.
-        """
-        if not rendered_envs_idx:
-            return [], [], 0, None
-
-        envs_idx, n_debug_envs, env_offsets, probe_world = self._compute_probes_world_pos(context, rendered_envs_idx)
-        probe_start = int(self._shared_metadata.sensor_probe_start[self._idx].item())
-        probe_slice = slice(probe_start, probe_start + self._n_probes)
-        n_tile = max(n_debug_envs, 1)
-        radii_tiled = np.tile(tensor_to_array(self._shared_metadata.probe_radii[probe_slice]).reshape(-1), n_tile)
-        noise_tiled = np.tile(tensor_to_array(self._shared_metadata.probe_radii_noise[probe_slice]).reshape(-1), n_tile)
-        if color_groups_fn is None:
-            groups = [(self._options.debug_probe_color, np.ones(probe_world.shape[0], dtype=bool))]
+        if self._link is None:
+            # A sensor attached to no entity sits in the world frame, its probes at their local position, with the
+            # environments a link pose would hold.
+            n_envs = self._manager.n_envs
+            envs_shape = (len(envs_idx),) if envs_idx is not None else ((n_envs,) if n_envs > 0 else ())
+            probes_pos = self._probe_local_pos.expand((*envs_shape, *self._probe_local_pos.shape))
         else:
-            groups = color_groups_fn(envs_idx)
-        nodes = []
-        for rgb, mask in groups:
-            mask_arr = tensor_to_array(mask, dtype=bool).reshape(-1)
-            (probes_idx,) = np.nonzero(mask_arr)
-            if probes_idx.size == 0:
-                continue
-            nodes.extend(
-                self._draw_probe_spheres(
-                    context, probe_world[probes_idx], rgb, radii_tiled[probes_idx], noise_tiled[probes_idx]
-                )
-            )
-        return nodes, envs_idx, n_debug_envs, env_offsets
-
-    def _tactile_color_groups_fn(
-        self, get_is_contact_flat: Callable[[list[int] | None], object]
-    ) -> Callable[[list[int] | None], list[tuple]]:
-        """
-        Build a ``color_groups_fn`` for the common tactile split: not-in-contact probes get ``debug_probe_color``
-        and in-contact probes get ``debug_contact_color``.
-
-        The sensor's options must expose ``debug_contact_color`` (i.e. inherit ``TactileProbeSensorOptionsMixin``).
-        """
-
-        def fn(envs_idx):
-            is_contact = tensor_to_array(get_is_contact_flat(envs_idx), dtype=bool).reshape(-1)
-            return [
-                (self._options.debug_probe_color, ~is_contact),
-                (self._options.debug_contact_color, is_contact),
-            ]
-
-        return fn
+            link_pos = self._link.get_pos(envs_idx, relative=False)[..., None, :]
+            link_quat = self._link.get_quat(envs_idx, relative=False)[..., None, :]
+            probes_pos = gu.transform_by_trans_quat(self._probe_local_pos, link_pos, link_quat)
+        if is_contact is None:
+            groups_active = torch.ones((1, *probes_pos.shape[:-1]), dtype=gs.tc_bool, device=gs.device)
+        else:
+            is_contact = is_contact.reshape((*probes_pos.shape[:-2], -1, self._n_probes))[..., -1, :]
+            groups_active = torch.stack((torch.logical_not(is_contact), is_contact))
+        markers_is_active = list(groups_active)
+        if self._debug_radii_bounds is not None:
+            radii, noise = probes_radii, options.probe_radius_noise
+            if noise > 0.0:
+                # The samples are drawn from the generator of numpy, group after group over the probes of each
+                # environment in turn, so that a seeded scene draws the same radii.
+                jitter = np.zeros(probes_pos.shape[:-1])
+                for group_active in tensor_to_array(groups_active):
+                    jitter[group_active] = np.random.uniform(-1.0, 1.0, size=int(group_active.sum()))
+                jitter = torch.as_tensor(jitter, dtype=gs.tc_float, device=gs.device)
+                radii = torch.round((radii + jitter * noise).clamp(min=0.0) / noise) * noise
+            radii_idx = torch.bucketize(radii, self._debug_radii_bounds)
+            for group_active in groups_active:
+                for i_r, is_drawn in enumerate(self._debug_radii_is_drawn):
+                    if is_drawn:
+                        markers_is_active.append(group_active & (radii_idx == i_r))
+        # The markers share the positions of the probes
+        pos = markers[0].pos
+        pos[envs_idx] = probes_pos
+        for marker, marker_is_active in zip(markers, markers_is_active):
+            is_active = marker.is_active
+            is_active[envs_idx] = marker_is_active
+        return markers
 
 
 @dataclass
@@ -494,12 +425,9 @@ class ProbesWithNormalSensorMetadataMixin(ProbeSensorMetadataMixin):
     probe_local_normal: torch.Tensor = make_tensor_field((0, 3))
 
 
-ProbesWithNormalSensorSharedMetadataT = TypeVar(
-    "ProbesWithNormalSensorSharedMetadataT", bound=ProbesWithNormalSensorMetadataMixin
-)
-
-
-class ProbesWithNormalSensorMixin(ProbeSensorMixin[ProbesWithNormalSensorSharedMetadataT]):
+class ProbesWithNormalSensorMixin[ProbesWithNormalSensorSharedMetadataT: ProbesWithNormalSensorMetadataMixin](
+    ProbeSensorMixin[ProbesWithNormalSensorSharedMetadataT]
+):
     """Probe sensor whose probes carry a per-probe outward normal in link-local frame."""
 
     def __init__(
@@ -517,6 +445,7 @@ class ProbesWithNormalSensorMixin(ProbeSensorMixin[ProbesWithNormalSensorSharedM
         else:
             self._probe_local_normal = raw_normal.reshape(self._n_probes, 3).contiguous()
 
+    @gs.assert_unbuilt
     def build(self) -> None:
         super().build()
         self._shared_metadata.probe_local_normal = concat_with_tensor(

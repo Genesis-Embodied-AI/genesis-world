@@ -39,6 +39,7 @@ def main():
             max_collision_pairs=500,
         ),
         vis_options=gs.options.VisOptions(
+            debug=args.debug,
             show_world_frame=False,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -60,7 +61,6 @@ def main():
         material=gs.materials.Rigid(
             rho=600.0,
         ),
-        vis_mode="collision" if args.debug else "visual",
         visualize_contact=False,
     )
 
@@ -79,7 +79,6 @@ def main():
             material=gs.materials.Rigid(
                 rho=600.0,
             ),
-            vis_mode="collision" if args.debug else "visual",
             visualize_contact=args.debug,
         )
         height += RING_HEIGHT - 1e-4
@@ -94,7 +93,6 @@ def main():
         material=gs.materials.Rigid(
             rho=600.0,
         ),
-        vis_mode="collision" if args.debug else "visual",
         visualize_contact=False,
     )
 

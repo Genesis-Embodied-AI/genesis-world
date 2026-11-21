@@ -10,19 +10,11 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
-from genesis.utils.array_class import (
-    ColliderInfo,
-    ColliderState,
-    DynInfo,
-    DynState,
-    ErrorCode,
-    GJKState,
-    GeomsInitAABB,
-    RigidInfo,
-)
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidErrorCode, RigidInfo
 from genesis.utils.misc import qd_isfinite
 
 from .constants import CONTACT_ORDER
+from .data import ColliderInfo, ColliderState, GJKState
 
 
 @qd.func
@@ -180,7 +172,7 @@ def func_collider_reset_env(
     if qd.static(not cache_only):
         collider_state.first_time[i_b] = True
 
-    # The contact cache is only held for the convex-convex pairs (see ContactCache in array_class.py)
+    # The contact cache is only held for the convex-convex pairs (see ContactCache in collider/data.py)
     if qd.static(collider_config.has_non_box_plane_convex_convex):
         for i_pair in range(collider_state.contact_cache.normal.shape[0]):
             collider_state.contact_cache.normal[i_pair, i_b] = qd.Vector.zero(gs.qd_float, 3)
@@ -245,11 +237,11 @@ def func_collider_clear_env(
     if qd.static(rigid_config.use_hibernation):
         # Advect the contacts of the sleepers: a pair standing still (func_is_link_pair_hibernated) stays where it is,
         # so its contact is kept at the front of the buffer with the force of the last solve it took part in (see
-        # n_contacts_hibernated in array_class.py for what reads the kept range). The contacts are first flagged on
+        # n_contacts_hibernated in collider/data.py for what reads the kept range). The contacts are first flagged on
         # their raw slot, in the sort key the narrowphase rewrites before reading it, then compacted in raw order: every
         # slot written to was already read, so no kept contact is overwritten. The kept range then lists them in their
         # last logical order (see func_sort_contacts), the raw order following the narrowphase's slot allocation, which
-        # the GPU leaves to atomics. An env with no sleeper keeps none (see n_awake_dofs in array_class.py).
+        # the GPU leaves to atomics. An env with no sleeper keeps none (see n_awake_dofs in rigid/data.py).
         n_hib = 0
         if rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]:
             n_raw = 0
@@ -324,7 +316,7 @@ def func_promote_woken_contacts(
     A kept contact holds where its sleeper rests, and the narrowphase left the sleeper's pairs out while it slept, so
     the woken link would solve its wake step without its support otherwise. A contact is promoted once its pair no
     longer stands still (func_is_link_pair_hibernated). The promoted contact moves to the end of the kept range, which
-    shrinks past it onto the first live slot (see n_contacts_hibernated in array_class.py), and the kept contacts
+    shrinks past it onto the first live slot (see n_contacts_hibernated in collider/data.py), and the kept contacts
     behind it close the gap in their order, so the getters keep listing the contacts of the links still asleep as they
     stood. The caller then sorts the live range.
     """
@@ -353,11 +345,13 @@ def kernel_collider_clear(
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
+    reset_warm_start: qd.template(),
 ):
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        func_collider_reset_env(i_b, collider_state, collider_config, cache_only=False)
+        if qd.static(reset_warm_start):
+            func_collider_reset_env(i_b, collider_state, collider_config, cache_only=False)
         func_collider_clear_env(i_b, dyn_state, collider_state, dyn_info, rigid_info, rigid_config)
         # Only the contacts of the sleepers remain listed, so their links alone keep a contact force
         for i_l in range(dyn_state.links.contact_force.shape[0]):
@@ -374,11 +368,13 @@ def kernel_masked_collider_clear(
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
+    reset_warm_start: qd.template(),
 ):
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(envs_mask.shape[0]):
         if envs_mask[i_b]:
-            func_collider_reset_env(i_b, collider_state, collider_config, cache_only=False)
+            if qd.static(reset_warm_start):
+                func_collider_reset_env(i_b, collider_state, collider_config, cache_only=False)
             func_collider_clear_env(i_b, dyn_state, collider_state, dyn_info, rigid_info, rigid_config)
             # See 'kernel_collider_clear'
             for i_l in range(dyn_state.links.contact_force.shape[0]):
@@ -498,7 +494,7 @@ def func_reserve_contacts(
         if not qd.static(use_atomic):
             collider_state.n_contacts[i_b] = i_c + n_contacts
     else:
-        errno[i_b] = errno[i_b] | ErrorCode.OVERFLOW_COLLISION_PAIRS
+        errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_COLLISION_PAIRS
     return i_c
 
 
@@ -534,7 +530,7 @@ def func_set_contact(
     # bodies pass through each other just as silently.
     residual = contact_pos[0] + contact_pos[1] + contact_pos[2] + normal[0] + normal[1] + normal[2] + penetration
     if not qd_isfinite(residual):
-        errno[i_b] = errno[i_b] | ErrorCode.INVALID_CONTACT_NAN
+        errno[i_b] = errno[i_b] | RigidErrorCode.INVALID_CONTACT_NAN
 
     # b to a
     collider_state.contact_data.geom_a[i_c, i_b] = i_ga
@@ -567,25 +563,25 @@ def func_add_diff_contact_input(
 ):
     i_c = collider_state.n_contacts[i_b]
     if i_c < collider_info.max_candidate_contacts[None]:
-        collider_state.diff_contact_input.geom_a[i_b, i_c] = i_ga
-        collider_state.diff_contact_input.geom_b[i_b, i_c] = i_gb
-        collider_state.diff_contact_input.local_pos1_a[i_b, i_c] = gjk_state.diff_contact_input.local_pos1_a[i_b, i_d]
-        collider_state.diff_contact_input.local_pos1_b[i_b, i_c] = gjk_state.diff_contact_input.local_pos1_b[i_b, i_d]
-        collider_state.diff_contact_input.local_pos1_c[i_b, i_c] = gjk_state.diff_contact_input.local_pos1_c[i_b, i_d]
-        collider_state.diff_contact_input.local_pos2_a[i_b, i_c] = gjk_state.diff_contact_input.local_pos2_a[i_b, i_d]
-        collider_state.diff_contact_input.local_pos2_b[i_b, i_c] = gjk_state.diff_contact_input.local_pos2_b[i_b, i_d]
-        collider_state.diff_contact_input.local_pos2_c[i_b, i_c] = gjk_state.diff_contact_input.local_pos2_c[i_b, i_d]
-        collider_state.diff_contact_input.w_local_pos1[i_b, i_c] = gjk_state.diff_contact_input.w_local_pos1[i_b, i_d]
-        collider_state.diff_contact_input.w_local_pos2[i_b, i_c] = gjk_state.diff_contact_input.w_local_pos2[i_b, i_d]
+        collider_state.diff_contact_input.geom_a[i_c, i_b] = i_ga
+        collider_state.diff_contact_input.geom_b[i_c, i_b] = i_gb
+        collider_state.diff_contact_input.local_pos1_a[i_c, i_b] = gjk_state.diff_contact_input.local_pos1_a[i_d, i_b]
+        collider_state.diff_contact_input.local_pos1_b[i_c, i_b] = gjk_state.diff_contact_input.local_pos1_b[i_d, i_b]
+        collider_state.diff_contact_input.local_pos1_c[i_c, i_b] = gjk_state.diff_contact_input.local_pos1_c[i_d, i_b]
+        collider_state.diff_contact_input.local_pos2_a[i_c, i_b] = gjk_state.diff_contact_input.local_pos2_a[i_d, i_b]
+        collider_state.diff_contact_input.local_pos2_b[i_c, i_b] = gjk_state.diff_contact_input.local_pos2_b[i_d, i_b]
+        collider_state.diff_contact_input.local_pos2_c[i_c, i_b] = gjk_state.diff_contact_input.local_pos2_c[i_d, i_b]
+        collider_state.diff_contact_input.w_local_pos1[i_c, i_b] = gjk_state.diff_contact_input.w_local_pos1[i_d, i_b]
+        collider_state.diff_contact_input.w_local_pos2[i_c, i_b] = gjk_state.diff_contact_input.w_local_pos2[i_d, i_b]
         # The first contact point is the reference contact point
-        collider_state.diff_contact_input.ref_id[i_b, i_c] = i_c - i_d
-        collider_state.diff_contact_input.ref_penetration[i_b, i_c] = gjk_state.diff_contact_input.ref_penetration[
-            i_b, i_d
+        collider_state.diff_contact_input.ref_id[i_c, i_b] = i_c - i_d
+        collider_state.diff_contact_input.ref_penetration[i_c, i_b] = gjk_state.diff_contact_input.ref_penetration[
+            i_d, i_b
         ]
 
 
 @qd.func
-def func_compute_geom_rbound(i_g: int, geoms_init_AABB: GeomsInitAABB, dyn_info: DynInfo):
+def func_compute_geom_rbound(i_g: int, dyn_info: DynInfo, rigid_info: RigidInfo):
     """Compute the bounding sphere radius for a geom, matching MuJoCo's geom_rbound."""
     geom_type = dyn_info.geoms.type[i_g]
     rbound = gs.qd_float(0.0)
@@ -604,31 +600,31 @@ def func_compute_geom_rbound(i_g: int, geoms_init_AABB: GeomsInitAABB, dyn_info:
         rbound = qd.sqrt(d0 * d0 + d1 * d1 + d2 * d2)
     else:
         # For mesh and other types, approximate as half AABB diagonal
-        rbound = 0.5 * (geoms_init_AABB[i_g, 7] - geoms_init_AABB[i_g, 0]).norm()
+        rbound = 0.5 * (rigid_info.geoms_init_AABB[i_g, 7] - rigid_info.geoms_init_AABB[i_g, 0]).norm()
     return rbound
 
 
 @qd.func
-def func_compute_geom_pair_scale(i_ga: int, i_gb: int, geoms_init_AABB: GeomsInitAABB, dyn_info: DynInfo):
+def func_compute_geom_pair_scale(i_ga: int, i_gb: int, dyn_info: DynInfo, rigid_info: RigidInfo):
     # Intrinsic length scale of a geom pair: half the smaller geom's world-aligned bounding-box diagonal. The
     # original (rest-pose) AABB is used so the scale is a constant independent of the current orientation, which
     # makes sense since the size of the geometries is an intrinsic property. Multiply by a relative tolerance to
     # turn it into an absolute one.
-    aabb_size_b = (geoms_init_AABB[i_gb, 7] - geoms_init_AABB[i_gb, 0]).norm()
+    aabb_size_b = (rigid_info.geoms_init_AABB[i_gb, 7] - rigid_info.geoms_init_AABB[i_gb, 0]).norm()
     aabb_size = aabb_size_b
     if dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.PLANE:
-        aabb_size_a = (geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0]).norm()
+        aabb_size_a = (rigid_info.geoms_init_AABB[i_ga, 7] - rigid_info.geoms_init_AABB[i_ga, 0]).norm()
         aabb_size = qd.min(aabb_size_a, aabb_size_b)
 
     return 0.5 * aabb_size
 
 
 @qd.func
-def func_compute_geom_pair_scale_mj(i_ga: int, i_gb: int, geoms_init_AABB: GeomsInitAABB, dyn_info: DynInfo):
+def func_compute_geom_pair_scale_mj(i_ga: int, i_gb: int, dyn_info: DynInfo, rigid_info: RigidInfo):
     """Geom-pair length scale matching MuJoCo's formula: min(rbound_g1, rbound_g2). Multiply by a relative tolerance
     to recover MuJoCo's absolute tolerance."""
-    rbound_a = func_compute_geom_rbound(i_ga, geoms_init_AABB, dyn_info)
-    rbound_b = func_compute_geom_rbound(i_gb, geoms_init_AABB, dyn_info)
+    rbound_a = func_compute_geom_rbound(i_ga, dyn_info, rigid_info)
+    rbound_b = func_compute_geom_rbound(i_gb, dyn_info, rigid_info)
     return qd.min(rbound_a, rbound_b)
 
 
@@ -636,8 +632,8 @@ def func_compute_geom_pair_scale_mj(i_ga: int, i_gb: int, geoms_init_AABB: Geoms
 def func_compute_mc_tolerance(
     i_ga: int,
     i_gb: int,
-    geoms_init_AABB: GeomsInitAABB,
     dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
 ):
@@ -646,9 +642,9 @@ def func_compute_mc_tolerance(
     Shared by every convex narrowphase arm so the accepted contact set stays backend-independent. The relative
     tolerance scales with the reference engine's pair scale under MuJoCo compatibility and with the intrinsic pair
     scale otherwise."""
-    scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
+    scale = func_compute_geom_pair_scale(i_ga, i_gb, dyn_info, rigid_info)
     if qd.static(rigid_config.enable_mujoco_compatibility):
-        scale = func_compute_geom_pair_scale_mj(i_ga, i_gb, geoms_init_AABB, dyn_info)
+        scale = func_compute_geom_pair_scale_mj(i_ga, i_gb, dyn_info, rigid_info)
     return collider_info.mc_tolerance[None] * scale
 
 
@@ -658,7 +654,6 @@ def func_contact_orthogonals(
     i_gb: int,
     i_b: int,
     normal: qd.types.vector(3),
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -688,9 +683,9 @@ def func_contact_orthogonals(
         # by the volume of their respective bounding box.
         i_g = i_gb
         if dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.PLANE:
-            size_ga = geoms_init_AABB[i_ga, 7]
+            size_ga = rigid_info.geoms_init_AABB[i_ga, 7]
             volume_ga = size_ga[0] * size_ga[1] * size_ga[2]
-            size_gb = geoms_init_AABB[i_gb, 7]
+            size_gb = rigid_info.geoms_init_AABB[i_gb, 7]
             volume_gb = size_gb[0] * size_gb[1] * size_gb[2]
             i_g = i_ga if volume_ga < volume_gb else i_gb
 
@@ -739,7 +734,6 @@ def func_perturb_geom_pair(
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
 ):
@@ -752,7 +746,6 @@ def func_perturb_geom_pair(
 
     Returns 'qrot', whether the detection has a corner to target, and the perturbed poses of geom A and geom B.
     """
-    EPS = rigid_info.EPS[None]
 
     qrot = qd.Vector.zero(gs.qd_float, 4)
     has_target_corner = True
@@ -760,14 +753,14 @@ def func_perturb_geom_pair(
         axis_idx = (i_detection - 1) // 2
         angle_sign = 2 * ((i_detection - 1) % 2) - 1
         axis = axis_0 if axis_idx == 0 else axis_1
-        qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
+        qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis)
     else:
         axis = qd.Vector.zero(gs.qd_float, 3)
         for i_t in qd.static(range(4)):
             if i_detection == i_t + 1:
                 axis = qd.Vector([overlap_axes[i_t, 0], overlap_axes[i_t, 1], overlap_axes[i_t, 2]])
         has_target_corner = axis.norm_sqr() > 0.0
-        qrot = gu.qd_rotvec_to_quat(collider_info.mc_perturbation[None] * axis, EPS)
+        qrot = gu.qd_rotvec_to_quat(collider_info.mc_perturbation[None] * axis)
 
     ga_pos_perturbed, ga_quat_perturbed = func_rotate_frame(ga_pos, ga_quat, contact_pos_0, qrot)
     gb_pos_perturbed, gb_quat_perturbed = func_rotate_frame(gb_pos, gb_quat, contact_pos_0, gu.qd_inv_quat(qrot))
@@ -1376,7 +1369,7 @@ def func_clamp_prune_contacts(
         n_con = qd.min(collider_state.n_contacts[i_b], max_candidate_contacts)
         collider_state.n_contacts[i_b] = n_con
         # The kept contacts of the sleepers lead the buffer in the order func_collider_clear_env gave them, and the
-        # prune runs on the live contacts after them (see n_contacts_hibernated in array_class.py)
+        # prune runs on the live contacts after them (see n_contacts_hibernated in collider/data.py)
         n_hib = collider_state.n_contacts_hibernated[i_b]
 
         # Identity permutation of the live contacts. Required so downstream consumers can always indirect through
@@ -1556,7 +1549,7 @@ def func_clamp_prune_contacts(
         # increase 'max_contacts'.
         if collider_state.n_contacts[i_b] > max_contacts:
             collider_state.n_contacts[i_b] = max_contacts
-            errno[i_b] = errno[i_b] | ErrorCode.OVERFLOW_CONTACTS
+            errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_CONTACTS
 
 
 @qd.func
@@ -1984,10 +1977,10 @@ def func_clamp_prune_contacts_coop(
         if i_thread == 0:
             if collider_state.n_contacts[i_b] > max_contacts:
                 collider_state.n_contacts[i_b] = max_contacts
-                errno[i_b] = errno[i_b] | ErrorCode.OVERFLOW_CONTACTS
+                errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_CONTACTS
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def func_set_upstream_grad(
     dL_dposition: qd.types.ndarray(),
     dL_dnormal: qd.types.ndarray(),

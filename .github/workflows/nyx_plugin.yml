@@ -6,7 +6,7 @@ name: Nyx Plugin
 # outcome has to be published as a check on the commit under test to show up on it at all.
 on:
   workflow_run:
-    workflows: ["Precommit Checks (Lint and Format)"]
+    workflows: ["Gate"]
     types: [completed]
 
 # Pull requests come from forks, whose branch names collide across contributors, so the repository they live in is
@@ -34,8 +34,13 @@ jobs:
     # reference images comparable.
     runs-on: gpu-t4-4-core
 
-    # Only a pull request is worth checking, the plugin being validated before a change lands rather than after.
-    if: github.event.workflow_run.event == 'pull_request'
+    # A draft pull request is gated as in the production workflow, through the name of the gate run that started this
+    # one. Re-running that run, which the CI Command workflow does with the other gated runs, starts a run that passes.
+    # A gate run cancelled by a newer commit, or waiting for approval, starts none.
+    if: >-
+      contains(fromJSON('["success", "failure"]'), github.event.workflow_run.conclusion)
+      && (startsWith(github.event.workflow_run.display_title, 'Ready ')
+        || github.event.workflow_run.run_attempt > 1 || github.run_attempt > 1)
 
     permissions:
       contents: read
@@ -174,7 +179,7 @@ jobs:
                 repo: context.repo.repo,
                 run_id: context.runId
               });
-              logUrl = data.jobs[0]?.html_url || logUrl;
+              logUrl = data.jobs.find((job) => job.name === 'nyx_plugin-unit_tests')?.html_url || logUrl;
             } catch (error) {
               core.warning(`Could not resolve the job log: ${error.message}`);
             }

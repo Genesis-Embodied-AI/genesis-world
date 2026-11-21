@@ -7,18 +7,21 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.options.sensors import IMU as IMUOptions
-from genesis.options.sensors import CrossCouplingAxisType
-from genesis.utils.array_class import DynState, RigidInfo
-from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
+from genesis.engine.render_context import Arrows, Shape
+from genesis.engine.solvers.rigid.data import DynState, RigidInfo
+from genesis.options.sensors import IMU as IMUOptions, CrossCouplingAxisType
+from genesis.utils.misc import concat_with_tensor, make_tensor_field
 
-from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
+from .base_sensor import (
+    RigidSensorMetadataMixin,
+    RigidSensorMixin,
+    SimpleSensor,
+    SimpleSensorMetadata,
+    func_sensor_link_motion,
+    func_sensor_link_pose,
+)
 
 if TYPE_CHECKING:
-    from genesis.ext.pyrender.mesh import Mesh
-    from genesis.utils.ring_buffer import TensorRingBuffer
-    from genesis.vis.rasterizer_context import RasterizerContext
-
     from .sensor_manager import SensorManager
 
 
@@ -52,15 +55,14 @@ def _kernel_update_imu_raw_data(
 
         # Spatial velocity and acceleration are expressed at the root of the kinematic tree, hence the transport to the
         # link origin before converting the spatial acceleration to the classical one.
-        cpos = dyn_state.links.pos[i_l, i_b] - dyn_state.links.root_COM[i_l, i_b]
-        acc_ang = dyn_state.links.cacc_ang[i_l, i_b]
-        ang = dyn_state.links.cd_ang[i_l, i_b]
-        vel = dyn_state.links.cd_vel[i_l, i_b] + ang.cross(cpos)
-        acc = dyn_state.links.cacc_lin[i_l, i_b] + acc_ang.cross(cpos) + ang.cross(vel)
+        pos, quat = func_sensor_link_pose(i_l, i_b, dyn_state.links)
+        cd_vel, ang, cacc_lin, acc_ang, root_com = func_sensor_link_motion(i_l, i_b, dyn_state.links)
+        cpos = pos - root_com
+        vel = cd_vel + ang.cross(cpos)
+        acc = cacc_lin + acc_ang.cross(cpos) + ang.cross(vel)
 
         # Rigid-body transport from the link origin to the measurement point: a_imu = a + alpha x r + w x (w x r). A
         # zero mounting offset contributes nothing, so this stays unconditional.
-        quat = dyn_state.links.quat[i_l, i_b]
         offset_pos_world = gu.qd_transform_by_quat(offset_pos, quat)
         acc = acc + acc_ang.cross(offset_pos_world) + ang.cross(ang.cross(offset_pos_world))
 
@@ -137,9 +139,6 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
 
         super().__init__(options, idx, shared_context, shared_metadata, manager)
 
-        self.quat_offset: torch.Tensor
-        self.pos_offset: torch.Tensor
-
     @gs.assert_built
     def set_acc_cross_axis_coupling(self, cross_axis_coupling: CrossCouplingAxisType, envs_idx=None):
         envs_idx = self._sanitize_envs_idx(envs_idx)
@@ -160,6 +159,7 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
 
     # ================================ internal methods ================================
 
+    @gs.assert_unbuilt
     def build(self):
         """
         Initialize all shared metadata needed to update all IMU sensors.
@@ -175,7 +175,7 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
                     _get_cross_axis_coupling_to_alignment_matrix(self._options.mag_cross_axis_coupling),
                 ]
             ),
-            expand=(self._manager._sim._B, 3, 3, 3),  # 3 sub-matrices after adding mag
+            expand=(self._manager.n_envs_, 3, 3, 3),  # 3 sub-matrices after adding mag
             dim=1,
         )
 
@@ -185,12 +185,8 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
             default_field = torch.tensor(default_field, device=gs.device, dtype=gs.tc_float)
 
         self._shared_metadata.magnetic_field_vector = concat_with_tensor(
-            self._shared_metadata.magnetic_field_vector, default_field, expand=(self._manager._sim._B, 1, 3), dim=1
+            self._shared_metadata.magnetic_field_vector, default_field, expand=(self._manager.n_envs_, 1, 3), dim=1
         )
-
-        if self._options.draw_debug:
-            self.quat_offset = self._shared_metadata.offsets_quat[0, self._idx]
-            self.pos_offset = self._shared_metadata.offsets_pos[0, self._idx]
 
     def _get_return_format(self) -> tuple[tuple[int, ...], ...]:
         return ((3,), (3,), (3,))
@@ -219,30 +215,36 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
         data_xyz = data.view(data.shape[0], -1, 3)
         data_xyz.copy_(torch.matmul(shared_metadata.alignment_rot_matrix, data_xyz.unsqueeze(-1)).squeeze(-1))
 
-    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
-        """Make arrows of the measured acceleration, angular velocity and magnetic field, in the first rendered env."""
-        if 0 not in envs_idx:
-            return []
-        env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Arrows]:
+        options = self._options
+        if not markers:
+            # The arrows of the measured acceleration, angular velocity and magnetic field
+            pos = torch.zeros((self._manager.n_envs_, 3, 3), dtype=gs.tc_float, device=gs.device)
+            radius = torch.tensor((0.006, 0.0055, 0.005), dtype=gs.tc_float, device=gs.device)
+            colors = torch.tensor(
+                (options.debug_acc_color, options.debug_gyro_color, options.debug_mag_color), dtype=gs.tc_float
+            )
+            markers = (Arrows(pos, torch.zeros_like(pos), radius, colors),)
+        link_pos = self._link.get_pos(envs_idx, relative=False)
+        link_quat = self._link.get_quat(envs_idx, relative=False)
+        # The offsets hold a row in a scene without parallel environments too
+        sensor_envs_idx = self._sanitize_envs_idx(envs_idx)
+        offset_pos = self._shared_metadata.offsets_pos[sensor_envs_idx, self._idx]
+        offset_quat = self._shared_metadata.offsets_quat[sensor_envs_idx, self._idx]
+        pos = link_pos + gu.transform_by_quat(offset_pos, link_quat)
 
-        quat = self._link.get_quat(env_idx, relative=False).reshape((4,))
-        pos = self._link.get_pos(env_idx, relative=False).reshape((3,)) + gu.transform_by_quat(self.pos_offset, quat)
-
-        # cannot specify envs_idx for read() when n_envs=0
-        data = self.read(env_idx)
-        acc_vec = data.lin_acc.reshape((3,)) * self._options.debug_acc_scale
-        gyro_vec = data.ang_vel.reshape((3,)) * self._options.debug_gyro_scale
-        mag_vec = data.mag.reshape((3,)) * self._options.debug_mag_scale
-
-        # transform from local frame to world frame
-        offset_quat = gu.transform_quat_by_quat(self.quat_offset, quat)
-        acc_vec = tensor_to_array(gu.transform_by_quat(acc_vec, offset_quat))
-        gyro_vec = tensor_to_array(gu.transform_by_quat(gyro_vec, offset_quat))
-        mag_vec = tensor_to_array(gu.transform_by_quat(mag_vec, offset_quat))
-
-        arrows = (
-            context.make_debug_arrow(pos=pos, vec=acc_vec, radius=0.006, color=self._options.debug_acc_color),
-            context.make_debug_arrow(pos=pos, vec=gyro_vec, radius=0.0055, color=self._options.debug_gyro_color),
-            context.make_debug_arrow(pos=pos, vec=mag_vec, radius=0.005, color=self._options.debug_mag_color),
+        data = self.read(envs_idx)
+        vecs = torch.stack(
+            (
+                data.lin_acc * options.debug_acc_scale,
+                data.ang_vel * options.debug_gyro_scale,
+                data.mag * options.debug_mag_scale,
+            ),
+            dim=-2,
         )
-        return [(None, arrow, None) for arrow in arrows if arrow is not None]
+        # The readings are stated in the frame of the sensor
+        sensor_quat = gu.transform_quat_by_quat(offset_quat, link_quat)
+        arrows_pos, arrows_vec = markers[0].pos, markers[0].vec
+        arrows_pos[envs_idx] = pos[..., None, :]
+        arrows_vec[envs_idx] = gu.transform_by_quat(vecs, sensor_quat[..., None, :])
+        return markers

@@ -2,25 +2,23 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
-import numpy as np
-import quadrants as qd
 import torch
-import trimesh
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.options.sensors import TemperatureGrid as TemperatureGridOptions
-from genesis.options.sensors import TemperatureProperties
-from genesis.utils.array_class import ColliderState, DynState
-from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
+from genesis.engine.render_context import DynamicMesh, Shape
+from genesis.engine.solvers.rigid.collider.data import ColliderState
+from genesis.engine.solvers.rigid.data import DynState
+from genesis.options.sensors import TemperatureGrid as TemperatureGridOptions, TemperatureProperties
+from genesis.utils.misc import concat_with_tensor, make_tensor_field
 from genesis.utils.ring_buffer import TensorRingBuffer
 
-from .base_sensor import SimpleSensor, RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensorMetadata
+from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
-    from genesis.ext.pyrender.mesh import Mesh
-    from genesis.vis.rasterizer_context import RasterizerContext
 
     from .sensor_manager import SensorManager
 
@@ -200,7 +198,7 @@ def _qd_polygon_area_from_points_3d(i_b: int, n: int, scratch: qd.types.ndarray(
     return area
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def _kernel_compute_contact_areas(
     contact_area: qd.types.ndarray(),
     scratch: qd.types.ndarray(),
@@ -281,7 +279,7 @@ def _qd_k_eff(k_a: float, k_b: float, eps: float) -> float:
     return gs.qd_float(2.0) * k_a * k_b / (k_a + k_b + eps)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def _kernel_contact_heat(
     links_idx: qd.types.ndarray(),
     sensor_cache_start: qd.types.ndarray(),
@@ -515,8 +513,10 @@ class TemperatureGridSensor(
         self._link: "RigidLink | None" = None
         self._debug_t_min: float = self._options.debug_temperature_range[0]
         self._debug_t_range: float = self._options.debug_temperature_range[1] - self._debug_t_min
-        self._debug_cell_local_positions: np.ndarray = np.array([])  # set in build
+        # The vertices of the top face of each cell of the grid in the frame of the link, in the order of the cells
+        self._debug_cells_verts: torch.Tensor | None = None
 
+    @gs.assert_unbuilt
     def build(self):
         super().build()
 
@@ -559,7 +559,7 @@ class TemperatureGridSensor(
             self._shared_metadata.simulate_all_link_temps = True
             if len(self._shared_metadata.link_temps) == 0:
                 self._shared_metadata.link_temps = torch.empty(
-                    (solver._B, solver.n_links), dtype=gs.tc_float, device=gs.device
+                    (solver.n_envs_, solver.n_links), dtype=gs.tc_float, device=gs.device
                 )
                 self._shared_metadata.link_volume = torch.empty(solver.n_links, dtype=gs.tc_float, device=gs.device)
 
@@ -581,7 +581,7 @@ class TemperatureGridSensor(
                     link_base_T[link_to_mat],
                     torch.tensor(ambient_T, dtype=gs.tc_float, device=gs.device),
                 )
-                n_batches = solver._B
+                n_batches = solver.n_envs_
                 self._shared_metadata.link_temps.copy_(base_T_per_link.unsqueeze(0).expand(n_batches, -1))
 
         # Per-sensor properties
@@ -624,12 +624,6 @@ class TemperatureGridSensor(
         dx, dy, dz = voxel_size.tolist()
         nx, ny, nz = grid_size_tensor.tolist()
 
-        xs = torch.arange(nx, device=gs.device, dtype=gs.tc_float) + 0.5
-        ys = torch.arange(ny, device=gs.device, dtype=gs.tc_float) + 0.5
-        zs = torch.arange(nz, device=gs.device, dtype=gs.tc_float) + 0.5
-        grid = torch.stack(torch.meshgrid(xs, ys, zs, indexing="ij"), dim=-1).reshape(-1, 3)
-        self._debug_cell_local_positions = (aabb_min_local.unsqueeze(0) + grid * voxel_size.unsqueeze(0)).cpu().numpy()
-
         K2_padded = _compute_K2_rfft3(nx * 2, ny * 2, nz * 2, dx, dy, dz, gs.device, gs.tc_float, gs.EPS)
         self._shared_metadata.K2_spectral.append(K2_padded)
 
@@ -652,10 +646,10 @@ class TemperatureGridSensor(
         # Contact area buffers
         n_c_max = int(solver.collider.collider_info.max_candidate_contacts[None])
         self._shared_metadata.contact_area_buffer = torch.zeros(
-            (n_c_max, solver._B), device=gs.device, dtype=gs.tc_float
+            (n_c_max, solver.n_envs_), device=gs.device, dtype=gs.tc_float
         )
         self._shared_metadata.contact_area_scratch = torch.empty(
-            (solver._B, n_c_max, len(_ScratchIdx)), device=gs.device, dtype=gs.tc_float
+            (solver.n_envs_, n_c_max, len(_ScratchIdx)), device=gs.device, dtype=gs.tc_float
         )
 
     def _get_return_format(self) -> tuple[int, ...]:
@@ -691,7 +685,7 @@ class TemperatureGridSensor(
         cls, shared_context: None, shared_metadata: TemperatureGridSensorMetadata, raw_data_T: torch.Tensor
     ):
         solver = shared_metadata.solver
-        dt = solver._sim.dt
+        dt = solver.sim.dt
         props = shared_metadata.link_material_properties
         link_conductivity = props[_PropIdx.CONDUCTIVITY]
         link_base_temperature = props[_PropIdx.BASE_TEMP]
@@ -782,52 +776,50 @@ class TemperatureGridSensor(
         _apply_T_measured_filter(
             shared_metadata.cache_sizes,
             shared_metadata.sensor_time_const,
-            shared_metadata.solver._sim.dt,
+            shared_metadata.solver.sim.dt,
             raw,
             previous,
         )
         data.copy_(previous)
 
-    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
-        """Make a flat mesh colored by temperature (cool=blue, hot=red), for the first rendered environment."""
-        if 0 not in envs_idx or self._link is None:
-            return []
-        env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
-
-        link_pos = self._link.get_pos(env_idx, relative=False)
-        link_quat = self._link.get_quat(env_idx, relative=False)
-        link_pos = tensor_to_array(link_pos).reshape(3)
-        link_quat = tensor_to_array(link_quat).reshape(4)
-        link_T = gu.trans_quat_to_T(link_pos, link_quat)
-
-        voxel_size = tensor_to_array(self._shared_metadata.voxel_size[self._idx]).reshape(3)
-
-        # Per-cell color from temperature (blue=cool, red=hot)
-        temps = self.read_ground_truth(env_idx)
-        temps = tensor_to_array(temps).reshape(-1)
-        t_min, t_range = self._debug_t_min, self._debug_t_range
-        if t_range <= 0:
-            t_range = 1.0
-        norm = np.clip((temps - t_min) / t_range, 0.0, 1.0)
-        colors_rgba = np.column_stack((norm, np.zeros_like(norm), 1.0 - norm, np.full_like(norm, 0.5)))
-
-        # Build a single mesh: one quad (2 triangles) per cell on the top face
-        n_cells = len(self._debug_cell_local_positions)
-        hx, hy, hz = voxel_size[0] / 2, voxel_size[1] / 2, voxel_size[2] / 2
-        quad_offsets = np.array([[-hx, -hy, hz], [hx, -hy, hz], [hx, hy, hz], [-hx, hy, hz]])
-        vertices = (self._debug_cell_local_positions[:, np.newaxis, :] + quad_offsets[np.newaxis, :, :]).reshape(-1, 3)
-
-        idx = np.arange(n_cells, dtype=np.int64) * 4
-        faces = np.empty((n_cells * 2, 3), dtype=np.int64)
-        faces[0::2] = np.column_stack([idx, idx + 1, idx + 2])
-        faces[1::2] = np.column_stack([idx, idx + 2, idx + 3])
-
-        face_colors_u8 = np.empty((n_cells * 2, 4), dtype=np.uint8)
-        face_colors_u8[0::2] = (colors_rgba * 255).astype(np.uint8)
-        face_colors_u8[1::2] = face_colors_u8[0::2]
-
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, face_colors=face_colors_u8)
-        return [(None, context.make_debug_mesh(mesh, T=link_T), None)]
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[DynamicMesh]:
+        if not markers:
+            voxel_size = self._shared_metadata.voxel_size[self._idx]
+            cells_idx = torch.meshgrid(
+                *(torch.arange(n, dtype=gs.tc_float, device=gs.device) for n in self._options.grid_size), indexing="ij"
+            )
+            cells_pos = self._shared_metadata.aabb_min[self._idx] + (torch.stack(cells_idx, dim=-1) + 0.5) * voxel_size
+            corners = torch.tensor(
+                (
+                    (-1.0, -1.0, 1.0),
+                    (1.0, -1.0, 1.0),
+                    (1.0, 1.0, 1.0),
+                    (-1.0, 1.0, 1.0),
+                ),
+                dtype=gs.tc_float,
+                device=gs.device,
+            )
+            self._debug_cells_verts = (cells_pos.reshape((-1, 1, 3)) + 0.5 * voxel_size * corners).reshape((-1, 3))
+            quad_verts_idx = torch.tensor(((0, 1, 2), (0, 2, 3)), dtype=gs.tc_int, device=gs.device)
+            cells_verts_start = 4 * torch.arange(len(self._debug_cells_verts) // 4, dtype=gs.tc_int, device=gs.device)
+            faces = (cells_verts_start[:, None, None] + quad_verts_idx).reshape((-1, 3))
+            verts_shape = (self._manager.n_envs_, len(self._debug_cells_verts))
+            verts = torch.zeros((*verts_shape, 3), dtype=gs.tc_float, device=gs.device)
+            colors = torch.zeros((*verts_shape, 4), dtype=gs.tc_float, device=gs.device)
+            markers = (DynamicMesh(faces, surface=None, verts=verts, colors=colors),)
+        link_pos = self._link.get_pos(envs_idx, relative=False)[..., None, :]
+        link_quat = self._link.get_quat(envs_idx, relative=False)[..., None, :]
+        temps = self.read_ground_truth(envs_idx).reshape((*link_pos.shape[:-2], -1))
+        t_range = self._debug_t_range if self._debug_t_range > 0.0 else 1.0
+        temps_rel = ((temps - self._debug_t_min) / t_range).clamp(0.0, 1.0)
+        # The cells are translucent, blue when cool and red when hot
+        cells_color = torch.stack(
+            (temps_rel, torch.zeros_like(temps_rel), 1.0 - temps_rel, torch.full_like(temps_rel, 0.5)), dim=-1
+        )
+        verts, colors = markers[0].verts, markers[0].colors
+        verts[envs_idx] = gu.transform_by_trans_quat(self._debug_cells_verts, link_pos, link_quat)
+        colors[envs_idx] = cells_color.repeat_interleave(4, dim=-2)
+        return markers
 
     @property
     def link_temperatures(self) -> torch.Tensor:

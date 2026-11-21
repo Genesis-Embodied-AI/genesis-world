@@ -14,6 +14,3 @@ uv pip install torch --index-url https://download.pytorch.org/whl/cu129
 uv pip install --upgrade pip setuptools wheel
 uv pip install omniverse-kit --index-url https://pypi.nvidia.com/
 uv pip install ".[dev,render,usd]" "pyuipc==0.0.7"
-# FIXME: matplotlib 3.11.0 changed text rasterization, breaking the MPLPlotter PNG snapshot
-# (test_recorders.py::test_plotter). Pin below 3.11 until the snapshot is regenerated.
-uv pip install "matplotlib<3.11"

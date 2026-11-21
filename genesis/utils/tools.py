@@ -5,11 +5,13 @@ import os
 import time
 
 import numpy as np
-import quadrants as qd
 from PIL import Image
+
+import quadrants as qd
 
 import genesis as gs
 from genesis.utils.misc import get_entry_point_name
+from genesis.utils.video_encoder import VideoEncoder
 
 
 def animate(imgs, filename=None, fps=60):
@@ -28,21 +30,15 @@ def animate(imgs, filename=None, fps=60):
 
     if filename is None:
         filename = f"{get_entry_point_name()}_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
-    os.makedirs(os.path.abspath(os.path.dirname(filename)), exist_ok=True)
 
     gs.logger.info(f'Saving video to ~<"{filename}">~...')
-    from moviepy import ImageSequenceClip
-
-    imgs = ImageSequenceClip(imgs, fps=fps)
-    imgs.write_videofile(
-        filename,
-        fps=fps,
-        logger=None,
-        codec="libx264",
-        preset="ultrafast",
-        # ffmpeg_params=["-crf", "0"],
-    )
-    gs.logger.info("Video saved.")
+    encoder = VideoEncoder(filename, fps)
+    try:
+        for img in imgs:
+            # The alpha channel of a color image is dropped, since the video has none
+            encoder.write(img[..., :3] if img.ndim == 3 else img)
+    finally:
+        encoder.close()
 
 
 def save_img_arr(arr, filename="img.png"):

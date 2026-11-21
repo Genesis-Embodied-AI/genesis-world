@@ -1,14 +1,20 @@
 import functools
+from typing import TYPE_CHECKING
 
 import torch
 
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.states.entities import MPMEntityState
+from genesis.constants import STRUCTURE
+from genesis.options.surfaces import Surface
 from genesis.utils.misc import broadcast_tensor
 
 from .particle_entity import ParticleEntity, assert_active
+
+if TYPE_CHECKING:
+    from genesis.engine.scene import Scene
+    from genesis.engine.solvers.mpm_solver import MPMSolver
 
 
 def assert_muscle(method):
@@ -32,10 +38,8 @@ class MPMEntity(ParticleEntity):
         Scene object this entity belongs to.
     solver : Solver
         The solver responsible for simulating this entity.
-    material : Material
-        Material used to determine physical behavior (e.g., Snow, Sand, Muscle).
-    morph : Morph
-        Shape description used for particle sampling.
+    spec : gs.entities.MPM
+        The entity spec the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface or texture representation.
     particle_size : float
@@ -44,42 +48,27 @@ class MPMEntity(ParticleEntity):
         Unique index of the entity.
     particle_start : int
         Starting particle index.
-    vvert_start : int
-        Start index for visual vertices (unused if no skinning).
-    vface_start : int
-        Start index for visual faces (unused if no skinning).
     """
 
     def __init__(
         self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        particle_size,
-        idx,
-        particle_start,
-        vvert_start,
-        vface_start,
-        name: str | None = None,
-    ):
-        need_skinning = not isinstance(
-            material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
-        )
+        scene: "Scene",
+        solver: "MPMSolver",
+        surface: Surface,
+        particle_size: float,
+        idx: int,
+        particle_start: int,
+        spec: "gs.entities.MPM",
+    ) -> None:
         super().__init__(
             scene,
             solver,
-            material,
-            morph,
             surface,
             particle_size,
             idx,
             particle_start,
-            vvert_start,
-            vface_start,
-            need_skinning=need_skinning,
-            name=name,
+            need_skinning=spec.material.structure == STRUCTURE.TEARABLE,
+            spec=spec,
         )
 
     def _add_to_solver(self):
@@ -88,39 +77,7 @@ class MPMEntity(ParticleEntity):
             self.set_muscle_group(self.mesh_set_group_ids)
 
     def _add_particles_to_solver(self):
-        self._solver.add_particles(
-            self._sim.cur_substep_local,
-            self.active,
-            self._particle_start,
-            self._n_particles,
-            self._material.idx,
-            self._material._default_Jp,
-            self._material.rho,
-            self._particles,
-        )
-
-    @gs.assert_built
-    def get_state(self):
-        """
-        Get the current physical state of the particle entity.
-
-        Returns
-        -------
-        state : MPMEntityState
-            The current state of all physical properties of the entity, a view of the state of the solver.
-        """
-        solver_state = self._solver.get_state(self._sim.cur_substep_local)
-        particles_slice = slice(self._particle_start, self._particle_start + self._n_particles)
-        return MPMEntityState(
-            self,
-            self._sim.cur_step_global,
-            solver_state.pos[:, particles_slice],
-            solver_state.vel[:, particles_slice],
-            solver_state.C[:, particles_slice],
-            solver_state.F[:, particles_slice],
-            solver_state.Jp[:, particles_slice],
-            solver_state.active[:, particles_slice],
-        )
+        self._solver.add_particles(self.active, self._particle_start, self.material, self._particles)
 
     # ------------------------------------------------------------------------------------
     # ---------------------------------- io & control ------------------------------------
@@ -140,8 +97,8 @@ class MPMEntity(ParticleEntity):
         """
         self.set_particles_actu(actus, envs_idx=envs_idx)
 
-    @assert_muscle
     @gs.assert_built
+    @assert_muscle
     def set_particles_actu(self, actus, particles_idx_local=None, envs_idx=None):
         """
         Set particle actuation values.
@@ -298,7 +255,7 @@ class MPMEntity(ParticleEntity):
             Spring stiffness for the constraint.
         """
         particles_mask = broadcast_tensor(
-            particles_mask, gs.tc_bool, (self._sim._B, self._n_particles), ("envs_idx", "particles_idx")
+            particles_mask, gs.tc_bool, (self._solver.n_envs_, self._n_particles), ("envs_idx", "particles_idx")
         )
         self._solver.set_particle_constraints(particles_mask, link_idx, stiffness, particles_start=self._particle_start)
 
@@ -315,7 +272,7 @@ class MPMEntity(ParticleEntity):
         particles_mask = broadcast_tensor(
             True if particles_mask is None else particles_mask,
             gs.tc_bool,
-            (self._sim._B, self._n_particles),
+            (self._solver.n_envs_, self._n_particles),
             ("envs_idx", "particles_idx"),
         )
         self._solver.remove_particle_constraints(particles_mask, particles_start=self._particle_start)

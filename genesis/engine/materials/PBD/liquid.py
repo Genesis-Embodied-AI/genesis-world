@@ -1,5 +1,6 @@
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
+from genesis.constants import STRUCTURE
 from genesis.typing import PositiveFloat, ValidFloat
 
 from .base import Base
@@ -27,6 +28,8 @@ class Liquid(Base["PBDParticleEntity"]):
     viscosity_relaxation : float, optional
         Relaxation factor used in the viscosity solver. Default is 0.01.
     """
+
+    structure: ClassVar[STRUCTURE] = STRUCTURE.AMORPHOUS
 
     rho: PositiveFloat = 1000.0
     sampler: SamplerType = "pbs"

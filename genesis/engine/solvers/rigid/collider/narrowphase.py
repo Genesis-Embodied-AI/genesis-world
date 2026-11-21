@@ -11,18 +11,9 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 import genesis.utils.simt as su
-from genesis.utils.array_class import (
-    ColliderInfo,
-    ColliderState,
-    DiffContactInput,
-    DynInfo,
-    DynState,
-    ErrorCode,
-    GJKState,
-    GeomsInitAABB,
-    MPRState,
-    RigidInfo,
-)
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidErrorCode, RigidInfo
+from genesis.utils.data import eoa
+from genesis.utils.sdf import SDFInfo
 
 from . import capsule_contact, diff_gjk, gjk, mpr
 from .box_contact import func_box_box_contact, func_plane_box_contact, func_sphere_box_contact
@@ -39,6 +30,9 @@ from .contact import (
     func_rotate_frame,
     func_set_contact,
 )
+from .data import ColliderInfo, ColliderState, DiffContactInput, GJKInfo, GJKState
+from .mpr import MPRInfo, MPRState
+from .support_field import SupportFieldInfo
 from .utils import func_closest_points_on_segments, func_is_discrete_geoms, func_point_in_geom_aabb
 
 
@@ -50,7 +44,7 @@ def func_contact_sphere_sdf(
     dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     is_col = False
@@ -61,11 +55,11 @@ def func_contact_sphere_sdf(
     sphere_center = dyn_state.geoms.pos[i_ga, i_b]
     sphere_radius = dyn_info.geoms.data[i_ga][0]
 
-    center_to_b_dist = sdf.sdf_func_world(i_gb, i_b, sphere_center, dyn_state.geoms, dyn_info.geoms, collider_info.sdf)
+    center_to_b_dist = sdf.sdf_func_world(i_gb, i_b, sphere_center, dyn_state.geoms, dyn_info.geoms, sdf_info)
     if center_to_b_dist < sphere_radius:
         is_col = True
         normal = sdf.sdf_func_normal_world(
-            i_gb, i_b, sphere_center, dyn_state.geoms, dyn_info.geoms, rigid_info, collider_info.sdf, collider_config
+            i_gb, i_b, sphere_center, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info, collider_config
         )
         penetration = sphere_radius - center_to_b_dist
         contact_pos = sphere_center - (sphere_radius - 0.5 * penetration) * normal
@@ -87,12 +81,12 @@ def func_add_polytope_vertex_contacts_sdf(
     tolerance: float,
     n_prev: int,
     contacts_slot,
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     block_dim: qd.template(),
@@ -116,7 +110,7 @@ def func_add_polytope_vertex_contacts_sdf(
     n_max = qd.static(collider_config.n_contacts_per_nonconvex_pair if rigid_config.enable_multi_contact else 1)
     N_SLOTS = qd.static((n_max + block_dim - 1) // block_dim)
     EPS = rigid_info.EPS[None]
-    gb_cell = collider_info.sdf.geoms_info.sdf_cell_size[i_gb]
+    gb_cell = sdf_info.geoms_info.sdf_cell_size[i_gb]
     margin = qd.min(qd.min(gb_cell[0], gb_cell[1]), gb_cell[2])
     synthetic_pen_max = 1e-4
 
@@ -132,7 +126,7 @@ def func_add_polytope_vertex_contacts_sdf(
     center_local = dyn_info.geoms.center[i_ga]
     rbound_a_sq = gs.qd_float(0.0)
     for k in qd.static(range(8)):
-        delta = geoms_init_AABB[i_ga, k] - center_local
+        delta = rigid_info.geoms_init_AABB[i_ga, k] - center_local
         d_sq = delta.dot(delta)
         if d_sq > rbound_a_sq:
             rbound_a_sq = d_sq
@@ -143,9 +137,9 @@ def func_add_polytope_vertex_contacts_sdf(
     )
     if not can_use_sd_reject:
         pos_mesh = gu.qd_inv_transform_by_trans_quat(center_a_world, gb_pos, gb_quat)
-        pos_sdf = gu.qd_transform_by_T(pos_mesh, collider_info.sdf.geoms_info.T_mesh_to_sdf[i_gb])
-        can_use_sd_reject = not sdf.sdf_func_is_outside_sdf_grid(i_gb, pos_sdf, collider_info.sdf)
-    sd_center = sdf.sdf_func_world_local(i_gb, center_a_world, gb_pos, gb_quat, dyn_info.geoms, collider_info.sdf)
+        pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[i_gb])
+        can_use_sd_reject = not sdf.sdf_func_is_outside_sdf_grid(i_gb, pos_sdf, sdf_info)
+    sd_center = sdf.sdf_func_world_local(i_gb, center_a_world, gb_pos, gb_quat, dyn_info.geoms, sdf_info)
 
     # The pairs of an env are detected in parallel, so the contacts of the pair's first scan are found through their
     # slots: the repeated-contact check and the shared pair budget below cover both scans.
@@ -160,7 +154,7 @@ def func_add_polytope_vertex_contacts_sdf(
         # picking up rim verts whose grad is tilted relative to the surface and would inject torque; a 1:1:16 rod
         # recovers a radius near rbound_a/n_max so the buffer spreads along the long axis instead of collapsing onto
         # the deepest tip and letting the body pivot about a single contact patch.
-        ext = geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0]
+        ext = rigid_info.geoms_init_AABB[i_ga, 7] - rigid_info.geoms_init_AABB[i_ga, 0]
         ext_max = qd.max(qd.max(ext[0], ext[1]), ext[2])
         ext_sum_other = ext[0] + ext[1] + ext[2] - ext_max
         needle_extent = ext_max - gs.qd_float(2.0) * ext_sum_other
@@ -168,7 +162,7 @@ def func_add_polytope_vertex_contacts_sdf(
         rbound_b_sq = gs.qd_float(0.0)
         b_center_local = dyn_info.geoms.center[i_gb]
         for k in qd.static(range(8)):
-            delta_b = geoms_init_AABB[i_gb, k] - b_center_local
+            delta_b = rigid_info.geoms_init_AABB[i_gb, k] - b_center_local
             d_sq_b = delta_b.dot(delta_b)
             if d_sq_b > rbound_b_sq:
                 rbound_b_sq = d_sq_b
@@ -287,20 +281,18 @@ def func_add_polytope_vertex_contacts_sdf(
                     i_c_end = column_vert_range[1]
             else:
                 if i_group == 0:
-                    i_v_min = sdf.sdf_func_find_closest_vert(
-                        i_ga, i_b, center_b_world, dyn_state, dyn_info, collider_info
-                    )
+                    i_v_min = sdf.sdf_func_find_closest_vert(i_ga, i_b, center_b_world, dyn_state, dyn_info, sdf_info)
                 elif i_group <= n_prev:
                     i_c_seed = su.qd_lane_slot_read(contacts_slot, n_prev - i_group, block_dim)
                     seed_pos = collider_state.contact_data.pos[i_c_seed, i_b]
-                    i_v_min = sdf.sdf_func_find_closest_vert(i_ga, i_b, seed_pos, dyn_state, dyn_info, collider_info)
+                    i_v_min = sdf.sdf_func_find_closest_vert(i_ga, i_b, seed_pos, dyn_state, dyn_info, sdf_info)
                 if i_v_min >= 0:
                     if su.qd_is_lane_slot_seen(seen_verts, n_seen, i_v_min, tid, block_dim):
                         i_v_min = -1
                 if i_v_min >= 0:
                     i_v_start = i_v_min
                     pos_min = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_v_min], ga_pos, ga_quat)
-                    sd_min = sdf.sdf_func_world_local(i_gb, pos_min, gb_pos, gb_quat, dyn_info.geoms, collider_info.sdf)
+                    sd_min = sdf.sdf_func_world_local(i_gb, pos_min, gb_pos, gb_quat, dyn_info.geoms, sdf_info)
                     i_v_cur = -1
                     while i_v_cur != i_v_min:
                         i_v_cur = i_v_min
@@ -319,7 +311,7 @@ def func_add_polytope_vertex_contacts_sdf(
                                     dyn_info.verts.init_pos[i_neighbor], ga_pos, ga_quat
                                 )
                                 sd_neighbor = sdf.sdf_func_world_local(
-                                    i_gb, pos_neighbor, gb_pos, gb_quat, dyn_info.geoms, collider_info.sdf
+                                    i_gb, pos_neighbor, gb_pos, gb_quat, dyn_info.geoms, sdf_info
                                 )
                             if qd.static(block_dim > 1):
                                 sd_best = su.qd_block_min(sd_neighbor)
@@ -394,7 +386,7 @@ def func_add_polytope_vertex_contacts_sdf(
                         is_candidate = func_point_in_geom_aabb(i_gb, i_b, vertex_pos, 0.0, dyn_state)
                     if is_candidate:
                         is_in_band, sd_v = sdf.sdf_func_world_local_banded(
-                            i_gb, vertex_pos, gb_pos, gb_quat, band, dyn_info, collider_info
+                            i_gb, vertex_pos, gb_pos, gb_quat, band, dyn_info, sdf_info
                         )
                         pen_v = -sd_v
                         # A vert no deeper than the shallowest kept one (at weakest_idx, the first of minimal pen, an
@@ -478,7 +470,7 @@ def func_add_polytope_vertex_contacts_sdf(
         grad_center = qd.Vector.zero(gs.qd_float, 3)
         if is_vert_kept:
             grad_center = sdf.sdf_func_grad_world_local(
-                i_gb, center_a_world, gb_pos, gb_quat, dyn_info.geoms, rigid_info, collider_info.sdf, collider_config
+                i_gb, center_a_world, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info, collider_config
             )
         normal_center = gu.qd_normalize(grad_center, EPS)
         # When two comparably-sized bodies meet "across" each other (the crossed-thin-rod regime: A's center sits within
@@ -535,7 +527,7 @@ def func_add_polytope_vertex_contacts_sdf(
                     if dyn_info.geoms.is_hollow[i_gb]:
                         is_closing_regime = False
                         sd_b_center = sdf.sdf_func_world_local(
-                            i_ga, center_b_world, ga_pos, ga_quat, dyn_info.geoms, collider_info.sdf
+                            i_ga, center_b_world, ga_pos, ga_quat, dyn_info.geoms, sdf_info
                         )
                         if sd_b_center < 0.0:
                             # A's material occupies B's center: B wraps around A (scanning the bolt of a nut-on-bolt
@@ -568,7 +560,7 @@ def func_add_polytope_vertex_contacts_sdf(
                             gb_pos,
                             gb_quat,
                             dyn_info,
-                            collider_info,
+                            sdf_info,
                         )
                         depth_a = sdf.sdf_func_ray_exit_distance(
                             i_ga,
@@ -579,7 +571,7 @@ def func_add_polytope_vertex_contacts_sdf(
                             ga_pos,
                             ga_quat,
                             dyn_info,
-                            collider_info,
+                            sdf_info,
                         )
                         approach_depth_pair = depth_a + depth_b - seg_len
             else:
@@ -594,7 +586,7 @@ def func_add_polytope_vertex_contacts_sdf(
             if i_k * block_dim + tid < n_max and i_v >= 0:
                 vertex_pos = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_v], ga_pos, ga_quat)
                 grad_v = sdf.sdf_func_grad_world_local(
-                    i_gb, vertex_pos, gb_pos, gb_quat, dyn_info.geoms, rigid_info, collider_info.sdf, collider_config
+                    i_gb, vertex_pos, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info, collider_config
                 )
                 # Per-vertex grad magnitude classifies the local grid SDF regime.
                 # - Smoothed (|grad| < 0.5): trilinear interpolation has smoothed across a feature. The pen value is
@@ -813,7 +805,7 @@ def func_add_polytope_vertex_contacts_sdf(
                                     errno,
                                 )
                         n_emitted_before = n_emitted_before + qd.cast(qd.math.popcnt(lanes), gs.qd_int)
-                    n_stored = qd.max(qd.min(max_contacts - i_c_base, n_emitted), 0)
+                    n_stored = qd.math.clamp(max_contacts - i_c_base, 0, n_emitted)
                     for i_k in qd.static(range(N_SLOTS)):
                         i_added = i_k * block_dim + tid
                         if i_added >= n_added and i_added < n_added + n_stored:
@@ -835,12 +827,12 @@ def func_add_polytope_vertex_contacts_sdf_shell(
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
     tolerance: float,
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     errno: qd.Tensor,
@@ -915,12 +907,12 @@ def func_add_polytope_vertex_contacts_sdf_shell(
         if qd.static(i_phase == 1):
             # A plane's handful of far-flung verts carry no contact information.
             is_phase_active = dyn_info.geoms.type[j_ga] != gs.GEOM_TYPE.PLANE
-        jb_cell = collider_info.sdf.geoms_info.sdf_cell_size[j_gb]
+        jb_cell = sdf_info.geoms_info.sdf_cell_size[j_gb]
         margin = qd.min(qd.min(jb_cell[0], jb_cell[1]), jb_cell[2])
         ja_center_local = dyn_info.geoms.center[j_ga]
         rbound_a_sq = gs.qd_float(0.0)
         for k in qd.static(range(8)):
-            delta = geoms_init_AABB[j_ga, k] - ja_center_local
+            delta = rigid_info.geoms_init_AABB[j_ga, k] - ja_center_local
             d_sq = delta.dot(delta)
             if d_sq > rbound_a_sq:
                 rbound_a_sq = d_sq
@@ -931,21 +923,21 @@ def func_add_polytope_vertex_contacts_sdf_shell(
         )
         if not can_use_sd_reject:
             pos_mesh = gu.qd_inv_transform_by_trans_quat(ja_center_world, jb_pos, jb_quat)
-            pos_sdf = gu.qd_transform_by_T(pos_mesh, collider_info.sdf.geoms_info.T_mesh_to_sdf[j_gb])
-            can_use_sd_reject = not sdf.sdf_func_is_outside_sdf_grid(j_gb, pos_sdf, collider_info.sdf)
-        sd_center = sdf.sdf_func_world_local(j_gb, ja_center_world, jb_pos, jb_quat, dyn_info.geoms, collider_info.sdf)
+            pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[j_gb])
+            can_use_sd_reject = not sdf.sdf_func_is_outside_sdf_grid(j_gb, pos_sdf, sdf_info)
+        sd_center = sdf.sdf_func_world_local(j_gb, ja_center_world, jb_pos, jb_quat, dyn_info.geoms, sdf_info)
         if is_phase_active and ((not can_use_sd_reject) or sd_center <= rbound_a):
             rbound_b_sq = gs.qd_float(0.0)
             jb_center_local = dyn_info.geoms.center[j_gb]
             for k in qd.static(range(8)):
-                delta_b = geoms_init_AABB[j_gb, k] - jb_center_local
+                delta_b = rigid_info.geoms_init_AABB[j_gb, k] - jb_center_local
                 d_sq_b = delta_b.dot(delta_b)
                 if d_sq_b > rbound_b_sq:
                     rbound_b_sq = d_sq_b
             jb_center_world = gu.qd_transform_by_trans_quat(jb_center_local, jb_pos, jb_quat)
 
             grad_center = sdf.sdf_func_grad_world_local_consistent(
-                j_gb, ja_center_world, jb_pos, jb_quat, dyn_info, rigid_info, collider_info
+                j_gb, ja_center_world, jb_pos, jb_quat, dyn_info, rigid_info, sdf_info
             )
             normal_center = gu.qd_normalize(grad_center, EPS)
             # Regime detection and per-vertex pen/normal policy identical to the per-vertex manifold, which
@@ -969,7 +961,7 @@ def func_add_polytope_vertex_contacts_sdf_shell(
                     elif dyn_info.geoms.is_hollow[j_gb]:
                         is_closing_regime = False
                         sd_b_center = sdf.sdf_func_world_local(
-                            j_ga, jb_center_world, ja_pos, ja_quat, dyn_info.geoms, collider_info.sdf
+                            j_ga, jb_center_world, ja_pos, ja_quat, dyn_info.geoms, sdf_info
                         )
                         if sd_b_center < 0.0:
                             is_enclosed_regime = True
@@ -985,7 +977,7 @@ def func_add_polytope_vertex_contacts_sdf_shell(
                             jb_pos,
                             jb_quat,
                             dyn_info,
-                            collider_info,
+                            sdf_info,
                         )
                         depth_a = sdf.sdf_func_ray_exit_distance(
                             j_ga,
@@ -996,7 +988,7 @@ def func_add_polytope_vertex_contacts_sdf_shell(
                             ja_pos,
                             ja_quat,
                             dyn_info,
-                            collider_info,
+                            sdf_info,
                         )
                         approach_depth_pair = depth_a + depth_b - seg_len
                 else:
@@ -1011,12 +1003,12 @@ def func_add_polytope_vertex_contacts_sdf_shell(
                 vertex_pos = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_v], ja_pos, ja_quat)
                 if func_point_in_geom_aabb(j_gb, i_b, vertex_pos, 0.0, dyn_state):
                     is_in_band, sd_v = sdf.sdf_func_world_local_banded(
-                        j_gb, vertex_pos, jb_pos, jb_quat, margin, dyn_info, collider_info
+                        j_gb, vertex_pos, jb_pos, jb_quat, margin, dyn_info, sdf_info
                     )
                     pen_v = -sd_v
                     if is_in_band:
                         grad_v = sdf.sdf_func_grad_world_local_consistent(
-                            j_gb, vertex_pos, jb_pos, jb_quat, dyn_info, rigid_info, collider_info
+                            j_gb, vertex_pos, jb_pos, jb_quat, dyn_info, rigid_info, sdf_info
                         )
                         grad_norm = grad_v.norm()
                         pen_emit = gs.qd_float(0.0)
@@ -1236,7 +1228,7 @@ def func_contact_vertex_sdf(
     dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     is_col = False
@@ -1247,9 +1239,7 @@ def func_contact_vertex_sdf(
     for i_v in range(dyn_info.geoms.vert_start[i_ga], dyn_info.geoms.vert_end[i_ga]):
         vertex_pos = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_v], ga_pos, ga_quat)
         if func_point_in_geom_aabb(i_gb, i_b, vertex_pos, 0.0, dyn_state):
-            new_penetration = -sdf.sdf_func_world_local(
-                i_gb, vertex_pos, gb_pos, gb_quat, dyn_info.geoms, collider_info.sdf
-            )
+            new_penetration = -sdf.sdf_func_world_local(i_gb, vertex_pos, gb_pos, gb_quat, dyn_info.geoms, sdf_info)
             if new_penetration > penetration:
                 is_col = True
                 contact_pos = vertex_pos
@@ -1269,7 +1259,7 @@ def func_contact_vertex_sdf(
         center_a = gu.qd_transform_by_trans_quat(dyn_info.geoms.center[i_ga], ga_pos, ga_quat)
         normal_sample = center_a if dyn_info.geoms.is_convex[i_ga] else contact_pos
         normal = sdf.sdf_func_normal_world_local(
-            i_gb, normal_sample, gb_pos, gb_quat, dyn_info.geoms, rigid_info, collider_info.sdf, collider_config
+            i_gb, normal_sample, gb_pos, gb_quat, dyn_info.geoms, rigid_info, sdf_info, collider_config
         )
 
         # Shift contact_pos from the deepest vertex (interior side) by half the penetration along the outward normal
@@ -1288,11 +1278,10 @@ def func_contact_nonconvex_convex_sdf(
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     # Contact between geoms in a mixed-convexity pair where A is the smaller-AABB side (whether convex or not) and B
@@ -1316,7 +1305,7 @@ def func_contact_nonconvex_convex_sdf(
     center_local = dyn_info.geoms.center[i_ga]
     rbound_a_sq = gs.qd_float(0.0)
     for k in qd.static(range(8)):
-        delta = geoms_init_AABB[i_ga, k] - center_local
+        delta = rigid_info.geoms_init_AABB[i_ga, k] - center_local
         d_sq = delta.dot(delta)
         if d_sq > rbound_a_sq:
             rbound_a_sq = d_sq
@@ -1337,9 +1326,9 @@ def func_contact_nonconvex_convex_sdf(
     can_use_sd_reject = dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.SPHERE
     if not can_use_sd_reject:
         pos_mesh = gu.qd_inv_transform_by_trans_quat(center_a_world, gb_pos, gb_quat)
-        pos_sdf = gu.qd_transform_by_T(pos_mesh, collider_info.sdf.geoms_info.T_mesh_to_sdf[i_gb])
-        can_use_sd_reject = not sdf.sdf_func_is_outside_sdf_grid(i_gb, pos_sdf, collider_info.sdf)
-    sd_center = sdf.sdf_func_world_local(i_gb, center_a_world, gb_pos, gb_quat, dyn_info.geoms, collider_info.sdf)
+        pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[i_gb])
+        can_use_sd_reject = not sdf.sdf_func_is_outside_sdf_grid(i_gb, pos_sdf, sdf_info)
+    sd_center = sdf.sdf_func_world_local(i_gb, center_a_world, gb_pos, gb_quat, dyn_info.geoms, sdf_info)
 
     if (not can_use_sd_reject) or sd_center <= rbound_a:
         is_col, normal, penetration, contact_pos = func_contact_vertex_sdf(
@@ -1353,7 +1342,7 @@ def func_contact_nonconvex_convex_sdf(
             dyn_state,
             dyn_info,
             rigid_info,
-            collider_info,
+            sdf_info,
             collider_config,
         )
 
@@ -1370,6 +1359,7 @@ def func_contact_convex_convex_sdf(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
     enable_edge_detection_fallback: qd.template(),
 ):
@@ -1390,10 +1380,10 @@ def func_contact_convex_convex_sdf(
     if i_va == -1:
         # start traversing on the vertex graph with a smart initial vertex
         pos_vb = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[gb_vert_start], gb_pos, gb_quat)
-        i_va = sdf.sdf_func_find_closest_vert(i_ga, i_b, pos_vb, dyn_state, dyn_info, collider_info)
+        i_va = sdf.sdf_func_find_closest_vert(i_ga, i_b, pos_vb, dyn_state, dyn_info, sdf_info)
     i_v_closest = i_va
     pos_v_closest = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_v_closest], ga_pos, ga_quat)
-    sd_v_closest = sdf.sdf_func_world(i_gb, i_b, pos_v_closest, dyn_state.geoms, dyn_info.geoms, collider_info.sdf)
+    sd_v_closest = sdf.sdf_func_world(i_gb, i_b, pos_v_closest, dyn_state.geoms, dyn_info.geoms, sdf_info)
 
     while True:
         for i_neighbor_ in range(
@@ -1402,9 +1392,7 @@ def func_contact_convex_convex_sdf(
         ):
             i_neighbor = collider_info.vert_neighbors[i_neighbor_]
             pos_neighbor = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_neighbor], ga_pos, ga_quat)
-            sd_neighbor = sdf.sdf_func_world(
-                i_gb, i_b, pos_neighbor, dyn_state.geoms, dyn_info.geoms, collider_info.sdf
-            )
+            sd_neighbor = sdf.sdf_func_world(i_gb, i_b, pos_neighbor, dyn_state.geoms, dyn_info.geoms, sdf_info)
             if sd_neighbor < sd_v_closest - 1e-5:  # 1e-5 (0.01mm) to avoid endless loop due to numerical instability
                 i_v_closest = i_neighbor
                 sd_v_closest = sd_neighbor
@@ -1420,7 +1408,7 @@ def func_contact_convex_convex_sdf(
     if sd_v_closest < 0.0:
         is_col = True
         normal = sdf.sdf_func_normal_world(
-            i_gb, i_b, pos_a, dyn_state.geoms, dyn_info.geoms, rigid_info, collider_info.sdf, collider_config
+            i_gb, i_b, pos_a, dyn_state.geoms, dyn_info.geoms, rigid_info, sdf_info, collider_config
         )
         penetration = -sd_v_closest
         contact_pos = pos_a
@@ -1436,18 +1424,18 @@ def func_contact_convex_convex_sdf(
             vec_01 = gu.qd_normalize(p_1 - p_0, EPS)
 
             sdf_grad_0_b = sdf.sdf_func_grad_world(
-                i_gb, i_b, p_0, dyn_state, dyn_info, rigid_info, collider_info, collider_config
+                i_gb, i_b, p_0, dyn_state, dyn_info, rigid_info, sdf_info, collider_config
             )
             sdf_grad_1_b = sdf.sdf_func_grad_world(
-                i_gb, i_b, p_1, dyn_state, dyn_info, rigid_info, collider_info, collider_config
+                i_gb, i_b, p_1, dyn_state, dyn_info, rigid_info, sdf_info, collider_config
             )
 
             # check if the edge on a is facing towards mesh b (I am not 100% sure about this, subject to removal)
             sdf_grad_0_a = sdf.sdf_func_grad_world(
-                i_ga, i_b, p_0, dyn_state, dyn_info, rigid_info, collider_info, collider_config
+                i_ga, i_b, p_0, dyn_state, dyn_info, rigid_info, sdf_info, collider_config
             )
             sdf_grad_1_a = sdf.sdf_func_grad_world(
-                i_ga, i_b, p_1, dyn_state, dyn_info, rigid_info, collider_info, collider_config
+                i_ga, i_b, p_1, dyn_state, dyn_info, rigid_info, sdf_info, collider_config
             )
             normal_edge_0 = sdf_grad_0_a - sdf_grad_0_a.dot(vec_01) * vec_01
             normal_edge_1 = sdf_grad_1_a - sdf_grad_1_a.dot(vec_01) * vec_01
@@ -1456,14 +1444,14 @@ def func_contact_convex_convex_sdf(
                 # check if closest point is between the two points
                 if sdf_grad_0_b.dot(vec_01) < 0 and sdf_grad_1_b.dot(vec_01) > 0:
                     cur_length = (p_1 - p_0).norm()
-                    ga_sdf_cell_size_vec = collider_info.sdf.geoms_info.sdf_cell_size[i_ga]
+                    ga_sdf_cell_size_vec = sdf_info.geoms_info.sdf_cell_size[i_ga]
                     ga_sdf_cell_size = qd.min(
                         qd.min(ga_sdf_cell_size_vec[0], ga_sdf_cell_size_vec[1]), ga_sdf_cell_size_vec[2]
                     )
                     while cur_length > ga_sdf_cell_size:
                         p_mid = 0.5 * (p_0 + p_1)
                         side = sdf.sdf_func_grad_world(
-                            i_gb, i_b, p_mid, dyn_state, dyn_info, rigid_info, collider_info, collider_config
+                            i_gb, i_b, p_mid, dyn_state, dyn_info, rigid_info, sdf_info, collider_config
                         ).dot(vec_01)
                         if side < 0:
                             p_0 = p_mid
@@ -1473,9 +1461,7 @@ def func_contact_convex_convex_sdf(
                         cur_length = 0.5 * cur_length
 
                     p = 0.5 * (p_0 + p_1)
-                    new_penetration = -sdf.sdf_func_world(
-                        i_gb, i_b, p, dyn_state.geoms, dyn_info.geoms, collider_info.sdf
-                    )
+                    new_penetration = -sdf.sdf_func_world(i_gb, i_b, p, dyn_state.geoms, dyn_info.geoms, sdf_info)
 
                     if new_penetration > 0.0:
                         is_col = True
@@ -1486,7 +1472,7 @@ def func_contact_convex_convex_sdf(
                             dyn_state.geoms,
                             dyn_info.geoms,
                             rigid_info,
-                            collider_info.sdf,
+                            sdf_info,
                             collider_config,
                         )
                         contact_pos = p
@@ -1506,13 +1492,14 @@ def func_contact_mpr_terrain(
     i_scratch: int,
     i_b: int,
     tid: int,
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     mpr_state: MPRState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     block_dim: qd.template(),
@@ -1527,7 +1514,6 @@ def func_contact_mpr_terrain(
     ga_pos, ga_quat = dyn_state.geoms.pos[i_ga, i_b], dyn_state.geoms.quat[i_ga, i_b]
     gb_pos, gb_quat = dyn_state.geoms.pos[i_gb, i_b], dyn_state.geoms.quat[i_gb, i_b]
     margin = gs.qd_float(0.0)
-    EPS = rigid_info.EPS[None]
     n_max = qd.static(collider_config.n_contacts_per_convex_pair)
     N_PERTURBATIONS = qd.static(4)
 
@@ -1538,7 +1524,7 @@ def func_contact_mpr_terrain(
     )
 
     is_return = False
-    tolerance = collider_info.mc_tolerance[None] * func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
+    tolerance = collider_info.mc_tolerance[None] * func_compute_geom_pair_scale(i_ga, i_gb, dyn_info, rigid_info)
     i_pair = collider_info.collision_pair_idx[i_ga, i_gb]
 
     # Transform to terrain's frame (using local variables, not modifying global state)
@@ -1565,7 +1551,7 @@ def func_contact_mpr_terrain(
                 ga_quat_terrain_frame,
                 collider_state,
                 dyn_info,
-                collider_info,
+                support_field_info,
                 rigid_config,
                 collider_config,
             )
@@ -1634,7 +1620,7 @@ def func_contact_mpr_terrain(
                     if i_detection > 0:
                         axis = axis_0 if i_detection < 3 else axis_1
                         angle_sign = 2 * (i_detection % 2) - 1
-                        qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
+                        qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis)
                         ga_pos_curr, ga_quat_curr = func_rotate_frame(ga_pos, ga_quat, contact_pos_0, qrot)
                         ga_pos_tf, ga_quat_tf = gu.qd_transform_pos_quat_by_trans_quat(
                             ga_pos_curr - gb_pos, ga_quat_curr, qd.Vector.zero(gs.qd_float, 3), gu.qd_inv_quat(gb_quat)
@@ -1679,11 +1665,12 @@ def func_contact_mpr_terrain(
                                 ga_quat_tf,
                                 gb_pos_terrain_frame,
                                 gb_quat_terrain_frame,
-                                geoms_init_AABB,
                                 collider_state,
                                 mpr_state,
                                 dyn_info,
-                                collider_info,
+                                rigid_info,
+                                mpr_info,
+                                support_field_info,
                                 rigid_config,
                                 collider_config,
                             )
@@ -1798,7 +1785,6 @@ def func_contact_mpr_terrain(
                                             i_gb,
                                             i_b,
                                             normal_0,
-                                            geoms_init_AABB,
                                             dyn_state,
                                             dyn_info,
                                             rigid_info,
@@ -1827,6 +1813,8 @@ def func_recompute_perturbed_contact(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
     rigid_config: qd.template(),
     geom_pair_scale: float,
     used_gjk: bool,
@@ -1854,8 +1842,8 @@ def func_recompute_perturbed_contact(
     witness_b = contact_pos + 0.5 * penetration * normal
     if used_gjk:
         # The polytope face normal can differ from the witness separation, so recover each material point directly
-        witness_a = gjk_state.witness.point_obj1[i_scratch, 0]
-        witness_b = gjk_state.witness.point_obj2[i_scratch, 0]
+        witness_a = gjk_state.witness.point_obj1[0, i_scratch]
+        witness_b = gjk_state.witness.point_obj2[0, i_scratch]
     witness_a = R_inv @ (witness_a - contact_pos_0) + contact_pos_0
     witness_b = R @ (witness_b - contact_pos_0) + contact_pos_0
 
@@ -1892,7 +1880,7 @@ def func_recompute_perturbed_contact(
             support_b = qd.Vector.zero(gs.qd_float, 3)
             if used_gjk:
                 i_f = gjk_state.nearest_face[i_scratch]
-                i_pv = gjk_state.polytope_faces.verts_idx[i_scratch, i_f][i_v]
+                i_pv = gjk_state.polytope_faces.verts_idx[i_f, i_scratch][i_v]
                 # Boxes, meshes and spheres provide native local supports. Other supports are stored in world space.
                 geom_type_a = dyn_info.geoms.type[i_ga]
                 geom_type_b = dyn_info.geoms.type[i_gb]
@@ -1902,10 +1890,10 @@ def func_recompute_perturbed_contact(
                     or geom_type_a == gs.GEOM_TYPE.SPHERE
                 ):
                     support_a = gu.qd_transform_by_trans_quat(
-                        gjk_state.polytope_verts.local_obj1[i_scratch, i_pv], ga_pos_original, ga_quat_original
+                        gjk_state.polytope_verts.local_obj1[i_pv, i_scratch], ga_pos_original, ga_quat_original
                     )
                 else:
-                    support_a = gjk_state.polytope_verts.obj1[i_scratch, i_pv]
+                    support_a = gjk_state.polytope_verts.obj1[i_pv, i_scratch]
                     support_a = R_inv @ (support_a - contact_pos_0) + contact_pos_0
                 if (
                     geom_type_b == gs.GEOM_TYPE.BOX
@@ -1913,10 +1901,10 @@ def func_recompute_perturbed_contact(
                     or geom_type_b == gs.GEOM_TYPE.SPHERE
                 ):
                     support_b = gu.qd_transform_by_trans_quat(
-                        gjk_state.polytope_verts.local_obj2[i_scratch, i_pv], gb_pos_original, gb_quat_original
+                        gjk_state.polytope_verts.local_obj2[i_pv, i_scratch], gb_pos_original, gb_quat_original
                     )
                 else:
-                    support_b = gjk_state.polytope_verts.obj2[i_scratch, i_pv]
+                    support_b = gjk_state.polytope_verts.obj2[i_pv, i_scratch]
                     support_b = R @ (support_b - contact_pos_0) + contact_pos_0
             else:
                 support_a = mpr_state.simplex_support.v1[i_v + 1, i_scratch]
@@ -2082,9 +2070,9 @@ def func_recompute_perturbed_contact(
     depth_noise = EPS * geom_pair_scale
     if used_gjk_0:
         if not func_is_discrete_geoms(i_ga, i_gb, dyn_info):
-            depth_noise = qd.max(depth_noise, collider_info.gjk.tolerance[None])
+            depth_noise = qd.max(depth_noise, gjk_info.tolerance[None])
     else:
-        depth_noise = qd.max(depth_noise, collider_info.mpr.CCD_TOLERANCE[None] * geom_pair_scale)
+        depth_noise = qd.max(depth_noise, mpr_info.CCD_TOLERANCE[None] * geom_pair_scale)
     if has_depth_estimate and depth < 0.0 and penetration_0 - depth > depth_noise:
         contact_pos += depth / (depth - penetration_0) * (contact_pos_0 - contact_pos)
     depth = qd.max(depth, 0.0)
@@ -2124,7 +2112,8 @@ def func_prefer_gjk_refinement(
     mpr_state: MPRState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -2154,7 +2143,7 @@ def func_prefer_gjk_refinement(
                 if qd.static(i_dir % 2 == 1):
                     directions[i_dir, k] = -directions[i_dir, k]
         # The MPR convergence tolerance absorbs the depth error of a portal that is the minimal one
-        depth_max = penetration - collider_info.mpr.CCD_TOLERANCE[None] * geom_pair_scale
+        depth_max = penetration - mpr_info.CCD_TOLERANCE[None] * geom_pair_scale
         # Any known point of the Minkowski difference bounds from below its depth along every direction, so a direction
         # is only queried while no known point rules it out. The portal vertices come first when MPR built a portal,
         # its degenerate paths leaving them unwritten, then every support found.
@@ -2182,7 +2171,7 @@ def func_prefer_gjk_refinement(
                         gb_quat,
                         collider_state,
                         dyn_info,
-                        collider_info,
+                        support_field_info,
                         rigid_config,
                         collider_config,
                     )
@@ -2212,6 +2201,7 @@ def func_contact_overlap_axes(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     geom_pair_scale: float,
@@ -2287,7 +2277,7 @@ def func_contact_overlap_axes(
                             edge_y = polygons[j_k1, 1] - polygons[j_k0, 1]
                             edge_length_sqr = edge_x**2 + edge_y**2
                             edge_fraction = -(polygons[j_k0, 0] * edge_x + polygons[j_k0, 1] * edge_y)
-                            edge_fraction = qd.min(qd.max(edge_fraction / qd.max(edge_length_sqr, EPS**2), 0.0), 1.0)
+                            edge_fraction = qd.math.clamp(edge_fraction / qd.max(edge_length_sqr, EPS**2), 0.0, 1.0)
                             distance = (polygons[j_k0, 0] + edge_fraction * edge_x) ** 2
                             distance += (polygons[j_k0, 1] + edge_fraction * edge_y) ** 2
                             span = edge_length_sqr / qd.max(distance, EPS**2)
@@ -2325,7 +2315,7 @@ def func_contact_overlap_axes(
                         gb_quat if is_b else ga_quat,
                         collider_state,
                         dyn_info,
-                        collider_info,
+                        support_field_info,
                         rigid_config,
                         collider_config,
                     )
@@ -2742,17 +2732,6 @@ def func_contact_overlap_axes(
 
 
 @qd.func
-def func_is_analytic_pair(i_ga: int, i_gb: int, dyn_info: DynInfo):
-    """Whether a pair of geoms, ordered by type, has a closed-form detection (see func_analytic_contact)."""
-    type_a = dyn_info.geoms.type[i_ga]
-    type_b = dyn_info.geoms.type[i_gb]
-    return (type_a == gs.GEOM_TYPE.CAPSULE and type_b == gs.GEOM_TYPE.CAPSULE) or (
-        type_a == gs.GEOM_TYPE.SPHERE
-        and (type_b == gs.GEOM_TYPE.SPHERE or type_b == gs.GEOM_TYPE.CAPSULE or type_b == gs.GEOM_TYPE.BOX)
-    )
-
-
-@qd.func
 def func_analytic_contact(
     i_ga: int,
     i_gb: int,
@@ -2763,32 +2742,39 @@ def func_analytic_contact(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
 ):
-    """Detect the contact of a pair of geoms that func_is_analytic_pair accepts, in closed form.
+    """Detect the contact of a pair of geoms in closed form, if the pair has a closed-form detection.
 
-    The geom poses are passed in rather than read from the geom state, so that the multi-contact search can perturb
-    them. Returns whether the geoms collide, and the normal, position and penetration of their contact.
+    The pairs of geoms 'i_ga' and 'i_gb', ordered by type, with a closed-form detection are capsule-capsule,
+    sphere-sphere, sphere-capsule and sphere-box. The geom poses are passed in rather than read from the geom state, so
+    that the multi-contact search can perturb them. Returns whether the pair has a closed-form detection, whether the
+    geoms collide, and the normal, position and penetration of their contact.
     """
+    # The callers branch on the returned flag rather than on a predicate evaluated ahead of this chain: a separate
+    # predicate branch makes the GPU narrowphase kernels markedly slower.
+    is_analytic = True
     is_col = False
     normal = qd.Vector.zero(gs.qd_float, 3)
     contact_pos = qd.Vector.zero(gs.qd_float, 3)
     penetration = gs.qd_float(0.0)
-    if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE:
+    if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
         is_col, normal, contact_pos, penetration = capsule_contact.func_capsule_capsule_contact(
             i_ga, i_gb, ga_pos, ga_quat, gb_pos, gb_quat, dyn_info, rigid_info
         )
-    elif dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.SPHERE:
+    elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.SPHERE:
         is_col, normal, contact_pos, penetration = capsule_contact.func_sphere_sphere_contact(
             i_ga, i_gb, ga_pos, gb_pos, dyn_info, rigid_info
         )
-    elif dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
+    elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
         is_col, normal, contact_pos, penetration = capsule_contact.func_sphere_capsule_contact(
             i_ga, i_gb, ga_pos, gb_pos, gb_quat, dyn_info, rigid_info
         )
-    else:
+    elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.BOX:
         is_col, normal, contact_pos, penetration = func_sphere_box_contact(
             i_ga, i_gb, ga_pos, gb_pos, gb_quat, dyn_info, rigid_info
         )
-    return is_col, normal, contact_pos, penetration
+    else:
+        is_analytic = False
+    return is_analytic, is_col, normal, contact_pos, penetration
 
 
 @qd.func
@@ -2796,7 +2782,6 @@ def func_convex_convex_contact(
     i_ga: int,
     i_gb: int,
     i_b: int,
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     mpr_state: MPRState,
@@ -2805,6 +2790,9 @@ def func_convex_convex_contact(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     gjk_config: qd.template(),
@@ -2830,8 +2818,8 @@ def func_convex_convex_contact(
                 dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE
             )
 
-        geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
-        tolerance = func_compute_mc_tolerance(i_ga, i_gb, geoms_init_AABB, dyn_info, collider_info, rigid_config)
+        geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, dyn_info, rigid_info)
+        tolerance = func_compute_mc_tolerance(i_ga, i_gb, dyn_info, rigid_info, collider_info, rigid_config)
         normal_cos_tol = qd.cos(2.0 * collider_info.mc_perturbation[None])
         diff_pos_tolerance = collider_info.diff_pos_tolerance[None] * geom_pair_scale
         diff_normal_tolerance = collider_info.diff_normal_tolerance[None]
@@ -2873,7 +2861,6 @@ def func_convex_convex_contact(
         has_target_corner = True
 
         i_pair = collider_info.collision_pair_idx[i_ga, i_gb]
-        is_analytic_pair = func_is_analytic_pair(i_ga, i_gb, dyn_info)
         for i_detection in range(5):
             prefer_gjk = (
                 collider_config.ccd_algorithm == CCD_ALGORITHM_CODE.GJK
@@ -2895,7 +2882,6 @@ def func_convex_convex_contact(
                         ga_quat_original,
                         gb_pos_original,
                         gb_quat_original,
-                        rigid_info,
                         collider_info,
                         rigid_config,
                     )
@@ -2905,19 +2891,14 @@ def func_convex_convex_contact(
             is_col = False
             # Slot of the contact added by this detection, -1 if none
             i_c_added = -1
-            if (multi_contact and is_col_0 and has_target_corner) or (i_detection == 0):
-                if is_analytic_pair:
-                    is_col, normal, contact_pos, penetration = func_analytic_contact(
-                        i_ga,
-                        i_gb,
-                        ga_pos_current,
-                        ga_quat_current,
-                        gb_pos_current,
-                        gb_quat_current,
-                        dyn_info,
-                        rigid_info,
-                    )
-                elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
+            is_detection_run = (multi_contact and is_col_0 and has_target_corner) or (i_detection == 0)
+            is_analytic = False
+            if is_detection_run:
+                is_analytic, is_col, normal, contact_pos, penetration = func_analytic_contact(
+                    i_ga, i_gb, ga_pos_current, ga_quat_current, gb_pos_current, gb_quat_current, dyn_info, rigid_info
+                )
+            if is_detection_run and not is_analytic:
+                if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
                     plane_dir = qd.Vector(
                         [dyn_info.geoms.data[i_ga][0], dyn_info.geoms.data[i_ga][1], dyn_info.geoms.data[i_ga][2]],
                         dt=gs.qd_float,
@@ -2933,7 +2914,7 @@ def func_convex_convex_contact(
                         gb_quat_current,
                         collider_state,
                         dyn_info,
-                        collider_info,
+                        support_field_info,
                         rigid_config,
                         collider_config,
                     )
@@ -2974,12 +2955,12 @@ def func_convex_convex_contact(
                                     ga_quat_current,
                                     gb_pos_current,
                                     gb_quat_current,
-                                    geoms_init_AABB,
                                     collider_state,
                                     mpr_state,
                                     dyn_info,
                                     rigid_info,
-                                    collider_info,
+                                    mpr_info,
+                                    support_field_info,
                                     rigid_config,
                                     collider_config,
                                 )
@@ -3003,7 +2984,8 @@ def func_convex_convex_contact(
                                 mpr_state,
                                 dyn_info,
                                 rigid_info,
-                                collider_info,
+                                mpr_info,
+                                support_field_info,
                                 rigid_config,
                                 collider_config,
                             )
@@ -3023,7 +3005,6 @@ def func_convex_convex_contact(
                                     gb_quat_current,
                                     diff_pos_tolerance,
                                     diff_normal_tolerance,
-                                    geoms_init_AABB,
                                     dyn_state,
                                     collider_state,
                                     gjk_state,
@@ -3031,6 +3012,8 @@ def func_convex_convex_contact(
                                     dyn_info,
                                     rigid_info,
                                     collider_info,
+                                    gjk_info,
+                                    support_field_info,
                                     rigid_config,
                                     collider_config,
                                 )
@@ -3048,7 +3031,8 @@ def func_convex_convex_contact(
                                     gjk_state,
                                     dyn_info,
                                     rigid_info,
-                                    collider_info,
+                                    gjk_info,
+                                    support_field_info,
                                     rigid_config,
                                     collider_config,
                                     gjk_config,
@@ -3070,9 +3054,9 @@ def func_convex_convex_contact(
                                             i_gb,
                                             i_b,
                                             i_pair,
-                                            gjk_state.normal[i_b, i_c],
-                                            gjk_state.contact_pos[i_b, i_c],
-                                            gjk_state.diff_penetration[i_b, i_c],
+                                            gjk_state.normal[i_c, i_b],
+                                            gjk_state.contact_pos[i_c, i_b],
+                                            gjk_state.diff_penetration[i_c, i_b],
                                             dyn_state,
                                             collider_state,
                                             dyn_info,
@@ -3089,8 +3073,8 @@ def func_convex_convex_contact(
                                         for i_c in range(n_contacts):
                                             # Ignore contact points if the number of contacts exceeds the limit.
                                             if i_c < collider_config.n_contacts_per_convex_pair:
-                                                contact_pos = gjk_state.contact_pos[i_b, i_c]
-                                                normal = gjk_state.normal[i_b, i_c]
+                                                contact_pos = gjk_state.contact_pos[i_c, i_b]
+                                                normal = gjk_state.normal[i_c, i_b]
                                                 contact_pos = func_apply_smooth_refinement(
                                                     i_ga,
                                                     i_gb,
@@ -3123,8 +3107,8 @@ def func_convex_convex_contact(
 
                                         break
                                     else:
-                                        contact_pos = gjk_state.contact_pos[i_b, 0]
-                                        normal = gjk_state.normal[i_b, 0]
+                                        contact_pos = gjk_state.contact_pos[0, i_b]
+                                        normal = gjk_state.normal[0, i_b]
 
             # Refine the unperturbed (i_detection == 0) contact here; perturbed contacts are refined inside
             # func_recompute_perturbed_contact after the perturbation is reverted, on the canonical (unperturbed) pose.
@@ -3167,7 +3151,7 @@ def func_convex_convex_contact(
                     if multi_contact:
                         # Perturb geom_a around two orthogonal axes to find multiple contacts
                         axis_0, axis_1 = func_contact_orthogonals(
-                            i_ga, i_gb, i_b, normal, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
+                            i_ga, i_gb, i_b, normal, dyn_state, dyn_info, rigid_info, rigid_config
                         )
                         if qd.static(not rigid_config.enable_mujoco_compatibility):
                             overlap_axes = qd.Matrix.rows([axis_0, -axis_0, axis_1, -axis_1])
@@ -3189,6 +3173,7 @@ def func_convex_convex_contact(
                                     dyn_info,
                                     rigid_info,
                                     collider_info,
+                                    support_field_info,
                                     rigid_config,
                                     collider_config,
                                     geom_pair_scale,
@@ -3231,6 +3216,8 @@ def func_convex_convex_contact(
                         dyn_info,
                         rigid_info,
                         collider_info,
+                        mpr_info,
+                        gjk_info,
                         rigid_config,
                         geom_pair_scale,
                         is_gjk_used,
@@ -3289,12 +3276,12 @@ def func_convex_convex_contact(
                 # The differentiable narrowphase replays the detection from the geom poses, and a perturbed one from
                 # contact 0 of the pair, which needs the discrete choices of the forward pass (see
                 # func_narrow_phase_diff_convex_vs_convex)
-                if is_analytic_pair and i_c_added >= 0:
-                    collider_state.diff_contact_input.geom_a[i_b, i_c_added] = i_ga
-                    collider_state.diff_contact_input.geom_b[i_b, i_c_added] = i_gb
-                    collider_state.diff_contact_input.ref_id[i_b, i_c_added] = i_c_0
-                    collider_state.diff_contact_input.detection_idx[i_b, i_c_added] = i_detection
-                    collider_state.diff_contact_input.valid[i_b, i_c_added] = 1
+                if is_analytic and i_c_added >= 0:
+                    collider_state.diff_contact_input.geom_a[i_c_added, i_b] = i_ga
+                    collider_state.diff_contact_input.geom_b[i_c_added, i_b] = i_gb
+                    collider_state.diff_contact_input.ref_id[i_c_added, i_b] = i_c_0
+                    collider_state.diff_contact_input.detection_idx[i_c_added, i_b] = i_detection
+                    collider_state.diff_contact_input.valid[i_c_added, i_b] = 1
 
 
 @qd.func
@@ -3308,14 +3295,15 @@ def _func_multicontact_run_detection(
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     mpr_state: MPRState,
     gjk_state: GJKState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     gjk_config: qd.template(),
@@ -3335,89 +3323,101 @@ def _func_multicontact_run_detection(
     contact_pos = qd.Vector.zero(gs.qd_float, 3)
     used_gjk = False
 
-    if func_is_analytic_pair(i_ga, i_gb, dyn_info):
-        is_col, normal, contact_pos, penetration = func_analytic_contact(
-            i_ga, i_gb, ga_pos, ga_quat, gb_pos, gb_quat, dyn_info, rigid_info
-        )
-    elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
-        plane_dir = qd.Vector(
-            [dyn_info.geoms.data[i_ga][0], dyn_info.geoms.data[i_ga][1], dyn_info.geoms.data[i_ga][2]], dt=gs.qd_float
-        )
-        plane_dir = gu.qd_transform_by_quat(plane_dir, ga_quat)
-        normal = -plane_dir.normalized()
-        v1 = mpr.support_driver(
-            i_gb, i_b, normal, gb_pos, gb_quat, collider_state, dyn_info, collider_info, rigid_config, collider_config
-        )
-        penetration = normal.dot(v1 - ga_pos)
-        contact_pos = v1 - 0.5 * penetration * normal
-        if qd.static(rigid_config.enable_mujoco_compatibility):
-            is_col = penetration > 0.0
+    is_analytic, is_col, normal, contact_pos, penetration = func_analytic_contact(
+        i_ga, i_gb, ga_pos, ga_quat, gb_pos, gb_quat, dyn_info, rigid_info
+    )
+    if not is_analytic:
+        if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
+            plane_dir = qd.Vector(
+                [dyn_info.geoms.data[i_ga][0], dyn_info.geoms.data[i_ga][1], dyn_info.geoms.data[i_ga][2]],
+                dt=gs.qd_float,
+            )
+            plane_dir = gu.qd_transform_by_quat(plane_dir, ga_quat)
+            normal = -plane_dir.normalized()
+            v1 = mpr.support_driver(
+                i_gb,
+                i_b,
+                normal,
+                gb_pos,
+                gb_quat,
+                collider_state,
+                dyn_info,
+                support_field_info,
+                rigid_config,
+                collider_config,
+            )
+            penetration = normal.dot(v1 - ga_pos)
+            contact_pos = v1 - 0.5 * penetration * normal
+            if qd.static(rigid_config.enable_mujoco_compatibility):
+                is_col = penetration > 0.0
+            else:
+                # A grazing pair's depth sits within rounding of zero, so a bare sign test accepts or rejects on
+                # rounding alone: accept within a band of rounding width and clamp, so the contact carries zero force
+                # until pressed.
+                is_col = penetration > -EPS * geom_pair_scale
+                penetration = qd.max(penetration, 0.0)
         else:
-            # A grazing pair's depth sits within rounding of zero, so a bare sign test accepts or rejects on rounding
-            # alone: accept within a band of rounding width and clamp, so the contact carries zero force until pressed.
-            is_col = penetration > -EPS * geom_pair_scale
-            penetration = qd.max(penetration, 0.0)
-    else:
-        if qd.static(collider_config.ccd_algorithm in (CCD_ALGORITHM_CODE.MPR, CCD_ALGORITHM_CODE.MJ_MPR)):
-            if not use_gjk:
-                is_mpr_updated = False
-                normal_ws = collider_state.contact_cache.normal[i_pair, i_b]
-                is_mpr_guess_direction_available = (qd.abs(normal_ws) > EPS).any()
-                for i_mpr in range(2):
-                    if i_mpr == 1:
-                        if qd.static(not rigid_config.enable_mujoco_compatibility):
-                            if is_initial_detection and not is_col and is_mpr_guess_direction_available:
-                                normal_ws = qd.Vector.zero(gs.qd_float, 3)
-                                is_mpr_guess_direction_available = False
-                                is_mpr_updated = False
+            if qd.static(collider_config.ccd_algorithm in (CCD_ALGORITHM_CODE.MPR, CCD_ALGORITHM_CODE.MJ_MPR)):
+                if not use_gjk:
+                    is_mpr_updated = False
+                    normal_ws = collider_state.contact_cache.normal[i_pair, i_b]
+                    is_mpr_guess_direction_available = (qd.abs(normal_ws) > EPS).any()
+                    for i_mpr in range(2):
+                        if i_mpr == 1:
+                            if qd.static(not rigid_config.enable_mujoco_compatibility):
+                                if is_initial_detection and not is_col and is_mpr_guess_direction_available:
+                                    normal_ws = qd.Vector.zero(gs.qd_float, 3)
+                                    is_mpr_guess_direction_available = False
+                                    is_mpr_updated = False
 
-                    if not is_mpr_updated:
-                        is_col, normal, penetration, contact_pos = mpr.func_mpr_contact(
-                            i_ga,
-                            i_gb,
-                            i_scratch,
-                            normal_ws,
-                            ga_pos,
-                            ga_quat,
-                            gb_pos,
-                            gb_quat,
-                            geoms_init_AABB,
-                            collider_state,
-                            mpr_state,
-                            dyn_info,
-                            rigid_info,
-                            collider_info,
-                            rigid_config,
-                            collider_config,
-                        )
-                        is_mpr_updated = True
+                        if not is_mpr_updated:
+                            is_col, normal, penetration, contact_pos = mpr.func_mpr_contact(
+                                i_ga,
+                                i_gb,
+                                i_scratch,
+                                normal_ws,
+                                ga_pos,
+                                ga_quat,
+                                gb_pos,
+                                gb_quat,
+                                collider_state,
+                                mpr_state,
+                                dyn_info,
+                                rigid_info,
+                                mpr_info,
+                                support_field_info,
+                                rigid_config,
+                                collider_config,
+                            )
+                            is_mpr_updated = True
 
-        if qd.static(collider_config.ccd_algorithm != CCD_ALGORITHM_CODE.MJ_MPR and not rigid_config.requires_grad):
-            if use_gjk:
-                gjk.func_gjk_contact(
-                    i_ga,
-                    i_gb,
-                    i_scratch,
-                    ga_pos,
-                    ga_quat,
-                    gb_pos,
-                    gb_quat,
-                    dyn_state,
-                    collider_state,
-                    gjk_state,
-                    dyn_info,
-                    rigid_info,
-                    collider_info,
-                    rigid_config,
-                    collider_config,
-                    gjk_config,
-                )
-                is_col = gjk_state.is_col[i_scratch] == 1
-                penetration = gjk_state.penetration[i_scratch]
-                if is_col:
-                    contact_pos = gjk_state.contact_pos[i_scratch, 0]
-                    normal = gjk_state.normal[i_scratch, 0]
-                used_gjk = True
+            if qd.static(collider_config.ccd_algorithm != CCD_ALGORITHM_CODE.MJ_MPR and not rigid_config.requires_grad):
+                if use_gjk:
+                    gjk.func_gjk_contact(
+                        i_ga,
+                        i_gb,
+                        i_scratch,
+                        ga_pos,
+                        ga_quat,
+                        gb_pos,
+                        gb_quat,
+                        dyn_state,
+                        collider_state,
+                        gjk_state,
+                        dyn_info,
+                        rigid_info,
+                        gjk_info,
+                        support_field_info,
+                        rigid_config,
+                        collider_config,
+                        gjk_config,
+                    )
+                    is_col = gjk_state.is_col[i_scratch] == 1
+                    penetration = gjk_state.penetration[i_scratch]
+                    if is_col:
+                        contact_pos = gjk_state.contact_pos[0, i_scratch]
+                        normal = gjk_state.normal[0, i_scratch]
+                    used_gjk = True
 
     return is_col, normal, contact_pos, penetration, used_gjk
 
@@ -3430,7 +3430,6 @@ def _func_multicontact_detect(
     i_det_end: int,
     overlap_axes: qd.types.matrix(4, 3),
     overlap_merge_tolerance: float,
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     mpr_state: MPRState,
@@ -3438,6 +3437,9 @@ def _func_multicontact_detect(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     gjk_config: qd.template(),
@@ -3453,7 +3455,7 @@ def _func_multicontact_detect(
     past 0 requires contact 0 in slot 0.
 
     Without the contact patch, detection i stores its contact in slot i of the entry (see NarrowphaseWorkQueue in
-    array_class.py) for _func_multicontact_gather. With the contact patch, the call takes the manifold GJK returns for
+    collider/data.py) for _func_multicontact_gather. With the contact patch, the call takes the manifold GJK returns for
     contact 0 when there is one, which skips perturbation, accepts each contact as it comes and writes those of the
     pair itself once its last detection ran.
     """
@@ -3486,8 +3488,8 @@ def _func_multicontact_detect(
             dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE
         )
 
-    geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
-    tolerance = func_compute_mc_tolerance(i_ga, i_gb, geoms_init_AABB, dyn_info, collider_info, rigid_config)
+    geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, dyn_info, rigid_info)
+    tolerance = func_compute_mc_tolerance(i_ga, i_gb, dyn_info, rigid_info, collider_info, rigid_config)
     if overlap_merge_tolerance > 0.0:
         tolerance = qd.min(tolerance, overlap_merge_tolerance)
     normal_cos_tol = qd.cos(2.0 * collider_info.mc_perturbation[None])
@@ -3532,7 +3534,7 @@ def _func_multicontact_detect(
             if not is_initial_detection and not is_axes_computed:
                 if qd.static(rigid_config.enable_mujoco_compatibility):
                     axis_0, axis_1 = func_contact_orthogonals(
-                        i_ga, i_gb, i_b, contact0_normal, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
+                        i_ga, i_gb, i_b, contact0_normal, dyn_state, dyn_info, rigid_info, rigid_config
                     )
                 is_axes_computed = True
             # Declared ahead of the branches that assign them, as quadrants scoping requires.
@@ -3553,7 +3555,6 @@ def _func_multicontact_detect(
                         ga_quat_original,
                         gb_pos_original,
                         gb_quat_original,
-                        rigid_info,
                         collider_info,
                         rigid_config,
                     )
@@ -3582,14 +3583,15 @@ def _func_multicontact_detect(
                         ga_quat_current,
                         gb_pos_current,
                         gb_quat_current,
-                        geoms_init_AABB,
                         dyn_state,
                         collider_state,
                         mpr_state,
                         gjk_state,
                         dyn_info,
                         rigid_info,
-                        collider_info,
+                        mpr_info,
+                        gjk_info,
+                        support_field_info,
                         rigid_config,
                         collider_config,
                         gjk_config,
@@ -3619,7 +3621,8 @@ def _func_multicontact_detect(
                                 mpr_state,
                                 dyn_info,
                                 rigid_info,
-                                collider_info,
+                                mpr_info,
+                                support_field_info,
                                 rigid_config,
                                 collider_config,
                             )
@@ -3642,13 +3645,13 @@ def _func_multicontact_detect(
                             )
                             is_gjk_multi_done = True
                     for i_c in range(n_contacts_manifold):
-                        manifold_normal = gjk_state.normal[i_scratch, i_c]
+                        manifold_normal = gjk_state.normal[i_c, i_scratch]
                         manifold_pos = func_apply_smooth_refinement(
                             i_ga,
                             i_gb,
                             manifold_normal,
                             penetration,
-                            gjk_state.contact_pos[i_scratch, i_c],
+                            gjk_state.contact_pos[i_c, i_scratch],
                             ga_pos_original,
                             ga_quat_original,
                             gb_pos_original,
@@ -3713,6 +3716,8 @@ def _func_multicontact_detect(
                         dyn_info,
                         rigid_info,
                         collider_info,
+                        mpr_info,
+                        gjk_info,
                         rigid_config,
                         geom_pair_scale,
                         is_gjk_used,
@@ -3878,12 +3883,12 @@ def _func_multicontact_write(
         # atomic_add below may still overshoot; in that case we write only the contacts that fit and set errno.
         max_candidate_contacts = collider_info.max_candidate_contacts[None]
         if collider_state.n_contacts[i_b] + n_con > max_candidate_contacts:
-            errno[i_b] = errno[i_b] | ErrorCode.OVERFLOW_COLLISION_PAIRS
+            errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_COLLISION_PAIRS
         else:
             start_idx = qd.atomic_add(collider_state.n_contacts[i_b], n_con)
             n_con = qd.math.clamp(max_candidate_contacts - start_idx, 0, n_con)
             if n_con == 0:
-                errno[i_b] = errno[i_b] | ErrorCode.OVERFLOW_COLLISION_PAIRS
+                errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_COLLISION_PAIRS
             for i in range(n_con):
                 i_c = start_idx + i
                 pos_i = qd.Vector(
@@ -3911,7 +3916,6 @@ def _func_multicontact_write(
 def _func_multicontact_gather(
     i_work: int,
     overlap_merge_tolerance: float,
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     dyn_info: DynInfo,
@@ -3923,7 +3927,7 @@ def _func_multicontact_gather(
 ):
     """Accept the candidate contacts of a queued pair in slot order and write those it keeps.
 
-    The slots of multicontact queue entry i_work (see NarrowphaseWorkQueue in array_class.py) go through
+    The slots of multicontact queue entry i_work (see NarrowphaseWorkQueue in collider/data.py) go through
     _func_multicontact_accept in order, and the contacts kept are written by _func_multicontact_write.
     """
     i_b = collider_state.work_queue.i_b[i_work]
@@ -3931,11 +3935,11 @@ def _func_multicontact_gather(
     i_gb = collider_state.work_queue.i_gb[i_work]
     i_pair = collider_state.work_queue.i_pair[i_work]
 
-    tolerance = func_compute_mc_tolerance(i_ga, i_gb, geoms_init_AABB, dyn_info, collider_info, rigid_config)
+    tolerance = func_compute_mc_tolerance(i_ga, i_gb, dyn_info, rigid_info, collider_info, rigid_config)
     if overlap_merge_tolerance > 0.0:
         tolerance = qd.min(tolerance, overlap_merge_tolerance)
     EPS = rigid_info.EPS[None]
-    geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
+    geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, dyn_info, rigid_info)
     normal_cos_tol = qd.cos(2.0 * collider_info.mc_perturbation[None])
 
     n_con = gs.qd_int(0)
@@ -3989,7 +3993,6 @@ def _func_multicontact_gather(
 
 @qd.func
 def func_narrowphase_multicontact(
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     mpr_state: MPRState,
@@ -3997,6 +4000,9 @@ def func_narrowphase_multicontact(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     gjk_config: qd.template(),
@@ -4072,9 +4078,9 @@ def func_narrowphase_multicontact(
                             i_gb = collider_state.work_queue.i_gb[i_work]
                             normal = collider_state.work_queue.contact_normal[i_work, 0]
                             contact_pos = collider_state.work_queue.contact_pos[i_work, 0]
-                            geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
+                            geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, dyn_info, rigid_info)
                             axis_0, axis_1 = func_contact_orthogonals(
-                                i_ga, i_gb, i_b, normal, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
+                                i_ga, i_gb, i_b, normal, dyn_state, dyn_info, rigid_info, rigid_config
                             )
                             overlap_axes = qd.Matrix.rows([axis_0, -axis_0, axis_1, -axis_1])
                             if dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.PLANE:
@@ -4095,6 +4101,7 @@ def func_narrowphase_multicontact(
                                     dyn_info,
                                     rigid_info,
                                     collider_info,
+                                    support_field_info,
                                     rigid_config,
                                     collider_config,
                                     geom_pair_scale,
@@ -4156,7 +4163,6 @@ def func_narrowphase_multicontact(
                             i_det_end,
                             overlap_axes,
                             overlap_merge_tolerance,
-                            geoms_init_AABB,
                             dyn_state,
                             collider_state,
                             mpr_state,
@@ -4164,6 +4170,9 @@ def func_narrowphase_multicontact(
                             dyn_info,
                             rigid_info,
                             collider_info,
+                            mpr_info,
+                            gjk_info,
+                            support_field_info,
                             rigid_config,
                             collider_config,
                             gjk_config,
@@ -4179,7 +4188,6 @@ def func_narrowphase_multicontact(
                     _func_multicontact_gather(
                         i_work,
                         sh_merge_tolerance[i_lane // n_units],
-                        geoms_init_AABB,
                         dyn_state,
                         collider_state,
                         dyn_info,
@@ -4216,7 +4224,6 @@ def _func_enqueue_for_multicontact(
 
 @qd.func
 def func_narrowphase_contact0(
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     mpr_state: MPRState,
@@ -4224,6 +4231,9 @@ def func_narrowphase_contact0(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     errno: qd.Tensor,
@@ -4280,7 +4290,7 @@ def func_narrowphase_contact0(
                 and dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.ELLIPSOID
             )
 
-            geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
+            geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, dyn_info, rigid_info)
 
             ga_pos = dyn_state.geoms.pos[i_ga, i_b]
             ga_quat = dyn_state.geoms.quat[i_ga, i_b]
@@ -4298,119 +4308,122 @@ def func_narrowphase_contact0(
 
             i_pair = collider_info.collision_pair_idx[i_ga, i_gb]
 
-            if func_is_analytic_pair(i_ga, i_gb, dyn_info):
-                is_col, normal, contact_pos, penetration = func_analytic_contact(
-                    i_ga, i_gb, ga_pos, ga_quat, gb_pos, gb_quat, dyn_info, rigid_info
-                )
-            elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
-                plane_dir = qd.Vector(
-                    [dyn_info.geoms.data[i_ga][0], dyn_info.geoms.data[i_ga][1], dyn_info.geoms.data[i_ga][2]],
-                    dt=gs.qd_float,
-                )
-                plane_dir = gu.qd_transform_by_quat(plane_dir, ga_quat)
-                normal = -plane_dir.normalized()
-                v1 = mpr.support_driver(
-                    i_gb,
-                    i_b,
-                    normal,
-                    gb_pos,
-                    gb_quat,
-                    collider_state,
-                    dyn_info,
-                    collider_info,
-                    rigid_config,
-                    collider_config,
-                )
-                penetration = normal.dot(v1 - ga_pos)
-                contact_pos = v1 - 0.5 * penetration * normal
-                if qd.static(rigid_config.enable_mujoco_compatibility):
-                    is_col = penetration > 0.0
-                else:
-                    # Grazing band and clamp: see the plane branch of _func_multicontact_run_detection.
-                    is_col = penetration > -EPS * geom_pair_scale
-                    penetration = qd.max(penetration, 0.0)
-            else:
-                if qd.static(collider_config.ccd_algorithm in (CCD_ALGORITHM_CODE.GJK, CCD_ALGORITHM_CODE.MJ_GJK)):
-                    gjk.clear_cache(flat_idx, gjk_state)
-                    distance = gjk.func_gjk(
-                        i_ga,
+            is_analytic, is_col, normal, contact_pos, penetration = func_analytic_contact(
+                i_ga, i_gb, ga_pos, ga_quat, gb_pos, gb_quat, dyn_info, rigid_info
+            )
+            if not is_analytic:
+                if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
+                    plane_dir = qd.Vector(
+                        [dyn_info.geoms.data[i_ga][0], dyn_info.geoms.data[i_ga][1], dyn_info.geoms.data[i_ga][2]],
+                        dt=gs.qd_float,
+                    )
+                    plane_dir = gu.qd_transform_by_quat(plane_dir, ga_quat)
+                    normal = -plane_dir.normalized()
+                    v1 = mpr.support_driver(
                         i_gb,
-                        flat_idx,
-                        ga_pos,
-                        ga_quat,
+                        i_b,
+                        normal,
                         gb_pos,
                         gb_quat,
                         collider_state,
-                        gjk_state,
                         dyn_info,
-                        collider_info,
+                        support_field_info,
                         rigid_config,
                         collider_config,
-                        shrink_sphere=False,
                     )
-                    is_col = distance < collider_info.gjk.collision_eps[None]
-                    if distance >= 0.5 * collider_info.gjk.FLOAT_MAX[None]:
-                        # func_gjk (fp32 on GPU) can spuriously separate a pair that was genuinely in contact last
-                        # step. Trust temporal coherence: if the multicontact pass cached a contact normal for this
-                        # pair, re-enqueue so the robust pass re-decides, instead of dropping it on a marginal frame.
-                        normal_ws = collider_state.contact_cache.normal[i_pair, i_b]
-                        is_col = normal_ws.dot(normal_ws) > 0.0
-
-                if qd.static(collider_config.ccd_algorithm in (CCD_ALGORITHM_CODE.MPR, CCD_ALGORITHM_CODE.MJ_MPR)):
-                    is_mpr_updated = False
-                    normal_ws = collider_state.contact_cache.normal[i_pair, i_b]
-                    is_mpr_guess_direction_available = (qd.abs(normal_ws) > EPS).any()
-                    for i_mpr in range(2):
-                        if i_mpr == 1:
-                            if qd.static(not rigid_config.enable_mujoco_compatibility):
-                                if not is_col and is_mpr_guess_direction_available:
-                                    normal_ws = qd.Vector.zero(gs.qd_float, 3)
-                                    is_mpr_guess_direction_available = False
-                                    is_mpr_updated = False
-
-                        if not is_mpr_updated:
-                            is_col, normal, penetration, contact_pos = mpr.func_mpr_contact(
-                                i_ga,
-                                i_gb,
-                                flat_idx,
-                                normal_ws,
-                                ga_pos,
-                                ga_quat,
-                                gb_pos,
-                                gb_quat,
-                                geoms_init_AABB,
-                                collider_state,
-                                mpr_state,
-                                dyn_info,
-                                rigid_info,
-                                collider_info,
-                                rigid_config,
-                                collider_config,
-                            )
-                            is_mpr_updated = True
-
-                    if qd.static(collider_config.ccd_algorithm == CCD_ALGORITHM_CODE.MPR):
-                        prefer_gjk = func_prefer_gjk_refinement(
+                    penetration = normal.dot(v1 - ga_pos)
+                    contact_pos = v1 - 0.5 * penetration * normal
+                    if qd.static(rigid_config.enable_mujoco_compatibility):
+                        is_col = penetration > 0.0
+                    else:
+                        # Grazing band and clamp: see the plane branch of _func_multicontact_run_detection.
+                        is_col = penetration > -EPS * geom_pair_scale
+                        penetration = qd.max(penetration, 0.0)
+                else:
+                    if qd.static(collider_config.ccd_algorithm in (CCD_ALGORITHM_CODE.GJK, CCD_ALGORITHM_CODE.MJ_GJK)):
+                        gjk.clear_cache(flat_idx, gjk_state)
+                        distance = gjk.func_gjk(
                             i_ga,
                             i_gb,
-                            i_pair,
-                            i_b,
                             flat_idx,
-                            mpr_state.portal_status[flat_idx],
-                            penetration,
                             ga_pos,
                             ga_quat,
                             gb_pos,
                             gb_quat,
-                            geom_pair_scale,
                             collider_state,
-                            mpr_state,
+                            gjk_state,
                             dyn_info,
-                            rigid_info,
-                            collider_info,
+                            gjk_info,
+                            support_field_info,
                             rigid_config,
                             collider_config,
+                            shrink_sphere=False,
                         )
+                        is_col = distance < gjk_info.collision_eps[None]
+                        if distance >= 0.5 * gjk_info.FLOAT_MAX[None]:
+                            # func_gjk (fp32 on GPU) can spuriously separate a pair that was genuinely in contact
+                            # last step. Trust temporal coherence: if the multicontact pass cached a contact normal for
+                            # this pair, re-enqueue so the robust pass re-decides, instead of dropping it on a marginal
+                            # frame.
+                            normal_ws = collider_state.contact_cache.normal[i_pair, i_b]
+                            is_col = normal_ws.dot(normal_ws) > 0.0
+
+                    if qd.static(collider_config.ccd_algorithm in (CCD_ALGORITHM_CODE.MPR, CCD_ALGORITHM_CODE.MJ_MPR)):
+                        is_mpr_updated = False
+                        normal_ws = collider_state.contact_cache.normal[i_pair, i_b]
+                        is_mpr_guess_direction_available = (qd.abs(normal_ws) > EPS).any()
+                        for i_mpr in range(2):
+                            if i_mpr == 1:
+                                if qd.static(not rigid_config.enable_mujoco_compatibility):
+                                    if not is_col and is_mpr_guess_direction_available:
+                                        normal_ws = qd.Vector.zero(gs.qd_float, 3)
+                                        is_mpr_guess_direction_available = False
+                                        is_mpr_updated = False
+
+                            if not is_mpr_updated:
+                                is_col, normal, penetration, contact_pos = mpr.func_mpr_contact(
+                                    i_ga,
+                                    i_gb,
+                                    flat_idx,
+                                    normal_ws,
+                                    ga_pos,
+                                    ga_quat,
+                                    gb_pos,
+                                    gb_quat,
+                                    collider_state,
+                                    mpr_state,
+                                    dyn_info,
+                                    rigid_info,
+                                    mpr_info,
+                                    support_field_info,
+                                    rigid_config,
+                                    collider_config,
+                                )
+                                is_mpr_updated = True
+
+                        if qd.static(collider_config.ccd_algorithm == CCD_ALGORITHM_CODE.MPR):
+                            prefer_gjk = func_prefer_gjk_refinement(
+                                i_ga,
+                                i_gb,
+                                i_pair,
+                                i_b,
+                                flat_idx,
+                                mpr_state.portal_status[flat_idx],
+                                penetration,
+                                ga_pos,
+                                ga_quat,
+                                gb_pos,
+                                gb_quat,
+                                geom_pair_scale,
+                                collider_state,
+                                mpr_state,
+                                dyn_info,
+                                rigid_info,
+                                mpr_info,
+                                support_field_info,
+                                rigid_config,
+                                collider_config,
+                            )
 
             if is_col:
                 if qd.static(collider_config.ccd_algorithm in (CCD_ALGORITHM_CODE.MPR, CCD_ALGORITHM_CODE.GJK)):
@@ -4465,7 +4478,6 @@ def func_narrowphase_contact0(
 
 @qd.func
 def func_narrow_phase_convex_vs_convex(
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     mpr_state: MPRState,
@@ -4474,6 +4486,9 @@ def func_narrow_phase_convex_vs_convex(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     gjk_config: qd.template(),
@@ -4504,7 +4519,6 @@ def func_narrow_phase_convex_vs_convex(
                         i_ga,
                         i_gb,
                         i_b,
-                        geoms_init_AABB,
                         dyn_state,
                         collider_state,
                         mpr_state,
@@ -4513,6 +4527,9 @@ def func_narrow_phase_convex_vs_convex(
                         dyn_info,
                         rigid_info,
                         collider_info,
+                        mpr_info,
+                        gjk_info,
+                        support_field_info,
                         rigid_config,
                         collider_config,
                         gjk_config,
@@ -4522,7 +4539,6 @@ def func_narrow_phase_convex_vs_convex(
 
 @qd.kernel(fastcache=True)
 def func_narrow_phase_diff_convex_vs_convex(
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     mpr_state: MPRState,
@@ -4531,6 +4547,8 @@ def func_narrow_phase_diff_convex_vs_convex(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    gjk_info: GJKInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     errno: qd.Tensor,
@@ -4545,10 +4563,10 @@ def func_narrow_phase_diff_convex_vs_convex(
         for i_chunk_ in range((collider_state.n_contacts[i_b] + N_LANES - 1) // N_LANES):
             i_c = i_chunk_ * N_LANES + i_lane
             if i_c < collider_state.n_contacts[i_b]:
-                ref_id = collider_state.diff_contact_input.ref_id[i_b, i_c]
+                ref_id = collider_state.diff_contact_input.ref_id[i_c, i_b]
                 is_ref = i_c == ref_id
-                i_ga = collider_state.diff_contact_input.geom_a[i_b, i_c]
-                i_gb = collider_state.diff_contact_input.geom_b[i_b, i_c]
+                i_ga = collider_state.diff_contact_input.geom_a[i_c, i_b]
+                i_gb = collider_state.diff_contact_input.geom_b[i_c, i_b]
 
                 if is_ref:
                     ref_penetration = -1.0
@@ -4563,8 +4581,8 @@ def func_narrow_phase_diff_convex_vs_convex(
                         contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_plane_contact(
                             i_ga, i_gb, i_b, i_c, dyn_state, diff_contact_input, dyn_info
                         )
-                    elif func_is_analytic_pair(i_ga, i_gb, dyn_info):
-                        _, contact_normal, contact_pos, penetration = func_analytic_contact(
+                    else:
+                        is_analytic, _, contact_normal, contact_pos, penetration = func_analytic_contact(
                             i_ga,
                             i_gb,
                             dyn_state.geoms.pos[i_ga, i_b],
@@ -4575,11 +4593,11 @@ def func_narrow_phase_diff_convex_vs_convex(
                             rigid_info,
                         )
                         weight = 1.0
-                    else:
-                        contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_contact(
-                            i_ga, i_gb, i_b, i_c, ref_penetration, dyn_state, diff_contact_input, collider_info
-                        )
-                    collider_state.diff_contact_input.ref_penetration[i_b, i_c] = penetration
+                        if not is_analytic:
+                            contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_contact(
+                                i_ga, i_gb, i_b, i_c, ref_penetration, dyn_state, diff_contact_input, collider_info
+                            )
+                    collider_state.diff_contact_input.ref_penetration[i_c, i_b] = penetration
 
                     func_set_contact(
                         i_ga,
@@ -4603,10 +4621,10 @@ def func_narrow_phase_diff_convex_vs_convex(
         for i_chunk_ in range((collider_state.n_contacts[i_b] + N_LANES - 1) // N_LANES):
             i_c = i_chunk_ * N_LANES + i_lane
             if i_c < collider_state.n_contacts[i_b]:
-                ref_id = collider_state.diff_contact_input.ref_id[i_b, i_c]
+                ref_id = collider_state.diff_contact_input.ref_id[i_c, i_b]
                 is_ref = i_c == ref_id
-                i_ga = collider_state.diff_contact_input.geom_a[i_b, i_c]
-                i_gb = collider_state.diff_contact_input.geom_b[i_b, i_c]
+                i_ga = collider_state.diff_contact_input.geom_a[i_c, i_b]
+                i_gb = collider_state.diff_contact_input.geom_b[i_c, i_b]
 
                 if not is_ref:
                     contact_pos = gs.qd_vec3(0.0, 0.0, 0.0)
@@ -4632,14 +4650,13 @@ def func_narrow_phase_diff_convex_vs_convex(
                             normal_0 = collider_state.contact_data.normal[ref_id, i_b]
                             contact_pos_0 = collider_state.contact_data.pos[ref_id, i_b]
                             penetration_0 = collider_state.contact_data.penetration[ref_id, i_b]
-                            i_detection = collider_state.diff_contact_input.detection_idx[i_b, i_c]
+                            i_detection = collider_state.diff_contact_input.detection_idx[i_c, i_b]
 
                             axis_0, axis_1 = func_contact_orthogonals(
                                 i_ga,
                                 i_gb,
                                 i_b,
                                 normal_0,
-                                geoms_init_AABB,
                                 dyn_state,
                                 dyn_info,
                                 rigid_info,
@@ -4657,7 +4674,6 @@ def func_narrow_phase_diff_convex_vs_convex(
                                     ga_quat,
                                     gb_pos,
                                     gb_quat,
-                                    rigid_info,
                                     collider_info,
                                     rigid_config,
                                 )
@@ -4672,7 +4688,7 @@ def func_narrow_phase_diff_convex_vs_convex(
                                 dyn_info,
                                 rigid_info,
                             )
-                            geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
+                            geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, dyn_info, rigid_info)
                             contact_normal, penetration, contact_pos = func_recompute_perturbed_contact(
                                 i_ga,
                                 i_gb,
@@ -4693,6 +4709,8 @@ def func_narrow_phase_diff_convex_vs_convex(
                                 dyn_info,
                                 rigid_info,
                                 collider_info,
+                                mpr_info,
+                                gjk_info,
                                 rigid_config,
                                 geom_pair_scale,
                                 used_gjk=False,
@@ -4700,7 +4718,7 @@ def func_narrow_phase_diff_convex_vs_convex(
                             )
                             weight = 1.0
                     else:
-                        ref_penetration = collider_state.diff_contact_input.ref_penetration[i_b, ref_id]
+                        ref_penetration = collider_state.diff_contact_input.ref_penetration[ref_id, i_b]
                         contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_contact(
                             i_ga, i_gb, i_b, i_c, ref_penetration, dyn_state, diff_contact_input, collider_info
                         )
@@ -4735,9 +4753,10 @@ def func_fill_diff_contact_input_plane(
     (box vertex / sphere center / capsule nearest endpoint) as v - radius * normal, stored in the convex geom's local
     frame. PLANE is the smallest GEOM_TYPE so it is always geom_a after the canonical type-ordered swap.
     """
-    _B = collider_state.active_buffer.shape[1]
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_c, i_b in qd.ndrange(collider_state.contact_data.pos.shape[0], _B):
+    for i_c, i_b in qd.ndrange(
+        *collider_state.contact_data.pos.shape, axes=qd.static(eoa(collider_state.diff_contact_input.geom_a))
+    ):
         if i_c < collider_state.n_contacts[i_b]:
             i_ga = collider_state.contact_data.geom_a[i_c, i_b]
             i_gb = collider_state.contact_data.geom_b[i_c, i_b]
@@ -4753,17 +4772,16 @@ def func_fill_diff_contact_input_plane(
                 core_world = support_pos - radius * normal
                 core_local = gu.qd_transform_by_quat(core_world - trans_convex, gu.qd_inv_quat(quat_convex))
 
-                collider_state.diff_contact_input.geom_a[i_b, i_c] = i_ga
-                collider_state.diff_contact_input.geom_b[i_b, i_c] = i_gb
-                collider_state.diff_contact_input.core_local[i_b, i_c] = core_local
-                collider_state.diff_contact_input.has_zero_penetration[i_b, i_c] = penetration <= 0.0
-                collider_state.diff_contact_input.ref_id[i_b, i_c] = i_c
-                collider_state.diff_contact_input.valid[i_b, i_c] = 1
+                collider_state.diff_contact_input.geom_a[i_c, i_b] = i_ga
+                collider_state.diff_contact_input.geom_b[i_c, i_b] = i_gb
+                collider_state.diff_contact_input.core_local[i_c, i_b] = core_local
+                collider_state.diff_contact_input.has_zero_penetration[i_c, i_b] = penetration <= 0.0
+                collider_state.diff_contact_input.ref_id[i_c, i_b] = i_c
+                collider_state.diff_contact_input.valid[i_c, i_b] = 1
 
 
 @qd.func
 def func_narrow_phase_convex_specializations(
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     dyn_info: DynInfo,
@@ -4786,7 +4804,6 @@ def func_narrow_phase_convex_specializations(
                     i_gb,
                     i_b,
                     i_pair,
-                    geoms_init_AABB,
                     dyn_state,
                     collider_state,
                     dyn_info,
@@ -4816,13 +4833,14 @@ def func_narrow_phase_convex_specializations(
 
 @qd.func
 def func_narrow_phase_any_vs_terrain(
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     mpr_state: MPRState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     errno: qd.Tensor,
@@ -4859,7 +4877,7 @@ def func_narrow_phase_any_vs_terrain(
                         collider_state.work_queue.i_ga[i_work] = i_ga
                         collider_state.work_queue.i_gb[i_work] = i_gb
                     else:
-                        errno[i_b] = errno[i_b] | ErrorCode.UNSUPPORTED_COLLISION_PAIR
+                        errno[i_b] = errno[i_b] | RigidErrorCode.UNSUPPORTED_COLLISION_PAIR
 
         qd.loop_config(
             name="narrowphase_terrain",
@@ -4889,13 +4907,14 @@ def func_narrow_phase_any_vs_terrain(
                     i_scratch,
                     collider_state.work_queue.i_b[i_work],
                     tid,
-                    geoms_init_AABB,
                     dyn_state,
                     collider_state,
                     mpr_state,
                     dyn_info,
                     rigid_info,
                     collider_info,
+                    mpr_info,
+                    support_field_info,
                     rigid_config,
                     collider_config,
                     block_dim=BLOCK_DIM,
@@ -4905,12 +4924,12 @@ def func_narrow_phase_any_vs_terrain(
 
 @qd.func
 def func_narrow_phase_nonconvex_vs_nonterrain(
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     errno: qd.Tensor,
@@ -4953,13 +4972,17 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
                     if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
                         i_ga, i_gb = i_gb, i_ga
                     elif dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.PLANE:
-                        diag_a_sq = (geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0]).norm_sqr()
-                        diag_b_sq = (geoms_init_AABB[i_gb, 7] - geoms_init_AABB[i_gb, 0]).norm_sqr()
+                        diag_a_sq = (
+                            rigid_info.geoms_init_AABB[i_ga, 7] - rigid_info.geoms_init_AABB[i_ga, 0]
+                        ).norm_sqr()
+                        diag_b_sq = (
+                            rigid_info.geoms_init_AABB[i_gb, 7] - rigid_info.geoms_init_AABB[i_gb, 0]
+                        ).norm_sqr()
                         if diag_a_sq > diag_b_sq:
                             i_ga, i_gb = i_gb, i_ga
 
                     tolerance = collider_info.mc_tolerance[None] * func_compute_geom_pair_scale(
-                        i_ga, i_gb, geoms_init_AABB, dyn_info
+                        i_ga, i_gb, dyn_info, rigid_info
                     )
 
                     # enable_multi_contact controls how many contacts the helper emits per pair (n_max=1 vs
@@ -4978,15 +5001,13 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
                     rb_a_sq = gs.qd_float(0.0)
                     rb_b_sq = gs.qd_float(0.0)
                     for k in qd.static(range(8)):
-                        d_a = geoms_init_AABB[i_ga, k] - dyn_info.geoms.center[i_ga]
-                        d_b = geoms_init_AABB[i_gb, k] - dyn_info.geoms.center[i_gb]
+                        d_a = rigid_info.geoms_init_AABB[i_ga, k] - dyn_info.geoms.center[i_ga]
+                        d_b = rigid_info.geoms_init_AABB[i_gb, k] - dyn_info.geoms.center[i_gb]
                         if d_a.dot(d_a) > rb_a_sq:
                             rb_a_sq = d_a.dot(d_a)
                         if d_b.dot(d_b) > rb_b_sq:
                             rb_b_sq = d_b.dot(d_b)
-                    sd_center_ab = sdf.sdf_func_world_local(
-                        i_gb, center_a_w, gb_pos, gb_quat, dyn_info.geoms, collider_info.sdf
-                    )
+                    sd_center_ab = sdf.sdf_func_world_local(i_gb, center_a_w, gb_pos, gb_quat, dyn_info.geoms, sdf_info)
                     # Nested-only: A's center must lie inside B's local AABB. Adjacent shells share every
                     # other property of a nested pair, but their contact is a small lens ON the closing
                     # line, where the azimuthal sectors degenerate to a single bucket and the aggregate
@@ -4998,8 +5019,8 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
                     is_nested = True
                     for j in qd.static(range(3)):
                         if (
-                            center_a_in_b[j] < geoms_init_AABB[i_gb, 0][j]
-                            or center_a_in_b[j] > geoms_init_AABB[i_gb, 7][j]
+                            center_a_in_b[j] < rigid_info.geoms_init_AABB[i_gb, 0][j]
+                            or center_a_in_b[j] > rigid_info.geoms_init_AABB[i_gb, 7][j]
                         ):
                             is_nested = False
                     if (
@@ -5022,12 +5043,12 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
                             gb_pos,
                             gb_quat,
                             tolerance,
-                            geoms_init_AABB,
                             dyn_state,
                             collider_state,
                             dyn_info,
                             rigid_info,
                             collider_info,
+                            sdf_info,
                             rigid_config,
                             collider_config,
                             errno,
@@ -5059,12 +5080,12 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
                                 tolerance,
                                 n_added,
                                 contacts_slot,
-                                geoms_init_AABB,
                                 dyn_state,
                                 collider_state,
                                 dyn_info,
                                 rigid_info,
                                 collider_info,
+                                sdf_info,
                                 rigid_config,
                                 collider_config,
                                 block_dim=BLOCK_DIM,

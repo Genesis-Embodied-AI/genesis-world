@@ -1,9 +1,14 @@
+import torch
+
 import genesis as gs
 from genesis.repr_base import RBC
+from genesis.typing import FArrayType
+from genesis.utils.misc import BuildableMixin
+
 from .description import RigidEqualityDescription
 
 
-class RigidEquality(RBC):
+class RigidEquality(BuildableMixin, RBC):
     """
     Equality class for rigid body entities.
     """
@@ -19,18 +24,23 @@ class RigidEquality(RBC):
         self._eq_obj1id = eq_obj1id
         self._eq_obj2id = eq_obj2id
 
+    @gs.assert_unbuilt
+    def _build(self) -> None:
+        self._is_built = True
+
+    def _destroy(self) -> None:
+        self._is_built = False
+
     # ------------------------------------------------------------------------------------
     # -------------------------------- real-time state -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def set_sol_params(self, sol_params):
+    @gs.assert_built
+    def set_sol_params(self, sol_params: "FArrayType | torch.Tensor") -> None:
         """
         Set the solver parameters of this equality constraint.
         """
-        if self._solver.is_built:
-            self._solver.set_sol_params(sol_params, eqs_idx=self._idx, envs_idx=None)
-        else:
-            self.desc.sol_params = sol_params
+        self._solver.set_sol_params(sol_params, eqs_idx=self._idx, envs_idx=None)
 
     @gs.assert_built
     def get_sol_params(self):
@@ -115,10 +125,3 @@ class RigidEquality(RBC):
         Returns the eq_data of this equality constraint.
         """
         return self.desc.data
-
-    @property
-    def is_built(self):
-        """
-        Whether the rigid entity this equality constraint belongs to is built.
-        """
-        return self.entity.is_built

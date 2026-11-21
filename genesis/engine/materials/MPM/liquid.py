@@ -1,9 +1,10 @@
-from typing import Any
+from typing import Any, ClassVar
 
 import quadrants as qd
 from pydantic import StrictBool
 
 import genesis as gs
+from genesis.constants import STRUCTURE
 
 from .base import Base
 
@@ -25,6 +26,8 @@ class Liquid(Base):
         Whether the liquid is viscous. Simply sets mu to zero when non-viscous. Default is False.
     """
 
+    structure: ClassVar[STRUCTURE] = STRUCTURE.AMORPHOUS
+
     viscous: StrictBool = False
 
     def model_post_init(self, context: Any) -> None:
@@ -38,7 +41,7 @@ class Liquid(Base):
         self.needs_svd = self.viscous
 
     @qd.func
-    def _update_F_S_Jp_liquid(self, J, F_tmp, U, S, V, Jp):
+    def _update_F_S_Jp_liquid(self, J, F_tmp, U, S, V, Jp, eps):
         F_new = qd.Matrix.identity(gs.qd_float, 3) * qd.pow(J, 1.0 / 3.0)
         S_new = S
         Jp_new = Jp

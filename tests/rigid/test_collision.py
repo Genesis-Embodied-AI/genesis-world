@@ -44,13 +44,14 @@ def _ellipsoid_mjcf_path(tmp_path, semi_axes):
 @pytest.mark.parametrize("gjk_collision", [True, False])
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_edge_cases(gs_sim, mode):
-    qpos_0 = gs_sim.rigid_solver.get_dofs_position()
+    (gs_robot,) = gs_sim.entities
+    qpos_0 = gs_robot.get_dofs_position()
     for _ in range(200):
         gs_sim.scene.step()
 
-    qvel = gs_sim.rigid_solver.get_dofs_velocity()
+    qvel = gs_robot.get_dofs_velocity()
     assert_allclose(qvel, 0, atol=1e-2)
-    qpos = gs_sim.rigid_solver.get_dofs_position()
+    qpos = gs_robot.get_dofs_position()
     atol = 1e-3 if mode in (4, 6) else 1e-4
     assert_allclose(qpos[[0, 1, 3, 4, 5]], qpos_0[[0, 1, 3, 4, 5]], atol=atol)
 
@@ -71,6 +72,9 @@ def test_plane_convex(show_viewer, tol):
             sim_options=gs.options.SimOptions(
                 dt=0.001,
             ),
+            vis_options=gs.options.VisOptions(
+                debug=True,
+            ),
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(1.0, -0.5, 0.5),
                 camera_lookat=(0.5, 0.0, 0.0),
@@ -89,7 +93,6 @@ def test_plane_convex(show_viewer, tol):
                 pos=(0.45184245, 0.05020455, 0.02),
                 quat=(0.51982231, 0.44427745, 0.49720965, 0.53402704),
             ),
-            vis_mode="collision",
             visualize_contact=True,
         )
 
@@ -109,6 +112,9 @@ def test_ellipsoid(xml_path, show_viewer):
         sim_options=gs.options.SimOptions(
             dt=0.02,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.4, 0.4, 0.3),
             camera_lookat=(0.0, 0.0, 0.1),
@@ -121,7 +127,6 @@ def test_ellipsoid(xml_path, show_viewer):
             file=xml_path,
             pos=(0, 0, 0.2),
         ),
-        vis_mode="collision",
         visualize_contact=True,
     )
     scene.build()
@@ -195,6 +200,9 @@ def test_no_drift(gjk_collision, entity_kind, entity_type, ground_type, show_vie
         ),
         rigid_options=gs.options.RigidOptions(
             use_gjk_collision=gjk_collision,
+        ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.25, 0.25, 0.2),
@@ -280,7 +288,6 @@ def test_no_drift(gjk_collision, entity_kind, entity_type, ground_type, show_vie
                     convexify=is_entity_convex,
                     decimate=False,
                 ),
-                vis_mode="collision",
                 # visualize_contact=True,
             )
             # Manually overwrite convex flag to forcibly exercise non-convex collision path
@@ -511,6 +518,9 @@ def test_box_contact_minimal_separation(detection, show_viewer, tol):
             use_gjk_collision=detection == "gjk",
             box_box_detection=detection == "box_box",
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, 0.0, 0.0),
             camera_lookat=(0.0, 1.0, -1.0),
@@ -537,7 +547,6 @@ def test_box_contact_minimal_separation(detection, show_viewer, tol):
                         gs.morphs.Box(pos=pair_pos + (0.0, 0.0, 3.0 * scale * i_box), size=scale * box_size)
                         for box_size in boxes_size[i_box]
                     ],
-                    vis_mode="collision",
                 )
                 for i_box in range(2)
             ]
@@ -734,6 +743,9 @@ def test_box_contact_true_penetration(show_viewer, tol):
         rigid_options=gs.options.RigidOptions(
             use_gjk_collision=True,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, -8.0, 4.0),
             camera_lookat=(0.0, 0.0, 0.0),
@@ -745,7 +757,6 @@ def test_box_contact_true_penetration(show_viewer, tol):
             morph=gs.morphs.Box(
                 size=BOX_SIZE,
             ),
-            vis_mode="collision",
         )
         for _ in range(2)
     )
@@ -803,6 +814,9 @@ def test_box_stacks_stability(detection, show_viewer, tol):
             box_box_detection=detection == "box_box",
             contact_pruning_tolerance=PRUNING_TOLERANCE,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, 0.0, 0.0),
             camera_lookat=(0.0, 1.0, -0.1),
@@ -827,7 +841,6 @@ def test_box_stacks_stability(detection, show_viewer, tol):
                 size=scale * BASE_SIZE,
                 fixed=True,
             ),
-            vis_mode="collision",
         )
         boxes = [
             scene.add_entity(
@@ -836,7 +849,6 @@ def test_box_stacks_stability(detection, show_viewer, tol):
                     for box_size in np.random.permutation(BOXES_SIZE)
                 ],
                 visualize_contact=True,
-                vis_mode="collision",
             )
             for i_b in range(len(BOXES_SIZE))
         ]
@@ -1097,6 +1109,9 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
         rigid_options=gs.options.RigidOptions(
             use_gjk_collision=gjk_collision,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(6.6, 5.74, 8.85),
             camera_lookat=(6.6, 5.63, 8.8),
@@ -1118,7 +1133,6 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
             size=(GEOM_SIZE, GEOM_SIZE, GEOM_SIZE),
         ),
         visualize_contact=True,
-        vis_mode="collision",
     )
     geom_pressed = scene.add_entity(
         gs.morphs.Box(
@@ -1126,7 +1140,6 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
             size=(GEOM_SIZE, GEOM_SIZE, GEOM_SIZE),
         ),
         visualize_contact=True,
-        vis_mode="collision",
     )
     # The lamp spans a meter while the finger presses it by less than a millimeter, so the rounding errors of the
     # Minkowski difference reach the depth convergence tolerance and cut dents into the polytope that refines the depth.
@@ -1139,7 +1152,6 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
             decimate=False,
         ),
         visualize_contact=True,
-        vis_mode="collision",
     )
     lamp = scene.add_entity(
         gs.morphs.Mesh(
@@ -1147,7 +1159,6 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
             pos=(-0.13053986430168152, -0.09062329679727554, -3.08468234539032),
             quat=(-0.04015674069523811, 0.15293818712234497, 0.14172174036502838, 0.9771961569786072),
         ),
-        vis_mode="collision",
     )
     scene.build()
 
@@ -1184,6 +1195,9 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
 @pytest.mark.required
 def test_robot_scaling_primitive_collision(show_viewer):
     scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         show_viewer=show_viewer,
         show_FPS=False,
     )
@@ -1196,7 +1210,6 @@ def test_robot_scaling_primitive_collision(show_viewer):
             file=f"{asset_path}/cross.xml",
             scale=0.5,
         ),
-        vis_mode="collision",
     )
     scene.build()
 
@@ -1329,6 +1342,7 @@ def test_contact_pruning(gjk_collision, show_viewer):
             use_gjk_collision=gjk_collision,
         ),
         vis_options=gs.options.VisOptions(
+            debug=True,
             rendered_envs_idx=(0,),
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -1370,7 +1384,6 @@ def test_contact_pruning(gjk_collision, show_viewer):
             smooth=False,
         ),
         visualize_contact=True,
-        vis_mode="collision",
     )
     scene.add_entity(
         morph=gs.morphs.Box(
@@ -1412,7 +1425,6 @@ def test_contact_pruning(gjk_collision, show_viewer):
         surface=gs.surfaces.Default(
             smooth=False,
         ),
-        vis_mode="collision",
     )
     scene.build(n_envs=2)
     # The box sits in the corner of the three walls in the first environment, and on the edge of the two walls after it
@@ -1511,6 +1523,9 @@ def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
             max_collision_pairs=1200,
             use_gjk_collision=gjk_collision,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.4, 0.0, 0.3),
             camera_lookat=(0.0, 0.0, 0.1),
@@ -1528,7 +1543,6 @@ def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
         material=gs.materials.Rigid(
             rho=600.0,
         ),
-        vis_mode="collision",
     )
     poss_init = [pole_pos]
     rpys_init = [(0.0, 0.0, 0.0)]
@@ -1548,7 +1562,6 @@ def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
             material=gs.materials.Rigid(
                 rho=600.0,
             ),
-            vis_mode="collision",
             visualize_contact=True,
         )
         rings.append(ring)
@@ -1565,7 +1578,6 @@ def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
         material=gs.materials.Rigid(
             rho=600.0,
         ),
-        vis_mode="collision",
     )
     poss_init.append(ball_pos)
     rpys_init.append((0.0, 0.0, 0.0))
@@ -1940,12 +1952,21 @@ def test_filter_neutral_self_collisions(show_viewer):
 
 
 @pytest.mark.required
-def test_contype_conaffinity(show_viewer, tol):
+@pytest.mark.parametrize("model_name", ["free_bodies_in_one_model"])
+def test_contype_conaffinity(xml_path, show_viewer, tol):
     GRAVITY = (0.0, 0.0, -10.0)
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             gravity=GRAVITY,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            enable_neutral_collision=True,
+            enable_adjacent_collision=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, -3.0, 2.5),
+            camera_lookat=(0.5, 2.0, 0.5),
         ),
         show_viewer=show_viewer,
     )
@@ -2001,15 +2022,54 @@ def test_contype_conaffinity(show_viewer, tol):
         ),
         visualize_contact=True,
     )
-    scene.build()
+    free_bodies = scene.add_entity(
+        gs.morphs.MJCF(
+            file=xml_path,
+        ),
+    )
+    # Each variant of a heterogeneous entity excludes its own body pairs: the same bodies hinged on a world whose geom
+    # reaches into the first body, each variant excluding a different one of the two overlapping body pairs
+    VARIANTS_EXCLUDED_BODIES = (("free_0", "free_1"), ("world", "free_0"))
+    hinged_mjcfs = []
+    for excluded_bodies in VARIANTS_EXCLUDED_BODIES:
+        mjcf = ET.parse(xml_path).getroot()
+        for joint in mjcf.iter("freejoint"):
+            joint.tag = "joint"
+            joint.attrib |= dict(type="hinge", axis="0 0 1")
+        geom_attrib = dict(type="box", size="0.05 0.05 0.05", pos="0.05 4.0 0.4", contype="3", conaffinity="5")
+        ET.SubElement(mjcf.find("worldbody"), "geom", **geom_attrib)
+        mjcf.find("contact/exclude").attrib |= dict(zip(("body1", "body2"), excluded_bodies))
+        hinged_mjcfs.append(ET.tostring(mjcf, encoding="unicode"))
+    hinged_bodies = scene.add_entity(
+        morph=[gs.morphs.MJCF(file=hinged_mjcf, pos=(0.0, 2.0, 0.0)) for hinged_mjcf in hinged_mjcfs],
+    )
+    scene.build(n_envs=2)
+    variants_excluded_links = [
+        frozenset([hinged_bodies.get_link(name).idx for name in excluded_bodies])
+        for excluded_bodies in VARIANTS_EXCLUDED_BODIES
+    ]
 
+    # The bitmasks of an MJCF are kept as authored, and the body pairs it excludes never collide
+    assert_equal([(geom.contype, geom.conaffinity) for geom in free_bodies.geoms], [(3, 5)] * 3)
     for _ in range(80):
         scene.step()
+        assert not tensor_to_array(free_bodies.get_contacts(with_entity=free_bodies)["valid_mask"]).any()
+        # Every environment carries one variant: its own excluded pair never collides, the other one does
+        contacts = hinged_bodies.get_contacts(with_entity=hinged_bodies)
+        links_a, links_b, is_valid = [tensor_to_array(contacts[key]) for key in ("link_a", "link_b", "valid_mask")]
+        for i_env, (excluded_links, colliding_links) in enumerate(
+            (variants_excluded_links, variants_excluded_links[::-1])
+        ):
+            contact_link_pairs = {
+                frozenset(link_pair)
+                for link_pair in zip(links_a[i_env, is_valid[i_env]], links_b[i_env, is_valid[i_env]])
+            }
+            assert excluded_links not in contact_link_pairs and colliding_links in contact_link_pairs
 
     assert_allclose(box1.get_pos(), (0.0, 0.0, 0.25), atol=5e-4)
     assert_allclose(box2.get_pos(), (0.0, 0.0, 0.75), atol=2e-3)
     assert_allclose(box2.get_pos(), box3.get_pos(), atol=2e-3)
-    assert_allclose(scene.rigid_solver.get_links_acc(slice(box4.link_start, box4.link_end)), GRAVITY, atol=tol)
+    assert_allclose(box4.get_links_acc(relative=False), GRAVITY, atol=tol)
 
 
 @pytest.mark.required
@@ -2039,16 +2099,16 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
     #   - contact set    -> narrowphase / pruning
     #   - contact order  -> contact sort
     #   - dofs velocity  -> constraint solve
-    from genesis.utils.array_class import RigidSimStaticConfig
+    from genesis.engine.solvers.rigid.data import RigidConfig
 
     if prefer_decomposed_solver is not None:
-        init_orig = RigidSimStaticConfig.__init__
+        init_orig = RigidConfig.__init__
 
         def init_forced(self, *args, **kwargs):
             kwargs["prefer_decomposed_solver"] = int(prefer_decomposed_solver)
             init_orig(self, *args, **kwargs)
 
-        monkeypatch.setattr(RigidSimStaticConfig, "__init__", init_forced)
+        monkeypatch.setattr(RigidConfig, "__init__", init_forced)
 
     N_TRIALS = 4
     N_STEPS = 25
@@ -2157,9 +2217,10 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
 def test_nan_reset(gs_sim, mode):
+    (gs_robot,) = gs_sim.entities
     for _ in range(200):
         gs_sim.scene.step()
-        qvel = gs_sim.rigid_solver.get_dofs_velocity()
+        qvel = gs_robot.get_dofs_velocity()
         if torch.isnan(qvel).any():
             break
     else:
@@ -2168,7 +2229,7 @@ def test_nan_reset(gs_sim, mode):
     gs_sim.scene.reset()
     for _ in range(5):
         gs_sim.scene.step()
-    qvel = gs_sim.rigid_solver.get_dofs_velocity()
+    qvel = gs_robot.get_dofs_velocity()
     assert not torch.isnan(qvel).any()
 
 
@@ -2199,10 +2260,7 @@ def test_neutral_self_collision_masks_across_merged_entities(merged_overlapping_
     scene.build()
 
     # The merged hand shares the arm's kinematic-tree root, so cross-entity pairs are self-collision candidates.
-    geoms_root_idx = np.array([geom.link.root_idx for geom in scene.rigid_solver.geoms])
-    arm_geoms = [geom.idx for geom in arm.geoms]
-    hand_geoms = [geom.idx for geom in hand.geoms]
-    assert set(geoms_root_idx[arm_geoms].tolist()) == set(geoms_root_idx[hand_geoms].tolist())
+    assert {geom.link.root_idx for geom in arm.geoms} == {geom.link.root_idx for geom in hand.geoms}
 
     # The palm overlaps the non-adjacent a2 link at qpos0, so the neutral-overlap check masks this cross-entity pair.
     collision_pair_idx = scene.rigid_solver.collider.collider_info.collision_pair_idx.to_numpy()

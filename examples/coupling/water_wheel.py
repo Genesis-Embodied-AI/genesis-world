@@ -54,14 +54,20 @@ def main():
         ),
     )
 
+    spec_cls = getattr(gs.entities, args.solver.upper())
+    material_cls = getattr(gs.materials, args.solver.upper()).Liquid
     emitter = scene.add_emitter(
-        material=getattr(gs.materials, args.solver.upper()).Liquid(
-            sampler="regular",
-        ),
         max_particles=100000,
-        surface=gs.surfaces.Glass(
-            color=(0.7, 0.85, 1.0, 0.7),
-            vis_mode="recon" if args.recon else "particle",
+        spec=spec_cls(
+            material=material_cls(
+                sampler="regular",
+            ),
+            surface=gs.surfaces.Glass(
+                color=(0.7, 0.85, 1.0, 0.7),
+            ),
+            vis=gs.options.EntityVisOptions(
+                debug=not args.recon,
+            ),
         ),
     )
     scene.build(n_envs=0)

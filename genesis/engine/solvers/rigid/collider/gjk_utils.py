@@ -7,8 +7,8 @@ This module contains shared utility functions used by both GJK and EPA algorithm
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.array_class import ColliderInfo
 from .constants import RETURN_CODE
+from .data import GJKInfo
 from .utils import func_det3
 
 
@@ -90,7 +90,7 @@ def func_point_triangle_intersection(
     tri_v1: qd.types.vector(3),
     tri_v2: qd.types.vector(3),
     tri_v3: qd.types.vector(3),
-    collider_info: ColliderInfo,
+    gjk_info: GJKInfo,
 ):
     """
     Check if the point is inside the triangle.
@@ -104,7 +104,7 @@ def func_point_triangle_intersection(
         # Check if the point predicted by the affine coordinates is equal to the point itself
         pred = tri_v1 * _lambda[0] + tri_v2 * _lambda[1] + tri_v3 * _lambda[2]
         diff = pred - point
-        is_inside = diff.norm_sqr() < collider_info.gjk.FLOAT_MIN_SQ[None]
+        is_inside = diff.norm_sqr() < gjk_info.FLOAT_MIN_SQ[None]
 
     return is_inside
 
@@ -155,7 +155,7 @@ def func_origin_tetra_intersection(
 
 @qd.func
 def func_project_origin_to_plane(
-    v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vector(3), collider_info: ColliderInfo
+    v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vector(3), gjk_info: GJKInfo
 ):
     """
     Project the origin onto the plane defined by the simplex vertices.
@@ -187,7 +187,7 @@ def func_project_origin_to_plane(
             # Zero normal, cannot project.
             flag = RETURN_CODE.FAIL
             break
-        elif nn > collider_info.gjk.FLOAT_MIN[None]:
+        elif nn > gjk_info.FLOAT_MIN[None]:
             point = n * (nv / nn)
             flag = RETURN_CODE.SUCCESS
             break
@@ -195,7 +195,7 @@ def func_project_origin_to_plane(
         # Last fallback if no valid normal was found
         if i == 2:
             # If the normal is still unreliable, cannot project.
-            if nn < collider_info.gjk.FLOAT_MIN[None]:
+            if nn < gjk_info.FLOAT_MIN[None]:
                 flag = RETURN_CODE.FAIL
             else:
                 point = n * (nv / nn)

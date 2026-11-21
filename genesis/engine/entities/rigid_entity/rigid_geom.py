@@ -1,23 +1,27 @@
+from collections.abc import Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 import numpy as np
 import torch
 
-import skimage
 import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
+import genesis.utils.mesh as mu
 from genesis.engine.mesh import Mesh
+from genesis.engine.render_context import GeomKey, LinkKey, SegmentationKeys
 from genesis.repr_base import RBC
-from genesis.utils.misc import DeprecationError, qd_to_torch, tensor_to_array
+from genesis.typing import FArrayType
+from genesis.utils.misc import BuildableMixin, DeprecationError, qd_to_torch, tensor_to_array
 
 from .description import RigidGeomDescription, RigidVisGeomDescription
 
 if TYPE_CHECKING:
     from genesis.engine.materials.rigid import Rigid as RigidMaterial
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+    from genesis.typing import IndexType
 
     from .rigid_entity import RigidEntity
     from .rigid_link import RigidLink
@@ -26,7 +30,7 @@ if TYPE_CHECKING:
 NUM_VERTS_VISUAL_GEOM_AABB = 200
 
 
-class RigidGeom(RBC):
+class RigidGeom(BuildableMixin, RBC):
     """
     A `RigidGeom` is the basic building block of a `RigidEntity` for collision checking. It is usually constructed
     from a single mesh. This can be accessed via `link.geoms`.
@@ -88,8 +92,12 @@ class RigidGeom(RBC):
         self.vert_neighbors, self.vert_n_neighbors, self.vert_neighbor_start = mesh.get_vert_adjacency()
         assert self.n_verts == len(self.vert_n_neighbors)
 
-    def _build(self):
-        pass
+    @gs.assert_unbuilt
+    def _build(self) -> None:
+        self._is_built = True
+
+    def _destroy(self) -> None:
+        self._is_built = False
 
     @property
     def trimesh(self):
@@ -111,18 +119,7 @@ class RigidGeom(RBC):
         The trimesh object reconstructed from the signed distance field (SDF) of the geom.
         """
         sdf_grid = self.desc.mesh.get_sdf_grid(self.desc.sdf)
-        if sdf_grid.value.min() >= 0:
-            gs.logger.warning("SDF is positive everywhere. Returning empty mesh.")
-            return trimesh.Trimesh(vertices=[], faces=[])
-        else:
-            vertices, faces, _, _ = skimage.measure.marching_cubes(sdf_grid.value, level=0)
-            T_sdf_to_mesh = np.linalg.inv(sdf_grid.T_mesh_to_sdf)
-            vertices = (T_sdf_to_mesh @ np.hstack([vertices, np.ones([len(vertices), 1])]).T)[:3].T
-            mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-            mesh.visual = trimesh.visual.ColorVisuals(
-                vertex_colors=np.tile(np.array([[1.0, 1.0, 0.6, 1.0]]), [len(vertices), 1])
-            )
-            return mesh
+        return mu.sdf_grid_to_trimesh(sdf_grid.value, sdf_grid.T_mesh_to_sdf)
 
     def visualize_sdf(
         self,
@@ -138,7 +135,7 @@ class RigidGeom(RBC):
         """
         Visualizes the signed distance field (SDF) of the rigid geometry in the viewer.
         """
-        if self._solver.scene.viewer is None:
+        if self._solver.sim.scene.viewer is None:
             gs.raise_exception("Viewer is not available.")
 
         if self._solver.n_envs > 0:
@@ -157,14 +154,14 @@ class RigidGeom(RBC):
                 T = gu.trans_to_T(np.array(pos))
         else:
             T = np.array(T)
-        self._solver.scene.draw_debug_mesh(sdf_mesh, T=T)
+        self._solver.sim.scene.draw_debug_mesh(sdf_mesh, T=T)
 
         if show_axis:
             axis_mesh = trimesh.creation.axis(origin_size=0.01, axis_radius=0.005, axis_length=axis_length)
             axis_mesh.visual = trimesh.visual.ColorVisuals(
                 vertex_colors=np.tile(np.array([axis_color]), [len(axis_mesh.vertices), 1])
             )
-            self._solver.scene.draw_debug_mesh(axis_mesh, T=T)
+            self._solver.sim.scene.draw_debug_mesh(axis_mesh, T=T)
 
         if show_boundary:
             sdf_grid = self.desc.mesh.get_sdf_grid(self.desc.sdf)
@@ -175,7 +172,7 @@ class RigidGeom(RBC):
             boundary_mesh.visual = trimesh.visual.ColorVisuals(
                 vertex_colors=np.tile(np.array([boundary_color]), [len(boundary_mesh.vertices), 1])
             )
-            self._solver.scene.draw_debug_mesh(boundary_mesh, T=T)
+            self._solver.sim.scene.draw_debug_mesh(boundary_mesh, T=T)
 
     @gs.assert_built
     def set_friction(self, friction):
@@ -290,14 +287,12 @@ class RigidGeom(RBC):
         verts = self.get_verts()
         return torch.stack((verts.min(dim=-2).values, verts.max(dim=-2).values), dim=-2)
 
-    def set_sol_params(self, sol_params):
+    @gs.assert_built
+    def set_sol_params(self, sol_params: "FArrayType | torch.Tensor") -> None:
         """
         Set the solver parameters of this geometry.
         """
-        if self._solver.is_built:
-            self._solver.set_sol_params(sol_params, geoms_idx=self._idx, envs_idx=None)
-        else:
-            self.desc.sol_params = sol_params
+        self._solver.set_sol_params(sol_params, geoms_idx=self._idx, envs_idx=None)
 
     @gs.assert_built
     def get_sol_params(self):
@@ -358,6 +353,12 @@ class RigidGeom(RBC):
         Get the entity that the geom belongs to.
         """
         return self._entity
+
+    @property
+    def seg_keys(self) -> SegmentationKeys:
+        """The keys identifying the geom in segmentation maps."""
+        entity_idx, link_idx = self._entity.idx, self._link.idx
+        return SegmentationKeys(entity_idx, LinkKey(entity_idx, link_idx), GeomKey(entity_idx, link_idx, self._idx))
 
     @property
     def solver(self) -> "RigidSolver":
@@ -567,13 +568,6 @@ class RigidGeom(RBC):
         return self.n_edges + self.edge_start
 
     @property
-    def is_built(self):
-        """
-        Whether the rigid entity the geom belongs to is built.
-        """
-        return self.entity.is_built
-
-    @property
     def is_free(self):
         raise DeprecationError("This property has been removed.")
 
@@ -592,7 +586,7 @@ class RigidGeom(RBC):
         return f"{self.__repr_name__()}: {self._uid}, idx: {self._idx} (from entity {self._entity.uid}, link {self._link.uid})"
 
 
-class RigidVisGeom(RBC):
+class RigidVisGeom(BuildableMixin, RBC):
     """
     A `RigidVisGeom` is a counterpart of `RigidGeom`, but for visualization purposes. This can be accessed via `link.vis_geoms`.
     """
@@ -619,8 +613,12 @@ class RigidVisGeom(RBC):
         self.active_envs_mask: torch.Tensor | None = None
         self.active_envs_idx: np.ndarray | None = None
 
-    def _build(self):
-        pass
+    @gs.assert_unbuilt
+    def _build(self) -> None:
+        self._is_built = True
+
+    def _destroy(self) -> None:
+        self._is_built = False
 
     @property
     def trimesh(self):
@@ -684,47 +682,60 @@ class RigidVisGeom(RBC):
         vverts_pos = pos[..., None, :] + gu.transform_by_quat(self._aabb_verts, quat[..., None, :])
         return torch.stack((vverts_pos.min(dim=-2).values, vverts_pos.max(dim=-2).values), dim=-2)
 
-    @gs.assert_built
-    def set_vverts(self, vverts, envs_idx=None):
-        """Override this vgeom's visual vertex positions for rendering and sensors. See
-        :meth:`KinematicEntity.set_vverts` for the full behavior; this method writes only this vgeom's slice.
+    @overload
+    def set_vverts(self, vverts: "np.typing.ArrayLike", envs_idx: "IndexType | None" = None) -> None: ...
 
-        Requires the owning entity's morph to be created with 'enable_custom_vverts=True'.
+    @overload
+    def set_vverts(
+        self,
+        vverts: None = None,
+        envs_idx: "IndexType | None" = None,
+        *,
+        variant: "int | str | Sequence[int | str] | None" = None,
+    ) -> None: ...
+
+    @gs.assert_built
+    def set_vverts(
+        self,
+        vverts: "np.typing.ArrayLike | None" = None,
+        envs_idx: "IndexType | None" = None,
+        *,
+        variant: "int | str | Sequence[int | str] | None" = None,
+    ) -> None:
+        """Write the batched variant of the DynamicVertices of this visual geom and show it, or show one of its
+        variants, in some environments.
+
+        The vertices `vverts` given, the batched variant takes them and shows them (see
+        ``gs.surfaces.DynamicVertices.is_batched``). Otherwise the variant `variant` is shown, the mesh of the asset if
+        None, whatever the variants. Giving both raises.
+
+        Parameters
+        ----------
+        vverts : None | array_like
+            The position of each vertex in the frame of the visual geom, of shape (n_vverts, 3) for every selected
+            environment or (len(envs_idx), n_vverts, 3) for one each. Defaults to None.
+        envs_idx : None | int | array_like, optional
+            The environments to set. If None, every environment is set. Defaults to None.
+        variant : None | int | str | sequence of int or str, optional
+            A variant, by position or by name, for every selected environment or one per selected environment, None
+            for the mesh of the asset. Defaults to None.
         """
-        if not self._entity._morph.enable_custom_vverts:
-            gs.raise_exception(
-                "'set_vverts' requires the entity's morph to be created with 'enable_custom_vverts=True'."
-            )
+        if self.desc.dynamic_vertices is None:
+            gs.raise_exception("'set_vverts' requires a visual geom showing 'gs.surfaces.DynamicVertices'.")
+        if vverts is not None and variant is not None:
+            gs.raise_exception("'set_vverts' takes either the vertices of the batched variant or a variant, not both.")
+        self._solver.render_context.set_vverts(self, vverts, envs_idx, variant)
+        # The scene records the entities whose visual vertices were written, which a file exporting it leaves out
         self._entity._is_vverts_overridden = True
-        custom_offset = self._entity._custom_vvert_start - self._entity._vvert_start
-        self._entity._solver.set_vverts(
-            self.vvert_start + custom_offset,
-            self.vvert_end + custom_offset,
-            np.array([self.idx], dtype=gs.np_int),
-            vverts,
-            envs_idx,
-        )
 
     @gs.assert_built
-    def get_vverts(self, envs_idx=None):
-        """Return a copy of this vgeom's visual vertex positions in world space.
+    def get_vverts(self, envs_idx: "IndexType | None" = None) -> torch.Tensor:
+        """Return a copy of the world position of the vertices of this visual geom, as drawn.
 
-        Entities created with 'morph.enable_custom_vverts=True' read from the engine-owned 'vverts_state.pos' buffer.
-        Other entities compute the positions on the fly from the vgeom's current world pose applied to 'init_vverts'.
+        The vertices of a visual geom showing DynamicVertices are those of the variant each environment shows, the
+        others those of its mesh, placed at the pose of the visual geom.
         """
-        if self._entity._morph.enable_custom_vverts:
-            custom_offset = self._entity._custom_vvert_start - self._entity._vvert_start
-            return self._entity._solver.get_vverts(
-                self.vvert_start + custom_offset, self.vvert_end + custom_offset, envs_idx
-            )
-
-        self._solver.update_vgeoms()
-        vgeoms_pos = qd_to_torch(self._solver.dyn_state.vgeoms.pos, envs_idx, transpose=True, copy=None)
-        vgeoms_quat = qd_to_torch(self._solver.dyn_state.vgeoms.quat, envs_idx, transpose=True, copy=None)
-        init = torch.as_tensor(self.init_vverts, dtype=gs.tc_float, device=gs.device)
-        pos = vgeoms_pos[..., self.idx, :].unsqueeze(-2)
-        quat = vgeoms_quat[..., self.idx, :].unsqueeze(-2)
-        tensor = gu.transform_by_trans_quat(init, pos, quat)
+        tensor = self._solver.render_context.get_vverts((self,), envs_idx)
         return tensor[0] if self._solver.n_envs == 0 else tensor
 
     # ------------------------------------------------------------------------------------
@@ -758,6 +769,12 @@ class RigidVisGeom(RBC):
         Get the entity that the vgeom belongs to.
         """
         return self._entity
+
+    @property
+    def seg_keys(self) -> SegmentationKeys:
+        """The keys identifying the visual geom in segmentation maps."""
+        entity_idx, link_idx = self._entity.idx, self._link.idx
+        return SegmentationKeys(entity_idx, LinkKey(entity_idx, link_idx), GeomKey(entity_idx, link_idx, self._idx))
 
     @property
     def vmesh(self):
@@ -867,13 +884,6 @@ class RigidVisGeom(RBC):
         Get the ending index of the vgeom's faces in the rigid solver.
         """
         return self.n_vfaces + self.vface_start
-
-    @property
-    def is_built(self):
-        """
-        Whether the rigid entity the vgeom belongs to is built.
-        """
-        return self.entity.is_built
 
     @property
     def is_free(self):

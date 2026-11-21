@@ -73,6 +73,19 @@ class RenderFlags(object):
     """Render occluded markers with darkened transparency (X-ray mode)."""
 
 
+class ViewFlags:
+    """Which views draw a mesh, as a bitwise or of the flags below (see 'Mesh.views').
+
+    The views that show the scene as it looks and the debug views render from a single scene, each drawing only the
+    meshes whose flags include its kind.
+    """
+
+    NORMAL = 1
+    """Drawn by the views that show the scene as it looks."""
+    DEBUG = 2
+    """Drawn by the debug views."""
+
+
 class TextAlign:
     """Text alignment options for captions.
 

@@ -2,6 +2,7 @@ import pytest
 import torch
 
 import genesis as gs
+from genesis.engine.render_context import DynamicMesh
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -43,6 +44,7 @@ def test_grid_sensor_contact_and_reset(show_viewer, tol, n_envs):
             ambient_temperature=BASE_TEMP,
             convection_coefficient=0.0,
             simulate_all_link_temperatures=False,
+            draw_debug=True,
             entity_idx=platform.idx,
             grid_size=GRID_SIZE,
             properties_dict={
@@ -71,6 +73,8 @@ def test_grid_sensor_contact_and_reset(show_viewer, tol, n_envs):
             },
         )
     )
+    with pytest.raises(gs.GenesisException, match="requires entity_idx >= 0"):
+        scene.add_sensor(gs.sensors.TemperatureGrid())
     scene.build(n_envs=n_envs)
 
     # After build, all cells at base temperature
@@ -85,6 +89,10 @@ def test_grid_sensor_contact_and_reset(show_viewer, tol, n_envs):
     assert (data[..., GRID_CENTER[0], GRID_CENTER[1], GRID_CENTER[2]] > data[0, 0, 0]).all(), (
         "Center cell should be hotter than corner"
     )
+    # The marker of the grid draws the top face of every cell, the hotter cells redder
+    (cells_marker,) = (shape for shape in scene.sim.render_context.get_markers() if isinstance(shape, DynamicMesh))
+    center_cell_idx = (GRID_CENTER[0] * GRID_SIZE[1] + GRID_CENTER[1]) * GRID_SIZE[2] + GRID_CENTER[2]
+    assert (cells_marker.colors[:, 4 * center_cell_idx, 0] > cells_marker.colors[:, 0, 0]).all()
 
     # Reset: exactly base temperature everywhere
     scene.reset()

@@ -1,10 +1,10 @@
-from typing import Any
+from typing import Any, ClassVar
 
 import quadrants as qd
 from pydantic import StrictBool, model_validator
 
 import genesis as gs
-from genesis.typing import PositiveFloat
+from genesis.constants import STRUCTURE
 
 from .base import SamplerType
 from .elasto_plastic import ElastoPlastic
@@ -36,6 +36,8 @@ class Snow(ElastoPlastic):
         Upper bound of yield condition. Default is 4.5e-3.
     """
 
+    structure: ClassVar[STRUCTURE] = STRUCTURE.AMORPHOUS
+
     sampler: SamplerType = "random"
     use_von_mises: StrictBool = False
 
@@ -53,7 +55,7 @@ class Snow(ElastoPlastic):
         self.update_stress = self._update_stress_snow
 
     @qd.func
-    def _update_F_S_Jp_snow(self, J, F_tmp, U, S, V, Jp):
+    def _update_F_S_Jp_snow(self, J, F_tmp, U, S, V, Jp, eps):
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         Jp_new = Jp
         for d in qd.static(range(3)):

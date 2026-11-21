@@ -1,6 +1,8 @@
-import pytest
 import numpy as np
+import pytest
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 
@@ -101,7 +103,6 @@ def test_cloth_attach_fixed_point(n_envs, material_type, show_viewer, tol):
         material=material_type(),
         surface=gs.surfaces.Default(
             color=(1.0, 1.0, 0.2, 1.0),
-            vis_mode="visual",
         ),
     )
     cloth_2 = scene.add_entity(
@@ -113,7 +114,6 @@ def test_cloth_attach_fixed_point(n_envs, material_type, show_viewer, tol):
         material=material_type(),
         surface=gs.surfaces.Default(
             color=(1.0, 1.0, 0.2, 1.0),
-            vis_mode="visual",
         ),
     )
     scene.build(n_envs=n_envs)
@@ -165,7 +165,7 @@ def test_cloth_attach_fixed_point(n_envs, material_type, show_viewer, tol):
     assert_allclose(vels[..., 2].mean(dim=-1), 0.0, tol=1e-3)
 
     # Release cloth
-    cloth_2.release_particle(particle_idx)
+    cloth_2.release_particles(particle_idx)
     for i in range(30):
         scene.step()
 
@@ -236,8 +236,8 @@ def test_cloth_attach_rigid_link(show_viewer):
     vel = np.array([[-0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]], dtype=np.float32)
     box.set_dofs_velocity(vel, dofs_idx_local=[0, 1, 2])
 
-    cloth_pos0 = cloth.get_particles_pos()[:, particles_idx].clone()
-    link_pos0 = scene.rigid_solver.links[box_link_idx].get_pos().clone()
+    cloth_pos0 = cloth.get_particles_pos()[:, particles_idx]
+    link_pos0 = box.links[0].get_pos()
 
     for _ in range(20):
         scene.step()
@@ -248,19 +248,124 @@ def test_cloth_attach_rigid_link(show_viewer):
         scene.step()
 
     # Check that the attached particles followed the link displacement per env
-    cloth_pos1 = cloth.get_particles_pos()[:, particles_idx].clone()
-    link_pos1 = scene.rigid_solver.links[box_link_idx].get_pos().clone()
+    cloth_pos1 = cloth.get_particles_pos()[:, particles_idx]
+    link_pos1 = box.links[0].get_pos()
     assert_allclose((cloth_pos1 - cloth_pos0).movedim(0, -2), link_pos1 - link_pos0, atol=2e-5)
 
     # Release cloth and restore box's speed
     box.set_dofs_velocity(vel, dofs_idx_local=[0, 1, 2])
-    cloth.release_particle(particles_idx)
+    cloth.release_particles(particles_idx)
     for _ in range(15):
         scene.step()
 
     # Make sure that the cloth is laying on the ground without moving
     cloth_pos2 = cloth.get_particles_pos()[:, particles_idx]
-    link_pos2 = scene.rigid_solver.links[box_link_idx].get_pos()
+    link_pos2 = box.links[0].get_pos()
     link_disp = link_pos2 - link_pos1
     cloth_disp = cloth_pos2 - cloth_pos1
     assert ((cloth_disp.movedim(0, -2) - link_disp).norm(dim=-1) > 0.2).all()
+
+
+@pytest.mark.required
+def test_force_fields(show_viewer, tol):
+    DT, SUBSTEPS, N_STEPS = 1e-2, 2, 10
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            substeps=SUBSTEPS,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, 0.5, 1.0),
+            camera_lookat=(0.0, 0.5, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
+    particles = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.5),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.PBD.Particle(),
+    )
+    particles_vortex = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 1.0, 0.5),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.PBD.Particle(),
+    )
+
+    @qd.func
+    def acc_growing_with_time(pos, vel, t, i):
+        return qd.Vector([t, 0.0, 0.0], dt=gs.qd_float)
+
+    custom = scene.add_force_field(gs.force_fields.Custom(acc_growing_with_time))
+    # A vortex about the x-axis through the second box, acting within 0.5m of its axis, far from the first box
+    vortex = scene.add_force_field(
+        gs.force_fields.Vortex(
+            direction=(1.0, 0.0, 0.0),
+            center=(0.0, 1.0, 0.5),
+            strength_perpendicular=10.0,
+            strength_radial=3.0,
+            falloff_max=0.5,
+        )
+    )
+    scene.build(n_envs=2)
+
+    # The vortex accelerates the second box in the plane normal to its axis, at the field acceleration of the position
+    # of each particle at the start of each substep
+    substep_dt = DT / SUBSTEPS
+    direction = torch.tensor(vortex.direction, dtype=gs.tc_float, device=gs.device)
+    center = torch.tensor(vortex.center, dtype=gs.tc_float, device=gs.device)
+    particles_vortex_pos = particles_vortex.get_particles_pos()
+    particles_vortex_vel = torch.zeros_like(particles_vortex_pos)
+    init_state = scene.get_state()
+    scene.step()
+    for _ in range(SUBSTEPS):
+        relative_pos = particles_vortex_pos - center
+        radial_pos = relative_pos - (relative_pos @ direction)[..., None] * direction
+        radius = radial_pos.norm(dim=-1, keepdim=True)
+        falloff = torch.where(
+            radius < vortex.falloff_min, 1.0, 1.0 / (radius - vortex.falloff_min + 1.0) ** vortex.falloff_pow
+        )
+        perpendicular = torch.cross(direction.expand_as(radial_pos), radial_pos, dim=-1)
+        acc = falloff * (vortex.strength_perpendicular * perpendicular - vortex.strength_radial * radial_pos)
+        particles_vortex_vel = particles_vortex_vel + substep_dt * acc
+        particles_vortex_pos = particles_vortex_pos + substep_dt * particles_vortex_vel
+    assert_allclose(particles_vortex.get_particles_vel()[..., 1:], particles_vortex_vel[..., 1:], tol=tol)
+
+    # An environment reset mid-run restarts its clock, which the force fields read, while the other one carries on
+    for _ in range(N_STEPS - 1):
+        scene.step()
+    particles_vel_0 = particles.get_particles_vel()
+    # The velocity after n substeps, each reading the time at its start, and n spanning one run then two
+    vels_x_ana = [substep_dt**2 * n * (n - 1) / 2 for n in (N_STEPS * SUBSTEPS, 2 * N_STEPS * SUBSTEPS)]
+    assert_allclose(particles_vel_0[..., 0], vels_x_ana[0], tol=tol)
+    scene.reset(init_state, envs_idx=[1])
+    for _ in range(N_STEPS):
+        scene.step()
+    particles_vel = particles.get_particles_vel()
+    assert_allclose(particles_vel[1], particles_vel_0[0], tol=gs.EPS)
+    assert_allclose(particles_vel[0, :, 0], vels_x_ana[1], tol=tol)
+
+    # A force field is active once created, and stops accelerating the particles while deactivated
+    assert custom.active
+    custom.deactivate()
+    assert not custom.active
+    for _ in range(N_STEPS):
+        scene.step()
+    assert_allclose(particles.get_particles_vel(), particles_vel, tol=tol)
+    custom.activate()
+    assert custom.active
+    for _ in range(N_STEPS):
+        scene.step()
+    n_start, n_end = 3 * N_STEPS * SUBSTEPS, 4 * N_STEPS * SUBSTEPS
+    vel_x_ana = vels_x_ana[1] + substep_dt**2 * (n_end * (n_end - 1) - n_start * (n_start - 1)) / 2
+    assert_allclose(particles.get_particles_vel()[0, :, 0], vel_x_ana, tol=tol)
+
+    # A zero or non-finite direction points nowhere
+    for force_field_type in (gs.force_fields.Constant, gs.force_fields.Wind, gs.force_fields.Vortex):
+        for direction in ((0.0, 0.0, 0.0), (float("nan"), 0.0, 1.0), (float("inf"), 0.0, 0.0)):
+            with pytest.raises(gs.GenesisException):
+                force_field_type(direction=direction)

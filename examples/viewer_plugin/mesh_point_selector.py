@@ -140,7 +140,7 @@ class MeshPointSelectorPlugin(RaycasterViewerPlugin):
     @override
     def on_draw(self) -> None:
         super().on_draw()
-        if self.scene._visualizer is not None and self.scene._visualizer.is_built:
+        if self.scene.visualizer is not None and self.scene.visualizer.is_built:
             self.scene.clear_debug_objects()
             mouse_ray = self._screen_position_to_ray(*self._prev_mouse_pos)
 
@@ -243,6 +243,7 @@ if __name__ == "__main__":
             gravity=(0.0, 0.0, 0.0),
         ),
         vis_options=gs.options.VisOptions(
+            debug=not args.use_visual_geom,
             show_world_frame=True,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -257,32 +258,29 @@ if __name__ == "__main__":
     )
 
     # Only entities opting into visual raycasting can be selected with --use-visual-geom.
-    raycastable = gs.materials.Rigid(
-        use_visual_raycasting=True,
-    )
-    vis_mode = "visual" if args.use_visual_geom else "collision"
-
     hand = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/shadow_hand/shadow_hand.urdf",
-            collision=True,
-            pos=(0.0, 0.0, 0.0),
-            euler=(0.0, 0.0, 180.0),
-            fixed=True,
-            merge_fixed_links=False,
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/shadow_hand/shadow_hand.urdf",
+                collision=True,
+                pos=(0.0, 0.0, 0.0),
+                euler=(0.0, 0.0, 180.0),
+                fixed=True,
+                merge_fixed_links=False,
+            ),
+            use_visual_raycasting=True,
         ),
-        material=raycastable,
-        vis_mode=vis_mode,
     )
     duck = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck/duck.obj",
-            pos=(0.0, 0.3, 0.0),
-            scale=0.001,
-            fixed=True,
+        spec=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck/duck.obj",
+                pos=(0.0, 0.3, 0.0),
+                scale=0.001,
+                fixed=True,
+            ),
+            use_visual_raycasting=True,
         ),
-        material=raycastable,
-        vis_mode=vis_mode,
     )
 
     scene.viewer.add_plugin(

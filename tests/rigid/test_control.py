@@ -74,9 +74,9 @@ def test_position_control(show_viewer):
     # in the particular case where `approximate_implicitfast` integrator is used.
     # Note that the low-level internal API is used because invweights must NOT be updated, otherwise
     # the test cannot pass. This is unecessary and not recommended for practical applications.
-    # robot.set_dofs_armature(robot.get_dofs_armature(envs_idx=1) + MOTORS_KD * scene.sim._substep_dt, envs_idx=1)
+    # robot.set_dofs_armature(robot.get_dofs_armature(envs_idx=1) + MOTORS_KD * scene.sim.substep_dt, envs_idx=1)
     dofs_armature = scene.rigid_solver.dyn_info.dofs.armature.to_numpy()
-    dofs_armature[:, 1] += tensor_to_array(MOTORS_KD * scene.sim._substep_dt)
+    dofs_armature[:, 1] += tensor_to_array(MOTORS_KD * scene.sim.substep_dt)
     scene.rigid_solver.dyn_info.dofs.armature.from_numpy(dofs_armature)
 
     force_range = qd_to_torch(scene.rigid_solver.dyn_info.dofs.force_range)
@@ -234,6 +234,12 @@ def test_drone_propellers_force_application(n_envs, substeps, show_viewer, tol):
     assert_allclose(drone.get_dofs_velocity(dofs_idx_local=3)[..., 0], roll_rate, tol=tol)
     assert_allclose(drone.get_dofs_velocity(dofs_idx_local=[4, 5]), 0.0, tol=tol)
 
+    # The propellers drawn twice without a step in between turn by the angle of that step alone
+    propellers_vgeom_idx = [drone.get_link(name).vgeoms[0].idx for name in drone.morph.propellers_link_name]
+    propellers_quat = scene.rigid_solver.get_vgeoms_quat(propellers_vgeom_idx)
+    drone.set_qpos(drone.get_qpos())
+    assert_allclose(scene.rigid_solver.get_vgeoms_quat(propellers_vgeom_idx), propellers_quat, tol=gs.EPS)
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu])
@@ -241,6 +247,9 @@ def test_drone_advanced(show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.005,
+        ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.5, 0.0, 1.5),
@@ -259,7 +268,6 @@ def test_drone_advanced(show_viewer):
                 merge_fixed_links=merge_fixed_links,
                 pos=(0.0, offset, 1.5),
             ),
-            vis_mode="collision",
             visualize_contact=True,
         )
         drones.append(drone)

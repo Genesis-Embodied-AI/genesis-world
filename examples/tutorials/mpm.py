@@ -12,9 +12,9 @@ scene = gs.Scene(
     mpm_options=gs.options.MPMOptions(
         lower_bound=(-0.5, -1.0, 0.0),
         upper_bound=(0.5, 1.0, 1),
-    ),
-    vis_options=gs.options.VisOptions(
-        visualize_mpm_boundary=True,
+        vis=gs.options.ParticleVisOptions(
+            boundary=True,
+        ),
     ),
     viewer_options=gs.options.ViewerOptions(
         res=(960, 640),
@@ -35,31 +35,38 @@ obj_elastic = scene.add_entity(
     ),
     surface=gs.surfaces.Default(
         color=(1.0, 0.4, 0.4),
-        vis_mode="visual",
     ),
 )
 
 obj_sand = scene.add_entity(
-    material=gs.materials.MPM.Liquid(),
-    morph=gs.morphs.Box(
-        pos=(0.0, 0.0, 0.25),
-        size=(0.3, 0.3, 0.3),
-    ),
-    surface=gs.surfaces.Default(
-        color=(0.3, 0.3, 1.0),
-        vis_mode="particle",
+    spec=gs.entities.MPM(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.25),
+            size=(0.3, 0.3, 0.3),
+        ),
+        material=gs.materials.MPM.Liquid(),
+        surface=gs.surfaces.Default(
+            color=(0.3, 0.3, 1.0),
+        ),
+        vis=gs.options.EntityVisOptions(
+            debug=True,
+        ),
     ),
 )
 
 obj_plastic = scene.add_entity(
-    material=gs.materials.MPM.ElastoPlastic(),
-    morph=gs.morphs.Sphere(
-        pos=(0.0, 0.5, 0.35),
-        radius=0.1,
-    ),
-    surface=gs.surfaces.Default(
-        color=(0.4, 1.0, 0.4),
-        vis_mode="particle",
+    spec=gs.entities.MPM(
+        morph=gs.morphs.Sphere(
+            pos=(0.0, 0.5, 0.35),
+            radius=0.1,
+        ),
+        material=gs.materials.MPM.ElastoPlastic(),
+        surface=gs.surfaces.Default(
+            color=(0.4, 1.0, 0.4),
+        ),
+        vis=gs.options.EntityVisOptions(
+            debug=True,
+        ),
     ),
 )
 

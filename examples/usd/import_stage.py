@@ -17,7 +17,7 @@ class JointAnimator:
     """
 
     def __init__(self, scene: gs.Scene):
-        self.rigid_solver = scene.sim.rigid_solver
+        self.rigid_solver = scene.rigid_solver
         self.joint_lower, self.joint_upper = map(tensor_to_array, self.rigid_solver.get_dofs_limit())
 
         init_positions = tensor_to_array(self.rigid_solver.get_dofs_position())

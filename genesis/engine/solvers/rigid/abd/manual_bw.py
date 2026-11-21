@@ -10,7 +10,8 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
+from genesis.utils.data import eoa
 
 
 @qd.func
@@ -57,10 +58,8 @@ def func_forward_kinematics_link_bw(
                     + xanchor_grad[j]
                     + dyn_state.dofs.pos.grad[dof_start + j, i_b]
                 )
-            # The forward normalizes the raw qpos quaternion (quat_ = q / |q|) before writing the link quaternion, so
-            # the gradient must pass through the Jacobian of q / |q|: J^T g = (g - qhat (qhat . g)) / |q|. Copying g
-            # straight into the raw entries leaves a spurious radial component that disagrees with finite differences
-            # even at unit length.
+            # The forward normalizes the raw qpos quaternion before writing the link quaternion, so the gradient passes
+            # through the Jacobian of the normalization, which has no component along the quaternion.
             q_raw = qd.Vector(
                 [
                     rigid_info.qpos[q_start + 3, i_b],
@@ -70,8 +69,7 @@ def func_forward_kinematics_link_bw(
                 ],
                 dt=gs.qd_float,
             )
-            q_norm = q_raw.norm()
-            qhat = q_raw / q_norm
+            qhat = gu.qd_normalize(q_raw, rigid_info.EPS[None])
             g_xyz = qd.Vector(
                 [
                     dyn_state.dofs.pos.grad[dof_start + 3, i_b],
@@ -81,7 +79,7 @@ def func_forward_kinematics_link_bw(
                 dt=gs.qd_float,
             )
             g_quat_eff = g_quat + gu.qd_quat_to_xyz_grad_quat(qhat, rigid_info.EPS[None], g_xyz)
-            g_quat_raw = (g_quat_eff - qhat * qhat.dot(g_quat_eff)) / q_norm
+            g_quat_raw = gu.qd_normalize_grad(q_raw, g_quat_eff, rigid_info.EPS[None])
             for j in qd.static(range(4)):
                 rigid_info.qpos.grad[q_start + 3 + j, i_b] = rigid_info.qpos.grad[q_start + 3 + j, i_b] + g_quat_raw[j]
             for j in qd.static(range(6)):
@@ -93,7 +91,7 @@ def func_forward_kinematics_link_bw(
             axis = dyn_info.dofs.motion_ang[I_d]
             angle = rigid_info.qpos[q_start, i_b] - rigid_info.qpos0[q_start, i_b]
             rotvec = axis * angle
-            qloc = gu.qd_rotvec_to_quat(rotvec, rigid_info.EPS[None])
+            qloc = gu.qd_rotvec_to_quat(rotvec)
             # quat_out = transform_quat_by_quat(qloc, quat_in) = quat_mul(quat_in, qloc)
             quat_out = gu.qd_transform_quat_by_quat(qloc, quat_in)
 
@@ -102,7 +100,7 @@ def func_forward_kinematics_link_bw(
             gq_out = g_quat - gu.qd_transform_by_quat_grad_quat(joint_pos_off, quat_out, g_pos)
             g_qloc = gu.qd_quat_mul_grad_rhs(quat_in, qloc, gq_out)
             g_quat_in_apply = gu.qd_quat_mul_grad_lhs(quat_in, qloc, gq_out)
-            rotvec_grad = gu.qd_rotvec_to_quat_grad_rotvec(rotvec, rigid_info.EPS[None], g_qloc)
+            rotvec_grad = gu.qd_rotvec_to_quat_grad_rotvec(rotvec, g_qloc)
             angle_grad = axis[0] * rotvec_grad[0] + axis[1] * rotvec_grad[1] + axis[2] * rotvec_grad[2]
             # The forward also publishes the angle as dofs.pos[dof_start] = qpos - qpos0, whose grad (accumulated by the
             # force-stage reverses) folds back linearly.
@@ -220,13 +218,25 @@ def func_forward_kinematics_link_bw(
                 + parent_quat_grad_from_quat[j]
             )
 
-    # The forward skips writing fixed root links' pose so users can overwrite it (see func_forward_kinematics_link):
-    # their pose is persistent input state, so its grad keeps accumulating across substeps and is left unconsumed here.
-    if not (i_parent == -1 and dyn_info.links.is_fixed[I_l]):
+    # The forward copies the pose of a fixed root link from its state, normalizing its quaternion as the one of a free
+    # joint (see func_forward_kinematics_link). The state persists across substeps, so its grad keeps accumulating.
+    i_fr = dyn_info.links.fixed_root_idx[I_l]
+    if i_fr != -1:
         for j in qd.static(range(3)):
-            dyn_state.links.pos.grad[i_l, i_b][j] = 0.0
+            dyn_state.fixed_roots.pos.grad[i_fr, i_b][j] = (
+                dyn_state.fixed_roots.pos.grad[i_fr, i_b][j] + dyn_state.links.pos.grad[i_l, i_b][j]
+            )
+        g_quat_raw = gu.qd_normalize_grad(
+            dyn_state.fixed_roots.quat[i_fr, i_b], dyn_state.links.quat.grad[i_l, i_b], rigid_info.EPS[None]
+        )
         for j in qd.static(range(4)):
-            dyn_state.links.quat.grad[i_l, i_b][j] = 0.0
+            dyn_state.fixed_roots.quat.grad[i_fr, i_b][j] = (
+                dyn_state.fixed_roots.quat.grad[i_fr, i_b][j] + g_quat_raw[j]
+            )
+    for j in qd.static(range(3)):
+        dyn_state.links.pos.grad[i_l, i_b][j] = 0.0
+    for j in qd.static(range(4)):
+        dyn_state.links.quat.grad[i_l, i_b][j] = 0.0
 
 
 @qd.kernel(fastcache=True)
@@ -248,7 +258,9 @@ def kernel_manual_forward_kinematics_bw(
     # Leaf to root: a child's grad on its parent lands before the parent's own iteration consumes it, so each root walks
     # its span descending, static links and trees together (see func_update_kinematics_root in forward_kinematics.py)
     qd.loop_config(name="manual_fk_only_bw", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+    for i_r, i_b in qd.ndrange(
+        rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1], axes=qd.static(eoa(dyn_state.links.pos))
+    ):
         i_l_root = rigid_info.roots_link_idx[i_r]
         i_l_end = rigid_info.links_root_end[i_l_root]
         for i_l_ in range(i_l_end - i_l_root):
@@ -415,7 +427,9 @@ def kernel_manual_forward_velocity_bw(
     qd.loop_config(
         name="manual_forward_velocity_bw", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     )
-    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+    for i_r, i_b in qd.ndrange(
+        rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1], axes=qd.static(eoa(dyn_state.links.pos))
+    ):
         i_l_root = rigid_info.roots_link_idx[i_r]
         i_l_end = rigid_info.links_root_end[i_l_root]
         for i_l_ in range(i_l_end - i_l_root):
@@ -446,11 +460,15 @@ def kernel_manual_compute_qacc_bw(dyn_state: DynState, rigid_info: RigidInfo, ri
     backward path populates it, and kernel_forward_dynamics_without_qacc.grad then reverses it into link poses.
 
     Like func_solve_mass_block, the triangular solves and the IFT outer product are restricted to the mass blocks of
-    each kinematic tree (see dofs_mass_block_start in array_class.py): elimination never crosses a block, and
+    each kinematic tree (see dofs_mass_block_start in rigid/data.py): elimination never crosses a block, and
     cross-block mass entries are structural zeros whose grads must stay zero.
     """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.dofs.force.shape[1]):
+    for i_t, i_b in qd.ndrange(
+        rigid_info.trees_root_idx.shape[0],
+        dyn_state.dofs.force.shape[1],
+        axes=qd.static(eoa(dyn_state.dofs.acc_smooth_bw)),
+    ):
         blocks_dof_start = rigid_info.trees_dof_start[i_t]
         blocks_dof_end = blocks_dof_start + rigid_info.trees_n_dofs[i_t]
 

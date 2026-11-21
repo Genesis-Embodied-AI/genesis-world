@@ -54,32 +54,40 @@ def main():
         ),
     )
     obj1 = scene.add_entity(
-        material=gs.materials.MPM.Elastic(
-            rho=500,
+        spec=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                lower=(0.2, 0.1, 0.05),
+                upper=(0.4, 0.3, 0.15),
+            ),
+            material=gs.materials.MPM.Elastic(
+                rho=500,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.9, 0.9, 0.9, 1.0),
+            ),
+            vis=gs.options.EntityVisOptions(
+                debug=True,
+            ),
         ),
-        morph=gs.morphs.Box(
-            lower=(0.2, 0.1, 0.05),
-            upper=(0.4, 0.3, 0.15),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.9, 0.9, 0.9, 1.0),
-        ),
-        vis_mode="particle",
     )
     obj2 = scene.add_entity(
-        material=gs.materials.MPM.Elastic(
-            rho=500,
+        spec=gs.entities.MPM(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                pos=(0.4, 0.55, 0.056),
+                scale=0.07,
+                euler=(90.0, 0.0, 90.0),
+            ),
+            material=gs.materials.MPM.Elastic(
+                rho=500,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.9, 0.8, 0.2, 1.0),
+            ),
+            vis=gs.options.EntityVisOptions(
+                debug=True,
+            ),
         ),
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            pos=(0.4, 0.55, 0.056),
-            scale=0.07,
-            euler=(90.0, 0.0, 90.0),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.9, 0.8, 0.2, 1.0),
-        ),
-        vis_mode="particle",
     )
 
     cam_0 = scene.add_camera(
@@ -123,19 +131,17 @@ def main():
 
             scene.step()
 
-            # you can use a scene_state
+            # The loss at the intermediate step covers the active particles of both objects
             if i == 25:
-                # compute loss
                 goal = torch.tensor([0.5, 0.8, 0.05], dtype=gs.tc_float, device=gs.device)
-                mpm_particles = scene.get_state().solvers_state[scene.solvers.index(scene.mpm_solver)]
-                loss += torch.pow(mpm_particles.pos[mpm_particles.active == 1] - goal, 2).sum()
+                for obj in (obj1, obj2):
+                    particles_pos, particles_active = obj.get_particles_pos(), obj.get_particles_active()
+                    loss += torch.pow(particles_pos[particles_active] - goal, 2).sum()
 
-            # you can also use an entity's state
             if i == horizon - 1:
                 # compute loss
                 goal = torch.tensor([0.5, 0.8, 0.05], dtype=gs.tc_float, device=gs.device)
-                state = obj1.get_state()
-                loss += torch.pow(state.pos - goal, 2).sum()
+                loss += torch.pow(obj1.get_particles_pos() - goal, 2).sum()
 
         timer.stamp("forward took: ")
         # backward pass

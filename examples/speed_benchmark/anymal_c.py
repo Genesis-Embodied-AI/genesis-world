@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 
 import genesis as gs
@@ -25,7 +27,7 @@ robot = scene.add_entity(
         pos=(0, 0, 0.8),
     ),
 )
-n_envs = 30000
+n_envs = 30000 if "PYTEST_VERSION" not in os.environ else 2
 scene.build(n_envs=n_envs)
 
 joints_name = (
@@ -48,5 +50,5 @@ robot.set_dofs_kp(np.full(12, 1000), motors_dof_idx)
 robot.control_dofs_position(np.zeros((n_envs, 12)), motors_dof_idx)
 
 # Speed: 14.4M FPS
-for i in range(1000):
+for i in range(1000 if "PYTEST_VERSION" not in os.environ else 5):
     scene.step()

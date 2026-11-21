@@ -12,6 +12,17 @@ import quadrants as qd
 import genesis as gs
 from genesis.typing import Vec3FType
 from genesis.utils.cache import register_cache_clear
+from genesis.utils.data import ENVS, Data, DataKind, Size, field
+
+
+# The particles of the particle solvers, which every per-particle array spans
+PARTICLES = Size("particles")
+# The slots of a spatial hash grid (see SpatialHashGrid)
+HASH_SLOTS = Size("hash_slots")
+# The chunks of consecutive slots, and the groups of consecutive chunks, over which the slot starts of a spatial hash
+# grid are summed in parallel
+HASH_CHUNKS = Size("hash_chunks")
+HASH_GROUPS = Size("hash_groups")
 
 # ------------------------------------------------------------------------------------
 # ------------------------------------- Quadrants ----------------------------------------
@@ -175,77 +186,71 @@ def qd_R_to_xyz(R, eps):
 
 
 @qd.func
-def qd_rotvec_to_R(rotvec, eps):
-    R = qd.Matrix.identity(gs.qd_float, 3)
+def qd_half_angle_terms(thetasq):
+    """Compute cos(theta / 2), sin(theta / 2) / theta and its derivative with respect to theta divided by theta.
 
-    angle = rotvec.norm()
-    if angle > eps:
-        c = qd.cos(angle)
-        s = qd.sqrt(1.0 - c**2)
-        t = 1.0 - c
-        x, y, z = rotvec / angle
-
-        R = qd.Matrix(
-            [
-                [t * x * x + c, t * x * y - z * s, t * x * z + y * s],
-                [t * x * y + z * s, t * y * y + c, t * y * z - x * s],
-                [t * x * z - y * s, t * y * z + x * s, t * z * z + c],
-            ],
-            dt=gs.qd_float,
-        )
-
-    return R
-
-
-@qd.func
-def qd_rotvec_to_quat(rotvec, eps):
-    quat = qd.Vector.zero(gs.qd_float, 4)
-
-    # We need to use [norm_sqr] instead of [norm] to avoid nan gradients in the backward pass. Even when theta = 0,
-    # the gradient of [norm] operation is computed and used (note that the gradient becomes NaN when theta = 0). This
-    # is seemd to be a bug in Quadrants autodiff @TODO: change back after the bug is fixed.
-    thetasq = rotvec.norm_sqr()
-    if thetasq > (eps**2):
-        theta = qd.sqrt(thetasq)
-        theta_half = 0.5 * theta
-        c, s = qd.cos(theta_half), qd.sin(theta_half)
-
-        quat[0] = c
-        xyz = s / theta * rotvec
-        for i in qd.static(range(3)):
-            quat[i + 1] = xyz[i]
-
-        # First order quaternion normalization is accurate enough yet necessary
-        quat *= 0.5 * (3.0 - quat.norm_sqr())
-    else:
-        quat[0] = 1.0
-
-    return quat
-
-
-@qd.func
-def qd_rotvec_to_quat_grad_rotvec(rotvec, eps, out_grad):
-    """Adjoint of qd_rotvec_to_quat(rotvec, eps) with respect to rotvec, given the upstream quaternion gradient.
-
-    Differentiates the eps-regularized surrogate quat = (c, sinc * rotvec) with theta_reg = sqrt(|rotvec|^2 + eps^2),
-    c = cos(theta_reg / 2) and sinc = sin(theta_reg / 2) / theta_reg. The surrogate deviates from the exact forward
-    (which branches at |rotvec| = eps and applies a first-order renormalization) by O(eps^2) in the main branch and
-    smooths over the constant-identity branch, trading exactness at the branch point for a gradient that stays
-    finite and continuous through rotvec = 0. Chain rule through theta_reg gives, per component i:
-        d(quat[0])/d(rotvec[i])   = -0.5 * sin(theta_reg / 2) * rotvec[i] / theta_reg
-        d(quat[1+j])/d(rotvec[i]) = delta(i, j) * sinc + rotvec[j] * (0.5 * c - sinc) / theta_reg^2 * rotvec[i]
+    The angle theta enters through its square. Below theta = 2, the three terms are evaluated by their Taylor series,
+    which stay accurate and smooth down to theta = 0, where the ratio of an approximate sine (fast math on GPU) to the
+    angle loses all relative accuracy and the closed form of the derivative cancels catastrophically.
     """
-    thetasq = rotvec.dot(rotvec)
-    theta_reg = qd.sqrt(thetasq + eps * eps)
-    theta_half = 0.5 * theta_reg
-    sin_half = qd.sin(theta_half)
-    cos_half = qd.cos(theta_half)
-    sinc = sin_half / theta_reg
-    d_sinc_d_theta = (0.5 * cos_half - sinc) / theta_reg
+    cos_half = 0.0
+    sinc_half = 0.0
+    sinc_half_deriv = 0.0
+    u = 0.25 * thetasq
+    if u < 1.0:
+        # Taylor coefficients in u = theta^2 / 4 of cos(theta / 2), of sin(theta / 2) / (theta / 2) and of its derivative
+        # with respect to u, highest order first for Horner's rule. The truncation error stays below the double precision
+        # up to u = 1.
+        for coef in qd.static(tuple([(-1) ** n / math.factorial(2 * n) for n in range(8, -1, -1)])):
+            cos_half = cos_half * u + coef
+        for coef in qd.static(tuple([(-1) ** n / math.factorial(2 * n + 1) for n in range(8, -1, -1)])):
+            sinc_half = sinc_half * u + coef
+        for coef in qd.static(tuple([(-1) ** n * n / math.factorial(2 * n + 1) for n in range(9, 0, -1)])):
+            sinc_half_deriv = sinc_half_deriv * u + coef
+        sinc_half = 0.5 * sinc_half
+        sinc_half_deriv = 0.25 * sinc_half_deriv
+    else:
+        theta = qd.sqrt(thetasq)
+        cos_half = qd.cos(0.5 * theta)
+        sinc_half = qd.sin(0.5 * theta) / theta
+        sinc_half_deriv = (0.5 * cos_half - sinc_half) / thetasq
+    return cos_half, sinc_half, sinc_half_deriv
 
+
+@qd.func
+def qd_rotvec_to_quat(rotvec):
+    cos_half, sinc_half, _ = qd_half_angle_terms(rotvec.norm_sqr())
+    xyz = sinc_half * rotvec
+    quat = qd.Vector([cos_half, xyz[0], xyz[1], xyz[2]], dt=gs.qd_float)
+    # First order quaternion normalization is accurate enough yet necessary
+    return quat * (0.5 * (3.0 - quat.norm_sqr()))
+
+
+@qd.func
+def qd_rotvec_to_R(rotvec):
+    """Convert a rotation vector to a rotation matrix by Rodrigues' formula R = I + a K + b K^2.
+
+    K is the cross-product matrix of the rotation vector, a = sin(theta) / theta and b = (1 - cos(theta)) / theta^2,
+    which the half-angle terms give as 2 sin(theta / 2) cos(theta / 2) / theta and 2 (sin(theta / 2) / theta)^2.
+    """
+    cos_half, sinc_half, _ = qd_half_angle_terms(rotvec.norm_sqr())
+    K = qd_vec_to_skew(rotvec)
+    return qd.Matrix.identity(gs.qd_float, 3) + 2.0 * sinc_half * cos_half * K + 2.0 * sinc_half * sinc_half * K @ K
+
+
+@qd.func
+def qd_rotvec_to_quat_grad_rotvec(rotvec, out_grad):
+    """Compute the adjoint of qd_rotvec_to_quat with respect to the rotation vector, given the quaternion gradient.
+
+    The first-order renormalization of the forward leaves its derivative unchanged, since the quaternion it receives is
+    of unit norm. With theta the norm of the rotation vector and sinc = sin(theta / 2) / theta, per component i:
+        d(quat[0])/d(rotvec[i])   = -0.5 * sinc * rotvec[i]
+        d(quat[1+j])/d(rotvec[i]) = delta(i, j) * sinc + rotvec[j] * (d(sinc)/d(theta) / theta) * rotvec[i]
+    """
+    _, sinc_half, sinc_half_deriv = qd_half_angle_terms(rotvec.norm_sqr())
     out_grad_vec = gs.qd_vec3(out_grad[1], out_grad[2], out_grad[3])
-    coeff = -0.5 * sin_half / theta_reg * out_grad[0] + d_sinc_d_theta / theta_reg * out_grad_vec.dot(rotvec)
-    return coeff * rotvec + sinc * out_grad_vec
+    coeff = -0.5 * sinc_half * out_grad[0] + sinc_half_deriv * out_grad_vec.dot(rotvec)
+    return coeff * rotvec + sinc_half * out_grad_vec
 
 
 @qd.func
@@ -396,17 +401,29 @@ def qd_quat_to_xyz_grad_quat(quat, eps, out_grad):
 
 
 @qd.func
-def qd_quat_to_rotvec(quat, eps):
-    q_w, q_x, q_y, q_z = quat
-    rotvec = qd.Vector([q_x, q_y, q_z], dt=gs.qd_float)
+def qd_quat_to_rotvec(quat):
+    """Convert a quaternion to the rotation vector of its rotation, of angle at most pi.
 
-    s2 = rotvec.norm()
-    if s2 > eps:
-        angle = 2.0 * qd.atan2(s2, qd.abs(q_w))
-        inv_sinc = angle / s2
-        rotvec = (-1.0 if q_w < 0.0 else 1.0) * inv_sinc * rotvec
-
-    return rotvec
+    Close to the identity, the ratio of the angle to the norm of the imaginary part is evaluated by the Taylor series of
+    atan(y) / y in the ratio y of the norm of the imaginary part to the real part, which stays accurate and smooth down
+    to the identity.
+    """
+    q_w = quat[0]
+    q_vec = gs.qd_vec3(quat[1], quat[2], quat[3])
+    s_sq = q_vec.norm_sqr()
+    w_sq = q_w * q_w
+    inv_sinc = 0.0
+    if s_sq < 1e-2 * w_sq:
+        ratio_sq = s_sq / w_sq
+        # Taylor coefficients of atan(y) / y in y^2, highest order first, whose truncation error stays below the double
+        # precision up to y^2 = 1e-2
+        for coef in qd.static(tuple([(-1) ** n / (2 * n + 1) for n in range(7, -1, -1)])):
+            inv_sinc = inv_sinc * ratio_sq + coef
+        inv_sinc = 2.0 / qd.abs(q_w) * inv_sinc
+    else:
+        s = qd.sqrt(s_sq)
+        inv_sinc = 2.0 * qd.atan2(s, qd.abs(q_w)) / s
+    return (-1.0 if q_w < 0.0 else 1.0) * inv_sinc * q_vec
 
 
 @qd.func
@@ -470,6 +487,18 @@ def qd_quat_mul_grad_rhs(u, v, out_grad):
         ],
         dt=gs.qd_float,
     )
+
+
+@qd.func
+def qd_normalize_grad(v, out_grad, eps):
+    """Adjoint of 'qd_normalize(v, eps)' with respect to 'v', given the upstream gradient of its output.
+
+    The output stays on the unit sphere whatever the length of 'v' past 'eps', so the gradient loses its component along
+    'v' and scales with the inverse of its length.
+    """
+    v_norm = qd.max(v.norm(), eps)
+    v_hat = v / v_norm
+    return (out_grad - v_hat * v_hat.dot(out_grad)) / v_norm
 
 
 @qd.func
@@ -570,6 +599,21 @@ def qd_transform_by_trans_quat(pos, trans, quat):
 @qd.func
 def qd_inv_transform_by_trans_quat(pos, trans, quat):
     return qd_transform_by_quat(pos - trans, qd_inv_quat(quat))
+
+
+@qd.func
+def qd_transform_aabb(
+    aabb_min: qd.types.vector(3), aabb_max: qd.types.vector(3), trans: qd.types.vector(3), quat: qd.types.vector(4)
+):
+    """Return the box of a box transformed by a translation and a rotation, the box of its 8 transformed corners."""
+    out_min = qd.Vector([qd.math.inf, qd.math.inf, qd.math.inf], dt=gs.qd_float)
+    out_max = -out_min
+    for i_corner in qd.static(range(8)):
+        corner = qd.Vector([aabb_max[j] if (i_corner >> j) & 1 else aabb_min[j] for j in qd.static(range(3))])
+        x = qd_transform_by_trans_quat(corner, trans, quat)
+        out_min = qd.min(out_min, x)
+        out_max = qd.max(out_max, x)
+    return out_min, out_max
 
 
 @qd.func
@@ -766,6 +810,24 @@ def qd_orthogonals(a):
 
 
 @qd.func
+def joint_equality_residual(pos: float, diff: float, eq_data: qd.types.vector(18)):
+    """Evaluate the residual of a joint equality constraint and the derivative of its polynomial.
+
+    The constraint ties the displacement 'pos' of the first joint to the displacement 'diff' of the second one through
+    the polynomial y - y0 = a0 + a1 * (x - x0) + a2 * (x - x0)^2 + a3 * (x - x0)^3 + a4 * (x - x0)^4, whose coefficients
+    are the first five entries of 'eq_data'. Returns 'pos' minus the polynomial at 'diff', and the derivative of the
+    polynomial at 'diff', the opposite of the Jacobian entry of the second joint.
+    """
+    deriv = gs.qd_float(0.0)
+    for i_5 in qd.static(range(5)):
+        diff_power = diff**i_5
+        pos = pos - diff_power * eq_data[i_5]
+        if qd.static(i_5 < 4):
+            deriv = deriv + eq_data[i_5 + 1] * diff_power * (i_5 + 1)
+    return pos, deriv
+
+
+@qd.func
 def imp_aref(params, neg_penetration, vel, pos):
     timeconst, dampratio, dmin, dmax, width, mid, power = params
 
@@ -844,6 +906,8 @@ class GeomConstants(NamedTuple):
     slerp_weights_offset: torch.Tensor
     slerp_weights_slope: torch.Tensor
     slerp_weights_slope_flipped: torch.Tensor
+    T_identity: torch.Tensor
+    T_bottom_row: torch.Tensor
 
 
 # Constant tensors of the torch geometry helpers by device and dtype. torch.compile traces a lookup in a dict, while it
@@ -905,6 +969,8 @@ def _tc_geom_constants(device: torch.device, dtype: torch.dtype) -> GeomConstant
             slerp_weights_offset=torch.tensor((1.0, 0.0, 1.0), dtype=dtype, device=device),
             slerp_weights_slope=torch.tensor((-1.0, 1.0, 0.0), dtype=dtype, device=device),
             slerp_weights_slope_flipped=torch.tensor((-1.0, -1.0, 0.0), dtype=dtype, device=device),
+            T_identity=torch.eye(4, dtype=dtype, device=device),
+            T_bottom_row=torch.tensor((0.0, 0.0, 0.0, 1.0), dtype=dtype, device=device),
         )
     return constants
 
@@ -1264,33 +1330,33 @@ def R_to_xyz(R, rpy=False, degrees=False):
 
 
 def trans_R_to_T(trans=None, R=None, *, out=None):
-    is_torch = all(isinstance(e, torch.Tensor) for e in (trans, R) if e is not None)
-    is_numpy = not is_torch and all(isinstance(e, np.ndarray) for e in (trans, R) if e is not None)
+    args = tuple(e for e in (trans, R) if e is not None)
+    is_torch = all(isinstance(e, torch.Tensor) for e in args)
+    is_numpy = not is_torch and all(isinstance(e, np.ndarray) for e in args)
 
     T = out
     B = () if trans is None and R is None else R.shape[:-2] if trans is None else trans.shape[:-1]
-    dtype = R.dtype if trans is None else trans.dtype
     if is_torch:
         if T is None:
-            device = R.device if trans is None else trans.device
-            T = torch.zeros((*B, 4, 4), dtype=dtype, device=device)
+            dtype = args[0].dtype if len(args) == 1 else torch.promote_types(trans.dtype, R.dtype)
+            T = torch.empty((*B, 4, 4), dtype=dtype, device=args[0].device)
     elif is_numpy:
         if T is None:
-            T = np.zeros((*B, 4, 4), dtype=dtype)
+            T = np.empty((*B, 4, 4), dtype=np.result_type(*args))
     else:
         gs.raise_exception(f"both of the inputs must be torch.Tensor or np.ndarray. got: {type(trans)=} and {type(R)=}")
     if B:
         assert T.shape == (*B, 4, 4)
 
-    T[..., 3, 3] = 1.0
+    # Copying the identity is a single contiguous write, cheaper than the strided writes of the entries that a missing
+    # input leaves to it. Once both inputs are given, the bottom row is all that remains.
+    if trans is None or R is None:
+        T[...] = _tc_geom_constants(T.device, T.dtype).T_identity if is_torch else np.eye(4)
+    else:
+        T[..., 3, :] = _tc_geom_constants(T.device, T.dtype).T_bottom_row if is_torch else (0.0, 0.0, 0.0, 1.0)
     if trans is not None:
         T[..., :3, 3] = trans
-    if R is None:
-        if is_torch:
-            torch.diagonal(T, dim1=-2, dim2=-1).fill_(1.0)
-        else:
-            T[..., [0, 1, 2], [0, 1, 2]] = 1.0
-    else:
+    if R is not None:
         T[..., :3, :3] = R
 
     return T
@@ -1304,34 +1370,8 @@ def trans_to_T(trans, *, out=None):
     return trans_R_to_T(trans, None, out=out)
 
 
-def trans_quat_to_T(trans=None, quat=None, *, out=None):
-    is_torch = all(isinstance(e, torch.Tensor) for e in (trans, quat) if e is not None)
-    is_numpy = not is_torch and all(isinstance(e, np.ndarray) for e in (trans, quat) if e is not None)
-
-    T = out
-    B = () if trans is None and quat is None else quat.shape[:-2] if trans is None else trans.shape[:-1]
-    if is_torch:
-        if T is None:
-            T = torch.zeros((*B, 4, 4), dtype=trans.dtype, device=trans.device)
-    elif is_numpy:
-        dtype = np.result_type(trans, quat)
-        trans, quat = trans.astype(dtype), quat.astype(dtype)
-        if T is None:
-            T = np.zeros((*B, 4, 4), dtype=dtype)
-    else:
-        gs.raise_exception(
-            f"both of the inputs must be torch.Tensor or np.ndarray. got: {type(trans)=} and {type(quat)=}"
-        )
-    if B:
-        assert T.shape == (*B, 4, 4)
-
-    T[..., 3, 3] = 1.0
-    if trans is not None:
-        T[..., :3, 3] = trans
-    if quat is not None:
-        quat_to_R(quat, out=T[..., :3, :3])
-
-    return T
+def trans_quat_to_T(trans=None, quat=None):
+    return trans_R_to_T(trans, None if quat is None else quat_to_R(quat))
 
 
 def T_to_trans(T):
@@ -1344,6 +1384,15 @@ def T_to_quat(T):
 
 def T_to_trans_quat(T):
     return T_to_trans(T), T_to_quat(T)
+
+
+def T_to_trans_quat_scale(T):
+    """Split transforms into their translation, their rotation as a quaternion, and the 3x3 linear map their rotation
+    applies after, which holds their scale and their shear.
+    """
+    # The rotation is proper, the linear map taking the reflection of a transform mirroring space (see 'polar')
+    R, scale = polar(T[..., :3, :3])
+    return T[..., :3, 3], R_to_quat(R), scale
 
 
 @nb.jit(nopython=True, cache=True)
@@ -1619,42 +1668,41 @@ def _tc_polar(A: torch.Tensor, pure_rotation: bool, side: Literal["right", "left
             # Flip signs where det < 0
             flip_mask = det_U < 0
             if flip_mask.any():
-                # Flip both the last column of U_svd and last row of Vt simultaneously
+                # Flipping the last column of U_svd alone turns U into a rotation, and negating the smallest singular
+                # value keeps A = U_svd @ diag(Sigma) @ Vt, so that P takes the reflection
                 U_svd[..., :, -1] = torch.where(flip_mask.unsqueeze(-1), -U_svd[..., :, -1], U_svd[..., :, -1])
-                Vt[..., -1, :] = torch.where(flip_mask.unsqueeze(-1), -Vt[..., -1, :], Vt[..., -1, :])
+                Sigma_last = torch.where(flip_mask, -Sigma[..., -1], Sigma[..., -1])
+                Sigma = torch.cat((Sigma[..., :-1], Sigma_last[..., None]), dim=-1)
         else:
             det_U = torch.linalg.det(U_temp)
             if det_U < 0:
-                # Flip both the last column of U_svd and last row of Vt simultaneously
+                # See the batched case
                 U_svd[:, -1] *= -1
-                Vt[-1, :] *= -1
+                Sigma = torch.cat((Sigma[:-1], -Sigma[-1:]))
 
     # Compute U
     U = U_svd @ Vt
 
-    # Use absolute value to ensure P is positive semi-definite
-    Sigma_abs = torch.abs(Sigma)
-
     if side == "right":
-        # P = Vt.T @ diag(|Sigma|) @ Vt
+        # P = Vt.T @ diag(Sigma) @ Vt
         # For batched: Vt is (*batch, N, M), need (*batch, M, N) -> transpose last two dims
         # Create diagonal matrix using torch.diag_embed for batched support
         if is_batched:
-            Sigma_diag = torch.diag_embed(Sigma_abs)  # Shape: (*batch, N, N)
+            Sigma_diag = torch.diag_embed(Sigma)  # Shape: (*batch, N, N)
             # Vt is (*batch, N, M), need Vt.T which is (*batch, M, N)
             Vt_T = Vt.transpose(-1, -2)  # Shape: (*batch, M, N)
             P = Vt_T @ Sigma_diag @ Vt  # Shape: (*batch, N, N)
         else:
-            Sigma_diag = torch.diag(Sigma_abs)  # Shape: (N, N)
+            Sigma_diag = torch.diag(Sigma)  # Shape: (N, N)
             P = Vt.T @ Sigma_diag @ Vt  # Shape: (N, N)
     else:  # "left"
-        # P = U_svd @ diag(|Sigma|) @ U_svd.T (left polar: A = P @ U)
+        # P = U_svd @ diag(Sigma) @ U_svd.T (left polar: A = P @ U)
         if is_batched:
-            Sigma_diag = torch.diag_embed(Sigma_abs)  # Shape: (*batch, M, M)
+            Sigma_diag = torch.diag_embed(Sigma)  # Shape: (*batch, M, M)
             U_svd_T = U_svd.transpose(-1, -2)  # Shape: (*batch, N, M)
             P = U_svd @ Sigma_diag @ U_svd_T  # Shape: (*batch, M, M)
         else:
-            Sigma_diag = torch.diag(Sigma_abs)  # Shape: (M, M)
+            Sigma_diag = torch.diag(Sigma)  # Shape: (M, M)
             P = U_svd @ Sigma_diag @ U_svd.T  # Shape: (M, M)
 
     return U, P
@@ -1706,31 +1754,27 @@ def _np_polar_core_single(A, pure_rotation: bool, side_int: int):
         U_temp = U_svd @ Vt
         det_U = np.linalg.det(U_temp)
         if det_U < 0:
-            # Flip both the last column of U_svd and last row of Vt simultaneously
-            # This changes det(U) from -1 to 1 but maintains A = U_svd @ diag(Sigma) @ Vt
-            # because the two sign flips cancel out in the product
+            # Flipping the last column of U_svd alone turns U into a rotation, and negating the smallest singular
+            # value keeps A = U_svd @ diag(Sigma) @ Vt, so that P takes the reflection
             U_svd[:, -1] *= -1
-            Vt[-1, :] *= -1
+            Sigma[-1] *= -1
 
     # Compute U
     U = U_svd @ Vt
 
-    # Use absolute value to ensure P is positive semi-definite
-    Sigma_abs = np.abs(Sigma)
-
     if side_int == 0:  # "right"
-        # P = Vt.T @ diag(|Sigma|) @ Vt
+        # P = Vt.T @ diag(Sigma) @ Vt
         # Create diagonal matrix manually for numba compatibility
         Sigma_diag = np.zeros((N, N), dtype=Sigma.dtype)
         for i in range(N):
-            Sigma_diag[i, i] = Sigma_abs[i]
+            Sigma_diag[i, i] = Sigma[i]
         P = Vt.T @ Sigma_diag @ Vt
     else:  # "left"
-        # P = U_svd @ diag(|Sigma|) @ U_svd.T (left polar: A = P @ U)
+        # P = U_svd @ diag(Sigma) @ U_svd.T (left polar: A = P @ U)
         # Create diagonal matrix manually for numba compatibility
         Sigma_diag = np.zeros((M, M), dtype=Sigma.dtype)
         for i in range(M):
-            Sigma_diag[i, i] = Sigma_abs[i]
+            Sigma_diag[i, i] = Sigma[i]
         P = U_svd @ Sigma_diag @ U_svd.T
 
     return U, P
@@ -1820,8 +1864,9 @@ def polar(A, pure_rotation: bool = True, side: Literal["right", "left"] = "right
         - Single matrix: shape (M, N)
         - Batched: shape (*batch, M, N)
     pure_rotation : bool, optional
-        If True, ensure the unitary matrix U has det(U) = 1 (pure rotation).
-        If False, U may have det(U) = -1 (contains reflection). Default is True.
+        If True, ensure the unitary matrix U has det(U) = 1 (pure rotation), the reflection of a matrix with a negative
+        determinant then going into P, which has a negative eigenvalue. If False, U has det(U) = -1 for such a matrix
+        and P is positive semi-definite. Default is True.
     side : Literal['right', 'left'], optional
         The side of the decomposition. Either 'right' or 'left'. Default is 'right'.
 
@@ -1830,7 +1875,8 @@ def polar(A, pure_rotation: bool = True, side: Literal["right", "left"] = "right
     tuple[np.ndarray | torch.Tensor, np.ndarray | torch.Tensor]
         A tuple of (U, P) where:
         - U : The unitary matrix (rotation part), same shape as A (M, N) or (*batch, M, N).
-        - P : The positive semi-definite matrix (scaling part). For 'right' decomposition,
+        - P : The symmetric matrix (scaling part), positive semi-definite unless a reflection was moved into it (see
+          `pure_rotation`). For 'right' decomposition,
           P has shape (N, N) or (*batch, N, N). For 'left' decomposition, P has shape (M, M) or (*batch, M, M).
     """
     if isinstance(A, np.ndarray):
@@ -1866,13 +1912,16 @@ def _tc_slerp(q0: torch.Tensor, q1: torch.Tensor, t: torch.Tensor, eps: float) -
     q0 = q0 / torch.linalg.vector_norm(q0, ord=2, dim=-1, keepdim=True)
     q1 = q1 / torch.linalg.vector_norm(q1, ord=2, dim=-1, keepdim=True)
     dot = (q0 * q1).sum(-1, keepdim=True)
-    dot_abs = dot.abs()
+    # Clamping the cosine keeps the angle at least acos(1 - eps), so that the spherical weights and their gradient stay
+    # finite. Below that angle, the weights differ from the exact ones by O(eps). The bound is raised to the machine
+    # epsilon of the quaternions, since '1 - eps' rounds to 1 in a lower precision than the simulation.
+    angle = torch.acos(dot.abs().clamp(max=1.0 - max(eps, torch.finfo(q0.dtype).eps)))
     # Weights '1 - t' of q0 and '+-t' of q1, signed to interpolate along the shorter arc, then 1. Once multiplied by the
     # angle between q0 and q1, a single sine evaluates the numerators and the denominator of the spherical weights.
     weights_slope = torch.where(dot < 0.0, constants.slerp_weights_slope_flipped, constants.slerp_weights_slope)
     weights_linear = torch.addcmul(constants.slerp_weights_offset, t[..., None], weights_slope)
-    weights_sin = torch.sin(weights_linear * torch.acos(dot_abs))
-    weights = torch.where(dot_abs > 1.0 - eps, weights_linear[..., :2], weights_sin[..., :2] / weights_sin[..., 2:])
+    weights_sin = torch.sin(weights_linear * angle)
+    weights = weights_sin[..., :2] / weights_sin[..., 2:]
     return torch.addcmul(q0 * weights[..., :1], q1, weights[..., 1:])
 
 
@@ -2098,11 +2147,20 @@ def quat_to_rotvec(quat: np.ndarray, out: np.ndarray | None = None) -> np.ndarra
     # Split real (qw,) and imaginary (qx, qy, qz) quaternion parts
     q_w, q_vec = quat[..., :1], np.ascontiguousarray(quat[..., 1:])
 
-    # Compute the angle-axis representation of the relative rotation
-    s2 = np.sqrt(np.sum(np.square(q_vec.reshape((-1, 3))), -1)).reshape((*B, 1))
-    angle = 2.0 * np.arctan2(s2, np.abs(q_w))
-    # FIXME: Ideally, a taylor expansion should be used to handle angle ~ 0.0
-    inv_sinc = angle / np.maximum(s2, gs.EPS)
+    # Close to the identity, the ratio of the angle to the norm of the imaginary part follows the Taylor series of
+    # atan(y) / y (see qd_quat_to_rotvec). Each branch reads safe placeholder values where the other one applies.
+    s_sq = np.sum(np.square(q_vec.reshape((-1, 3))), -1).reshape((*B, 1))
+    w_sq = np.square(q_w)
+    is_series = s_sq < 1e-2 * w_sq
+    ratio_sq = np.where(is_series, s_sq, 0.0) / np.where(is_series, w_sq, 1.0)
+    inv_sinc_series = np.zeros_like(ratio_sq)
+    for coef in [(-1) ** n / (2 * n + 1) for n in range(7, -1, -1)]:
+        inv_sinc_series = inv_sinc_series * ratio_sq + coef
+    w_abs = np.abs(q_w)
+    s = np.sqrt(np.where(is_series, 1.0, s_sq))
+    inv_sinc = np.where(
+        is_series, 2.0 / np.where(is_series, w_abs, 1.0) * inv_sinc_series, 2.0 * np.arctan2(s, w_abs) / s
+    )
     out_[:] = np.where(q_w < 0.0, -1.0, 1.0) * inv_sinc * q_vec
 
     if out is None:
@@ -2127,61 +2185,69 @@ def rotvec_to_quat(rotvec: np.ndarray, out: np.ndarray | None = None) -> np.ndar
         assert out.shape == (*B, 4)
         out_ = out
 
-    # Split unit axis and positive angle
-    angle = np.sqrt(np.sum(np.square(rotvec.reshape((-1, 3))), -1)).reshape(B)
-    # FIXME: Taylor expansion should be used to handle angle ~ 0.0
-    axis = rotvec / np.maximum(angle[..., None], gs.EPS)
-
-    # Compute the quaternion representation
-    out_[..., 0] = np.cos(0.5 * angle)
-    out_[..., 1:] = np.sin(0.5 * angle[..., None]) * axis
+    # Below an angle of 2, the half-angle terms follow their Taylor series (see qd_half_angle_terms), whose factorials
+    # come from 'math.gamma' that numba supports. The closed form reads the angle clamped to that bound, so that it stays
+    # finite where the series applies.
+    thetasq = np.sum(np.square(rotvec.reshape((-1, 3))), -1).reshape((*B, 1))
+    u = 0.25 * thetasq
+    cos_half_series = np.zeros_like(u)
+    for coef in [(-1.0) ** n / math.gamma(2 * n + 1) for n in range(8, -1, -1)]:
+        cos_half_series = cos_half_series * u + coef
+    sinc_half_series = np.zeros_like(u)
+    for coef in [(-1.0) ** n / math.gamma(2 * n + 2) for n in range(8, -1, -1)]:
+        sinc_half_series = sinc_half_series * u + coef
+    theta = np.sqrt(np.maximum(thetasq, 4.0))
+    is_series = u < 1.0
+    out_[..., :1] = np.where(is_series, cos_half_series, np.cos(0.5 * theta))
+    out_[..., 1:] = np.where(is_series, 0.5 * sinc_half_series, np.sin(0.5 * theta) / theta) * rotvec
 
     return out_
 
 
 @nb.jit(nopython=True, cache=True)
-def _np_axis_cos_angle_to_R(axis: np.ndarray, cos_theta: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
-    if isinstance(cos_theta, (float, np.float32, np.float64)):
-        assert axis.ndim == 1
-    else:
-        assert axis.ndim - 1 == cos_theta.ndim
-    if out is None:
-        out_ = np.empty((*axis.shape[:-1], 3, 3), dtype=axis.dtype)
-    else:
-        assert out.shape == (*axis.shape[:-1], 3, 3)
-        out_ = out
-
-    axis_norm = np.sqrt(np.sum(np.square(axis.reshape((-1, 3))), -1).reshape((*axis.shape[:-1], 1)))
-    axis = axis / axis_norm
-    if not isinstance(cos_theta, (float, np.float32, np.float64)):
-        cos_theta = cos_theta[..., None]
-    sin_theta = np.sqrt(1.0 - cos_theta**2)
-    cos1_axis = (1.0 - cos_theta) * axis
-    sin_axis = sin_theta * axis
-
-    tmp = cos1_axis[..., 0] * axis[..., 1]
-    out_[..., 0, 1] = tmp - sin_axis[..., 2]
-    out_[..., 1, 0] = tmp + sin_axis[..., 2]
-    tmp = cos1_axis[..., 0] * axis[..., 2]
-    out_[..., 0, 2] = tmp + sin_axis[..., 1]
-    out_[..., 2, 0] = tmp - sin_axis[..., 1]
-    tmp = cos1_axis[..., 1] * axis[..., 2]
-    out_[..., 1, 2] = tmp - sin_axis[..., 0]
-    out_[..., 2, 1] = tmp + sin_axis[..., 0]
-    tmp = cos1_axis * axis + cos_theta
-    out_[..., 0, 0] = tmp[..., 0]
-    out_[..., 1, 1] = tmp[..., 1]
-    out_[..., 2, 2] = tmp[..., 2]
-
-    return out_
+def _np_unit_axis_cos_sin_to_R(x: float, y: float, z: float, c: float, s: float, R: np.ndarray) -> None:
+    t = 1.0 - c
+    t_xy, t_xz, t_yz = t * x * y, t * x * z, t * y * z
+    R[0, 0], R[0, 1], R[0, 2] = t * x * x + c, t_xy - s * z, t_xz + s * y
+    R[1, 0], R[1, 1], R[1, 2] = t_xy + s * z, t * y * y + c, t_yz - s * x
+    R[2, 0], R[2, 1], R[2, 2] = t_xz - s * y, t_yz + s * x, t * z * z + c
 
 
+@nb.jit(nopython=True, cache=True)
 def axis_angle_to_R(axis: np.ndarray, theta: np.ndarray) -> np.ndarray:
-    return _np_axis_cos_angle_to_R(axis, np.cos(theta))
+    """Compute the rotation matrices of a single or a batch of rotations given as an axis and an angle.
+
+    'axis' holds rotation axes of arbitrary non-zero norm. 'theta' holds one angle per axis in radians, or is a scalar
+    for a single axis.
+    """
+    theta = np.asarray(theta)
+    assert axis.shape[:-1] == theta.shape
+
+    out = np.empty((*axis.shape[:-1], 3, 3), dtype=axis.dtype)
+    for i in np.ndindex(axis.shape[:-1]):
+        x, y, z = axis[i]
+        axis_norm_inv = 1.0 / np.sqrt(x * x + y * y + z * z)
+        c, s = np.cos(theta[i]), np.sin(theta[i])
+        _np_unit_axis_cos_sin_to_R(x * axis_norm_inv, y * axis_norm_inv, z * axis_norm_inv, c, s, out[i])
+
+    return out
 
 
+@nb.jit(nopython=True, cache=True)
 def rotvec_to_R(rotvec: np.ndarray) -> np.ndarray:
-    return axis_angle_to_R(rotvec, np.linalg.norm(rotvec, axis=-1))
+    """Compute the rotation matrices of a single or a batch of rotation vectors, whose norm is the angle in radians."""
+    out = np.empty((*rotvec.shape[:-1], 3, 3), dtype=rotvec.dtype)
+    for i in np.ndindex(rotvec.shape[:-1]):
+        x, y, z = rotvec[i]
+        theta = np.sqrt(x * x + y * y + z * z)
+        if theta < gs.EPS:
+            _np_unit_axis_cos_sin_to_R(0.0, 0.0, 1.0, 1.0, 0.0, out[i])
+        else:
+            theta_inv = 1.0 / theta
+            c, s = np.cos(theta), np.sin(theta)
+            _np_unit_axis_cos_sin_to_R(x * theta_inv, y * theta_inv, z * theta_inv, c, s, out[i])
+
+    return out
 
 
 @nb.jit(nopython=True, cache=True)
@@ -2199,96 +2265,79 @@ def R_to_rotvec(R: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
 
 
 @nb.jit(nopython=True, cache=True)
-def z_to_R(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
+def z_to_R(v_a: np.ndarray) -> np.ndarray:
     """
-    Compute the "smallest" rotation transforming vector 'v_a' in 'e_z' as a rotation matrix.
+    Compute the shortest rotation mapping the z-axis onto a direction, as a rotation matrix.
 
-    This operation is computed by rotating the world frame by moving the original z-axis to the given vector via the
-    shortest path.
+    It is the rotation of `z_to_quat`, whose docstring describes the handling of the degenerate directions.
     """
-    B = v_a.shape[:-1]
-
-    v_a_norm = np.sqrt(np.sum(np.square(v_a.reshape((-1, 3))), -1).reshape((*B, 1)))
-    v_a = v_a / v_a_norm
-
-    axis = np.empty((*B, 3), dtype=v_a.dtype)
-    cos_theta = np.empty(B, dtype=v_a.dtype)
-    for i in np.ndindex(B):
-        axis_i = axis[i]
+    out = np.empty((*v_a.shape[:-1], 3, 3), dtype=v_a.dtype)
+    for i in np.ndindex(v_a.shape[:-1]):
         v_x, v_y, v_z = v_a[i]
-        cos_theta[i] = v_z
-        if abs(cos_theta[i]) < 1.0 - gs.EPS:
-            axis_i[0] = -v_y
-            axis_i[1] = v_x
-            axis_i[2] = 0.0
-        else:
-            axis_i[:] = 0.0, 1.0, 0.0
+        R = out[i]
 
-    return _np_axis_cos_angle_to_R(axis, cos_theta, out)
+        v_norm = np.sqrt(v_x * v_x + v_y * v_y + v_z * v_z)
+        if not np.isfinite(v_norm):
+            R[:] = np.nan
+        elif v_norm < gs.EPS:
+            _np_unit_axis_cos_sin_to_R(0.0, 0.0, 1.0, 1.0, 0.0, R)
+        else:
+            v_norm_inv = 1.0 / v_norm
+            v_x, v_y, v_z = v_x * v_norm_inv, v_y * v_norm_inv, v_z * v_norm_inv
+            transverse_sq = v_x * v_x + v_y * v_y
+            if v_z >= 0.0 or transverse_sq > 0.0:
+                # Near -z, 1 + v_z loses its digits to cancellation, so use the equal (1 - v_z) / (v_x^2 + v_y^2)
+                f = 1.0 / (1.0 + v_z) if v_z >= 0.0 else (1.0 - v_z) / transverse_sq
+                f_xy = -f * v_x * v_y
+                R[0, 0], R[0, 1], R[0, 2] = 1.0 - f * v_x * v_x, f_xy, v_x
+                R[1, 0], R[1, 1], R[1, 2] = f_xy, 1.0 - f * v_y * v_y, v_y
+                R[2, 0], R[2, 1], R[2, 2] = -v_x, -v_y, v_z
+            else:
+                _np_unit_axis_cos_sin_to_R(0.0, 1.0, 0.0, -1.0, 0.0, R)
+
+    return out
 
 
 @nb.jit(nopython=True, cache=True)
-def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
+def z_to_quat(v_a: np.ndarray) -> np.ndarray:
     """
-    Compute the "smallest" rotation transforming vector 'v_a' in 'e_z' as a quaternion (q_w, q_x, q_y, q_z).
+    Compute the shortest rotation mapping the z-axis onto a direction, as a quaternion (q_w, q_x, q_y, q_z).
 
-    This method is (surprisingly) slower than `z_up_to_R`, w/ and w/o chaining `transform_by_(quat|R)`.
+    'v_a' holds a single or a batch of directions of arbitrary norm. A direction whose norm is below `gs.EPS` gives the
+    identity. The exact -z direction gives the rotation by pi about the y-axis, out of all the shortest rotations. A
+    direction with a non-finite component, or whose squared norm overflows, gives a NaN quaternion.
     """
-    if out is None:
-        out_ = np.empty((*v_a.shape[:-1], 4), dtype=v_a.dtype)
-    else:
-        assert out.shape == (*v_a.shape[:-1], 4)
-        out_ = out
-
-    v_a_norm = np.sqrt(np.sum(np.square(v_a.reshape((-1, 3))), -1).reshape((*v_a.shape[:-1], 1)))
-    v_a = v_a / v_a_norm
-    v_x, v_y, v_z = v_a[..., 0], v_a[..., 1], v_a[..., 2]
-
+    out = np.empty((*v_a.shape[:-1], 4), dtype=v_a.dtype)
     for i in np.ndindex(v_a.shape[:-1]):
         v_x, v_y, v_z = v_a[i]
-        quat = out_[i]
+        quat = out[i]
 
-        if v_a_norm[i] < gs.EPS:
+        v_norm = np.sqrt(v_x * v_x + v_y * v_y + v_z * v_z)
+        if not np.isfinite(v_norm):
+            quat[:] = np.nan
+        elif v_norm < gs.EPS:
             quat[:] = 1.0, 0.0, 0.0, 0.0
-        elif v_z > -1.0 + gs.EPS:
-            s = np.sqrt(2.0 * (1.0 + v_z))
-            s_inv = 1.0 / s
-            quat[:] = 0.5 * s, -v_y * s_inv, v_x * s_inv, 0.0
         else:
-            eps_thr = np.sqrt(gs.EPS)
-            eps_x = abs(v_x) < gs.EPS
-            eps_y = abs(v_y) < gs.EPS
-            if not eps_y:
-                ratio = v_x / v_y
-                if eps_x:
-                    esp_ratio = abs(ratio) < eps_thr
-            elif eps_y and not eps_x:
-                ratio = v_y / v_x
-                esp_ratio = abs(ratio) < eps_thr
-            w_2 = 0.5 * (1.0 + max(v_z, -1.0))
-            quat[0] = np.sqrt(w_2)
-            if eps_x and eps_y:
-                # Both q_x and q_y would do fine. Picking q_y arbitrarily.
-                quat[1] = 0.0
-                quat[2] = 1.0
-            elif esp_ratio:
-                coef_abs = np.sqrt(1.0 - w_2) * (1.0 - 0.5 * ratio**2)
-                if eps_x:
-                    quat[1] = -np.sign(v_y) * coef_abs
-                    quat[2] = -quat[1] * ratio
-                else:
-                    quat[2] = np.sign(v_x) * coef_abs
-                    quat[1] = -quat[2] * ratio
+            v_norm_inv = 1.0 / v_norm
+            v_x, v_y, v_z = v_x * v_norm_inv, v_y * v_norm_inv, v_z * v_norm_inv
+            if v_z >= 0.0:
+                s = np.sqrt(2.0 * (1.0 + v_z))
+                s_inv = 1.0 / s
+                quat[:] = 0.5 * s, -v_y * s_inv, v_x * s_inv, 0.0
             else:
-                q_x_abs = np.sqrt((1.0 - w_2) / (1.0 + ratio**2))
-                quat[1] = -np.sign(v_y) * q_x_abs
-                quat[2] = +np.sign(v_x) * q_x_abs * ratio
-            quat[3] = 0.0
+                # Near -z, 1 + v_z loses cos(theta/2) to cancellation. Recover it from the transverse norm instead.
+                transverse_norm = np.sqrt(v_x * v_x + v_y * v_y)
+                if transverse_norm > 0.0:
+                    sin_half_angle = np.sqrt(0.5 * (1.0 - v_z))
+                    axis_scale = sin_half_angle / transverse_norm
+                    quat[:] = 0.5 * transverse_norm / sin_half_angle, -v_y * axis_scale, v_x * axis_scale, 0.0
+                else:
+                    quat[:] = 0.0, 0.0, 1.0, 0.0
 
-            # First order quaternion normalization is accurate enough
-            quat *= 0.5 * (3.0 - np.sum(np.square(quat), -1))
+                # First order quaternion normalization is accurate enough
+                quat *= 0.5 * (3.0 - (quat[0] ** 2 + quat[1] ** 2 + quat[2] ** 2))
 
-    return out_
+    return out
 
 
 def compute_camera_angle(camera_pos, camera_lookat):
@@ -2540,122 +2589,191 @@ def default_dofs_kv(n=6):
     return np.full((n,), fill_value=10.0, dtype=gs.np_float)
 
 
-@qd.data_oriented
-class SpatialHasher:
-    def __init__(self, cell_size, grid_res, n_slots=None):
-        self.cell_size = cell_size
-        self.grid_res = grid_res
+class SpatialHashGrid(Data, kind=DataKind.DERIVED, shape=(HASH_SLOTS, ENVS)):
+    """
+    The particles of every environment sorted by the cell of a uniform grid they lie in, for neighbour queries.
 
-        if n_slots is None:
-            self.n_slots = np.prod(grid_res)
-        else:
-            self.n_slots = n_slots
+    A cell of integer coordinates hashes to one of the slots, whose particles take the sorted indices from `slot_start`
+    to `slot_start + slot_size` (see func_hash_sort_particles). `particles_idx` is the particle each sorted index holds,
+    and `n_particles` the number of active particles of each environment, which take the first sorted indices.
+    """
 
-    def build(self, n_elems, n_batch):
-        self._B = n_batch
-        # number of elements in each slot
-        self.slot_size = qd.field(gs.qd_int, shape=(self.n_slots, self._B))
-        # element index offset in each slot
-        self.slot_start = qd.field(gs.qd_int, shape=(self.n_slots, self._B))
-        # index of the element each sorted index holds, before the elements of each slot are put in ascending order
-        self.elems_idx = qd.field(gs.qd_int, shape=(n_elems, self._B))
-        self.cur_cnt = qd.field(gs.qd_int, shape=(self._B,))
+    slot_size: qd.Tensor = field(int)
+    slot_start: qd.Tensor = field(int)
+    particles_idx: qd.Tensor = field(int, shape=(PARTICLES, ENVS))
+    n_particles: qd.Tensor = field(int, shape=(ENVS,))
+    # The particle count and the first sorted index of each chunk of consecutive slots, and of each group of consecutive
+    # chunks (see hash_grid_sizes)
+    chunks_size: qd.Tensor = field(int, shape=(HASH_CHUNKS, ENVS), kind=DataKind.SCRATCH)
+    chunks_start: qd.Tensor = field(int, shape=(HASH_CHUNKS, ENVS), kind=DataKind.SCRATCH)
+    groups_size: qd.Tensor = field(int, shape=(HASH_GROUPS, ENVS), kind=DataKind.SCRATCH)
+    groups_start: qd.Tensor = field(int, shape=(HASH_GROUPS, ENVS), kind=DataKind.SCRATCH)
+    # The particle each sorted index holds before the particles of each slot are put in ascending order of index
+    slots_particles_idx: qd.Tensor = field(int, shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH)
+    cell_size: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT)
+    grid_res: qd.Tensor = field((int, 3), shape=(), kind=DataKind.CONSTANT)
+    # The slot of each particle, -1 for an inactive one (see func_sort_particles_by_slot)
+    particles_slot: qd.Tensor = field(int, shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH)
 
-    @qd.func
-    def compute_reordered_idx(self, n, pos, active, reordered_idx):
-        """
-        Reordered element idx based on the given positions and active flags.
 
-        The elements of a slot take their sorted indices in ascending order of element index.
+def hash_grid_sizes(n_slots: int) -> dict[str, int]:
+    """Return the sizes a spatial hash grid of a number of slots is built with (see SpatialHashGrid)."""
+    # The slots split into chunks of about the cube root of their number, and the chunks into groups as long, which
+    # keeps every part of the parallel sum of the slot sizes to that length
+    part_len = math.ceil(n_slots ** (1 / 3))
+    n_chunks = math.ceil(n_slots / part_len)
+    return dict(hash_slots=n_slots, hash_chunks=n_chunks, hash_groups=math.ceil(n_chunks / part_len))
 
-        Parameters:
-            n (int)       : The number of elements in the positions and active arrays.
-            pos           : The array of positions.
-            active        : The array of active flags.
-            reordered_idx : The array to store the computed reordered indices.
 
-        Returns:
-            None
-        """
+@qd.func
+def func_hash_sort_particles(particles_pos: qd.Tensor, particles_is_active: qd.Tensor, hash_grid: SpatialHashGrid):
+    """
+    Sort the active particles of every environment by the slot of the hash grid their position falls in.
 
-        self.slot_size.fill(0)
-        self.slot_start.fill(0)
-        self.cur_cnt.fill(0)
+    Called at the top level of a kernel, whose loops it runs in parallel (see func_sort_particles_by_slot).
+    """
+    for i_p, i_b in qd.ndrange(particles_pos.shape[0], hash_grid.slot_size.shape[1]):
+        i_s = -1
+        if particles_is_active[i_p, i_b]:
+            i_s = func_hash_pos_to_slot(particles_pos[i_p, i_b], hash_grid)
+        hash_grid.particles_slot[i_p, i_b] = i_s
 
-        for i_n, i_b in qd.ndrange(n, self._B):
-            if active[i_n, i_b]:
-                slot_idx = self.pos_to_slot(pos[i_n, i_b])
-                qd.atomic_add(self.slot_size[slot_idx, i_b], 1)
+    func_sort_particles_by_slot(hash_grid)
 
-        for i_n in range(self.n_slots):
-            for i_b in range(self._B):
-                self.slot_start[i_n, i_b] = qd.atomic_add(self.cur_cnt[i_b], self.slot_size[i_n, i_b])
 
-        for i_n, i_b in qd.ndrange(n, self._B):
-            if active[i_n, i_b]:
-                slot_idx = self.pos_to_slot(pos[i_n, i_b])
-                i_r = qd.atomic_add(self.slot_start[slot_idx, i_b], 1)
-                self.elems_idx[i_r, i_b] = i_n
+@qd.func
+def func_sort_particles_by_slot(hash_grid: SpatialHashGrid):
+    """
+    Sort the particles of every environment by the slot `particles_slot` gives them, leaving out those of slot -1.
 
-        # recover slot_start
-        for i_s, i_b in qd.ndrange(self.n_slots, self._B):
-            self.slot_start[i_s, i_b] -= self.slot_size[i_s, i_b]
+    The particles sorted take the sorted indices 0 to `n_particles - 1`, those of a slot following each other in
+    ascending order of index, and `particles_idx` receives the particle of each sorted index. Called at the top level of
+    a kernel, whose loops it runs in parallel.
+    """
+    n_slots, _B = hash_grid.slot_size.shape[0], hash_grid.slot_size.shape[1]
+    # The slot starts are all written before they are read, so the counts alone start from zero
+    for i_s, i_b in qd.ndrange(n_slots, _B):
+        hash_grid.slot_size[i_s, i_b] = 0
 
-        # The atomic increments fill each slot in the order the threads reach it, which varies from one run to the next.
-        # Ranking the elements of a slot by index fixes the order in which the neighbour queries sum over them, so that
-        # the same state steps on bit-identically.
-        for i_n, i_b in qd.ndrange(n, self._B):
-            if active[i_n, i_b]:
-                slot_idx = self.pos_to_slot(pos[i_n, i_b])
-                slot_start = self.slot_start[slot_idx, i_b]
-                rank = 0
-                for i_r in range(slot_start, slot_start + self.slot_size[slot_idx, i_b]):
-                    if self.elems_idx[i_r, i_b] < i_n:
-                        rank += 1
-                reordered_idx[i_n, i_b] = slot_start + rank
+    for i_p, i_b in qd.ndrange(*hash_grid.particles_slot.shape):
+        i_s = hash_grid.particles_slot[i_p, i_b]
+        if i_s >= 0:
+            qd.atomic_add(hash_grid.slot_size[i_s, i_b], 1)
 
-    @qd.func
-    def for_all_neighbors(self, i_p, pos, task_range, ret: qd.template(), task: qd.template(), i_b):
-        """
-        Iterates over all neighbors of a given position and performs a task on each neighbor.
-        Elements are considered neighbors if they are within task_range.
+    # The slots of each environment are stored in slot order, so that the particles of neighbouring cells are close in
+    # memory, and identical environments store the same particle at the same sorted index, which the parallel threads
+    # running over the environments of one index read side by side. The slot starts are an exclusive prefix sum of the
+    # slot sizes, summed over chunks of consecutive slots and over groups of consecutive chunks in parallel, so that
+    # the serial part of the sum runs over the groups alone.
+    n_chunks, n_groups = hash_grid.chunks_size.shape[0], hash_grid.groups_size.shape[0]
+    chunk_len = (n_slots + n_chunks - 1) // n_chunks
+    group_len = (n_chunks + n_groups - 1) // n_groups
+    for i_c, i_b in qd.ndrange(n_chunks, _B):
+        n_particles = 0
+        for i_s in range(i_c * chunk_len, qd.min((i_c + 1) * chunk_len, n_slots)):
+            n_particles = n_particles + hash_grid.slot_size[i_s, i_b]
+        hash_grid.chunks_size[i_c, i_b] = n_particles
 
-        Parameters:
-            i_p (int)  : Index of the querying particle.
-            pos        : Template for the positions of all particles.
-            task       : Template for the task to be performed on each neighbor of the querying particle.
-            task_range : Range within which the task should be performed.
-            ret        : Template for the return value of the task.
+    for i_g, i_b in qd.ndrange(n_groups, _B):
+        n_particles = 0
+        for i_c in range(i_g * group_len, qd.min((i_g + 1) * group_len, n_chunks)):
+            n_particles = n_particles + hash_grid.chunks_size[i_c, i_b]
+        hash_grid.groups_size[i_g, i_b] = n_particles
 
-        Returns:
-            None
-        """
-        base = self.pos_to_grid(pos[i_p, i_b])
-        for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
-            slot_idx = self.grid_to_slot(base + offset)
-            for j_p in range(
-                self.slot_start[slot_idx, i_b], self.slot_size[slot_idx, i_b] + self.slot_start[slot_idx, i_b]
-            ):
-                if i_p != j_p and (pos[i_p, i_b] - pos[j_p, i_b]).norm() < task_range:
-                    task(i_p, j_p, ret, i_b)
+    for i_b in range(_B):
+        n_particles = 0
+        for i_g in range(n_groups):
+            hash_grid.groups_start[i_g, i_b] = n_particles
+            n_particles = n_particles + hash_grid.groups_size[i_g, i_b]
+        hash_grid.n_particles[i_b] = n_particles
 
-    @qd.func
-    def pos_to_grid(self, pos):
-        return qd.floor(pos / self.cell_size, gs.qd_int)
+    for i_g, i_b in qd.ndrange(n_groups, _B):
+        n_particles = hash_grid.groups_start[i_g, i_b]
+        for i_c in range(i_g * group_len, qd.min((i_g + 1) * group_len, n_chunks)):
+            hash_grid.chunks_start[i_c, i_b] = n_particles
+            n_particles = n_particles + hash_grid.chunks_size[i_c, i_b]
 
-    @qd.func
-    def grid_to_pos(self, grid_id):
-        return (grid_id + 0.5) * self.cell_size
+    for i_c, i_b in qd.ndrange(n_chunks, _B):
+        n_particles = hash_grid.chunks_start[i_c, i_b]
+        for i_s in range(i_c * chunk_len, qd.min((i_c + 1) * chunk_len, n_slots)):
+            hash_grid.slot_start[i_s, i_b] = n_particles
+            n_particles = n_particles + hash_grid.slot_size[i_s, i_b]
 
-    @qd.func
-    def grid_to_slot(self, grid_id):
-        return (
-            grid_id[0] * self.grid_res[1] * self.grid_res[2] + grid_id[1] * self.grid_res[2] + grid_id[2]
-        ) % self.n_slots
+    for i_p, i_b in qd.ndrange(*hash_grid.particles_slot.shape):
+        i_s = hash_grid.particles_slot[i_p, i_b]
+        if i_s >= 0:
+            i_r = qd.atomic_add(hash_grid.slot_start[i_s, i_b], 1)
+            hash_grid.slots_particles_idx[i_r, i_b] = i_p
 
-    @qd.func
-    def pos_to_slot(self, pos):
-        return self.grid_to_slot(self.pos_to_grid(pos))
+    # The atomic increments above left every slot start at the end of its range
+    for i_s, i_b in qd.ndrange(n_slots, _B):
+        hash_grid.slot_start[i_s, i_b] = hash_grid.slot_start[i_s, i_b] - hash_grid.slot_size[i_s, i_b]
+
+    # The atomic increments fill each slot in the order the threads reach it, which varies from one run to the next.
+    # Ranking the particles of a slot by index fixes the order in which the neighbour queries sum over them, so that
+    # the same state steps on bit-identically.
+    for i_p, i_b in qd.ndrange(*hash_grid.particles_slot.shape):
+        i_s = hash_grid.particles_slot[i_p, i_b]
+        if i_s >= 0:
+            slot_start = hash_grid.slot_start[i_s, i_b]
+            rank = 0
+            for i_r in range(slot_start, slot_start + hash_grid.slot_size[i_s, i_b]):
+                if hash_grid.slots_particles_idx[i_r, i_b] < i_p:
+                    rank += 1
+            hash_grid.particles_idx[slot_start + rank, i_b] = i_p
+
+
+@qd.func
+def func_hash_pos_to_grid(pos: qd.types.vector(3), hash_grid: SpatialHashGrid):
+    """Return the integer coordinates of the cell of the hash grid a position lies in."""
+    return qd.floor(pos / hash_grid.cell_size[None], gs.qd_int)
+
+
+# The integer dtype is spelled out since the Genesis integer vector types only exist once Genesis is initialized
+@qd.func
+def func_hash_grid_to_slot(grid_id, hash_grid: SpatialHashGrid):
+    """
+    Return the slot of the hash grid a cell of integer coordinates hashes to.
+
+    The grid wraps around along each axis, so that the cells of a run along an axis shorter than the resolution of the
+    grid hash to distinct slots (see func_hash_n_cells).
+    """
+    return func_hash_cell_to_slot(func_hash_wrap_cell(grid_id, hash_grid), hash_grid)
+
+
+@qd.func
+def func_hash_wrap_cell(grid_id, hash_grid: SpatialHashGrid):
+    """Return the cell of integer coordinates wrapped into the grid along each axis."""
+    return grid_id % hash_grid.grid_res[None]
+
+
+@qd.func
+def func_hash_cell_to_slot(cell, hash_grid: SpatialHashGrid):
+    """
+    Return the slot of a cell wrapped into the grid along each axis, or past it by less than one grid resolution.
+
+    A neighbour search wraps the first cell of its run once (see func_hash_wrap_cell), and the cells after it with a
+    subtraction rather than a modulo.
+    """
+    grid_res = hash_grid.grid_res[None]
+    cell_wrapped = qd.select(cell >= grid_res, cell - grid_res, cell)
+    return cell_wrapped[0] * grid_res[1] * grid_res[2] + cell_wrapped[1] * grid_res[2] + cell_wrapped[2]
+
+
+@qd.func
+def func_hash_n_cells(n_cells: int, hash_grid: SpatialHashGrid):
+    """
+    Return how many of a run of consecutive cells along each axis hash to distinct slots, the grid wrapping around.
+
+    A neighbour search over the run visits each slot once by looping over that many cells along each axis.
+    """
+    return qd.min(qd.Vector([n_cells, n_cells, n_cells], dt=gs.qd_int), hash_grid.grid_res[None])
+
+
+@qd.func
+def func_hash_pos_to_slot(pos: qd.types.vector(3), hash_grid: SpatialHashGrid):
+    """Return the slot of the hash grid a position falls in."""
+    return func_hash_grid_to_slot(func_hash_pos_to_grid(pos, hash_grid), hash_grid)
 
 
 @nb.jit(nopython=True, cache=True)

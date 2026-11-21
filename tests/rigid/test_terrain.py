@@ -290,6 +290,9 @@ def test_mesh_to_heightfield(tmp_path, show_viewer):
         sim_options=gs.options.SimOptions(
             gravity=(5, 0, -5),
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0, -5, 7),
             camera_lookat=(10, 15, 4),
@@ -304,14 +307,12 @@ def test_mesh_to_heightfield(tmp_path, show_viewer):
             height_field=hf_terrain,
             pos=translation,
         ),
-        vis_mode="collision",
     )
     ball = scene.add_entity(
         gs.morphs.Sphere(
             pos=(10, 15, 7),
             radius=1,
         ),
-        vis_mode="collision",
     )
     scene.build()
 
@@ -434,13 +435,13 @@ def test_multicontact_sphere_vs_terrain(show_viewer, tol):
 
     for _ in range(80):
         scene.step()
-        print(tensor_to_array(sphere.get_dofs_velocity()))
+        print(sphere.get_dofs_velocity())
 
     # Sphere is at rest at the apex of the pit. Equilibrium height is set by the four-wall solid angle: contacts on the
     # opposing pyramid walls push the sphere upward, so it sits above the apex vertex but well below the rim.
-    pos_final = tensor_to_array(sphere.get_pos())
+    pos_final = sphere.get_pos()
     assert_allclose(pos_final[:2], 0.0, tol=2.0 * HORIZONTAL_SCALE)
     assert SPHERE_RADIUS < pos_final[2] < APEX_IDX * VERTICAL_SCALE + SPHERE_RADIUS
 
-    vel_final = tensor_to_array(sphere.get_dofs_velocity())
+    vel_final = sphere.get_dofs_velocity()
     assert_allclose(vel_final, 0.0, tol=1e-5)

@@ -16,7 +16,7 @@ import genesis.utils.geom as gu
 from genesis.ext import pyrender
 from genesis.ext.pyrender.overlay import ImGuiOverlayPlugin
 from genesis.repr_base import RBC
-from genesis.utils.misc import redirect_libc_stderr, tensor_to_array
+from genesis.utils.misc import BuildableMixin, redirect_libc_stderr, tensor_to_array
 from genesis.utils.tools import Rate
 from genesis.vis.keybindings import Key, KeyAction, Keybind, KeyMod
 from genesis.vis.viewer_plugins import DefaultControlsPlugin
@@ -37,13 +37,13 @@ class ViewerLock:
         self._pyrender_viewer.render_lock.release()
 
 
-class Viewer(RBC):
+class Viewer(BuildableMixin, RBC):
     def __init__(self, options: "ViewerOptions", context):
-        self._is_built = False
         self._res = options.res
         self._run_in_thread = options.run_in_thread
         self._refresh_rate = options.refresh_rate
         self._realtime_factor = options.realtime_factor
+        self._update_on_setters = options.update_on_setters
         self._camera_init_pos = np.asarray(options.camera_pos, dtype=np.float64)
         self._camera_init_lookat = np.asarray(options.camera_lookat, dtype=np.float64)
         self._camera_up = np.asarray(options.camera_up, dtype=np.float64)
@@ -62,6 +62,7 @@ class Viewer(RBC):
 
         self._pyrender_viewer = None
         self.context = context
+        self.context.add_view(self, is_debug=True)
         self.scene = None
 
         self._followed_entity = None
@@ -76,6 +77,7 @@ class Viewer(RBC):
         self._last_refresh_time = None
         self._step_pacer = None
 
+    @gs.assert_unbuilt
     def build(self, scene):
         self.scene = scene
 
@@ -140,6 +142,7 @@ class Viewer(RBC):
                         plane_reflection=self.context.plane_reflection,
                         enable_help_text=self._enable_help_text,
                         plugins=self._plugins,
+                        debug_view=True,
                         viewer_flags={
                             "window_title": f"Genesis {gs.__version__}",
                             "refresh_rate": self._refresh_rate,
@@ -189,6 +192,11 @@ class Viewer(RBC):
         if self._pyrender_viewer is not None and self._pyrender_viewer.is_active:
             self._pyrender_viewer.close()
 
+    def destroy(self):
+        self.stop()
+        self.context.remove_view(self)
+        self._is_built = False
+
     def is_alive(self):
         if self._pyrender_viewer is None:
             return False
@@ -229,7 +237,7 @@ class Viewer(RBC):
             self._last_refresh_time = now
             with self.lock:
                 # A step changes the state of every solver, so every solver is synced at each refresh. A setter syncs
-                # its own solver right away (see 'Visualizer.build').
+                # right away (see 'Visualizer.build').
                 self.context.update(force_render=True)
 
                 # Refresh viewer by default if and if this is possible
@@ -286,8 +294,9 @@ class Viewer(RBC):
         depth=False,
         seg=False,
         normal=False,
-        skip_markers=False,
         split_envs=False,
+        env_idx=None,
+        debug_view=True,
     ):
         return self._pyrender_viewer.render_offscreen(
             camera_node,
@@ -296,8 +305,9 @@ class Viewer(RBC):
             depth,
             seg,
             normal,
-            skip_markers=skip_markers,
             split_envs=split_envs,
+            env_idx=env_idx,
+            debug_view=debug_view,
         )
 
     def set_camera_pose(self, pose=None, pos=None, lookat=None):
@@ -449,7 +459,7 @@ class Viewer(RBC):
         # is only recorded once it has successfully attached. The render lock serializes the attach with the viewer
         # thread when running in a thread; it is reentrant, so this is a no-op when called from a render callback
         # (e.g. the overlay Plugins tab) that already holds it.
-        if self.is_built:
+        if self._is_built:
             with self._pyrender_viewer.render_lock:
                 self._pyrender_viewer.register_plugin(plugin)
         self._plugins.append(plugin)
@@ -466,7 +476,7 @@ class Viewer(RBC):
         """
         if plugin in self._plugins:
             self._plugins.remove(plugin)
-        if self.is_built and plugin in self._pyrender_viewer.plugins:
+        if self._is_built and plugin in self._pyrender_viewer.plugins:
             # Hold the (reentrant) render lock so the detach is serialized with the viewer thread, then drop the
             # plugin via copy-on-write so a dispatch loop already iterating self.plugins finishes on its snapshot.
             with self._pyrender_viewer.render_lock:
@@ -498,10 +508,6 @@ class Viewer(RBC):
         return tuple(self._plugins)
 
     @property
-    def is_built(self):
-        return self._is_built
-
-    @property
     def res(self):
         return self._res
 
@@ -522,6 +528,11 @@ class Viewer(RBC):
             self._step_pacer = None
         else:
             self._step_pacer = Rate(value / self.scene.sim.dt)
+
+    @property
+    def update_on_setters(self) -> bool:
+        """Whether the viewer shows the changes of a setter right away (see ``ViewerOptions.update_on_setters``)."""
+        return self._update_on_setters
 
     @property
     def camera_pos(self):

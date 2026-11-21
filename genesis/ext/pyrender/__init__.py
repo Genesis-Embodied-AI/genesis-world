@@ -11,7 +11,7 @@ from .renderer import Renderer
 from .viewer import Viewer
 from .offscreen import OffscreenRenderer
 from .version import __version__
-from .constants import RenderFlags, TextAlign, GLTF
+from .constants import RenderFlags, TextAlign, GLTF, ViewFlags
 
 __all__ = [
     "Camera",
@@ -35,6 +35,7 @@ __all__ = [
     "OffscreenRenderer",
     "__version__",
     "RenderFlags",
+    "ViewFlags",
     "TextAlign",
     "GLTF",
 ]

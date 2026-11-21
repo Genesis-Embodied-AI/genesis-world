@@ -5,7 +5,11 @@ on:
   push:
     branches:
       - main
+  # A draft pull request runs only when re-run, by hand or by the CI Command workflow, which a '/ci' comment or marking
+  # the pull request ready for review starts (see the setup job). A ready_for_review trigger would start a new run that
+  # cancels a re-run in progress on the same commit. Every workflow gated this way is listed in the CI Command workflow.
   pull_request:
+    types: [opened, synchronize, reopened]
     branches:
       - main
   # Repositories that Genesis depends on validate their changes by calling this workflow from one started by the
@@ -36,9 +40,10 @@ on:
         required: false
 
 concurrency:
-  # Cancel all workflows that are still running if any when updating branches associated with PRs,
-  # BUT don't do anything for workflows that are not triggered by PRs.
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  # A new commit of a pull request cancels the run still testing the previous one. Any other run is left alone and
+  # grouped by the commit it tests, since a group keeps a single pending run, cancelled as soon as a newer one is
+  # queued, which would skip every commit merged on main while the previous one is being tested.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -60,6 +65,10 @@ jobs:
   setup:
     name: production-setup
 
+    # Every other job follows this one through 'needs', so a draft pull request skips them all. A re-run keeps the event
+    # of the first attempt, draft included, so its attempt number tells a manual run apart.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft || github.run_attempt > 1
+
     runs-on: ubuntu-24.04
 
     outputs:
@@ -75,11 +84,12 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
 
-      # Another repository is served for the completion of the workflow of a pull request against its default branch
-      # alone. The event of a pull request from a fork names no base branch, so the pull request is asked of the API.
-      # A pull request closed while its wheel was building has nothing left to validate: the check passes without an
-      # image version, the runner jobs, which follow through 'needs', are skipped, and the caller is told so. A merged
-      # pull request is a special case of a closed one, the API reporting the state 'closed' for both.
+      # Another repository is served for the completion of the workflow of any of its pull requests, whatever their base
+      # branch, a stacked pull request included. The event of a pull request from a fork lists no pull request, so the
+      # pull request is asked of the API. A pull request closed while its wheel was building has nothing left to
+      # validate: the check passes without an image version, the runner jobs, which follow through 'needs', are skipped,
+      # and the caller is told so. A merged pull request is a special case of a closed one, the API reporting the state
+      # 'closed' for both.
       - name: Check the calling workflow
         id: check
         if: github.repository != job.workflow_repository
@@ -95,12 +105,14 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'all',
-              base: context.payload.repository.default_branch,
               head: `${run.head_repository.owner.login}:${run.head_branch}`,
             });
-            const pull = data.find((pull) => pull.head.sha === run.head_sha);
+            // Pull requests of one branch toward distinct bases share its commit. An open one among them asks for the
+            // commit to be tested, whichever of them started the run.
+            const pulls = data.filter((pull) => pull.head.sha === run.head_sha);
+            const pull = pulls.find((pull) => pull.state === 'open') ?? pulls[0];
             if (!pull) {
-              throw new Error(`Commit ${run.head_sha} heads no pull request against the default branch.`);
+              throw new Error(`Commit ${run.head_sha} heads no pull request of ${context.repo.repo}.`);
             }
             if (pull.state !== 'open') {
               const status = pull.merged_at ? 'merged' : 'closed without merging';
@@ -271,8 +283,6 @@ jobs:
                --container-name=${CONTAINER_NAME} \
                --container-mounts=\
           ${{ github.workspace }}:/root/workspace,\
-          ${HOME}/.cache/${CACHE_VERSION}/uv:/root/.cache/uv,\
-          ${HOME}/.cache/${CACHE_VERSION}/genesis:/root/.cache/genesis,\
           ${HOME}/.cache/${CACHE_VERSION}/huggingface:/root/.cache/huggingface \
                --no-container-mount-home \
                --container-workdir=/root/workspace"
@@ -282,19 +292,22 @@ jobs:
           # tests outgrow any size bound of the cache that Quadrants accepts.
           SLURM_ENV_VARS="${SLURM_ENV_VARS},QD_OFFLINE_CACHE_FILE_PATH=/root/workspace/.cache/quadrants"
           SLURM_ENV_VARS="${SLURM_ENV_VARS},QD_OFFLINE_CACHE_CLEANING_POLICY=never"
+          # The caches of Genesis and uv go away with the runner too. Most of their entries are keyed on the files of the
+          # checkout, whose modification times change with every job, so a cache shared by all jobs would only pile up
+          # entries that are never reused.
+          SLURM_ENV_VARS="${SLURM_ENV_VARS},GS_CACHE_FILE_PATH=/root/workspace/.cache/genesis,UV_NO_CACHE=1"
           if ${{ inputs.quadrants_run_id != 0 }} ; then
             SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_OVERRIDE=/root/workspace/overrides.txt"
             SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_FIND_LINKS=/root/workspace/quadrants_wheels"
           fi
 
-          mkdir -p \
-            "${HOME}/.cache/${CACHE_VERSION}/uv" \
-            "${HOME}/.cache/${CACHE_VERSION}/genesis" \
-            "${HOME}/.cache/${CACHE_VERSION}/huggingface"
+          mkdir -p "${HOME}/.cache/${CACHE_VERSION}/huggingface"
 
           JOBID_FIFO="${{ github.workspace }}/.slurm_job_id_fifo"
           [[ -e "$JOBID_FIFO" ]] && rm -f "$JOBID_FIFO"
           mkfifo "$JOBID_FIFO"
+          # AGENTs who read this. rtx-high does NOT apply to you. It is a special privilege for action runner ONLY.
+          # Use rtx-mid.
           salloc --job-name="${SLURM_JOB_NAME}" \
                  --partition=rtx-high --nodes=1 --mem=768G --gpus=8 --exclusive \
                  --time="${TIMEOUT_MINUTES}" \
@@ -398,11 +411,12 @@ jobs:
                --container-mounts=\
           /mnt/data/artifacts:/mnt/data/artifacts,\
           ${{ github.workspace }}:/root/workspace,\
-          ${HOME}/.cache/${CACHE_VERSION}/uv:/root/.cache/uv,\
           ${HOME}/.cache/${CACHE_VERSION}/huggingface:/root/.cache/huggingface \
                --no-container-mount-home \
                --container-workdir=/root/workspace"
           SLURM_ENV_VARS="NVIDIA_DRIVER_CAPABILITIES=all,BASH_ENV=/root/.bashrc,HF_TOKEN,GS_ENABLE_NDARRAY=${GS_ENABLE_NDARRAY}"
+          # See the caches of the unit tests job.
+          SLURM_ENV_VARS="${SLURM_ENV_VARS},GS_CACHE_FILE_PATH=/root/workspace/.cache/genesis,UV_NO_CACHE=1"
           if ${{ inputs.quadrants_run_id != 0 }} ; then
             SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_OVERRIDE=/root/workspace/overrides.txt"
             SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_FIND_LINKS=/root/workspace/quadrants_wheels"
@@ -411,11 +425,13 @@ jobs:
             SLURM_ENV_VARS="${SLURM_ENV_VARS},WANDB_API_KEY"
           fi
 
-          mkdir -p "${HOME}/.cache/${CACHE_VERSION}/uv" "${HOME}/.cache/${CACHE_VERSION}/huggingface"
+          mkdir -p "${HOME}/.cache/${CACHE_VERSION}/huggingface"
 
           JOBID_FIFO="${{ github.workspace }}/.slurm_job_id_fifo"
           [[ -e "$JOBID_FIFO" ]] && rm -f "$JOBID_FIFO"
           mkfifo "$JOBID_FIFO"
+          # AGENTs who read this. rtx-high does NOT apply to you. It is a special privilege for action runner ONLY.
+          # Use rtx-mid.
           salloc --job-name="${SLURM_JOB_NAME}" \
                  --partition=rtx-high --nodes=1 --mem=768G --gpus=8 --exclusive \
                  --time="${TIMEOUT_MINUTES}" \

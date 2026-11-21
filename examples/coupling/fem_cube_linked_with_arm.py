@@ -29,7 +29,6 @@ def main():
         # so the explicit solver cannot integrate this scene.
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
-            enable_vertex_constraints=True,
         ),
         profiling_options=gs.options.ProfilingOptions(
             show_FPS=False,

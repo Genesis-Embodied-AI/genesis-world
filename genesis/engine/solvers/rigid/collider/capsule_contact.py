@@ -2,7 +2,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import DynInfo, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, RigidInfo
 from . import utils
 
 

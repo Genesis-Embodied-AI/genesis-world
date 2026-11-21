@@ -33,8 +33,13 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                 requires_grad=requires_grad,
             ),
             rigid_options=gs.options.RigidOptions(
+                # A softer constraint keeps the box pressed into the ground box at a depth its rocking cannot undo
+                constraint_timeconst=0.02,
                 # A non-neutral impratio makes the regularized cone coefficient observable to finite differences
                 impratio=2.0,
+            ),
+            vis_options=gs.options.VisOptions(
+                debug=True,
             ),
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(1.2, -1.2, 0.8),
@@ -43,7 +48,9 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
             show_viewer=show_viewer,
         )
         # Every entity starts at rest on a support of top z = 0: box / sphere half extent 0.2, upright capsule radius
-        # 0.1 + half length 0.2 = 0.3, lying capsule radius 0.1.
+        # 0.1 + half length 0.2 = 0.3, lying capsule radius 0.1. The box on the ground box is tilted and pressed into it:
+        # resting flat, its contact between parallel faces would have no defined position, and the slightest rocking
+        # would change the contact set.
         if shape == "ground_box":
             # A box and a sphere on a ground box, and beside it a capsule lying on a fixed capsule along it, which
             # multi-contact touches at both ends.
@@ -53,28 +60,25 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                     pos=(0.0, 0.0, -0.1),
                     fixed=True,
                 ),
-                vis_mode="collision",
             )
             scene.add_entity(
                 gs.morphs.MJCF(
                     file=mjcf_capsule_ground,
                 ),
-                vis_mode="collision",
             )
             entities = (
                 scene.add_entity(
                     gs.morphs.Box(
                         size=(0.4, 0.4, 0.4),
-                        pos=(0.0, 0.0, 0.2),
+                        pos=(-0.5, 0.0, 0.198),
+                        euler=(1.0, 1.0, 0.0),
                     ),
-                    vis_mode="collision",
                 ),
                 scene.add_entity(
                     gs.morphs.Sphere(
                         radius=0.2,
                         pos=(0.6, 0.0, 0.2),
                     ),
-                    vis_mode="collision",
                 ),
                 scene.add_entity(
                     gs.morphs.MJCF(
@@ -82,7 +86,6 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                         pos=(1.5, 0.0, 0.1),
                         euler=(0.0, 90.0, 0.0),
                     ),
-                    vis_mode="collision",
                 ),
             )
         else:
@@ -93,7 +96,6 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                         size=(0.4, 0.4, 0.4),
                         pos=(0.0, 0.0, 0.2),
                     ),
-                    vis_mode="collision",
                 )
             elif shape == "sphere":
                 entity = scene.add_entity(
@@ -101,7 +103,6 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                         radius=0.2,
                         pos=(0.0, 0.0, 0.2),
                     ),
-                    vis_mode="collision",
                 )
             elif shape == "capsule":
                 entity = scene.add_entity(
@@ -109,7 +110,6 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                         file=mjcf_capsule,
                         pos=(0.0, 0.0, 0.3),
                     ),
-                    vis_mode="collision",
                 )
             else:
                 raise ValueError(shape)
@@ -118,19 +118,26 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
         return scene, entities, ground
 
     def _n_contacts(entities):
-        # The entities never touch each other, so that each contact involves a single one of them
-        return sum(len(entity.get_contacts()["geom_a"]) for entity in entities)
+        # The entities never touch each other, so that each contact involves a single one of them. Each entity stays in
+        # contact with its support, at points on its own surface.
+        n_contacts = 0
+        for entity in entities:
+            contacts = entity.get_contacts()
+            aabb = entity.get_AABB()
+            assert len(contacts["geom_a"]) > 0
+            assert ((aabb[0] - 1e-3 < contacts["position"]) & (contacts["position"] < aabb[1] + 1e-3)).all()
+            n_contacts += len(contacts["geom_a"])
+        return n_contacts
 
     def _losses(scene, entities):
         # Each entity measures its position from the vertical axis it starts on, which gives every loss term the
         # magnitude of a single entity at the origin, whose finite differences resolve its small gradient in fp32
-        qpos = scene.rigid_solver.get_state().qpos
         return [
-            ((qpos[0, entity.q_start : entity.q_start + 3] - qpos.new_tensor((*entity.morph.pos[:2], 0.0))) ** 2).sum()
+            ((entity.get_qpos()[:3] - entity.get_qpos().new_tensor((*entity.morph.pos[:2], 0.0))) ** 2).sum()
             for entity in entities
         ]
 
-    n_settle = 12
+    n_settle = 20
     n_steps = 2
     eps = 1e-2
     # Contact force gradients are tiny (stiff contact barely moves): at fp32 the FD reference mostly rounds to
@@ -149,6 +156,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
             for entity in entities:
                 entity.control_dofs_force(base_force)
             scene.step()
+            _n_contacts(entities)
 
     scene_ana, entities_ana, ground_ana = _build_contact_scene(
         shape, grad_capsule, grad_capsule_ground, requires_grad=True, show_viewer=show_viewer
@@ -156,8 +164,11 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
     init_force = np.broadcast_to(base_force, (n_steps, len(entities_ana), 6)).copy()
     scene_ana.reset()
     settle(scene_ana, entities_ana)
+    # Each entity comes to rest vertically on its support, which a contact dropped for a single substep would set
+    # bouncing again
+    for entity in entities_ana:
+        assert_allclose(entity.get_dofs_velocity()[2], 0.0, atol=5e-4)
     nc = _n_contacts(entities_ana)
-    assert nc > 0, f"setup error: {shape} not in contact after settle (n_contacts={nc})"
     if shape == "ground_box":
         n_contacts_capsule = _n_contacts(entities_ana[2:])
         assert n_contacts_capsule > 1, "setup error: multi-contact found no perturbed contact between the capsules"
@@ -173,7 +184,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
         scene_ana.step()
         assert _n_contacts(entities_ana) == nc, "contact set changed during grad window - FD invalid"
     scene_ana.backward(sum(_losses(scene_ana, entities_ana)))
-    ana = tensor_to_array(forces.grad)
+    ana = forces.grad
 
     # The FD reference must also run in diff mode: differentiable scenes route contacts through diff_gjk, whose
     # contact set and forces differ slightly from the production narrowphase, so a production-mode reference would
@@ -234,6 +245,9 @@ def test_contact_no_tunneling_forward(show_viewer):
         sim_options=gs.options.SimOptions(
             requires_grad=True,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.0, -2.0, 1.2),
             camera_lookat=(0.0, 0.0, 0.4),
@@ -249,7 +263,6 @@ def test_contact_no_tunneling_forward(show_viewer):
                 pos=(x, 0.0, 0.2),
                 fixed=True,
             ),
-            vis_mode="collision",
         )
         tops.append(
             scene.add_entity(
@@ -257,7 +270,6 @@ def test_contact_no_tunneling_forward(show_viewer):
                     size=(0.4, 0.4, 0.4),
                     pos=(x, 0.0, 0.6),
                 ),
-                vis_mode="collision",
             )
         )
     scene.build()
@@ -459,7 +471,7 @@ def test_contact_detection_jacobian_matches_fd(grad_capsule):
         ),
     )
     scene.build()
-    collider = scene.sim.rigid_solver.collider
+    collider = scene.rigid_solver.collider
 
     box1.set_quat(R_to_quat(gs.euler_to_R([np.deg2rad(3.0), np.deg2rad(3.0), np.deg2rad(3.0)])))
     entities = (
@@ -502,11 +514,11 @@ def test_contact_detection_jacobian_matches_fd(grad_capsule):
     dL_dpenetration = torch.autograd.grad(loss, penetration)[0]
 
     collider.backward(dL_dposition, dL_dnormal, dL_dpenetration)
-    dL_dpos = qd_to_torch(scene.sim.rigid_solver.dyn_state.geoms.pos.grad)
-    dL_dquat = qd_to_torch(scene.sim.rigid_solver.dyn_state.geoms.quat.grad)
+    dL_dpos = qd_to_torch(scene.rigid_solver.dyn_state.geoms.pos.grad)
+    dL_dquat = qd_to_torch(scene.rigid_solver.dyn_state.geoms.quat.grad)
     # Setting a quaternion normalizes it, so that the finite differences only see the gradient along the unit sphere.
     # The capsule detections rotate with a formula that assumes a unit quaternion, whose gradient has a radial part.
-    geoms_quat = qd_to_torch(scene.sim.rigid_solver.dyn_state.geoms.quat)
+    geoms_quat = qd_to_torch(scene.rigid_solver.dyn_state.geoms.quat)
     dL_dquat = dL_dquat - (dL_dquat * geoms_quat).sum(dim=-1, keepdim=True) * geoms_quat
 
     # fp64 is required: in fp32 the finite differences of the contacts stay off by more than 1e-2 at every step size,
@@ -555,7 +567,7 @@ def test_contact_detection_jacobian_matches_fd(grad_capsule):
     dL_dposition = torch.autograd.grad(loss, position, retain_graph=True)[0]
     dL_dpenetration = torch.autograd.grad(loss, penetration)[0]
     collider.backward(dL_dposition, dL_dnormal, dL_dpenetration)
-    assert torch.isfinite(qd_to_torch(scene.sim.rigid_solver.dyn_state.geoms.pos.grad)).all()
+    assert torch.isfinite(qd_to_torch(scene.rigid_solver.dyn_state.geoms.pos.grad)).all()
 
 
 @pytest.mark.required
@@ -612,7 +624,7 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
         ),
     )
     scene.build()
-    rigid_solver = scene._sim.rigid_solver
+    rigid_solver = scene.rigid_solver
     constraint_solver = rigid_solver.constraint_solver
 
     for _ in range(25):

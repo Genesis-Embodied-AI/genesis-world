@@ -1,10 +1,12 @@
 import math
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import PurePath
-from typing import TYPE_CHECKING, Annotated, Any, Mapping, Sequence, TypeVar, get_args
+from typing import TYPE_CHECKING, Annotated, Any, TypeVar, get_args
 
 import numpy as np
 import torch
+
 from frozendict import frozendict
 from pydantic import BeforeValidator, Field, GetCoreSchemaHandler, GetPydanticSchema
 from pydantic_core import PydanticCustomError, core_schema
@@ -230,3 +232,7 @@ else:
     FGridArrayType = Annotated[NDArrayType, BeforeValidator(_to_float_grid)]
     PathType = Annotated[str, BeforeValidator(lambda v: str(v) if isinstance(v, PurePath) else v)]
     FrozenDictType = Annotated[frozendict[_K, _V], _FrozenDictValidator]
+
+
+# An index of environments, or of the elements of an entity, as the runtime getters and setters take it
+IndexType = int | range | slice | Sequence[int] | np.ndarray | torch.Tensor

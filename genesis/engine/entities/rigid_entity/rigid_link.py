@@ -7,11 +7,9 @@ import genesis as gs
 from genesis.constants import link_ref_frame
 from genesis.repr_base import RBC
 from genesis.typing import LaxPositiveFArrayType
-from genesis.utils import geom as gu
-from genesis.utils.misc import DeprecationError, qd_to_torch
+from genesis.utils.misc import BuildableMixin, DeprecationError, qd_to_torch
 
 from .description import KinematicLinkDescription, RigidGeomDescription, RigidLinkDescription, RigidVisGeomDescription
-from .inertial import LinkInertial
 from .rigid_geom import RigidGeom, RigidVisGeom
 
 if TYPE_CHECKING:
@@ -21,7 +19,7 @@ if TYPE_CHECKING:
     from .rigid_joint import RigidJoint
 
 
-class KinematicLink(RBC):
+class KinematicLink(BuildableMixin, RBC):
     """
     Kinematic class. One KinematicEntity consists of multiple KinematicLinks, each of which is a rigid body and could
     consist of multiple RigidVisGeoms (`link.vgeoms` for visualization).
@@ -87,9 +85,17 @@ class KinematicLink(RBC):
         prev_end = self._variant_vgeom_ranges[-1][1]
         self._variant_vgeom_ranges.append((prev_end, prev_end + n_new_vgeoms))
 
-    def _build(self):
+    @gs.assert_unbuilt
+    def _build(self) -> None:
         for vgeom in self._vgeoms:
             vgeom._build()
+
+        self._is_built = True
+
+    def _destroy(self) -> None:
+        for vgeom in self._vgeoms:
+            vgeom._destroy()
+        self._is_built = False
 
     def _add_vgeom(self, desc: RigidVisGeomDescription):
         vgeom = RigidVisGeom(
@@ -181,7 +187,7 @@ class KinematicLink(RBC):
 
         # For heterogeneous entities, compute AABB per-environment respecting active_envs_idx
         if self.entity._enable_heterogeneous:
-            envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+            envs_idx = self._solver.sim.sanitize_envs_idx(envs_idx)
             n_envs = len(envs_idx)
             aabb_min = torch.full((n_envs, 3), float("inf"), dtype=gs.tc_float, device=gs.device)
             aabb_max = torch.full((n_envs, 3), float("-inf"), dtype=gs.tc_float, device=gs.device)
@@ -331,9 +337,11 @@ class KinematicLink(RBC):
     @property
     def aligned(self) -> bool:
         """
-        Whether the build anchored the link frame on the center of mass and principal axes of its body (the 'align'
-        option, on a free body that opts in or is a primitive). Only a single rigid body gets the anchor: a free root
-        with an inertia and no DOF-bearing descendant. Its joint-space mass block is then exactly diagonal.
+        Whether the link frame stands at the center of mass and on the principal axes of its body, which the build
+        anchors it on (the 'align' option, on a free body that opts in or is a primitive). Only a single rigid body
+        gets the anchor: a free root with an inertia and no DOF-bearing descendant. Its joint-space mass block is then
+        exactly diagonal. A density the link or geom options give, or an attach extending the body, leaves the frame
+        anchored and the body unaligned.
         """
         return self.desc.is_aligned
 
@@ -393,13 +401,6 @@ class KinematicLink(RBC):
         Number of faces of all the link's vgeoms.
         """
         return sum([vgeom.n_vfaces for vgeom in self._vgeoms])
-
-    @property
-    def is_built(self) -> bool:
-        """
-        Whether the entity the link belongs to is built.
-        """
-        return self.entity.is_built
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- repr ----------------------------------------
@@ -467,26 +468,17 @@ class RigidLink(KinematicLink):
         prev_geom_end = self._variant_geom_ranges[-1][1]
         self._variant_geom_ranges.append((prev_geom_end, prev_geom_end + n_new_geoms))
 
+    def _destroy(self) -> None:
+        for geom in self._geoms:
+            geom._destroy()
+        super()._destroy()
+
+    @gs.assert_unbuilt
     def _build(self):
         super()._build()
 
         for geom in self._geoms:
             geom._build()
-
-        # Compute per-variant inertial for heterogeneous links. A variant not carrying the link simulates it massless.
-        if self._variant_geom_ranges is not None:
-            i_l = self.idx - self.entity._link_start
-            self._variant_inertial = []
-            for i_variant, variant in enumerate(self.entity._desc.variants):
-                if i_l not in variant.links_idx:
-                    self._variant_inertial.append(
-                        LinkInertial(0.0, gu.zero_pos(), gu.identity_quat(), np.zeros((3, 3), dtype=gs.np_float))
-                    )
-                    continue
-                v_l_desc = self.desc if i_variant == 0 else variant.links[variant.links_idx.index(i_l)]
-                self._variant_inertial.append(
-                    LinkInertial(v_l_desc.mass, v_l_desc.inertial_pos, v_l_desc.inertial_quat, v_l_desc.inertia)
-                )
 
     def _add_geom(self, desc: RigidGeomDescription, needs_coup=False):
         geom = RigidGeom(
@@ -582,7 +574,9 @@ class RigidLink(KinematicLink):
             Defaults to 'link_origin'.
         local: bool, optional
             Whether `force`, `torque` and `pos` are expressed in the coordinates of the `ref` frame rather than the
-            world frame. Defaults to False.
+            world frame, a convenience to set a world wrench from local coordinates. The wrench is converted to world
+            when the call is made and held constant in world over the substeps of the step, so it does not turn with the
+            link during the step. Defaults to False.
         """
         self._solver.apply_links_external_wrench(force, torque, self._idx, envs_idx, pos=pos, ref=ref, local=local)
 

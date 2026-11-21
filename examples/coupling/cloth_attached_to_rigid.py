@@ -57,7 +57,7 @@ def main():
     cloth_scale = 0.5
     cloth_morph = gs.morphs.Mesh(pos=cloth_pos, scale=cloth_scale, file="meshes/cloth.obj")
     cloth_material = gs.materials.PBD.Cloth()
-    cloth_surface = gs.surfaces.Default(color=(0.2, 0.4, 0.8, 1.0))  # , vis_mode="particle")
+    cloth_surface = gs.surfaces.Default(color=(0.2, 0.4, 0.8, 1.0))
     cloth = scene.add_entity(cloth_morph, cloth_material, cloth_surface)
 
     scene.build(n_envs=0)
@@ -74,7 +74,7 @@ def main():
 
     for j in range(args.num_teleports):
         if j == 2:
-            cloth.release_particle(particles_idx)
+            cloth.release_particles(particles_idx)
 
         new_pos = (0.2 * math.sin(j), 0.2 * math.cos(j), 0.5)
         new_rot = gu.euler_to_quat((-30 * j, -40 * j, 70 * j))

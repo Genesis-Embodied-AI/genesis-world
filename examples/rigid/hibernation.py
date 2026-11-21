@@ -48,6 +48,9 @@ def main():
             max_collision_pairs=3000,
             use_hibernation=True,
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         profiling_options=gs.options.ProfilingOptions(
             show_FPS=False,
         ),
@@ -75,7 +78,6 @@ def main():
                             pos=(i * spacing - offset, j * spacing - offset, z_floor + k * layer_gap),
                             euler=(90.0, 0.0, (i * 37 + j * 53 + k * 71) % 360),
                         ),
-                        vis_mode="collision",
                     )
         camera_pos = (0.8 * n_side * spacing, 0.8 * n_side * spacing, 0.5 * n_side * spacing)
         camera_lookat = (0.0, 0.0, -0.1 * n_side * spacing)
@@ -86,7 +88,6 @@ def main():
             gs.morphs.MJCF(
                 file="xml/dominos.xml",
             ),
-            vis_mode="collision",
         )
         camera_pos = (1.2, -2.2, 1.6)
         camera_lookat = (1.2, 0.0, 0.0)
@@ -99,6 +100,7 @@ def main():
             lookat=camera_lookat,
             fov=45,
             GUI=False,
+            debug=True,
         )
 
     # Two correlated signals streamed to a live plot: the step rate climbs as bodies fall asleep, and the number of

@@ -1,10 +1,10 @@
 from typing import Any, Literal
 
 import numpy as np
-from pydantic import PrivateAttr, StrictBool, model_validator
+from pydantic import Field, PrivateAttr, StrictBool, field_validator, model_validator
 
 import genesis as gs
-from genesis.typing import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, UnitVec4FType, Vec3FType
+from genesis.typing import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, Vec3FType
 
 from .options import Options
 
@@ -38,8 +38,6 @@ class SimOptions(Options):
         exception. Defaults to 1.
     gravity : tuple, optional
         Gravity force in N/kg. Defaults to (0.0, 0.0, -9.81).
-    floor_height : float, optional
-        Height of the floor in meters. Defaults to 0.0.
     requires_grad : bool, optional
         Whether to enable differentiable mode. Defaults to False.
     use_hydroelastic_contact : bool, optional
@@ -49,7 +47,6 @@ class SimOptions(Options):
     dt: PositiveFloat = 1e-2
     substeps: PositiveInt = 1
     gravity: Vec3FType = (0.0, 0.0, -9.81)
-    floor_height: float = 0.0
     requires_grad: StrictBool = False
 
 
@@ -70,7 +67,9 @@ class LegacyCouplerOptions(BaseCouplerOptions):
     rigid_mpm : bool, optional
         Whether to enable coupling between rigid and MPM solvers. Defaults to True.
     rigid_sph : bool, optional
-        Whether to enable coupling between rigid and SPH solvers. Defaults to True.
+        Whether to enable coupling between rigid and SPH solvers. Defaults to True. The liquid sampled inside a coupled
+        rigid body, or within half a particle size of its surface, is removed when the scene is built, with a warning.
+        Moving liquid inside a coupled body afterwards, for instance by setting its position, is unsupported.
     rigid_pbd : bool, optional
         Whether to enable coupling between rigid and PBD solvers. Defaults to True.
     rigid_fem : bool, optional
@@ -82,7 +81,9 @@ class LegacyCouplerOptions(BaseCouplerOptions):
     fem_mpm : bool, optional
         Whether to enable coupling between FEM and MPM solvers. Defaults to True.
     fem_sph : bool, optional
-        Whether to enable coupling between FEM and SPH solvers. Defaults to True.
+        Whether to enable coupling between FEM and SPH solvers. Defaults to True. The liquid sampled inside a coupled
+        FEM body, or within half a particle size of its surface, is removed when the scene is built, with a warning.
+        Moving liquid inside a coupled body afterwards, for instance by setting its position, is unsupported.
     """
 
     rigid_mpm: StrictBool = True
@@ -107,65 +108,105 @@ class SAPCouplerOptions(BaseCouplerOptions):
     Parameters
     ----------
     n_sap_iterations : int, optional
-        Number of iterations for the SAP solver. Defaults to 5.
+        Maximum number of Newton iterations of the SAP solver in each substep, which stops earlier once it converges. A
+        smaller value bounds the cost of a substep, at the risk of returning velocities that do not satisfy the contacts
+        and that inject energy into resting contacts. Defaults to 100.
     n_pcg_iterations : int, optional
         Number of iterations for the Preconditioned Conjugate Gradient solver. Defaults to 100.
     n_linesearch_iterations : int, optional
-        Max number of iterations for the line search solver. Defaults to 10.
+        Maximum number of iterations of the exact line search of each Newton iteration, which stops earlier once it
+        meets its tolerance, usually within a few iterations. A smaller value bounds the cost of a Newton iteration, at
+        the risk of taking a step short of the minimum of the cost along the Newton direction, which can stall the
+        Newton iterations. Defaults to 100.
     sap_convergence_atol : float, optional
-        Absolute tolerance for SAP convergence. Defaults to 1e-6.
+        Absolute tolerance of the SAP solve on the norm of the gradient of its cost, in momentum units, added to the
+        relative one. A larger value stops the solves of scenes moving slowly earlier, at the cost of accuracy near
+        rest. Defaults to None, which leaves the relative tolerance alone.
     sap_convergence_rtol : float, optional
-        Relative tolerance for SAP convergence. Defaults to 1e-5.
+        Tolerance of the SAP solve on the norm of the gradient of its cost relative to the momentum of the scene, and on
+        the share of each kinematic tree and FEM entity relative to its own momentum and the impulses it receives. A
+        smaller value solves the contacts more accurately, so that resting contacts slip less within a step, at the cost
+        of more Newton iterations per substep. Defaults to None, which takes 1e-4 in double precision and 1e-3 in single
+        precision: single precision with its default runs fastest, while double precision solves about ten times more
+        accurately for a quarter to two thirds more Newton iterations. A solve also stops once its iterations no longer
+        decrease its cost, which bounds the accuracy any value can reach to the precision of the simulation.
     sap_taud : float, optional
         Dissipation time scale for SAP. Defaults to 0.1.
     sap_beta : float, optional
-        Normal regularization parameter for SAP. Defaults to 1.0.
+        Stiffness of the contacts of rigid bodies, as the time a resting body takes to settle on what it rests on, in
+        substeps. A smaller value makes the contacts stiffer, so that bodies sink less into each other and rock less
+        under a push, at the cost of a less robust solve that may take more iterations. A larger value softens them:
+        the penetration grows with the square of this value. On the floor, the fixed stiffness of the contact of each
+        vertex also bounds how stiff the contact of a heavy body gets. Defaults to 0.125, which keeps resting bodies
+        less than a tenth of a millimeter deep at usual substeps.
     sap_sigma : float, optional
         Friction regularization parameter for SAP. Defaults to 1e-3.
+    enable_lagged_friction : bool, optional
+        Whether the friction of each contact scales with its normal force of the previous substep rather than with the
+        normal force solved within the substep. Lagged friction keeps sliding bodies on the surface they slide on,
+        decelerating at the rate of Coulomb friction, where SAP friction lifts them off it at a speed growing with
+        their sliding speed. In exchange, the friction lags one substep behind changes of the normal force, so that it
+        grips harder on impact, and sticking contacts under load creep at a speed up to `stiction_tolerance`. Defaults
+        to True.
+    stiction_tolerance : float, optional
+        Sliding speed below which lagged friction holds a contact as sticking, in m/s. A smaller value lets sticking
+        contacts creep less, at the cost of more Newton iterations per substep. Ignored without lagged friction.
+        Defaults to 1e-4.
     pcg_threshold : float, optional
-        Threshold for the Preconditioned Conjugate Gradient solver. Defaults to 1e-6.
+        Threshold of the Preconditioned Conjugate Gradient solver on the squared residual of each Newton step, relative
+        to its initial value. A smaller value takes fewer and more accurate Newton steps, each costing more conjugate
+        gradient iterations, for the same converged result. A value below the square of the precision of the simulation
+        acts as that square. Defaults to 1e-2.
     linesearch_ftol : float, optional
         Line search sufficient value close to zero for exact linesearch. Defaults to 1e-6.
     linesearch_max_step_size : float, optional
         Maximum step size for exact linesearch. Defaults to 1.5.
     hydroelastic_stiffness : float, optional
-        Stiffness for hydroelastic contact. Defaults to 1e8.
-    point_contact_stiffness : float, optional
-        Stiffness for point contact. Defaults to 1e8.
-    fem_floor_contact_type : str, optional
-        Type of contact against the floor. Defaults to "tet". Can be "tet", "vert", or "none".
-        TET would be the default choice for most cases.
-        VERT would be preferable when the mesh is very coarse, such as a single cube or a tetrahedron.
-    enable_fem_self_tet_contact : bool, optional
-        Whether to use tetrahedral based self-contact. Defaults to True.
-    rigid_rigid_type : str, optional
-        Type of contact between rigid bodies. Defaults to "tet". Can be "tet", "vert", or "none".
-    rigid_floor_contact_type : str, optional
-        Type of contact against the floor. Defaults to "tet". Can be "tet", "vert", or "none".
-        Tet would be the default choice for most cases.
-        Vert would be preferable when the mesh is very coarse, such as a single cube or a tetrahedron.
-    enable_rigid_fem_contact : bool, optional
-        Whether to enable coupling between rigid and FEM solvers. Defaults to True.
+        Stiffness for hydroelastic contact. It also bounds the stiffness of the contact of FEM entities with the floor,
+        which otherwise follows the hydroelastic modulus of their material. The floor is the rigid ground plane of the
+        scene, which must be a single fixed plane facing up, and the surface vertices of FEM entities and the vertices
+        of rigid bodies touch it. A scene without one has no floor. Defaults to 1e8.
+    enable_fem_self_collision : bool, optional
+        Whether a FEM entity collides with itself where distant parts of it meet, such as a long soft body folding onto
+        itself. Distinct FEM entities always collide. Disabling it skips the contact search of a lone FEM entity against
+        itself, a cost growing with the resolution of its mesh. With several FEM entities, their contact search still
+        runs, and only the contacts within each entity are dropped. Disable it when FEM entities never fold onto
+        themselves. Defaults to True.
+    enable_fem_neutral_collision : bool, optional
+        Whether the parts of a FEM entity adjacent in its rest shape also collide with each other, when
+        `enable_fem_self_collision` is on. Enable it for a thin body whose faces get pressed together. It multiplies the
+        collision pairs of fine meshes, which then need a much larger `max_collision_pairs`. Defaults to False.
+    max_collision_pairs : int, optional
+        Maximum number of collision pairs of each kind of contact in each environment: the pairs of overlapping bounding
+        boxes the contact detection tests, and the pairs of elements, or of an element and the floor, that may touch. A
+        larger value covers larger or more finely meshed contact patches, at the cost of memory proportional to it and
+        to the number of environments, capped by the most pairs the scene can produce. Exceeding it at runtime halts
+        the simulation with an error naming this option. Defaults to 32768.
+    max_contacts : int, optional
+        Maximum number of contact points of each kind of contact in each environment. A larger value covers larger or
+        more finely meshed contact patches, at the cost of memory proportional to it and to the number of environments,
+        capped by the most contact points the scene can produce. Exceeding it at runtime halts the simulation with an
+        error naming this option. Defaults to 4096.
     """
 
-    n_sap_iterations: PositiveInt = 5
+    n_sap_iterations: PositiveInt = 100
     n_pcg_iterations: PositiveInt = 100
-    n_linesearch_iterations: PositiveInt = 10
-    sap_convergence_atol: PositiveFloat = 1e-6
-    sap_convergence_rtol: PositiveFloat = 1e-5
+    n_linesearch_iterations: PositiveInt = 100
+    sap_convergence_atol: PositiveFloat | None = None
+    sap_convergence_rtol: PositiveFloat | None = None
     sap_taud: PositiveFloat = 0.1
-    sap_beta: PositiveFloat = 1.0
+    sap_beta: PositiveFloat = 0.125
     sap_sigma: PositiveFloat = 1e-3
-    pcg_threshold: PositiveFloat = 1e-6
+    enable_lagged_friction: StrictBool = True
+    stiction_tolerance: PositiveFloat = 1e-4
+    pcg_threshold: PositiveFloat = 1e-2
     linesearch_ftol: PositiveFloat = 1e-6
     linesearch_max_step_size: PositiveFloat = 1.5
     hydroelastic_stiffness: PositiveFloat = 1e8
-    point_contact_stiffness: PositiveFloat = 1e8
-    fem_floor_contact_type: Literal["tet", "vert", "none"] = "tet"
-    enable_fem_self_tet_contact: StrictBool = True
-    rigid_floor_contact_type: Literal["tet", "vert", "none"] = "tet"
-    enable_rigid_fem_contact: StrictBool = True
-    rigid_rigid_contact_type: Literal["tet", "vert", "none"] = "tet"
+    enable_fem_self_collision: StrictBool = True
+    enable_fem_neutral_collision: StrictBool = False
+    max_collision_pairs: NonNegativeInt = 32768
+    max_contacts: NonNegativeInt = 4096
 
 
 class IPCCouplerOptions(BaseCouplerOptions):
@@ -366,6 +407,101 @@ class GravityMixin(Options):
     gravity: Vec3FType | None = None
 
 
+class KinematicVisOptions(Options):
+    """
+    Options configuring the markers of the kinematic solver, which the interactive viewer and the debug cameras draw.
+
+    Parameters
+    ----------
+    link_frames : bool, optional
+        Whether to draw the frame of each link. Many frames clutter the view of an articulated robot. Defaults to False.
+    link_frame_size : float, optional
+        The length of the axes of the frames of the links, in meters. Longer axes stay legible from afar but hide the
+        links of a small robot. Defaults to 0.2.
+    """
+
+    link_frames: StrictBool = False
+    link_frame_size: PositiveFloat = 0.2
+
+
+class RigidVisOptions(KinematicVisOptions):
+    """
+    Options configuring the markers of the rigid solver, which the interactive viewer and the debug cameras draw.
+
+    Parameters
+    ----------
+    link_frames : bool, optional
+        See ``KinematicVisOptions``.
+    link_frame_size : float, optional
+        See ``KinematicVisOptions``.
+    constraints : bool, optional
+        Whether to draw the equality constraints between links and joints, as a line joining the two points each one
+        binds (the anchors of a connect constraint, the origins of the links or of the joints otherwise). Their poses
+        are read back at each frame drawn. Defaults to False.
+    contact_force_scale : float, optional
+        The length of the arrow of a contact force per newton, in meters, e.g. the arrow of a 10 N force is 0.1 m long
+        at 0.01 (see ``gs.options.Geom.visualize_contact``). A larger scale shows small forces at the cost of long
+        arrows crossing the scene under heavy loads. Defaults to 0.01.
+    """
+
+    constraints: StrictBool = False
+    contact_force_scale: PositiveFloat = 0.01
+
+
+class ParticleVisOptions(Options):
+    """
+    Options configuring how the entities of a particle solver (MPM, SPH or PBD) are drawn.
+
+    Parameters
+    ----------
+    boundary : bool, optional
+        Whether to draw the edges of the box confining the particles as a marker, which the interactive viewer and the
+        debug cameras draw. The box of a large domain clutters the view, and its thin edges render unevenly from one
+        renderer to the next. Defaults to False.
+    recon_backend : str, optional
+        How the surface of the entities whose material draws one is reconstructed from their particles. 'splashsurf'
+        extracts a smooth surface from the density of the particles, but requires all of them to share the same radius.
+        'levelset' wraps the union of the spheres of the particles, which supports a radius per particle at the cost of
+        a bumpier surface. 'openvdb' is a deprecated alias of 'levelset'. Defaults to 'splashsurf'.
+    n_support_neighbors : int, optional
+        The number of particles whose positions place each vertex of a visual mesh skinned on the particles of an MPM
+        or PBD entity. More neighbors deform the mesh more smoothly, at the cost of the memory and of the time of
+        skinning it at each frame drawn. Defaults to 12.
+    """
+
+    boundary: StrictBool = False
+    recon_backend: Literal["splashsurf", "levelset"] = "splashsurf"
+    n_support_neighbors: PositiveInt = 12
+
+    @field_validator("recon_backend", mode="before")
+    @classmethod
+    def _rename_openvdb_backend(cls, value: Any) -> Any:
+        if value == "openvdb":
+            gs.logger.warning("Surface reconstruction backend 'openvdb' is deprecated. Use 'levelset' instead.")
+            return "levelset"
+        return value
+
+
+class PBDVisOptions(ParticleVisOptions):
+    """
+    Options configuring how the entities of the PBD solver are drawn.
+
+    Parameters
+    ----------
+    boundary : bool, optional
+        See ``ParticleVisOptions``.
+    recon_backend : str, optional
+        See ``ParticleVisOptions``.
+    n_support_neighbors : int, optional
+        See ``ParticleVisOptions``.
+    constraints : bool, optional
+        Whether to draw the particles fixed in place or to a rigid link as markers, which the interactive viewer and
+        the debug cameras draw. Their state is read back at each frame drawn. Defaults to False.
+    """
+
+    constraints: StrictBool = False
+
+
 class KinematicOptions(Options):
     """
     Options configuring the KinematicSolver (visualization-only solver).
@@ -383,12 +519,15 @@ class KinematicOptions(Options):
     IK_max_targets : int, optional
         Maximum number of IK targets. Increasing this doesn't affect IK solving speed, but will increase memory usage.
         Defaults to 6.
+    vis : gs.options.KinematicVisOptions, optional
+        The markers the solver draws (see ``gs.options.KinematicVisOptions``).
     """
 
     batch_links_info: StrictBool = False
     batch_joints_info: StrictBool = False
     batch_dofs_info: StrictBool = False
     IK_max_targets: PositiveInt = 6
+    vis: KinematicVisOptions = Field(default_factory=KinematicVisOptions)
 
 
 class RigidOptions(GravityMixin, TimeBasedMixin):
@@ -545,6 +684,8 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         Broadphase traversal strategy. ``SAP`` (sweep-and-prune) or ``ALL_VS_ALL`` (parallel pair iteration). Defaults
         to ``None`` (auto: ``SAP`` on CPU or with heterogeneous entities, ``ALL_VS_ALL`` on GPU otherwise). See
         ``gs.broadphase_traversal`` for details on each strategy.
+    vis : gs.options.RigidVisOptions, optional
+        The markers the solver draws (see ``gs.options.RigidVisOptions``).
 
     Warning
     -------
@@ -604,6 +745,8 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
     # broadphase configuration
     broadphase_traversal: gs.broadphase_traversal | None = None
 
+    vis: RigidVisOptions = Field(default_factory=RigidVisOptions)
+
     def __init__(self, *, contact_resolve_time: float | None = None, use_contact_island: bool | None = None, **data):
         super().__init__(**data)
         if contact_resolve_time is not None:
@@ -655,6 +798,8 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
         This option is deprecated.
     leaf_block_size : int, optional
         This option is deprecated.
+    vis : gs.options.ParticleVisOptions, optional
+        How the entities of the solver are drawn and the markers it draws (see ``gs.options.ParticleVisOptions``).
     """
 
     particle_size: PositiveFloat | None = None  # in meters. Will be computed automatically if it's None.
@@ -664,6 +809,7 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
     # These will later be converted to discrete grid bound. The actual grid boundary could be slightly tighter.
     lower_bound: Vec3FType = (-1.0, -1.0, 0.0)
     upper_bound: Vec3FType = (1.0, 1.0, 1.0)
+    vis: ParticleVisOptions = Field(default_factory=ParticleVisOptions)
 
     def __init__(self, *, use_sparse_grid: bool = False, leaf_block_size: int = 8, **data):
         super().__init__(**data)
@@ -686,7 +832,13 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
 
 class SPHOptions(GravityMixin, TimeBasedMixin):
     """
-    Options configuring the SPHSolver.
+    Options configuring the SPHSolver, which keeps the liquid incompressible with divergence-free smoothed particle
+    hydrodynamics (DFSPH).
+
+    The liquid is a single incompressible phase, without air to cushion its impacts, so the pressure it exerts on a wall
+    it strikes exceeds measured values: averaged over a few milliseconds, the first impact of a dam break on the
+    opposite wall peaks at about 1.4 to 1.8 times the experimental median, and the instantaneous peak grows sharper as
+    the substep shrinks. Read wall pressures and forces averaged over the timescale of interest.
 
     Note
     ----
@@ -696,8 +848,6 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
     ----------
     particle_size : float, optional
         Particle diameter in meters. Defaults to 0.02.
-    pressure_solver : str, optional
-        Pressure solver type. Current supported pressure solvers are 'WCSPH' and 'DFSPH'. Defaults to 'WCSPH'.
     lower_bound : tuple, shape (3,), optional
         Lower bound of the simulation domain. Defaults to (-100.0, -100.0, 0.0).
     upper_bound : tuple, shape (3,), optional
@@ -709,15 +859,19 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
     max_divergence_error : float, optional
         Maximum divergence error for DFSPH. Defaults to 0.1.
     max_density_error_percent : float, optional
-        Maximum density error *percent* for DFSPH, so 0.1 means 0.1%. Defaults to 0.05.
+        Average density error that DFSPH allows at the end of a substep, in percent of the rest density, so 0.1 means
+        0.1%. A lower value keeps the liquid closer to incompressible and its pressure steadier from one substep to the
+        next, at the cost of more solver iterations per substep. A larger value saves iterations, but lets the pressure
+        swing between substeps, which can shake a liquid at rest and the bodies it carries. Defaults to 0.01.
     max_divergence_solver_iterations : int, optional
         Maximum number of iterations for the divergence solver. Defaults to 100.
     max_density_solver_iterations : int, optional
         Maximum number of iterations for the density solver. Defaults to 100.
+    vis : gs.options.ParticleVisOptions, optional
+        How the entities of the solver are drawn and the markers it draws (see ``gs.options.ParticleVisOptions``).
     """
 
     particle_size: PositiveFloat = 0.02
-    pressure_solver: Literal["WCSPH", "DFSPH"] = "WCSPH"
 
     lower_bound: Vec3FType = (-100.0, -100.0, 0.0)
     upper_bound: Vec3FType = (100.0, 100.0, 100.0)
@@ -728,9 +882,11 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
 
     # DFSPH parameters
     max_divergence_error: PositiveFloat = 0.1
-    max_density_error_percent: PositiveFloat = 0.05  # This is percent
+    max_density_error_percent: PositiveFloat = 0.01
     max_divergence_solver_iterations: PositiveInt = 100
     max_density_solver_iterations: PositiveInt = 100
+
+    vis: ParticleVisOptions = Field(default_factory=ParticleVisOptions)
 
     _support_radius: float = PrivateAttr(default=0.0)
     _hash_grid_res: np.ndarray = PrivateAttr(default=None)
@@ -792,6 +948,8 @@ class PBDOptions(GravityMixin, TimeBasedMixin):
         Lower bound of the simulation domain. Defaults to (-100.0, -100.0, 0.0).
     upper_bound : tuple, shape (3,), optional
         Upper bound of the simulation domain. Defaults to (100.0, 100.0, 100.0).
+    vis : gs.options.PBDVisOptions, optional
+        How the entities of the solver are drawn and the markers it draws (see ``gs.options.PBDVisOptions``).
     """
 
     # constraints solving iterations
@@ -810,6 +968,8 @@ class PBDOptions(GravityMixin, TimeBasedMixin):
 
     lower_bound: Vec3FType = (-100.0, -100.0, 0.0)
     upper_bound: Vec3FType = (100.0, 100.0, 100.0)
+
+    vis: PBDVisOptions = Field(default_factory=PBDVisOptions)
 
     _hash_grid_res: np.ndarray = PrivateAttr(default=None)
 
@@ -840,6 +1000,20 @@ class PBDOptions(GravityMixin, TimeBasedMixin):
             self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(int).tolist()
 
 
+class FEMVisOptions(Options):
+    """
+    Options configuring the markers of the FEM solver, which the interactive viewer and the debug cameras draw.
+
+    Parameters
+    ----------
+    constraints : bool, optional
+        Whether to draw the vertex constraints, as a point at each constrained vertex and a line to its target. Their
+        state is read back at each frame drawn. Defaults to False.
+    """
+
+    constraints: StrictBool = False
+
+
 class FEMOptions(GravityMixin, TimeBasedMixin):
     """
     Options configuring the FEMSolver.
@@ -855,8 +1029,6 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
     ----------
     damping : float, optional
         Damping factor. Defaults to 0.0.
-    floor_height : float, optional
-        Height of the floor in meters. If none, it will inherit from `SimOptions`. Defaults to None.
     use_implicit_solver : bool, optional
         Whether to use the implicit solver. Defaults to False.
         Implicit solver is a more stable solver for FEM. It can be used with a large time step.
@@ -867,9 +1039,20 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
     n_linesearch_iterations : int, optional
         Maximum number of line search iterations. Defaults to 0. Only used when `use_implicit_solver` is True.
     newton_dx_threshold : float, optional
-        Threshold for the Newton solver. Defaults to 1e-6. Only used when `use_implicit_solver` is True.
+        Displacement of the vertices over a Newton iteration, in meters and root mean square, below which the Newton
+        iterations of an environment stop. A larger value saves iterations and leaves a larger error in the solve.
+        Defaults to 1e-6. Only used when `use_implicit_solver` is True.
     pcg_threshold : float, optional
-        Threshold for the PCG solver. Defaults to 1e-6. Only used when `use_implicit_solver` is True.
+        Accuracy of the linear solves of the implicit solver, as the reduction of their squared residual relative to the
+        start of each Newton iteration. A smaller value leaves a smaller error in the positions, which scales with the
+        square root of this value, each tenfold reduction costing a roughly constant number of extra linear iterations.
+        Defaults to None, resolved from the simulation:
+        - 1e-6 in single precision, whose rounding caps the accuracy of stiff bodies below that value anyway;
+        - 1e-9 in double precision, an error of about 1e-7 of the motion of stiff bodies and 1e-5 of soft ones;
+        - the round-off of the simulation precision when `requires_grad` is True, since gradients need the exact
+          solution of each substep.
+        An explicit value applies in every case, a value below the round-off of the simulation precision acting as that
+        round-off. Only used when `use_implicit_solver` is True.
     linesearch_c : float, optional
         Line search sufficient decrease parameter. Defaults to 1e-4. Only used when `use_implicit_solver` is True.
     linesearch_tau : float, optional
@@ -878,38 +1061,25 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
         Rayleigh Damping factor for the implicit solver. Defaults to 0.5. Only used when `use_implicit_solver` is True.
     damping_beta : float, optional
         Rayleigh Damping factor for the implicit solver. Defaults to 5e-4. Only used when `use_implicit_solver` is True.
-    enable_vertex_constraints : bool, optional
-        Whether to enable vertex constraints. Defaults to False.
+    max_vertex_constraints : int, optional
+        Maximum number of constrained vertices per environment (see `FEMEntity.set_vertex_constraints`), on top of the
+        vertices that the vertex options of the entities fix. Constraining one past it raises. A larger value lets more
+        vertices be pinned, at the cost of 56 bytes of memory per slot and per environment in single precision, 100 in
+        double precision. Defaults to 64.
+    vis : gs.options.FEMVisOptions, optional
+        The markers the solver draws (see ``gs.options.FEMVisOptions``).
     """
 
     damping: NonNegativeFloat = 0.0
-    floor_height: float | None = None
     use_implicit_solver: StrictBool = False
     n_newton_iterations: PositiveInt = 1
     n_pcg_iterations: PositiveInt = 500
     n_linesearch_iterations: NonNegativeInt = 0
     newton_dx_threshold: PositiveFloat = 1e-6
-    pcg_threshold: PositiveFloat = 1e-6
+    pcg_threshold: PositiveFloat | None = None
     linesearch_c: PositiveFloat = 1e-4
     linesearch_tau: PositiveFloat = 0.5
     damping_alpha: NonNegativeFloat = 0.5
     damping_beta: NonNegativeFloat = 5e-4
-    enable_vertex_constraints: StrictBool = False
-
-
-class SFOptions(TimeBasedMixin):
-    """
-    Options configuring the SFSolver.
-    """
-
-    res: PositiveInt = 128
-    solver_iters: PositiveInt = 500
-    decay: PositiveFloat = 0.99
-
-    T_low: float = 1.0
-    T_high: float = 0.0
-
-    inlet_pos: Vec3FType = (0.6, 0.0, 0.1)
-    inlet_vel: Vec3FType = (0.0, 0.0, 1.0)
-    inlet_quat: UnitVec4FType = (1.0, 0.0, 0.0, 0.0)
-    inlet_s: PositiveFloat = 400.0
+    max_vertex_constraints: NonNegativeInt = 64
+    vis: FEMVisOptions = Field(default_factory=FEMVisOptions)

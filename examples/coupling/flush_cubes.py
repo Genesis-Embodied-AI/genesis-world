@@ -20,9 +20,12 @@ def main():
             grid_density=64,
             lower_bound=(-0.45, -0.65, -0.01),
             upper_bound=(0.45, 0.65, 1.0),
+            vis=gs.options.ParticleVisOptions(
+                boundary=True,
+            ),
         ),
         vis_options=gs.options.VisOptions(
-            visualize_mpm_boundary=True,
+            debug=True,
             rendered_envs_idx=[0],
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -46,7 +49,6 @@ def main():
         ),
         surface=gs.surfaces.Rough(
             color=(1.0, 0.5, 0.5, 1.0),
-            vis_mode="particle",
         ),
     )
 
@@ -60,7 +62,6 @@ def main():
         ),
         surface=gs.surfaces.Rough(
             color=(1.0, 1.0, 0.5, 1.0),
-            vis_mode="particle",
         ),
     )
 
@@ -75,7 +76,6 @@ def main():
         ),
         surface=gs.surfaces.Rough(
             color=(0.5, 1.0, 1.0, 1.0),
-            vis_mode="particle",
         ),
     )
     emitter1 = scene.add_emitter(

@@ -1,25 +1,28 @@
 from functools import wraps
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
-import igl
 import trimesh
-
-import quadrants as qd
 
 import genesis as gs
 import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
-from genesis.engine.couplers import SAPCoupler
 from genesis.engine.entities.rigid_entity import RigidLink
-from genesis.engine.states.entities import FEMEntityState
+from genesis.engine.render_context import MeshKey, SegmentationKeys
+from genesis.options.patches import resolve_patch_parts
+from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
 from genesis.utils.misc import broadcast_tensor, tensor_to_array, unique_rows
 
 from .base_entity import Entity
+
+if TYPE_CHECKING:
+    from genesis.engine.scene import Scene
+    from genesis.engine.solvers.fem_solver import FEMSolver
 
 
 class FEMVisGeom(RBC):
@@ -30,11 +33,9 @@ class FEMVisGeom(RBC):
     geoms or duplicated by texture seams share a single simulated vertex).
     """
 
-    def __init__(self, entity, vvert_start, vface_start, vmesh, sim_verts_idx):
+    def __init__(self, entity, vmesh, sim_verts_idx):
         self._uid = gs.UID()
         self._entity = entity
-        self._vvert_start = vvert_start
-        self._vface_start = vface_start
         self._vmesh = vmesh
         self._sim_verts_idx = sim_verts_idx
 
@@ -51,6 +52,12 @@ class FEMVisGeom(RBC):
     def entity(self):
         """The FEM entity the vgeom belongs to."""
         return self._entity
+
+    @property
+    def seg_keys(self) -> SegmentationKeys:
+        """The keys identifying the visual geom in segmentation maps."""
+        entity_idx = self._entity.idx
+        return SegmentationKeys(entity_idx, entity_idx, MeshKey(entity_idx, self._entity.vgeoms.index(self)))
 
     @property
     def vmesh(self):
@@ -87,26 +94,6 @@ class FEMVisGeom(RBC):
         """Number of render faces of the vgeom."""
         return len(self._vmesh.faces)
 
-    @property
-    def vvert_start(self):
-        """Starting index of the vgeom's render vertices in the FEM solver."""
-        return self._vvert_start
-
-    @property
-    def vface_start(self):
-        """Starting index of the vgeom's render faces in the FEM solver."""
-        return self._vface_start
-
-    @property
-    def vvert_end(self):
-        """Ending index of the vgeom's render vertices in the FEM solver."""
-        return self._vvert_start + self.n_vverts
-
-    @property
-    def vface_end(self):
-        """Ending index of the vgeom's render faces in the FEM solver."""
-        return self._vface_start + self.n_vfaces
-
 
 def assert_muscle(method):
     @wraps(method)
@@ -118,7 +105,6 @@ def assert_muscle(method):
     return wrapper
 
 
-@qd.data_oriented
 class FEMEntity(Entity):
     """
     A finite element method (FEM)-based entity for deformable simulation.
@@ -133,10 +119,8 @@ class FEMEntity(Entity):
         The simulation scene that this entity belongs to.
     solver : Solver
         The physics solver instance used for simulation.
-    material : Material
-        The material properties defining elasticity, density, etc.
-    morph : Morph
-        The morph specification that defines the entity's shape.
+    spec : gs.entities.FEM
+        The entity spec the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         The surface mesh associated with the entity (for rendering or collision).
     idx : int
@@ -147,34 +131,24 @@ class FEMEntity(Entity):
         Starting index of this entity's elements in the global element array (default is 0).
     s_start : int, optional
         Starting index of this entity's surface triangles in the global surface array (default is 0).
-    vvert_start : int, optional
-        Starting index of this entity's render vertices in the global render vertex array (default is 0).
-    vface_start : int, optional
-        Starting index of this entity's render faces in the global render face array (default is 0).
     """
 
     def __init__(
         self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        idx,
-        v_start=0,
-        el_start=0,
-        s_start=0,
-        vvert_start=0,
-        vface_start=0,
-        name: str | None = None,
-    ):
-        super().__init__(idx, scene, morph, solver, material, surface, name=name)
+        scene: "Scene",
+        solver: "FEMSolver",
+        surface: Surface,
+        idx: int,
+        spec: "gs.entities.FEM",
+        v_start: int = 0,
+        el_start: int = 0,
+        s_start: int = 0,
+    ) -> None:
+        super().__init__(idx, scene, solver, surface, spec)
 
         self._v_start = v_start  # offset for vertex index of elements
         self._el_start = el_start  # offset for element index
         self._s_start = s_start  # offset for surface triangles
-        self._vvert_start = vvert_start  # offset for render vertices
-        self._vface_start = vface_start  # offset for render faces
         self._step_global_added = None
         self.sample()
 
@@ -213,9 +187,6 @@ class FEMEntity(Entity):
             tri2el = np.repeat(np.arange(self.elems.shape[0], dtype=gs.np_int)[:, np.newaxis], 4, axis=1)
             unique_el = tri2el.flat[unique_idcs]
             self._surface_el_np = unique_el[cnt == 1]
-
-        if isinstance(self.sim.coupler, SAPCoupler):
-            self.compute_pressure_field()
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- basic entity ops -------------------------------
@@ -284,9 +255,11 @@ class FEMEntity(Entity):
             If the tensor shape is not supported or per-element actuation is attempted.
         """
         elements_idx = self._get_global_idx(None, self.n_elements, self._el_start, unsafe=True)
-        actu = broadcast_tensor(actu, gs.tc_float, (self._sim._B, self.material.n_groups), ("envs_idx", "groups"))
+        actu = broadcast_tensor(
+            actu, gs.tc_float, (self._solver.n_envs_, self.material.n_groups), ("envs_idx", "groups")
+        )
         # Every element of the entity takes the actuation of its muscle group
-        actu = actu[:, None] if self._scene.n_envs > 0 else actu[0]
+        actu = actu[:, None] if self._solver.n_envs > 0 else actu[0]
         self._solver.set_elements_actu(actu, elements_idx, n_groups=self.material.n_groups)
 
     def set_muscle(self, muscle_group=None, muscle_direction=None):
@@ -321,13 +294,6 @@ class FEMEntity(Entity):
             assert ((1.0 - muscle_direction.norm(dim=-1)).abs() < gs.EPS).all()
 
             self.set_muscle_direction(muscle_direction)
-
-    def get_state(self):
-        solver_state = self._solver.get_state(self._sim.cur_substep_local)
-        verts_slice = slice(self._v_start, self._v_start + self.n_vertices)
-        return FEMEntityState(
-            self, self._sim.cur_step_global, solver_state.pos[:, verts_slice], solver_state.vel[:, verts_slice]
-        )
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- instantiation ----------------------------------
@@ -369,6 +335,25 @@ class FEMEntity(Entity):
         if not init_positions.shape[0] > 0:
             gs.raise_exception("Entity has zero vertices.")
 
+        # The patches select vertices as the morph states them, relative to its position before its rotation. The later
+        # of two patches setting one vertex applies.
+        verts_pos_morph = verts - self._morph.pos
+        verts_is_fixed = np.zeros(len(verts), dtype=np.bool_)
+        for patch in self._spec.patches:
+            if not isinstance(patch.options, gs.options.Vertex):
+                continue
+            # Each selector resolves among the vertices the selectors before it hold, an ordinal counting those alone
+            verts_idx = np.arange(len(verts))
+            for vertex_index in patch.selectors:
+                if verts_idx.size == 0:
+                    break
+                verts_idx = verts_idx[vertex_index._resolve(verts_pos_morph[verts_idx])]
+            if verts_idx.size == 0:
+                gs.raise_exception(f"The selection {patch.selection_repr} holds no vertex of entity '{self.name}'.")
+            if "is_fixed" in patch.options.model_fields_set:
+                verts_is_fixed[verts_idx] = patch.options.is_fixed
+        self._fixed_verts_idx_local = np.flatnonzero(verts_is_fixed).astype(gs.np_int, copy=False)
+
         self.init_positions = torch.tensor(init_positions, dtype=gs.tc_float, device=gs.device)
         self.init_positions_COM_offset = torch.tensor(
             init_positions - (verts_COM + offset_shift), dtype=gs.tc_float, device=gs.device
@@ -386,23 +371,29 @@ class FEMEntity(Entity):
         the simulated vertices.
         """
         meshes = gs.Mesh.from_morph_surface(self._morph, self._surface)
+        # The visual geoms form a single level, so that the later of two selections holding a visual geom applies, and
+        # a surface given as None keeps that of the entity.
+        vgeoms_name = [mesh.metadata.get("name", "") for mesh in meshes]
+        vgeoms_surface: list[Surface | None] = [None] * len(meshes)
+        for patch in self._spec.patches:
+            if not isinstance(patch.options, gs.options.VGeom):
+                continue
+            vgeoms_idx = np.flatnonzero(resolve_patch_parts(patch, vgeoms_name))
+            if vgeoms_idx.size == 0:
+                gs.raise_exception(
+                    f"The selection {patch.selection_repr} holds no visual geom of entity '{self.name}'."
+                )
+            for i_vg in vgeoms_idx:
+                vgeoms_surface[i_vg] = patch.options.surface
+        for mesh, surface in zip(meshes, vgeoms_surface):
+            if surface is not None:
+                mesh.set_surface(surface)
         surface_verts, surface_faces, verts_maps = mu.merge_submeshes(
             [mesh.verts for mesh in meshes], [mesh.faces for mesh in meshes]
         )
         self._vgeoms = gs.List()
-        vvert_start, vface_start = self._vvert_start, self._vface_start
         for mesh, verts_idx in zip(meshes, verts_maps):
-            self._vgeoms.append(
-                FEMVisGeom(
-                    entity=self,
-                    vvert_start=vvert_start,
-                    vface_start=vface_start,
-                    vmesh=mesh,
-                    sim_verts_idx=verts_idx,
-                )
-            )
-            vvert_start += len(mesh.verts)
-            vface_start += len(mesh.faces)
+            self._vgeoms.append(FEMVisGeom(entity=self, vmesh=mesh, sim_verts_idx=verts_idx))
 
         if isinstance(self.material, gs.materials.FEM.Cloth):
             # Cloth needs no tetrahedralization: the welded surface triangles are the simulation elements.
@@ -424,7 +415,7 @@ class FEMEntity(Entity):
         self.instantiate(verts, elems)
 
     def _add_to_solver(self):
-        self._step_global_added = self._sim.cur_step_global
+        self._step_global_added = self._solver.sim.cur_step_global
         gs.logger.info(
             f"Entity {self.uid} added. class: {self.__class__.__name__}, morph: {self.morph.__class__.__name__}, "
             f"size: ({self.n_elements}, {self.n_vertices}), material: {self.material}."
@@ -435,21 +426,16 @@ class FEMEntity(Entity):
 
         if isinstance(self.material, gs.materials.FEM.Cloth):
             self._solver.add_cloth(
-                f=self._sim.cur_substep_local,
                 v_start=self._v_start,
                 s_start=self._s_start,
                 verts=verts_numpy,
                 tri2v=self._surface_tri_np,
+                tri2el=self._surface_el_np,
             )
         else:
             elems_np = self.elems.astype(gs.np_int, copy=False)
             self._solver.add_elements(
-                f=self._sim.cur_substep_local,
-                mat_idx=self._material.idx,
-                mat_mu=self._material.mu,
-                mat_lam=self._material.lam,
-                mat_rho=self._material.rho,
-                mat_friction_mu=self._material.friction_mu,
+                material=self.material,
                 v_start=self._v_start,
                 el_start=self._el_start,
                 s_start=self._s_start,
@@ -459,44 +445,7 @@ class FEMEntity(Entity):
                 tri2el=self._surface_el_np,
             )
 
-        for vgeom in self._vgeoms:
-            # A vgeom without a texture carries no UVs; an empty array leaves its slice of the solver buffer zeroed.
-            uvs = vgeom.uvs
-            if uvs is None:
-                uvs = np.zeros((0, 2), dtype=gs.np_float)
-            self._solver.add_vverts(
-                vvert_start=vgeom.vvert_start,
-                vface_start=vgeom.vface_start,
-                v_start=self._v_start,
-                verts_idx=vgeom.sim_verts_idx,
-                uvs=uvs,
-                vfaces=vgeom.vmesh.faces.astype(gs.np_int, copy=False),
-            )
-
-    def compute_pressure_field(self):
-        """
-        Compute the pressure field for the FEM entity based on its tetrahedral elements.
-
-        For hydroelastic contact: https://drake.mit.edu/doxygen_cxx/group__hydroelastic__user__guide.html
-
-        Notes
-        -----
-        https://github.com/RobotLocomotion/drake/blob/master/geometry/proximity/make_mesh_field.cc
-        TODO: Add margin support
-        Drake's implementation of margin seems buggy.
-        """
-        init_positions = tensor_to_array(self.init_positions)
-        unsigned_distance, *_ = igl.signed_distance(
-            init_positions, init_positions, self._surface_tri_np, sign_type=igl.SIGNED_DISTANCE_TYPE_UNSIGNED
-        )
-        unsigned_distance = unsigned_distance.astype(gs.np_float, copy=False)
-        max_distance = np.max(unsigned_distance)
-        if max_distance < gs.EPS:
-            gs.raise_exception(
-                f"Pressure field max distance is too small: {max_distance}. "
-                "This might be due to a mesh having no internal vertices."
-            )
-        self.pressure_field_np = unsigned_distance / max_distance * self.material.hydroelastic_modulus  # normalize
+        self._is_built = True
 
     # ------------------------------------------------------------------------------------
     # ---------------------------- interfacing with solver -------------------------------
@@ -536,6 +485,40 @@ class FEMEntity(Entity):
         """
         verts_idx = self._get_global_idx(verts_idx_local, self.n_vertices, self._v_start, unsafe=True, batched_idx=True)
         self._solver.set_verts_vel(vels, verts_idx, envs_idx)
+
+    @gs.assert_built
+    def get_verts_pos(self, verts_idx_local=None, envs_idx=None):
+        """
+        Get the position of some vertices.
+
+        Parameters
+        ----------
+        verts_idx_local : None | int | array_like, shape (N,)
+            Index of the vertices relative to this entity, the same in every environment. If None, all vertices will be
+            considered. Defaults to None.
+        envs_idx : None | int | array_like, shape (M,), optional
+            The indices of the environments to get. If None, all environments will be considered. Defaults to None.
+
+        Returns
+        -------
+        poss : torch.Tensor, shape ([M,] N, 3)
+            The position of each vertex.
+        """
+        verts_idx = self._get_global_idx(verts_idx_local, self.n_vertices, self._v_start, unsafe=True)
+        return self._solver.get_verts_pos(verts_idx, envs_idx)
+
+    @gs.assert_built
+    def get_verts_vel(self, verts_idx_local=None, envs_idx=None):
+        """
+        Get the velocity of some vertices (see 'get_verts_pos').
+
+        Returns
+        -------
+        vels : torch.Tensor, shape ([M,] N, 3)
+            The velocity of each vertex.
+        """
+        verts_idx = self._get_global_idx(verts_idx_local, self.n_vertices, self._v_start, unsafe=True)
+        return self._solver.get_verts_vel(verts_idx, envs_idx)
 
     @assert_muscle
     def set_muscle_group(self, muscle_group):
@@ -579,9 +562,11 @@ class FEMEntity(Entity):
                 Optional rigid link for the vertices to follow, maintaining relative position.
             is_soft_constraint: bool
                 By default, use a hard constraint directly sets position and zero velocity.
-                A soft constraint uses a spring force to pull the vertex towards the target position.
+                A soft constraint pulls the vertices toward their targets with critically damped springs under the
+                explicit solver, while the implicit solver holds them at their targets (see
+                'FEMSolver.set_vertex_constraints').
             stiffness : float
-                Specify a spring stiffness for a soft constraint. Critical damping is applied.
+                Stiffness of the springs of a soft constraint, in N/m.
             envs_idx : array_like, optional
                 List of environment indices to apply the constraints to. If None, applies to all environments.
         """
@@ -679,26 +664,6 @@ class FEMEntity(Entity):
     def n_vfaces(self):
         """Number of render faces in the FEM entity, summed over its visual geoms."""
         return sum(vgeom.n_vfaces for vgeom in self._vgeoms)
-
-    @property
-    def vvert_start(self):
-        """Global render vertex index offset for this entity."""
-        return self._vvert_start
-
-    @property
-    def vface_start(self):
-        """Global render face index offset for this entity."""
-        return self._vface_start
-
-    @property
-    def vvert_end(self):
-        """Global render vertex index past this entity's last one."""
-        return self._vvert_start + self.n_vverts
-
-    @property
-    def vface_end(self):
-        """Global render face index past this entity's last one."""
-        return self._vface_start + self.n_vfaces
 
     @property
     def n_surface_vertices(self):

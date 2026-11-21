@@ -22,9 +22,11 @@ def main():
             grid_density=64,
             lower_bound=(0.0, -1.0, -0.1),
             upper_bound=(0.57, 1.0, 2.4),
+            vis=gs.options.ParticleVisOptions(
+                boundary=True,
+            ),
         ),
         vis_options=gs.options.VisOptions(
-            visualize_mpm_boundary=True,
             rendered_envs_idx=[0],
         ),
         viewer_options=gs.options.ViewerOptions(

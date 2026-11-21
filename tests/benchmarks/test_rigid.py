@@ -228,6 +228,9 @@ def make_go2(n_envs, solver=None, gjk=None, **scene_kwargs):
                 **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
             ),
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         **{"show_viewer": False, "show_FPS": False, **scene_kwargs},
     )
 
@@ -236,7 +239,6 @@ def make_go2(n_envs, solver=None, gjk=None, **scene_kwargs):
         gs.morphs.URDF(
             file="urdf/go2/urdf/go2.urdf",
         ),
-        vis_mode="collision",
     )
     time_start = time.time()
     scene.build(n_envs=n_envs)
@@ -338,6 +340,9 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
             **(dict(constraint_solver=solver) if solver is not None else {}),
             **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         **{"show_viewer": False, "show_FPS": False, **scene_kwargs},
     )
 
@@ -350,7 +355,6 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
                 pos=(0, 0, 1.0),
             )
         ),
-        vis_mode="collision",
     )
     time_start = time.time()
     scene.build(n_envs=n_envs)
@@ -367,8 +371,11 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
     # Snapshot the state exercised by the per-step partial reset in the 'accessors' variant: the same per-env
     # accessor + reset workload seen in RL rollouts, run on top of the falling-humanoid dynamics.
     if accessors:
-        qpos0 = torch.tile(init_qpos, (n_envs, 1)) if n_envs > 0 else init_qpos
-        vel0 = torch.zeros((*((n_envs,) if n_envs > 0 else ()), robot.n_dofs), dtype=gs.tc_float, device=gs.device)
+        # The joints alone, the floating base aside, selected on top of the environments being reset
+        joints_qs_idx = torch.arange(7, robot.n_qs, device=gs.device)
+        joints_dofs_idx = torch.arange(6, robot.n_dofs, device=gs.device)
+        qpos0 = init_qpos[joints_qs_idx]
+        vel0 = torch.zeros((len(joints_dofs_idx),), dtype=gs.tc_float, device=gs.device)
         state_rigid_0 = scene.rigid_solver.get_state()
 
         if n_envs > 0:
@@ -376,7 +383,7 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
             reset_envs_idx = torch.as_tensor(
                 np.random.permutation(n_envs)[:n_reset_envs], dtype=gs.tc_int, device=gs.device
             )
-            reset_envs_mask = torch.isin(scene._envs_idx, reset_envs_idx)
+            reset_envs_mask = torch.isin(torch.arange(n_envs, device=gs.device), reset_envs_idx)
         else:
             reset_envs_mask = None
 
@@ -402,12 +409,12 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
             robot.get_contacts(is_padded=True)
 
             # TODO: Entire scene reset is still slow currently because 'partial=False' by default.
-            scene.rigid_solver.set_state(0, state_rigid_0, envs_idx=reset_envs_mask, partial=True)
+            scene.rigid_solver.set_state(state_rigid_0, envs_idx=reset_envs_mask, partial=True)
 
             robot.set_dofs_stiffness(dofs_stiffness)
             robot.set_dofs_damping(dofs_damping)
-            robot.set_dofs_velocity(vel0, envs_idx=reset_envs_mask, skip_forward=True)
-            robot.set_qpos(qpos0, envs_idx=reset_envs_mask, zero_velocity=False, skip_forward=True)
+            robot.set_dofs_velocity(vel0, joints_dofs_idx, envs_idx=reset_envs_mask, skip_forward=True)
+            robot.set_qpos(qpos0, joints_qs_idx, envs_idx=reset_envs_mask, zero_velocity=False, skip_forward=True)
             robot.set_pos(base_pos0, envs_idx=reset_envs_mask, skip_forward=True)
             robot.set_quat(base_quat0, envs_idx=reset_envs_mask, relative=False, skip_forward=True)
 
@@ -443,6 +450,9 @@ def make_double_smplx(n_envs, solver=None, gjk=None, **scene_kwargs):
             **(dict(constraint_solver=solver) if solver is not None else {}),
             **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         **{"show_viewer": False, "show_FPS": False, **scene_kwargs},
     )
 
@@ -458,7 +468,6 @@ def make_double_smplx(n_envs, solver=None, gjk=None, **scene_kwargs):
                     euler=INIT_EULER,
                 )
             ),
-            vis_mode="collision",
         )
         for pos in INIT_POSS
     ]
@@ -710,12 +719,14 @@ def make_convexify(n_envs, solver=None, gjk=None, **scene_kwargs):
             **(dict(constraint_solver=solver) if solver is not None else {}),
             **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         **{"show_viewer": False, "show_FPS": False, **scene_kwargs},
     )
 
     scene.add_entity(
         gs.morphs.Mesh(file="meshes/tank.obj", scale=5.0, fixed=True, euler=(90, 0, 90)),
-        vis_mode="collision",
     )
     # 80 auto-decomposed objects (mug/donut/cup/apple, CoACD) stacked in a 4x4x5 staggered grid that collapses
     # into the tank -- exercises the convex-decomposition collision path at a high contact count.
@@ -730,7 +741,6 @@ def make_convexify(n_envs, solver=None, gjk=None, **scene_kwargs):
                 pos=((gx + 0.5 * (gz % 2)) * 0.1 - 0.18, (gy + 0.5 * (gz % 2)) * 0.145 - 0.265, 0.11 + gz * 0.08),
                 euler=(90.0, 0.0, 0.0),
             ),
-            vis_mode="collision",
         )
 
     time_start = time.time()
@@ -760,6 +770,9 @@ def make_nonconvex_spacecraft(n_envs, solver=None, gjk=None, **scene_kwargs):
             **(dict(constraint_solver=solver) if solver is not None else {}),
             **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         **{"show_viewer": False, "show_FPS": False, **scene_kwargs},
     )
 
@@ -774,7 +787,6 @@ def make_nonconvex_spacecraft(n_envs, solver=None, gjk=None, **scene_kwargs):
             convexify=False,
             fixed=True,
         ),
-        vis_mode="collision",
     )
     obj = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1)))
 
@@ -848,6 +860,9 @@ def _build_table_bussing_scene(n_envs, solver=None, gjk=None, **scene_kwargs):
             **(dict(constraint_solver=solver) if solver is not None else {}),
             **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
         ),
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
         **{"show_viewer": False, "show_FPS": False, **scene_kwargs},
     )
 
@@ -860,7 +875,6 @@ def _build_table_bussing_scene(n_envs, solver=None, gjk=None, **scene_kwargs):
         gs.morphs.Mesh(
             file=f"{table_path}/work_table.glb", scale=(1.14, 1.0, 1.445), pos=(0.597, 0.0, 0.0), fixed=True
         ),
-        vis_mode="collision",
     )
 
     robot_path = get_hf_dataset(pattern="dual_arms_primitives.urdf")
@@ -872,7 +886,7 @@ def _build_table_bussing_scene(n_envs, solver=None, gjk=None, **scene_kwargs):
     for k, (kind, rel, euler, spot) in enumerate(OBJECTS):
         pos = spot if len(spot) == 3 else (*spot, DROP_Z + 0.04 * k)
         morph = gs.morphs.URDF if kind == "urdf" else gs.morphs.Mesh
-        scene.add_entity(morph(file=f"{twin_path}/table_bussing/{rel}", pos=pos, euler=euler), vis_mode="collision")
+        scene.add_entity(morph(file=f"{twin_path}/table_bussing/{rel}", pos=pos, euler=euler))
 
     time_start = time.time()
     scene.build(n_envs=n_envs)
