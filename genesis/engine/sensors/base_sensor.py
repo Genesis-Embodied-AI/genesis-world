@@ -13,7 +13,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.render_context import RenderContext, ScopedRenderContext, Shape
 from genesis.engine.solvers.rigid.data import LinksState
-from genesis.engine.state_change import StateChange
+from genesis.engine.state_change import ChangeLog, StateChange, TrackableMixin
 from genesis.repr_base import RBC
 from genesis.typing import NumArrayType, NumericType
 from genesis.utils.geom import euler_to_quat
@@ -27,7 +27,6 @@ from genesis.utils.misc import (
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
     from genesis.engine.solvers import RigidSolver
-    from genesis.engine.solvers.base_solver import Solver
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
     from genesis.options.sensors.options import SensorOptions
     from genesis.recorders.base_recorder import Recorder, RecorderOptions
@@ -167,7 +166,9 @@ DataT = TypeVarWithDefault("DataT", default=tuple, covariant=True)
 SharedSensorContextT = TypeVar("SharedSensorContextT")
 
 
-class Sensor(BuildableMixin, RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT, DataT]):
+class Sensor(
+    TrackableMixin, BuildableMixin, RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT, DataT]
+):
     """
     Base class for all types of sensors.
 
@@ -316,6 +317,8 @@ class Sensor(BuildableMixin, RBC, Generic[OptionsT, SharedSensorContextT, Shared
         """
         # Set first, since the builds of the derived sensors call their own guarded accessors
         self._is_built = True
+        # The setters of the sensor change its model, which the readings of the latest step no longer follow
+        self.changelog = ChangeLog(self._manager.n_envs_)
         self._shared_metadata.delays_ts = concat_with_tensor(
             self._shared_metadata.delays_ts, self._delay_ts, expand=(self._manager.n_envs_, 1), dim=1
         )
@@ -494,8 +497,9 @@ class Sensor(BuildableMixin, RBC, Generic[OptionsT, SharedSensorContextT, Shared
         'ScopedRenderContext.update_markers'). `envs_idx` is None for a scene without parallel environments, which
         indexes the single row of the arrays.
 
-        A change of state of a source of the sensor (see '_sources') makes the markers stale in the environments it
-        touches, where they are drawn hidden until the next step.
+        Each marker states the changes its content follows (see 'Shape.invalidated_by'), and is hidden while one of
+        them occurred since the latest measurement (see 'SensorScopedRenderContext.update_markers'). Each marker is made
+        with the flags of its items drawn.
         """
         raise NotImplementedError(f"{type(self).__name__} draws no marker.")
 
@@ -534,16 +538,6 @@ class Sensor(BuildableMixin, RBC, Generic[OptionsT, SharedSensorContextT, Shared
         return self._manager.sim.scene.add_recorder(self.read, rec_options)
 
     # =============================== private shared methods ===============================
-
-    @property
-    def _sources(self) -> "tuple[Solver, ...]":
-        """The solvers whose changes of state make the readings of the sensor stale.
-
-        The solver of the entity the sensor is attached to by default, none for a static sensor.
-        """
-        if self._options.entity_idx < 0:
-            return ()
-        return (self._manager.sim.entities[self._options.entity_idx].solver,)
 
     def _get_formatted_data(self, tensor: torch.Tensor, envs_idx=None) -> torch.Tensor:
         """
@@ -586,15 +580,6 @@ class Sensor(BuildableMixin, RBC, Generic[OptionsT, SharedSensorContextT, Shared
 class SensorScopedRenderContext(ScopedRenderContext[Sensor]):
     """The markers of the readings of a sensor drawing them (see 'Sensor._update_markers')."""
 
-    # Any change of state may make the readings of a sensor stale, which the markers show as the latest step computed
-    # them until the next one.
-    stale_on = frozenset(StateChange)
-    markers_stale_on = frozenset(StateChange)
-
-    @property
-    def sources(self) -> "tuple[Solver, ...]":
-        return self.owner._sources
-
     def __init__(self, sensor: Sensor, context: RenderContext) -> None:
         super().__init__(sensor, context)
         # The markers the sensor returned last (see 'Sensor._update_markers')
@@ -603,7 +588,18 @@ class SensorScopedRenderContext(ScopedRenderContext[Sensor]):
     def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:
         envs_idx = envs_idx if self.owner._manager.n_envs > 0 else None
         self._markers = self.owner._update_markers(self._markers, envs_idx)
-        return self._markers
+        # A marker draws what the sensor measured, so a fork of it without any item is returned while a change it
+        # follows occurred since the latest measurement, as the solvers and the sensor mark themselves clean once
+        # measured.
+        return tuple(
+            marker.fork(is_active=torch.zeros_like(marker.is_active))
+            if any(
+                trackable.changelog.is_dirty_since(None, *changes)
+                for trackable, changes in marker.invalidated_by.items()
+            )
+            else marker
+            for marker in self._markers
+        )
 
 
 class _SolverLinkGroup(NamedTuple):
@@ -717,10 +713,12 @@ class _LinkAttachedSensorMixin(BuildableMixin):
     @gs.assert_built
     def set_pos_offset(self, pos_offset, envs_idx=None):
         self._set_metadata_field(pos_offset, self._shared_metadata.offsets_pos, self._idx, 3, envs_idx)
+        self.changelog.record(StateChange.MODEL, envs_idx=envs_idx)
 
     @gs.assert_built
     def set_quat_offset(self, quat_offset, envs_idx=None):
         self._set_metadata_field(quat_offset, self._shared_metadata.offsets_quat, self._idx, 4, envs_idx)
+        self.changelog.record(StateChange.MODEL, envs_idx=envs_idx)
 
 
 class RigidSensorMixin[RigidSensorMetadataMixinT: RigidSensorMetadataMixin](_LinkAttachedSensorMixin):

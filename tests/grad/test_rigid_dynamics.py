@@ -126,8 +126,6 @@ def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
         def read_pose(entity, out=output, sl=is_single_link):
             if sl:
                 return entity.get_pos() if out == "pos" else entity.get_quat()
-            # The poses of the links are those the configuration implies, which a step may leave pending
-            entity.solver.update_forward_pos()
             return entity.get_links_pos(relative=False) if out == "pos" else entity.get_links_quat(relative=False)
 
         def clear_poses(scene, entity):

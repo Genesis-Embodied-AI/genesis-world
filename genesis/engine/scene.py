@@ -2211,10 +2211,6 @@ class SceneScopedRenderContext(ScopedRenderContext[Scene]):
             values_rows.append(rows)
         return values_rows, is_shared
 
-    @property
-    def sources(self) -> tuple[()]:
-        return ()
-
     def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:
         return tuple(self._markers)
 

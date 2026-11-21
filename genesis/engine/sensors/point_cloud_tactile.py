@@ -14,6 +14,7 @@ import genesis.utils.sdf as sdf
 from genesis.engine.bvh import func_aabb_intersects_aabb, func_bvh_traverse
 from genesis.engine.render_context import Points, Shape
 from genesis.engine.solvers.rigid.data import DynInfo, DynState
+from genesis.engine.state_change import StateChange, TrackableMixin
 from genesis.options.sensors import (
     ElastomerTaxel as ElastomerTaxelSensorOptions,
     ProximityTaxel as ProximityTaxelOptions,
@@ -614,7 +615,11 @@ class PointCloudTactileSensorMixin[PointCloudTactileSensorMetadataMixinT: PointC
             self._shared_metadata.points = points
 
     def _update_probes_markers(
-        self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None, is_contact: torch.Tensor | None
+        self,
+        markers: tuple[Shape, ...],
+        envs_idx: torch.Tensor | None,
+        is_contact: torch.Tensor | None,
+        invalidated_by: dict[TrackableMixin, tuple[StateChange, ...]],
     ) -> tuple[Points, ...]:
         # The points of the point cloud of the tracked links follow the markers of the probes
         if markers:
@@ -632,6 +637,7 @@ class PointCloudTactileSensorMixin[PointCloudTactileSensorMetadataMixinT: PointC
                 self._options.debug_point_cloud_radius,
                 self._options.debug_point_cloud_color,
                 is_active=torch.zeros_like(self._debug_pc_is_active),
+                invalidated_by={self._shared_metadata.solver: (StateChange.GEOMETRY,), self: (StateChange.MODEL,)},
             )
         solver = self._shared_metadata.solver
         links_pos = solver.get_links_pos(self._debug_pc_links_idx, envs_idx)
@@ -643,7 +649,7 @@ class PointCloudTactileSensorMixin[PointCloudTactileSensorMetadataMixinT: PointC
             links_quat[..., self._debug_pc_links_rank, :],
         )
         pc_is_active[envs_idx] = self._debug_pc_is_active[envs_idx]
-        return (*super()._update_probes_markers(markers[:-1], envs_idx, is_contact), pc_marker)
+        return (*super()._update_probes_markers(markers[:-1], envs_idx, is_contact, invalidated_by), pc_marker)
 
 
 class ProximityTaxelReturnType(NamedTuple):
@@ -779,7 +785,14 @@ class ProximityTaxelSensor(
     def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
         probes_slice = slice(self._probe_start_idx, self._probe_start_idx + self._n_probes)
         taxel_signal = self._shared_metadata.taxel_signal_buf[probes_slice, self._sanitize_envs_idx(envs_idx)]
-        return self._update_probes_markers(markers, envs_idx, is_contact=taxel_signal.T >= gs.EPS)
+        # The forces follow the configuration and the relative velocities
+        invalidated_by = {
+            self._shared_metadata.solver: (StateChange.GEOMETRY, StateChange.DYNAMICS),
+            self: (StateChange.MODEL,),
+        }
+        return self._update_probes_markers(
+            markers, envs_idx, is_contact=taxel_signal.T >= gs.EPS, invalidated_by=invalidated_by
+        )
 
 
 @qd.func
@@ -2052,4 +2065,8 @@ class ElastomerTaxelSensor(
 
     def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
         disp = self.read_ground_truth(envs_idx)
-        return self._update_probes_markers(markers, envs_idx, is_contact=torch.linalg.norm(disp, dim=-1) >= gs.EPS)
+        # The depths follow the configuration
+        invalidated_by = {self._shared_metadata.solver: (StateChange.GEOMETRY,), self: (StateChange.MODEL,)}
+        return self._update_probes_markers(
+            markers, envs_idx, is_contact=torch.linalg.norm(disp, dim=-1) >= gs.EPS, invalidated_by=invalidated_by
+        )

@@ -74,8 +74,8 @@ GRAD = "grad"
 class MPMParticles(Data, kind=DataKind.STATE, shape=(PARTICLES, ENVS)):
     """Runtime state of the material point method (MPM) particles, one value per particle and environment."""
 
-    pos: qd.Tensor = field((float, 3), grad=True)
-    vel: qd.Tensor = field((float, 3), grad=True)
+    pos: qd.Tensor = field((float, 3), grad=True, change=StateChange.GEOMETRY)
+    vel: qd.Tensor = field((float, 3), grad=True, change=StateChange.DYNAMICS)
     # The affine velocity field
     C: qd.Tensor = field((float, (3, 3)), grad=True)
     # The deformation gradient
@@ -96,7 +96,7 @@ class MPMParticles(Data, kind=DataKind.STATE, shape=(PARTICLES, ENVS)):
     actu: qd.Tensor = field(float, grad=True)
     # The plastic volume ratio
     Jp: qd.Tensor = field(float, grad=True)
-    is_active: qd.Tensor = field(bool)
+    is_active: qd.Tensor = field(bool, change=StateChange.GEOMETRY)
     # The momentum per unit offset a particle gives the cells of its stencil, its stress and affine velocity together
     affine: qd.Tensor = field((float, (3, 3)), kind=DataKind.SCRATCH, labels=DETERMINISTIC)
     # The velocity a particle gathers from the grid, before the boundary applies (see kernel_transfer_grid_to_particles)
@@ -649,12 +649,12 @@ Please decrease the simulation timestep or adjust the material parameters."""
             particles_idx, envs_idx, actus, self.mpm_info.particles.muscle_group, self.mpm_state.particles.actu
         )
 
-    def get_particles_actu(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
+    def get_particles_actu(self, particles_idx=None, envs_idx=None, *, copy: bool | None = True) -> torch.Tensor:
         """Get the actuation of some particles (see 'set_particles_actu')."""
-        tensor = self._read_data(self.mpm_state.particles.actu, envs_idx, particles_idx, copy=True)
+        tensor = self._read_data(self.mpm_state.particles.actu, envs_idx, particles_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    @mutates(StateChange.MODEL)
+    @mutates()
     def set_particles_muscle_group(self, muscle_group, particles_idx=None) -> None:
         """Set the muscle group of some particles, shared by every environment."""
         self._write_data(
@@ -669,11 +669,11 @@ Please decrease the simulation timestep or adjust the material parameters."""
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
 
-    def get_particles_muscle_group(self, particles_idx=None) -> torch.Tensor:
+    def get_particles_muscle_group(self, particles_idx=None, *, copy: bool | None = True) -> torch.Tensor:
         """Get the muscle group of some particles (see 'set_particles_muscle_group')."""
-        return self._read_data(self.mpm_info.particles.muscle_group, None, particles_idx, copy=True, is_batched=False)
+        return self._read_data(self.mpm_info.particles.muscle_group, None, particles_idx, copy=copy, is_batched=False)
 
-    @mutates(StateChange.MODEL)
+    @mutates()
     def set_particles_muscle_direction(self, muscle_direction, particles_idx=None) -> None:
         """Set the unit direction of the muscle fibers of some particles, shared by every environment."""
         self._write_data(
@@ -688,7 +688,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
 
-    @mutates(StateChange.MODEL)
+    @mutates()
     def set_particles_free(self, free, particles_idx=None) -> None:
         """Set whether some particles move freely or stay fixed, shared by every environment."""
         self._write_data(
@@ -703,16 +703,16 @@ Please decrease the simulation timestep or adjust the material parameters."""
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
 
-    def get_particles_free(self, particles_idx=None) -> torch.Tensor:
+    def get_particles_free(self, particles_idx=None, *, copy: bool | None = True) -> torch.Tensor:
         """Get whether some particles move freely (see 'set_particles_free')."""
-        return self._read_data(self.mpm_info.particles.is_free, None, particles_idx, copy=True, is_batched=False)
+        return self._read_data(self.mpm_info.particles.is_free, None, particles_idx, copy=copy, is_batched=False)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- particle constraints ------------------------------
     # ------------------------------------------------------------------------------------
 
     @gs.assert_built
-    @mutates(StateChange.MODEL)
+    @mutates()
     def set_particle_constraints(
         self, particles_mask, link_idx: int, stiffness: float, *, particles_start: int = 0
     ) -> None:
@@ -775,6 +775,8 @@ Please decrease the simulation timestep or adjust the material parameters."""
         self.particle_constraints = MPMParticleConstraints(
             sizes=dict(particles=self._n_particles, envs=self.n_envs_), env_first=False
         )
+        # Allocated after the build, which registered the arrays of the solver (see 'ChangeLog.register')
+        self.changelog.register(iter_data(self, "particle_constraints"))
         kernel_clear_particle_constraints(self.particle_constraints)
         self._is_constrained = True
 
@@ -784,18 +786,19 @@ Please decrease the simulation timestep or adjust the material parameters."""
         *,
         boundary_only: bool = False,
         envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
-    ) -> None:
+    ) -> list[DataItem]:
         # The constraints are allocated on first use, so a record holds them only if they existed when it was made: a
         # record holding them allocates them before they are written back, and one without them leaves none.
         is_constrained_record = checkpoint.arrays.get("particle_constraints.is_constrained")
         if is_constrained_record is not None and is_constrained_record.ndim > 0 and not self._is_constrained:
             self._init_particle_constraints()
-        super().load_checkpoint(checkpoint, boundary_only=boundary_only, envs_idx=envs_idx)
+        items = super().load_checkpoint(checkpoint, boundary_only=boundary_only, envs_idx=envs_idx)
         if is_constrained_record is not None and is_constrained_record.ndim == 0 and self._is_constrained:
             kernel_clear_particle_constraints(self.particle_constraints)
+        return items
 
     @gs.assert_built
-    @mutates(StateChange.MODEL)
+    @mutates()
     def remove_particle_constraints(self, particles_mask=None, *, particles_start: int = 0) -> None:
         """
         Detach some particles from the rigid link they are attached to (see 'set_particle_constraints').

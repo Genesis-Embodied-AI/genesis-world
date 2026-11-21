@@ -399,6 +399,11 @@ class SensorManager(BuildableMixin, BatchedMixin):
             # for any return space (bool, uint8, quantized float, ...).
             sensor_cls._apply_delay(metadata, measured_return_ring, self._return_cache[sensor_cls])
 
+        # The readings sample the sensors as they stand (see 'Shape.invalidated_by')
+        for sensors in self._sensors_by_type.values():
+            for sensor in sensors:
+                sensor.changelog.mark_clean()
+
         step_timer.stop_phase()
 
     def get_cloned_from_cache(self, sensor: "Sensor", is_ground_truth: bool = False) -> torch.Tensor:

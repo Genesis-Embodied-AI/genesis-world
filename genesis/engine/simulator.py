@@ -12,7 +12,7 @@ from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
 from genesis.typing import IndexType
-from genesis.utils.data import ArrayItem, DataItem, DataKind, check_data, iter_data
+from genesis.utils.data import ArrayItem, DataItem, DataKind, ScalarItem, check_data, iter_data
 from genesis.utils.misc import (
     BatchedMixin,
     BuildableMixin,
@@ -41,7 +41,7 @@ from .solvers.base_solver import (
     kernel_set_time,
     merge_errno,
 )
-from .state_change import StateChange, Subscriber
+from .state_change import StateChange, Subscriber, untracked_launches
 from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 
 if TYPE_CHECKING:
@@ -49,6 +49,9 @@ if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.options.scene import SceneOptions
     from genesis.options.surfaces import Surface
+
+# The categories of change a step makes, as the plain integers the change logs take below their public interface
+_STEP_CHANGES = (int(StateChange.GEOMETRY), int(StateChange.DYNAMICS))
 
 
 def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SolverCheckpoint]]) -> None:
@@ -266,6 +269,9 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         for solver in self._solvers:
             solver.build(n_envs)
             if solver.is_active:
+                # The arrays of the solver are tracked, and its refreshes refresh them as they are read stale
+                solver.changelog.register(solver.data, envs_idx=(solver._envs_idx, self._envs_idx))
+                solver.changelog.register_refreshes(solver)
                 self._active_solvers.append(solver)
                 self._active_systems.append(solver)
                 if not isinstance(solver, RigidSolver):
@@ -312,11 +318,14 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
             self._rigid_mpm_hybrid.build()
 
         # A change of the model invalidates every operation of the rollout (see 'RolloutGraph.invalidate'), while a
-        # change of the state is a call the graph records (see 'mutates'). The state of a solver tracking no gradient
-        # stays outside the graph.
+        # change of the state is a call the graph records (see 'mutates'). The invalidation runs inside the setter: a
+        # backward pass may follow it with no other call, and torch checks the saved tensors of a node before its code
+        # runs. The state of a solver tracking no gradient stays outside the graph.
         for solver in self._active_solvers:
             if solver.requires_grad:
-                solver.subscribe(Subscriber(frozenset((StateChange.MODEL,)), callback=self._rollout_graph.invalidate))
+                solver.changelog.subscribe(
+                    Subscriber(frozenset((StateChange.MODEL,)), callback=self._rollout_graph.invalidate)
+                )
 
         # On CPU, the flags of the solvers are merged straight from their numpy views (see 'merge_errno'), and whether
         # any env is flagged spares the calls of 'check_errno' at every step but those that raise
@@ -410,12 +419,23 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
             for item in system.data:
                 if isinstance(item, DataItem) and item.kind in kinds:
                     yield item._replace(name=f"{prefix}.{item.name}")
+        if DataKind.DERIVED in kinds:
+            for solver in self._active_solvers:
+                yield ScalarItem(
+                    f"Simulator.{type(solver).__name__}.is_dirty",
+                    DataKind.DERIVED,
+                    solver,
+                    lambda solver: solver.changelog.is_dirty_since(None),
+                )
 
     def __getstate__(self) -> SimulatorCheckpoint:
         """Return a SimulatorCheckpoint of the simulation, for '__setstate__' to restore."""
         return SimulatorCheckpoint(
             steps=self._steps.clone(),
             solvers={type(system).__name__: system.__getstate__() for system in self._active_systems},
+            solvers_is_dirty={
+                type(solver).__name__: solver.changelog.is_dirty_since(None) for solver in self._active_solvers
+            },
         )
 
     def check_checkpoint(self, state: SimulatorCheckpoint) -> None:
@@ -449,6 +469,8 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         for system in self._active_systems:
             system.__setstate__(state.solvers[type(system).__name__])
         self._steps[:] = torch.as_tensor(state.steps, device=gs.device)
+        for solver in self._active_solvers:
+            solver.changelog.restore(state.solvers_is_dirty[type(solver).__name__])
         # Flush the zero-copy writes of fill_data on Metal.
         if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
             torch.mps.synchronize()
@@ -487,13 +509,21 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
             self.check_errno()
             self._has_errno_flags = False
 
+        # A step changes the state of every environment, which it records before running, so that what the solvers
+        # compute during the step, such as the contacts, follows every change before it.
+        for solver in self._active_solvers:
+            solver.changelog.record(*_STEP_CHANGES)
+
         with self._step_timer.phase("physics"):
             if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
                 self._steps += 1
-                for _ in range(self._substeps):
-                    self.rigid_solver.substep()
-                    self._cur_substep_global += 1
-                self.rigid_solver.clear_external_force()
+                # The rigid solver records what each substep writes at once (see 'ChangeLog.commit'), which spares
+                # tracking each of its launches.
+                with untracked_launches():
+                    for _ in range(self._substeps):
+                        self.rigid_solver.substep()
+                        self._cur_substep_global += 1
+                    self.rigid_solver.clear_external_force()
             elif self._rollout_graph.is_recording:
                 self._rollout_graph.record_step(StepOperation(self))
             else:
@@ -501,7 +531,9 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
                 self._rollout_graph.mark_state_changed()
                 self._step()
 
-        self._render_context.advance()
+        # The step recomputed everything the solvers derive from their state (see 'depends_on')
+        for solver in self._active_solvers:
+            solver.changelog.mark_clean()
 
         # The flags of the step are merged once, as it is over, which leaves the checks and the mask of the flagged envs
         # mere reads of them (see 'Solver.update_errno')
@@ -520,11 +552,14 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
     def _step(self):
         """Run the substeps of a step."""
         self._steps += 1
-        for _ in range(self._substeps):
-            self.substep()
-            self._cur_substep_global += 1
-        if self.rigid_solver.is_active:
-            self.rigid_solver.clear_external_force()
+        # The solvers record what their substeps write at once (see 'ChangeLog.commit'), the couplers and the
+        # solvers reading the derived arrays of another one refreshing them first as the step starts.
+        with untracked_launches(refresh=True):
+            for _ in range(self._substeps):
+                self.substep()
+                self._cur_substep_global += 1
+            if self.rigid_solver.is_active:
+                self.rigid_solver.clear_external_force()
 
     def _reverse(self, substep_start: int, steps_start: torch.Tensor, checkpoints: list[SolverCheckpoint]) -> None:
         """

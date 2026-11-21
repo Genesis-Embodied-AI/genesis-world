@@ -532,7 +532,9 @@ def data_to_array(data, *, to_torch: bool = False, copy: bool | None = None):
             data = data.clone()
         return data if to_torch else tensor_to_array(data)
     if isinstance(data, (qd.Tensor, qd.Field, qd.Ndarray)):
-        return qd_to_torch(data, copy=copy) if to_torch else qd_to_numpy(data, copy=copy)
+        # The data is copied as it stands (see 'no_read_guard')
+        with no_read_guard():
+            return qd_to_torch(data, copy=copy) if to_torch else qd_to_numpy(data, copy=copy)
     if isinstance(data, np.ndarray):
         return data
     if isinstance(data, tuple) and (data_asdict := getattr(data, "_asdict", None)) is not None:
@@ -961,6 +963,39 @@ def _apply_masks(out, value, row_mask, col_mask, keepdim, copy, *, to_torch):
     return out[mask]
 
 
+# The function a read of a quadrants array calls first, None for none (see 'set_array_read_hook')
+_array_read_hook: Callable[[Any], None] | None = None
+
+
+def set_array_read_hook(hook: Callable[[Any], None] | None) -> None:
+    """Set the function 'qd_to_torch' and 'qd_to_numpy' call with the array they read before reading it.
+
+    It lets the arrays derived from the state refresh as they are read (see 'genesis.engine.state_change').
+
+    Parameters
+    ----------
+    hook : Callable[[Any], None] | None
+        The function called with each array read, None for none.
+    """
+    global _array_read_hook
+    _array_read_hook = hook
+
+
+@contextmanager
+def no_read_guard() -> Iterator[None]:
+    """Lift the read guard within the block, the quadrants arrays being read as they stand (see 'set_array_read_hook').
+
+    A copy of the data itself, such as a checkpoint or the save of a backward pass, holds what the arrays hold, while a
+    consumer of their values reads them current.
+    """
+    global _array_read_hook
+    hook, _array_read_hook = _array_read_hook, None
+    try:
+        yield
+    finally:
+        _array_read_hook = hook
+
+
 def qd_to_torch(
     value: qd.Tensor | qd.Field | qd.Ndarray,
     row_mask: int | range | slice | tuple[int, ...] | list[int] | torch.Tensor | np.ndarray | None = None,
@@ -981,6 +1016,8 @@ def qd_to_torch(
         copy (bool, optional): Wether to enforce returning a copy no matter what. None to avoid copy if possible
         without raising an exception if not.
     """
+    if _array_read_hook is not None:
+        _array_read_hook(value)
     if isinstance(value, qd.Tensor):
         value = value._unwrap()
 
@@ -1053,6 +1090,8 @@ def qd_to_numpy(
         copy (bool, optional): Wether to enforce returning a copy no matter what. None to avoid copy if possible
         without raising an exception if not.
     """
+    if _array_read_hook is not None:
+        _array_read_hook(value)
     if isinstance(value, qd.Tensor):
         value = value._unwrap()
 
@@ -1084,8 +1123,11 @@ def qd_to_numpy(
                 array = _maybe_transpose_np(value.to_numpy(), value, transpose)
                 is_copy = True
             else:
+                # A numpy view is read-only, the arrays being written through torch views alone, which the change logs
+                # follow (see 'genesis.engine.state_change').
                 value._np = tc.numpy()
                 value._T_np = _maybe_transpose(tc, value, True).numpy()
+                value._np.flags.writeable = value._T_np.flags.writeable = False
                 if isinstance(value, qd.Ndarray):
                     value._reset = functools.partial(_reset_ndarray_with_views, value)
                 array = value._T_np if transpose else value._np

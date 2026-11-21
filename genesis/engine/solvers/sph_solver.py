@@ -11,6 +11,7 @@ import genesis as gs
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import SPHEntity
 from genesis.engine.materials import SPH
+from genesis.engine.state_change import StateChange
 from genesis.options.solvers import SPHOptions
 from genesis.options.surfaces import Surface
 from genesis.utils.data import ENVS, Config, ConfigItem, Data, DataItem, DataKind, eoa, field, is_opted_in, iter_data
@@ -56,14 +57,14 @@ class SPHParticles(Data, kind=DataKind.STATE, shape=(PARTICLES, ENVS)):
     of change of the density they correct.
     """
 
-    pos: qd.Tensor = field((float, 3))
-    vel: qd.Tensor = field((float, 3))
+    pos: qd.Tensor = field((float, 3), change=StateChange.GEOMETRY)
+    vel: qd.Tensor = field((float, 3), change=StateChange.DYNAMICS)
     acc: qd.Tensor = field((float, 3))
     rho: qd.Tensor = field(float)
     p: qd.Tensor = field(float)
     dfsph_factor: qd.Tensor = field(float)
     drho: qd.Tensor = field(float)
-    is_active: qd.Tensor = field(bool)
+    is_active: qd.Tensor = field(bool, change=StateChange.GEOMETRY)
 
 
 class SPHParticlesInfo(Data, kind=DataKind.CONSTANT, shape=(PARTICLES,)):

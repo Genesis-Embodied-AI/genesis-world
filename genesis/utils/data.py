@@ -231,6 +231,7 @@ class _FieldSpec(NamedTuple):
     is_ndarray: bool = False
     opt_in: bool = False
     oversize_hint: str = ""
+    change: IntEnum | None = None
 
 
 def field(
@@ -243,22 +244,42 @@ def field(
     ndarray: bool = False,
     opt_in: bool = False,
     oversize_hint: str = "",
+    change: IntEnum | None = None,
 ):
     """
     Declare a field of a struct (see Data).
 
-    `dtype` is the element type of an array: `float`, `int` or `bool` in the precision of the simulation, a Quadrants
-    type, a function returning one, or such a type paired with an element shape, `(float, 3)` for a vector and
-    `(float, (3, 3))` for a matrix, whose dimensions may be sizes. `shape` lists the sizes of its dimensions (see Size),
-    and a field of shape () and kind CONSTANT or INFO is a constant the constructor fills from its values, a vector
-    constant from any sequence of its length. `kind` and `shape` replace the defaults of the struct, for every array of
-    a member. `labels` select the array, or every array of a member, in the property tables of the constructor. `grad`
-    gives the array gradients when the constructor requires them. `ndarray` allocates an ndarray on every backend. An
-    `opt_in` array or member is unused until another component opts it in (see 'opt_in'). An array too large for a
-    backend to address raises at allocation, its message ending with `oversize_hint`, such as the options shrinking it.
+    `kind` and `shape` replace the defaults of the struct, for every array of a member.
+
+    Parameters
+    ----------
+    dtype : Any, optional
+        The element type of an array: `float`, `int` or `bool` in the precision of the simulation, a Quadrants type, a
+        function returning one, or such a type paired with an element shape, `(float, 3)` for a vector and
+        `(float, (3, 3))` for a matrix, whose dimensions may be sizes. None for a member struct. Defaults to None.
+    shape : tuple[Size | int, ...] | None, optional
+        The sizes of the dimensions of the array (see Size). A field of shape () and kind CONSTANT or INFO is a constant
+        the constructor fills from its values, a vector constant from any sequence of its length. Defaults to None.
+    kind : DataKind | None, optional
+        The kind of the array. Defaults to None.
+    labels : str | tuple[str, ...], optional
+        The labels selecting the array, or every array of a member, in the property tables of the constructor.
+        Defaults to ().
+    grad : bool, optional
+        Whether the array has gradients when the constructor requires them. Defaults to False.
+    ndarray : bool, optional
+        Whether the array is an ndarray on every backend. Defaults to False.
+    opt_in : bool, optional
+        Whether the array or member is unused until another component opts it in (see 'opt_in'). Defaults to False.
+    oversize_hint : str, optional
+        The end of the message raised when the array is too large for a backend to address, such as the options
+        shrinking it. Defaults to "".
+    change : IntEnum | None, optional
+        The category of change a write of a STATE array records, such as `StateChange.GEOMETRY` (see
+        'genesis.engine.state_change'), a write of an INFO array changing the model whatever it is. Defaults to None.
     """
     labels = labels if isinstance(labels, tuple) else (labels,)
-    spec = _FieldSpec(dtype, shape, kind, labels, grad, ndarray, opt_in, oversize_hint)
+    spec = _FieldSpec(dtype, shape, kind, labels, grad, ndarray, opt_in, oversize_hint, change)
     return dataclasses.field(metadata={_SPEC: spec})
 
 
@@ -793,18 +814,26 @@ class ArrayItem(NamedTuple):
     name: str
     kind: DataKind
     array: qd.Tensor | qd.Field | qd.Ndarray | torch.Tensor
+    change: IntEnum | None = None
+    """The category of change a write of the array records (see 'field')."""
 
 
 class ScalarItem(NamedTuple):
     """A Python native scalar of a solver, such as a flag, under the name of its attribute (see 'iter_data').
 
-    It is the attribute 'attr' of 'owner', a property with a setter included, which a restore sets back.
+    It is the attribute 'attr' of 'owner', a property with a setter included, which a restore sets back, or the value a
+    function of 'owner' computes, read-only, which its owner restores itself.
     """
 
     name: str
     kind: DataKind
     owner: object
-    attr: str
+    attr: str | Callable[[Any], bool | int | float]
+
+    @property
+    def value(self) -> bool | int | float:
+        """The current value of the scalar."""
+        return getattr(self.owner, self.attr) if isinstance(self.attr, str) else self.attr(self.owner)
 
 
 # What a solver yields among its data, which a checkpoint or a trajectory reads and writes back (see 'iter_data')
@@ -830,10 +859,11 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
     'grad'. A Python native scalar of an object outside any struct, such as a flag, yields an item of the given kind,
     which a restore sets back. A static config yields a ConfigItem. Anything else raises.
     """
-    # The attributes left to walk, depth first in declaration order, each with the kind it inherits and its name
-    pending = [(owner, attr, kind, attr)]
+    # The attributes left to walk, depth first in declaration order, each with the kind it inherits, its name and the
+    # category of change of its field.
+    pending = [(owner, attr, kind, attr, None)]
     while pending:
-        owner, attr, kind, name = pending.pop()
+        owner, attr, kind, name, change = pending.pop()
         value = getattr(owner, attr)
         is_owner_struct = dataclasses.is_dataclass(owner) or isinstance(owner, tuple)
         if isinstance(value, Config):
@@ -841,7 +871,7 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
         elif isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor)):
             if kind is None:
                 gs.raise_exception(f"'{attr}' holds an array that no struct or annotation gives a kind.")
-            yield ArrayItem(name, kind, value)
+            yield ArrayItem(name, kind, value, change)
             if not isinstance(value, torch.Tensor) and value.has_grad():
                 yield ArrayItem(f"{name}.grad", kind, value.grad)
         elif dataclasses.is_dataclass(value) or isinstance(value, tuple):
@@ -856,7 +886,7 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
                 if stated_kind is None and kind is None and is_member_array:
                     stated_kind = type(value).kind
                 member_kind = kind if stated_kind is None else stated_kind
-                pending.append((value, member, member_kind, f"{name}.{member}"))
+                pending.append((value, member, member_kind, f"{name}.{member}", spec.change))
         elif isinstance(value, (bool, int, float)) and not is_owner_struct:
             if kind is None:
                 gs.raise_exception(f"'{attr}' holds a {type(value).__name__} that no annotation gives a kind.")
@@ -921,7 +951,7 @@ def check_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torc
             shape, dtype = (*array.shape, *element_shape), array.dtype
             is_item_real = dtype in qd.types.primitive_types.real_types
         else:
-            scalar = getattr(item.owner, item.attr)
+            scalar = item.value
             shape, dtype = (), type(scalar).__name__
             is_item_real = isinstance(scalar, float)
         if tuple(value.shape) != shape:
@@ -945,7 +975,7 @@ def copy_data(items: Iterable[DataItem], *, to_torch: bool) -> dict[str, np.ndar
     values = {}
     for item in items:
         if isinstance(item, ScalarItem):
-            values[item.name] = np.array(getattr(item.owner, item.attr))
+            values[item.name] = np.array(item.value)
         else:
             values[item.name] = data_to_array(item.array, to_torch=to_torch, copy=True)
     return values
@@ -962,8 +992,9 @@ def fill_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch
     for item in check_data(items, values):
         value = values[item.name]
         if isinstance(item, ScalarItem):
+            assert isinstance(item.attr, str), f"'{item.name}' is read-only: its owner restores it."
             # 'check_data' admits a boolean record for an integer, so the value takes the native type of the attribute
-            setattr(item.owner, item.attr, type(getattr(item.owner, item.attr))(value.item()))
+            setattr(item.owner, item.attr, type(item.value)(value.item()))
             continue
         view = None
         if isinstance(item.array, torch.Tensor):

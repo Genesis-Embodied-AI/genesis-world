@@ -6,6 +6,7 @@ import torch
 
 import genesis as gs
 from genesis.engine.render_context import Points, Shape
+from genesis.engine.state_change import StateChange
 from genesis.options.sensors import RaycastPattern, Raycaster as RaycasterOptions
 from genesis.utils.geom import normalize, transform_by_quat, transform_by_trans_quat
 from genesis.utils.misc import concat_with_tensor, make_tensor_field
@@ -20,8 +21,6 @@ from .base_sensor import (
 )
 
 if TYPE_CHECKING:
-    from genesis.engine.solvers.base_solver import Solver
-
     from .sensor_manager import SensorManager
 
 
@@ -57,11 +56,11 @@ class RaycastContext(SharedSensorContext):
         if self._active:
             return
         self._active = True
-        context, rigid_solver = self._sim.render_context, self._sim.rigid_solver
+        rigid_solver = self._sim.rigid_solver
         # The collision geometry is the rigid solver's alone, while visual meshes exist on both solvers
         visual_contexts = (rigid_solver.render_context, self._sim.kinematic_solver.render_context)
-        self._targets.extend(get_raycast_targets(context, (rigid_solver.render_context,), is_visual=False))
-        self._targets.extend(get_raycast_targets(context, visual_contexts, is_visual=True))
+        self._targets.extend(get_raycast_targets((rigid_solver.render_context,), is_visual=False))
+        self._targets.extend(get_raycast_targets(visual_contexts, is_visual=True))
         self.update()
 
     def update(self):
@@ -259,20 +258,33 @@ class RaycasterSensor(
                 is_last=i_target == len(targets) - 1,
             )
 
-    @property
-    def _sources(self) -> "tuple[Solver, ...]":
-        # The rays hit the meshes of the solvers of the targets
-        targets_solvers = (target.scoped_context.owner for target in self._shared_context.targets)
-        return tuple(dict.fromkeys((*super()._sources, *targets_solvers)))
-
     def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Points, Points]:
         if not markers:
             # The spheres at the start and at the hit point of every ray
             pos = torch.zeros((self._manager.n_envs_, len(self.ray_starts), 3), dtype=gs.tc_float, device=gs.device)
             radius = self._options.debug_sphere_radius
+            # The hit points follow the configurations of the solvers of the targets and of the link of the sensor, the
+            # starts of the rays being drawn where the link stands.
+            solvers = (
+                *(target.scoped_context.owner for target in self._shared_context.targets),
+                self._link.entity.solver,
+            )
+            invalidated_by = {**dict.fromkeys(solvers, (StateChange.GEOMETRY,)), self: (StateChange.MODEL,)}
             markers = (
-                Points(pos, radius, self._options.debug_ray_start_color),
-                Points(torch.zeros_like(pos), radius, self._options.debug_ray_hit_color),
+                Points(
+                    pos,
+                    radius,
+                    self._options.debug_ray_start_color,
+                    is_active=torch.ones(pos.shape[:-1], dtype=gs.tc_bool, device=gs.device),
+                    invalidated_by={self._link.entity.solver: (StateChange.GEOMETRY,), self: (StateChange.MODEL,)},
+                ),
+                Points(
+                    torch.zeros_like(pos),
+                    radius,
+                    self._options.debug_ray_hit_color,
+                    is_active=torch.ones(pos.shape[:-1], dtype=gs.tc_bool, device=gs.device),
+                    invalidated_by=invalidated_by,
+                ),
             )
         data = self.read(envs_idx)
         link_pos = self._link.get_pos(envs_idx, relative=False)[..., None, :]

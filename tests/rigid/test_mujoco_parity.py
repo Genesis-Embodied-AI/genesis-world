@@ -9,6 +9,7 @@ from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.mujoco_parity import (
+    _get_model_mappings,
     check_mujoco_data_consistency,
     check_mujoco_model_consistency,
     init_paired_simulators,
@@ -420,6 +421,38 @@ def test_robot_kinematics(gs_sim, mj_sim, tol):
         qpos = dofs_lower + (dofs_upper - dofs_lower) * np.random.rand(gs_robot.n_qs)
         init_paired_simulators(gs_sim, mj_sim, qpos)
         check_mujoco_data_consistency(gs_sim, mj_sim, tol=tol)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("xml_path", ["xml/rope_hinge.xml"])
+@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG])
+@pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_setters_getters(gs_sim, mj_sim, tol):
+    solver = gs_sim.rigid_solver
+    (gs_bodies_idx, _, gs_qs_idx, gs_dofs_idx, _, _), (mj_bodies_idx, _, mj_qs_idx, mj_dofs_idx, _, _) = (
+        _get_model_mappings(gs_sim, mj_sim)
+    )
+    init_paired_simulators(gs_sim, mj_sim)
+    gs_sim.scene.step()
+    mujoco.mj_step(mj_sim.model, mj_sim.data)
+
+    # The getters run forward kinematics on the state the setters wrote after a step, as 'mj_forward' does, then on the
+    # state the next step reaches.
+    qpos = tensor_to_array(solver.get_qpos()) + 0.1
+    solver.set_qpos(qpos)
+    solver.set_dofs_velocity(0.1)
+    mj_sim.data.qpos[mj_qs_idx] = qpos[gs_qs_idx]
+    mj_sim.data.qvel[mj_dofs_idx] = 0.1
+    mujoco.mj_forward(mj_sim.model, mj_sim.data)
+    for is_stepped in (False, True):
+        if is_stepped:
+            gs_sim.scene.step()
+            mujoco.mj_step(mj_sim.model, mj_sim.data)
+        assert_allclose(solver.get_qpos()[gs_qs_idx], mj_sim.data.qpos[mj_qs_idx], tol=tol)
+        assert_allclose(solver.get_dofs_velocity()[gs_dofs_idx], mj_sim.data.qvel[mj_dofs_idx], tol=tol)
+        assert_allclose(solver.get_links_pos()[gs_bodies_idx], mj_sim.data.xpos[mj_bodies_idx], tol=tol)
+        assert_allclose(solver.get_links_quat()[gs_bodies_idx], mj_sim.data.xquat[mj_bodies_idx], tol=tol)
 
 
 @pytest.mark.required

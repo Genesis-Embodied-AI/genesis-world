@@ -152,13 +152,21 @@ def test_data_accessor(n_envs, batched, tol):
     # accessors take an environment selection at all.
     n_envs_info = n_envs if batched else -1
 
+    # The results of a step are checked first, any setter withholding them until the next step
+    scene.step()
     for arg1_max, arg2_max, getter_or_spec, setter, qd_data in (
+        (gs_s.n_links, n_envs, gs_s.get_links_acc, None, None),
+        (gs_s.n_dofs, n_envs, gs_s.get_dofs_control_force, None, gs_s.dyn_state.dofs.qf_applied),
+        (gs_s.n_dofs, n_envs, gs_s.get_dofs_force, None, gs_s.dyn_state.dofs.force),
+        (gs_robot.n_links, n_envs, gs_robot.get_links_acc, None, None),
+        (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_control_force, None, None),
+        (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_force, None, None),
+        (-1, n_envs, gs_robot.get_links_net_contact_force, None, None),
         # SOLVER
         (gs_s.n_links, n_envs, gs_s.get_links_pos, None, gs_s.dyn_state.links.pos),
         (gs_s.n_links, n_envs, gs_s.get_links_quat, None, gs_s.dyn_state.links.quat),
         (gs_s.n_links, n_envs, gs_s.get_links_vel, None, None),
         (gs_s.n_links, n_envs, gs_s.get_links_ang, None, gs_s.dyn_state.links.cd_ang),
-        (gs_s.n_links, n_envs, gs_s.get_links_acc, None, None),
         (gs_s.n_links, n_envs, gs_s.get_links_root_COM, None, gs_s.dyn_state.links.root_COM),
         (
             gs_s.n_links,
@@ -170,8 +178,6 @@ def test_data_accessor(n_envs, batched, tol):
         (gs_s.n_links, n_envs_info, gs_s.get_links_COM, gs_s.set_links_COM, gs_s.dyn_info.links.inertial_pos),
         (gs_s.n_links, n_envs_info, gs_s.get_links_inertia, gs_s.set_links_inertia, gs_s.dyn_info.links.inertial_i),
         (gs_s.n_links, n_envs_info, gs_s.get_links_invweight, None, gs_s.dyn_info.links.invweight),
-        (gs_s.n_dofs, n_envs, gs_s.get_dofs_control_force, None, gs_s.dyn_state.dofs.qf_applied),
-        (gs_s.n_dofs, n_envs, gs_s.get_dofs_force, None, gs_s.dyn_state.dofs.force),
         (gs_s.n_dofs, n_envs, gs_s.get_dofs_velocity, gs_s.set_dofs_velocity, gs_s.dyn_state.dofs.vel),
         (gs_s.n_dofs, n_envs, gs_s.get_dofs_position, gs_s.set_dofs_position, gs_s.dyn_state.dofs.pos),
         (
@@ -213,14 +219,11 @@ def test_data_accessor(n_envs, batched, tol):
         (gs_robot.n_links, n_envs, gs_robot.get_links_quat, None, None),
         (gs_robot.n_links, n_envs, gs_robot.get_links_vel, None, None),
         (gs_robot.n_links, n_envs, gs_robot.get_links_ang, None, None),
-        (gs_robot.n_links, n_envs, gs_robot.get_links_acc, None, None),
         (gs_robot.n_links, n_envs, (), gs_robot.set_friction_ratio, None),
         (gs_robot.n_links, n_envs_info, gs_robot.get_links_mass, gs_robot.set_links_mass, None),
         (gs_robot.n_links, n_envs_info, (3,), gs_robot.set_links_COM, None),
         (gs_robot.n_links, n_envs_info, gs_robot.get_links_inertia, gs_robot.set_links_inertia, None),
         (gs_robot.n_links, n_envs_info, gs_robot.get_links_invweight, None, None),
-        (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_control_force, None, None),
-        (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_force, None, None),
         (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_velocity, gs_robot.set_dofs_velocity, None),
         (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_position, gs_robot.set_dofs_position, None),
         (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_force_range, gs_robot.set_dofs_force_range, None),
@@ -236,7 +239,6 @@ def test_data_accessor(n_envs, batched, tol):
         (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_act_gain, gs_robot.set_dofs_act_gain, None),
         (gs_robot.n_qs, n_envs, gs_robot.get_qpos, gs_robot.set_qpos, None),
         (-1, n_envs, gs_robot.get_mass_mat, None, None),
-        (-1, n_envs, gs_robot.get_links_net_contact_force, None, None),
         (-1, n_envs, gs_robot.get_pos, gs_robot.set_pos, None),
         (-1, n_envs, gs_robot.get_quat, gs_robot.set_quat, None),
         (-1, -1, gs_robot.get_mass, gs_robot.set_mass, None),
@@ -263,8 +265,9 @@ def test_data_accessor(n_envs, batched, tol):
         getter, spec = (getter_or_spec, None) if callable(getter_or_spec) else (None, getter_or_spec)
 
         # Restore PD consistency before each iteration (act_gain/act_bias setters may have broken it)
-        gs_s.set_dofs_kp(0.0)
-        gs_s.set_dofs_kv(0.0)
+        if setter is not None:
+            gs_s.set_dofs_kp(0.0)
+            gs_s.set_dofs_kv(0.0)
 
         # Check getter and setter without row or column masking
         if getter is not None:
@@ -1013,12 +1016,19 @@ def test_inertial_property_setters(sliding_ball_pair, xml_path, implicit_inertia
         assert_allclose(pair.get_dofs_position(slide_dof), authored.get_dofs_position(slide_dof), tol=tol)
         assert_allclose(pair.get_dofs_velocity(slide_dof), authored.get_dofs_velocity(slide_dof), tol=tol)
 
-    # Refreshing the weights, defined only at the neutral configuration, must leave the live one untouched.
+    # Refreshing the weights, defined only at the neutral configuration, must leave the live one untouched, in every
+    # environment whichever a setter just wrote, through a mass as through an armature.
     qpos_live = authored.get_qpos()
     vel_live = authored.get_dofs_velocity()
-    authored.links[1].set_mass(2.25)
-    assert_allclose(authored.get_qpos(), qpos_live, tol=gs.EPS)
-    assert_allclose(authored.get_dofs_velocity(), vel_live, tol=gs.EPS)
+    links_pos_live, links_vel_live = authored.get_links_pos(), authored.get_links_vel()
+    armature_live = authored.get_dofs_armature()
+    for set_model, value in ((authored.links[1].set_mass, 2.25), (authored.set_dofs_armature, armature_live)):
+        authored.set_qpos(qpos_live[[1]], envs_idx=[1], zero_velocity=False)
+        set_model(value)
+        assert_allclose(authored.get_qpos(), qpos_live, tol=gs.EPS)
+        assert_allclose(authored.get_dofs_velocity(), vel_live, tol=gs.EPS)
+        assert_allclose(authored.get_links_pos(), links_pos_live, tol=gs.EPS)
+        assert_allclose(authored.get_links_vel(), links_vel_live, tol=gs.EPS)
 
     # Where the mass of a link sits is what the dynamics turns it about, so both the place a link carries its own mass
     # and the composite place its tree turns about have to follow a mass or a center of mass being written. Asserted on
@@ -1104,7 +1114,7 @@ def test_inertial_property_setters(sliding_ball_pair, xml_path, implicit_inertia
     dofs_idx = slice(free_bodies.dof_start, free_bodies.dof_start + free_bodies.n_dofs)
     untouched = slice(free_bodies.dof_start + 6, free_bodies.dof_start + free_bodies.n_dofs)
     for buffer in (constraint_state.grad, constraint_state.Mgrad):
-        sentinels = qd_to_numpy(buffer)
+        sentinels = qd_to_numpy(buffer, copy=True)
         sentinels[dofs_idx] = SENTINEL
         buffer.from_numpy(sentinels)
     free_bodies.links[0].set_mass(2.0)
@@ -1329,30 +1339,36 @@ def test_reset(
     # while none sleeps.
     if not use_hibernation:
         scene.step()
-        scene.get_state()
         continued_getters = tuple(getter() for getter in GETTERS)
         scene.reset(state=fallen_state)
         scene.step()
-        scene.get_state()
         resumed_getters = tuple(getter() for getter in GETTERS)
         # FIXME: quadrants#1086 - the replay drifts in the last bits, which contacts amplify to the tolerance in fp32.
         tol = 1e-9 if precision == "64" else 2e-4
         for actual, continued_ref in zip(resumed_getters, continued_getters):
             assert_allclose(actual, continued_ref, tol=tol)
 
+    # A restored state reads as captured. Under MuJoCo compatibility the quantities derived from the state were captured
+    # as the last step left them, derived from the state it started from, whereas a restored state derives them from
+    # itself.
+    STATE_GETTERS = (scene.rigid_solver.get_qpos, scene.rigid_solver.get_dofs_velocity, box.get_dofs_velocity)
+    scene.reset(state=fallen_state)
+    fallen_restored_getters = tuple(getter() for getter in GETTERS)
+    for getter, actual, fallen_ref in zip(GETTERS, fallen_restored_getters, fallen_getters):
+        if not enable_mujoco_compatibility or getter in STATE_GETTERS:
+            assert_equal(actual, fallen_ref)
+
     for envs_idx in (BOOL_MASK, torch.where(BOOL_MASK)[0]):
         scene.reset(state=fallen_state)
         scene.reset(state=init_state, envs_idx=envs_idx)
         restored_getters = tuple(getter() for getter in GETTERS)
-        for actual, init_ref, fallen_ref in zip(restored_getters, init_getters, fallen_getters):
+        for actual, init_ref, fallen_ref in zip(restored_getters, init_getters, fallen_restored_getters):
             assert_equal(actual[BOOL_MASK], init_ref[BOOL_MASK])
             assert_equal(actual[~BOOL_MASK], fallen_ref[~BOOL_MASK])
 
     # After reset, simulation from init_state should reproduce the original fallen_state trajectory
     for _ in range(N_STEPS):
         scene.step()
-    # Reading the state refreshes the poses the step left one integration behind, as the capture of 'fallen_state' did
-    scene.get_state()
     replayed_getters = tuple(getter() for getter in GETTERS)
     replayed_acc_getters = tuple(getter() for getter in ACC_GETTERS)
     for actual, fallen_ref in (*zip(replayed_getters, fallen_getters), *zip(replayed_acc_getters, fallen_acc_getters)):

@@ -1,9 +1,11 @@
+from enum import IntEnum
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
-from genesis.engine.solvers.rigid.data import DynInfo, DynState, LinksState, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, LinksState, RigidConfig, RigidInfo
 from genesis.grad.bridge import no_grad
 from genesis.utils.data import eoa
 from genesis.utils.simt import func_exact_sum_add, func_exact_sum_take
@@ -122,6 +124,67 @@ def func_wakeup_link(
 
         # The entity owning this link now has an awake link
         dyn_state.entities.is_hibernated[dyn_info.links.entity_idx[link_I], i_b] = False
+
+
+class MASS_MAT_ASSEMBLY(IntEnum):
+    """Select the kinematic trees whose mass matrix a substep assembles and factors (see func_forward_dynamics).
+
+    A sleeping tree keeps the mass matrix and the factor of its last awake substep (see func_is_awake_tree), which a
+    write of the mass matrix outside the step overwrites, and a refresh of the mass matrix outside the step may leave
+    the substep nothing to compute.
+    """
+
+    AWAKE = 0
+    """Assemble and factor the awake trees."""
+
+    ALL = 1
+    """Assemble and factor every tree, the sleeping ones included."""
+
+    FACTOR = 2
+    """Factor the awake trees, whose mass matrix is current."""
+
+    NONE = 3
+    """Neither, the mass matrix of the awake trees and its factor being current."""
+
+
+def get_mass_mat_assembly(
+    rigid_config: RigidConfig,
+    is_mass_mat_written: bool,
+    is_mass_mat_stale: bool = True,
+    is_mass_mat_L_stale: bool = True,
+) -> MASS_MAT_ASSEMBLY:
+    """Select the kinematic trees whose mass matrix a substep assembles and factors, as its kernels compile.
+
+    The implicit pass of the integration takes the stale flags at their defaults, since it computes its damped factor
+    anew whatever the forward dynamics reused.
+
+    Parameters
+    ----------
+    rigid_config : RigidConfig
+        The static configuration of the rigid solver.
+    is_mass_mat_written : bool
+        Whether the mass matrix or its factor was written outside the substep since the last substep read its writes.
+    is_mass_mat_stale : bool, optional
+        Whether the mass matrix is stale. Defaults to True.
+    is_mass_mat_L_stale : bool, optional
+        Whether the factor of the mass matrix is stale. Defaults to True.
+    """
+    # A sleeping tree keeps the mass matrix of its last awake substep, which a write outside the substep replaced
+    if rigid_config.use_hibernation and is_mass_mat_written:
+        return MASS_MAT_ASSEMBLY.ALL
+    # The matrix a refresh of the getter leaves is that of the substep where it holds no implicit damping term, the
+    # derived quantities stand as at the start of the substep, and no gradient flows through it.
+    if (
+        rigid_config.integrator == gs.integrator.approximate_implicitfast
+        or rigid_config.enable_mujoco_compatibility
+        or rigid_config.requires_grad
+        or is_mass_mat_stale
+    ):
+        return MASS_MAT_ASSEMBLY.AWAKE
+    # The fused solve of the smooth acceleration runs in the factor pass, which it needs then
+    if rigid_config.enable_fused_smooth_acc_solve or is_mass_mat_L_stale:
+        return MASS_MAT_ASSEMBLY.FACTOR
+    return MASS_MAT_ASSEMBLY.NONE
 
 
 @qd.func

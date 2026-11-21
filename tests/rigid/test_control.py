@@ -240,6 +240,19 @@ def test_drone_propellers_force_application(n_envs, substeps, show_viewer, tol):
     drone.set_qpos(drone.get_qpos())
     assert_allclose(scene.rigid_solver.get_vgeoms_quat(propellers_vgeom_idx), propellers_quat, tol=gs.EPS)
 
+    # Thrust follows the propellers of a drone just turned by a setter: a quarter turn about x sends it along -y
+    scene.reset()
+    drone.set_quat((np.cos(np.pi / 4), np.sin(np.pi / 4), 0.0, 0.0))
+    drone.set_propellers_rpm(BASE_RPM)
+    scene.step()
+    thrust = drone.n_propellers * drone.KF * BASE_RPM**2
+    mass = drone.get_mass_mat()[..., 1, 1]
+    damping = drone.get_dofs_damping(dofs_idx_local=1)[..., 0]
+    vel_y = 0.0
+    for _ in range(substeps):
+        vel_y = (mass * vel_y - SUBSTEP_DT * thrust) / (mass + damping * SUBSTEP_DT)
+    assert_allclose(drone.get_dofs_velocity(dofs_idx_local=1)[..., 0], vel_y, tol=tol)
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu])
