@@ -177,7 +177,8 @@ class Recorder[T](BuildableMixin):
             try:
                 # Note that it is necessary to rely on private threading atexit because functions registered using
                 # 'atexit.register' are called AFTER 'threading._shutdown', causing deadlock for non-daemon threads.
-                threading._register_atexit(self.stop)
+                # 'RecorderManager.stop' destroys the recorders it stops, which leaves nothing to stop at exit.
+                threading._register_atexit(lambda: self._is_built and self.stop())
             except AttributeError:
                 pass
         else:

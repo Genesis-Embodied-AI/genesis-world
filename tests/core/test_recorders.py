@@ -1,4 +1,6 @@
 import csv
+import subprocess
+import sys
 import time
 
 import numpy as np
@@ -297,6 +299,21 @@ def test_file_writers(tmp_path):
     is_paused = False
     scene.step()
     assert scene.timings["period"] > timings["step"] > 0.0
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [None])
+def test_stop_recording_then_exit(tmp_path):
+    npz_file = tmp_path / "data.npz"
+    script = (
+        "import genesis as gs; gs.init(backend=gs.cpu); scene = gs.Scene(show_viewer=False); "
+        f"scene.add_recorder(data_func=lambda: 1.0, rec_options=gs.recorders.NPZFile(filename={str(npz_file)!r})); "
+        "scene.build(); scene.step(); scene.stop_recording()"
+    )
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, encoding="utf-8")
+    assert proc.returncode == 0, proc.stderr
+    assert "Exception ignored" not in proc.stderr, proc.stderr
+    assert npz_file.exists()
 
 
 @pytest.mark.required
