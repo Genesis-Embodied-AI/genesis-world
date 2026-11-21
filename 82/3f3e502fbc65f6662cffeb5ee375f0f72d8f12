@@ -1,0 +1,39 @@
+genesis/engine/materials/MPM/sand.py
+  s_5240a667552e1a::t_b556fdc6189071 29
+genesis/engine/materials/MPM/base.py
+  s_5240a667552e1a::t_b556fdc6189071 40
+genesis/engine/materials/SPH/liquid.py
+  s_5240a667552e1a::t_b556fdc6189071 23
+genesis/utils/particle.py
+  s_5240a667552e1a::t_cdd8865546b34f 707,712
+  s_5240a667552e1a::t_2028c2d2f18c5c 742,822-827
+  s_5240a667552e1a::t_5e70ab364bbc79 745-746
+  s_5240a667552e1a::t_031c00db503c1a 842,893,896
+  s_5240a667552e1a::t_0b5c9af605c2a4 658-661
+  s_5240a667552e1a::t_4a466bd2a3f381 657
+  s_5240a667552e1a::t_4a120dd4b5ce34 883-884,890,892,895,897,901,915
+genesis/engine/materials/PBD/particle.py
+  s_5240a667552e1a::t_b556fdc6189071 29
+genesis/engine/materials/SPH/base.py
+  s_5240a667552e1a::t_b556fdc6189071 24
+genesis/engine/materials/PBD/liquid.py
+  s_5240a667552e1a::t_b556fdc6189071 24
+genesis/engine/materials/MPM/snow.py
+  s_5240a667552e1a::t_b556fdc6189071 32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "823f3e502fbc65f6662cffeb5ee375f0f72d8f12",
+  "prompts": {},
+  "sessions": {
+    "s_5240a667552e1a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79df346b-1de2-478e-b332-2901000bb3c0",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
