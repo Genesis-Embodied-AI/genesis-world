@@ -29,8 +29,7 @@ class Snow(ElastoPlastic):
     rho : float, optional
         Density (kg/m³). Default is 1000.
     sampler : str, optional
-        Particle sampler. Default is 'random'. 'pbs-<res>' sets the resolution of the signed distance field of 'pbs', 32
-        by default.
+        Particle sampler. Default is 'random'.
     yield_lower : float, optional
         Lower bound of yield condition. Default is 2.5e-2.
     yield_higher : float, optional

@@ -26,8 +26,7 @@ class Sand(Base):
     rho : float, optional
         Density (kg/m³). Default is 1000.
     sampler : str, optional
-        Particle sampler. Default is 'random'. 'pbs-<res>' sets the resolution of the signed distance field of 'pbs', 32
-        by default.
+        Particle sampler. Default is 'random'.
     friction_angle : float, optional
         Friction angle in degrees, used to compute internal pressure-dependent plasticity. Default is 45.
     """
