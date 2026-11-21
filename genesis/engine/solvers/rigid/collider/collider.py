@@ -24,8 +24,8 @@ from genesis.engine.entities.rigid_entity.description import _balanced_variant_m
 from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
-from genesis.engine.state_change import StateChange, TrackableMixin, depends_on, scratch
-from genesis.utils.data import ConfigItem, DataItem, iter_data, opt_in
+from genesis.engine.state_change import StateChange, TrackableMixin, depends_on, scoped_kind
+from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data, opt_in
 from genesis.utils.misc import (
     assign_indexed_tensor,
     get_gpu_core_count,
@@ -884,7 +884,7 @@ class Collider(TrackableMixin):
         )
 
     # The contacts it empties are no result, until the next detection or step finds them anew
-    @scratch(attrgetter("collider_state.n_contacts"), attrgetter("collider_state.contact_data"))
+    @scoped_kind(DataKind.SCRATCH, attrgetter("collider_state.n_contacts"), attrgetter("collider_state.contact_data"))
     def clear(self, envs_idx=None, *, reset_warm_start: bool = True):
         """Remove the contacts of the environments 'envs_idx' (None for all of them), with their forces.
 

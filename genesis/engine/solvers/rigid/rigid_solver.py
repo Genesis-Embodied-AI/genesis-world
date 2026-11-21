@@ -35,14 +35,14 @@ from genesis.engine.solvers.rigid.collider.data import ColliderState
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
 from genesis.engine.solvers.rigid.constraint.solver import cholesky_tile_size_for
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidConfig, RigidData, RigidErrorCode, RigidInfo
-from genesis.engine.state_change import StateChange, depends_on, mutates, scratch, untracked_launches
+from genesis.engine.state_change import StateChange, depends_on, mutates, scoped_kind, untracked_launches
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.options.surfaces import Surface
 from genesis.typing import FArrayType, IndexType, Vec2FType, Vec3FType
-from genesis.utils.data import ConfigItem, DataItem, is_opted_in
+from genesis.utils.data import ConfigItem, DataItem, DataKind, is_opted_in
 from genesis.utils.misc import (
     DeprecationError,
     assign_indexed_tensor,
@@ -219,14 +219,6 @@ def _sanitize_sol_params(
     width[:] = width.clip(0.0)
     power[:] = power.clip(1)
     return sol_params
-
-
-# The mass matrix and its factor, which solving the inverse weights uses as scratch (see 'scratch')
-_MASS_MATRIX_ARRAYS = (
-    attrgetter("rigid_info.mass_mat"),
-    attrgetter("rigid_info.mass_mat_L"),
-    attrgetter("rigid_info.mass_mat_D_inv"),
-)
 
 
 class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
@@ -993,8 +985,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             mass_spread = max(mass_spread, mass_spread_entity.max())
         return mass_spread
 
-    # The weights are solved with the mass matrix of the neutral configuration, which the mass matrix holds meanwhile
-    @scratch(*_MASS_MATRIX_ARRAYS)
     def _refresh_invweight_and_meaninertia(self, envs_idx=None, *, force_update=True):
         # Every kinematic tree of the solver is recomputed. A change limited to some links is handled by the setter
         # writing them, which recomputes their own tree only.
@@ -2037,9 +2027,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.collider is not None:
             self.collider.reset(envs_idx, cache_only=False)
 
-    # See '_refresh_invweight_and_meaninertia', which the kernels writing the inertial properties of a link run
     @mutates()
-    @scratch(*_MASS_MATRIX_ARRAYS)
     def _set_links_info(self, values, links_idx, name, envs_idx=None, *, scale_inertia=False):
         """Write one inertial property of the given links, then recompute the inverse weights of their trees once.
 
@@ -2930,6 +2918,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         tensor = qd_to_torch(self.dyn_info.dofs.frictionloss, envs_idx, dofs_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 and self._options.batch_dofs_info else tensor
 
+    # The mass matrix and its factor are the working buffers of the step, which the getter reads as the refresh computes
+    # them at the current configuration
+    @scoped_kind(
+        DataKind.DERIVED,
+        attrgetter("rigid_info.mass_mat"),
+        attrgetter("rigid_info.mass_mat_L"),
+        attrgetter("rigid_info.mass_mat_D_inv"),
+    )
     def get_mass_mat(self, dofs_idx=None, envs_idx=None, decompose=False, *, copy: bool | None = True):
         tensor = qd_to_torch(self.mass_mat_L if decompose else self.mass_mat, envs_idx, transpose=True, copy=copy)
         if dofs_idx is not None:

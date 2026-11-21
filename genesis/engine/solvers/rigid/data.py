@@ -64,11 +64,11 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     geoms_init_AABB: qd.Tensor = field((float, 3), shape=(GEOMS, 8), labels=DYNAMICS)
     # Stored reversed under the cooperative constraint kernels (see RigidData), i_d1 innermost, for their readers
     # striding i_d1 across lanes. The writers striding i_b have cooperative variants under the same flag.
-    mass_mat: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.DERIVED, labels=DYNAMICS, grad=True)
+    mass_mat: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.SCRATCH, labels=DYNAMICS, grad=True)
     # Stored in declared order whatever the kernels: its main reader, a serial back-substitution with lanes varying
     # i_b, would lose more from the reversed order than the tiled factor gains.
-    mass_mat_L: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.DERIVED, labels=DYNAMICS, grad=True)
-    mass_mat_D_inv: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.DERIVED, labels=DYNAMICS, grad=True)
+    mass_mat_L: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.SCRATCH, labels=DYNAMICS, grad=True)
+    mass_mat_D_inv: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.SCRATCH, labels=DYNAMICS, grad=True)
     # Scratch of the register-tiled mass factor, environment-first like the tile operations. The constraint Hessian
     # aliases it (see nt_H in ConstraintState).
     mass_mat_tiled_scratch: qd.Tensor = field(float, shape=(ENVS, DOFS, DOFS), kind=DataKind.SCRATCH, labels=TILED_MASS)

@@ -1069,10 +1069,10 @@ def test_derived_quantities_follow_state(show_viewer, tol):
     assert_allclose(franka.get_links_quat(), links_quat, tol=gs.EPS)
     assert_allclose(franka.get_links_pos()[0], links_pos_stepped[0], tol=gs.EPS)
 
-    # The mass matrix read after a setter is that of the configuration it wrote, which the next step assembles too
+    # The mass matrix of each environment follows its configuration
     mass_mat = franka.get_mass_mat().clone()
-    scene.step()
-    assert_allclose(franka.get_mass_mat(), mass_mat, tol=tol)
+    franka.set_qpos(qpos[[1]], envs_idx=[0])
+    assert_allclose(franka.get_mass_mat()[0], mass_mat[1], tol=tol)
 
 
 @pytest.mark.required

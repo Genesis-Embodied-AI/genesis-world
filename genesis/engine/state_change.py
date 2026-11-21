@@ -61,8 +61,10 @@ _N_FIXED_ENTRIES = _ANY_STATE + 1
 # The selections an axis of a change log keeps per category before counting as changed everywhere (see '_Counters')
 _MAX_SELECTIONS = 32
 
-# The kinds of the arrays a change log tracks: the state, the model and what derives from them
-_TRACKED_KINDS = (DataKind.INFO, DataKind.STATE, DataKind.DERIVED)
+# The kinds of the arrays a change log tracks: the state, the model and what is computed from them, the derived arrays
+# and the scratch ones (see 'scoped_kind')
+_COMPUTED_KINDS = (DataKind.DERIVED, DataKind.SCRATCH)
+_TRACKED_KINDS = (DataKind.INFO, DataKind.STATE, *_COMPUTED_KINDS)
 
 
 class ChangeAxis(NamedTuple):
@@ -351,10 +353,10 @@ class ChangeLog:
         Parameters
         ----------
         items : Iterable[DataItem]
-            The data of the trackable, such as 'Solver.data', whose quadrants arrays of kind INFO or DERIVED are
-            tracked, and those of kind STATE declaring the category of their changes, gradients aside, a write of an
-            INFO array changing the model. The other arrays of the state, such as the control inputs, the warm starts
-            or the error flags, change nothing a derived array is computed from.
+            The data of the trackable, such as 'Solver.data', whose quadrants arrays of kind INFO, DERIVED or SCRATCH
+            are tracked, and those of kind STATE declaring the category of their changes, gradients aside, a write of
+            an INFO array changing the model. The other arrays of the state, such as the control inputs, the warm
+            starts or the error flags, change nothing a derived array is computed from.
         envs_idx : Iterable[torch.Tensor], optional
             The index tensors naming every environment, which a launch reaching them all takes, so that it leaves none
             of them stale whatever they were before, read on the host. Defaults to ().
@@ -397,27 +399,32 @@ class ChangeLog:
         ----------
         owner : Any
             The object, whose methods tagged 'mutates(derived=True)' take the environments to refresh, None for all of
-            them, and write the derived arrays the kernels they name may write (see 'get_accessed_paths').
+            them, and write the derived or scratch arrays the kernels they name may write (see 'get_accessed_paths'). A
+            scratch array a refresh computes is refreshed only where a block makes it derived (see 'scoped_kind').
         """
         # The roots each refresh reads, and the derived arrays it reads that another refresh computes
         refreshes_roots, refreshes_reads = {}, {}
-        for cls in reversed(type(owner).__mro__):
-            for attr_value in vars(cls).values():
+        # A method a subclass overrides is registered once, as the subclass defines it
+        names = set()
+        for cls in type(owner).__mro__:
+            for name, attr_value in vars(cls).items():
                 method = _DERIVED_METHODS.get(attr_value) if callable(attr_value) else None
-                if method is None:
+                if method is None or name in names:
                     continue
+                names.add(name)
                 refresh = weakref.WeakMethod(getattr(owner, method.__name__))
                 access = get_accessed_paths(method, owner)
                 writes = _resolve_paths(access.paths_written, {"self": owner})
                 entries = tuple(
-                    entry for log, entry in writes if log is self and self._entries_kind[entry] == DataKind.DERIVED
+                    entry for log, entry in writes if log is self and self._entries_kind[entry] in _COMPUTED_KINDS
                 )
                 self._refresh_entries[refresh] = entries
                 for entry in entries:
+                    assert entry not in self._entries_refresh, "Two refreshes compute the same array."
                     self._entries_refresh[entry] = refresh
                 used = [entry for log, entry in _resolve_paths(access.paths_used, {"self": owner}) if log is self]
-                refreshes_roots[refresh] = {entry for entry in used if self._entries_kind[entry] != DataKind.DERIVED}
-                refreshes_reads[refresh] = {entry for entry in used if self._entries_kind[entry] == DataKind.DERIVED}
+                refreshes_roots[refresh] = {entry for entry in used if self._entries_kind[entry] not in _COMPUTED_KINDS}
+                refreshes_reads[refresh] = {entry for entry in used if self._entries_kind[entry] in _COMPUTED_KINDS}
         # A derived array a refresh computes depends on the roots of the refresh, through the derived arrays it reads
         # as well, which a step computing it leaves current until one of them is written (see 'record_step')
         for refresh, entries in self._refresh_entries.items():
@@ -436,9 +443,12 @@ class ChangeLog:
                 self._entries_step_production[entry] = production
 
     def owner(self, entry: int) -> _Production | None:
-        """Return the production that last wrote a derived array, None if none did."""
+        """Return the production that last wrote a derived or scratch array, None if none did.
+
+        A step leaves its scratch arrays stale, whatever it wrote in them.
+        """
         if self._entries_owner_bulk[entry] != self._bulk:
-            if self._step_production is None:
+            if self._step_production is None or self._entries_kind[entry] == DataKind.SCRATCH:
                 return None
             return self._entries_step_production.get(entry, self._step_production)
         return self._entries_owner[entry]
@@ -467,7 +477,7 @@ class ChangeLog:
         if tracked is None:
             return True
         entry = tracked[1]
-        production = self.owner(entry) if self._entries_kind[entry] == DataKind.DERIVED else self._step_production
+        production = self.owner(entry) if self._entries_kind[entry] in _COMPUTED_KINDS else self._step_production
         if production is None:
             return True
         excluded_entries = tuple(_tracked_entry(excluded_array)[1] for excluded_array in excluded)
@@ -489,7 +499,11 @@ class ChangeLog:
     def _refresh(self, refresh: weakref.WeakMethod) -> None:
         global _refresh_depth
         envs_is_stale, is_stale = None, False
-        for production in {self.owner(entry) for entry in self._refresh_entries[refresh]}:
+        # The scratch arrays the refresh writes along the way count only where a block makes them derived
+        entries = [
+            entry for entry in self._refresh_entries[refresh] if _effective_kind(self, entry) == DataKind.DERIVED
+        ]
+        for production in {self.owner(entry) for entry in entries}:
             if production is None:
                 is_stale, envs_is_stale = True, None
                 break
@@ -613,10 +627,11 @@ class ChangeLog:
         versions, entries_kind, entries_change = self._versions, self._entries_kind, self._entries_change
         changes = set()
         for entry in entries:
-            if _refresh_depth > 0 and entries_kind[entry] != DataKind.DERIVED:
+            is_root = entries_kind[entry] not in _COMPUTED_KINDS
+            if _refresh_depth > 0 and is_root:
                 continue
             versions[entry] += 1
-            if entries_kind[entry] != DataKind.DERIVED:
+            if is_root:
                 changes.add(_ANY_STATE)
                 if entries_change[entry] is not None:
                     changes.add(entries_change[entry])
@@ -786,10 +801,17 @@ _TRACKED_ARRAYS: "weakref.WeakKeyDictionary[Any, tuple[weakref.ref[ChangeLog], i
 # The depth of the refreshes running, whose productions leave no environment stale (see 'ChangeLog._refresh')
 _refresh_depth = 0
 
-# The derived arrays used as scratch by the blocks running, by change log and entry, with the number of blocks holding
-# each of them, and the number of blocks using every derived array as scratch (see 'scratch')
-_SCRATCH_ENTRIES: dict[tuple["ChangeLog", int], int] = {}
-_scratch_all_depth = 0
+# The kinds the blocks running give to some computed arrays, innermost last, each with the entries it names by change
+# log, None naming every computed array (see 'scoped_kind')
+_KIND_SCOPES: list[tuple[DataKind, frozenset[tuple["ChangeLog", int]] | None]] = []
+
+
+def _effective_kind(log: "ChangeLog", entry: int) -> DataKind:
+    """Return the kind of a computed array, as the innermost block naming it gives it, else as declared."""
+    for kind, entries in reversed(_KIND_SCOPES):
+        if entries is None or (log, entry) in entries:
+            return kind
+    return log._entries_kind[entry]
 
 
 def _resolve_paths(paths: Iterable[tuple[str, ...]], roots: dict[str, Any]) -> list[tuple[ChangeLog, int]]:
@@ -840,7 +862,7 @@ class _LogWrite(NamedTuple):
 
     log: "weakref.ref[ChangeLog]"
     entries: tuple[int, ...]
-    entries_derived: tuple[int, ...]
+    entries_computed: tuple[int, ...]
     indices_positions: tuple[tuple[str, int], ...]
 
 
@@ -848,11 +870,11 @@ class _LaunchEffect(NamedTuple):
     """What a launch of a kernel on given structs reads and writes among the tracked arrays."""
 
     writes: tuple[_LogWrite, ...]
-    # The derived arrays the launch reads without writing them
-    reads_derived: tuple[tuple["weakref.ref[ChangeLog]", int], ...]
+    # The derived and scratch arrays the launch reads without writing them
+    reads_computed: tuple[tuple["weakref.ref[ChangeLog]", int], ...]
     # The arrays of the state and of the model the launch reads, by change log
     roots: dict["weakref.ref[ChangeLog]", tuple[int, ...]]
-    # The key of the production of the derived arrays the launch writes (see 'ChangeLog._produce'), and the position
+    # The key of the production of the computed arrays the launch writes (see 'ChangeLog._produce'), and the position
     # of its argument 'envs_idx'
     production_key: object | None
     i_envs: int | None
@@ -918,10 +940,10 @@ class _LaunchTracker:
         if effect is None:
             return
 
-        for log_ref, entry in effect.reads_derived:
+        for log_ref, entry in effect.reads_computed:
             log = log_ref()
             refresh = None if log is None else log._entries_refresh.get(entry)
-            if refresh is not None:
+            if refresh is not None and _effective_kind(log, entry) == DataKind.DERIVED:
                 production = log.owner(entry)
                 if production is None or production.is_stale():
                     log._refresh(refresh)
@@ -936,27 +958,28 @@ class _LaunchTracker:
                 log._record_entries(entries, **{name: args[i] for name, i in indices_positions})
         if effect.production_key is not None:
             envs_idx = None if effect.i_envs is None else args[effect.i_envs]
-            # The roots of the derived arrays read are roots of the arrays computed from them. A derived array read
-            # stale leaves them current all the same, since the analysis may report reads a static branch never makes
-            # (see 'get_accessed_paths'), which only a step computes in practice.
+            # The roots of the computed arrays read are roots of the arrays computed from them. An array read stale
+            # leaves them current all the same, since the analysis may report reads a static branch never makes (see
+            # 'get_accessed_paths'), which only a step computes in practice.
             roots = {log_ref(): entries for log_ref, entries in effect.roots.items() if log_ref() is not None}
-            for log_ref, entry in effect.reads_derived:
+            for log_ref, entry in effect.reads_computed:
                 log = log_ref()
                 production = None if log is None else log.owner(entry)
                 if production is not None:
                     for root_log, root_entries in production.roots.items():
                         roots[root_log] = tuple(sorted(set(roots.get(root_log, ())) | set(root_entries)))
-            for log_ref, _, entries_derived, _ in effect.writes:
+            for log_ref, _, entries_computed, _ in effect.writes:
                 log = log_ref()
-                if entries_derived and log is not None:
-                    # What a launch leaves in a derived array used as scratch is no result (see 'scratch')
+                if entries_computed and log is not None:
+                    # What a launch leaves in a scratch array is no result, unlike what a refresh computes in it (see
+                    # 'scoped_kind')
                     entries_scratch = ()
-                    if _scratch_all_depth > 0 and _refresh_depth == 0:
-                        entries_scratch = entries_derived
-                    elif _SCRATCH_ENTRIES and _refresh_depth == 0:
-                        entries_scratch = tuple(entry for entry in entries_derived if (log, entry) in _SCRATCH_ENTRIES)
+                    if _refresh_depth == 0:
+                        entries_scratch = tuple(
+                            entry for entry in entries_computed if _effective_kind(log, entry) == DataKind.SCRATCH
+                        )
                     log._invalidate_entries(entries_scratch)
-                    entries_produced = tuple(entry for entry in entries_derived if entry not in entries_scratch)
+                    entries_produced = tuple(entry for entry in entries_computed if entry not in entries_scratch)
                     if entries_produced:
                         log._produce(effect.production_key, entries_produced, roots, envs_idx)
 
@@ -988,22 +1011,22 @@ def _compute_launch_effect(kernel: Any, args: tuple, positions: tuple[int, ...])
         entries = tuple(entry for entry_log, entry in written if entry_log is log)
         if not entries:
             continue
-        entries_derived = tuple(entry for entry in entries if log._entries_kind[entry] == DataKind.DERIVED)
+        entries_computed = tuple(entry for entry in entries if log._entries_kind[entry] in _COMPUTED_KINDS)
         indices_positions = tuple((name, i) for i, name in enumerate(names) if name in log._indices_axes)
-        writes.append(_LogWrite(weakref.ref(log), entries, entries_derived, indices_positions))
-    reads_derived = tuple(
+        writes.append(_LogWrite(weakref.ref(log), entries, entries_computed, indices_positions))
+    reads_computed = tuple(
         (weakref.ref(log), entry)
         for log, entry in used
-        if (log, entry) not in written and log._entries_kind[entry] == DataKind.DERIVED and not is_moving_data
+        if (log, entry) not in written and log._entries_kind[entry] in _COMPUTED_KINDS and not is_moving_data
     )
     roots = {}
     for log, entry in used:
-        if log._entries_kind[entry] != DataKind.DERIVED:
+        if log._entries_kind[entry] not in _COMPUTED_KINDS:
             roots.setdefault(log, []).append(entry)
     roots = {weakref.ref(log): tuple(entries) for log, entries in roots.items()}
-    is_producing = any([write.entries_derived for write in writes])
+    is_producing = any([write.entries_computed for write in writes])
     i_envs = names.index("envs_idx") if "envs_idx" in names else None
-    return _LaunchEffect(tuple(writes), reads_derived, roots, object() if is_producing else None, i_envs)
+    return _LaunchEffect(tuple(writes), reads_computed, roots, object() if is_producing else None, i_envs)
 
 
 # The tracker of every launch, installed once the first change log tracks arrays
@@ -1054,7 +1077,7 @@ def _on_array_read(array: Any) -> None:
         return
     log, i_entry = entry
     refresh = log._entries_refresh.get(i_entry)
-    if refresh is not None:
+    if refresh is not None and _effective_kind(log, i_entry) == DataKind.DERIVED:
         production = log.owner(i_entry)
         if production is None or production.is_stale():
             log._refresh(refresh)
@@ -1088,51 +1111,53 @@ def _method_writes(method: Callable[..., Any], owner: Any) -> tuple[_LogWrite, .
     return writes
 
 
-class scratch:
-    """Use some derived arrays as scratch: what a launch writes in them leaves them stale, until a refresh or a step.
+class scoped_kind:
+    """Give some computed arrays another kind, SCRATCH or DERIVED, for the duration of a block.
 
-    A launch computes the derived arrays it writes by contract, except those a block uses for something else, such as
-    the mass matrix of another configuration or contacts cleared, which are no result. As a context manager it takes the
-    arrays, or structs standing for every array of them, and as a decorator of a method, the functions returning them
-    from the object the method belongs to, the whole method running in the context. A refresh running within it computes
-    them all the same.
+    What a launch writes in a derived array is current by contract, and a stale derived array is refreshed as it is
+    read, while what a launch writes in a scratch array leaves it stale and a read takes it as it stands. A block
+    reusing a derived array for something else, such as contacts cleared, makes it scratch, and a getter reading a
+    scratch array a refresh computes makes it derived, such as the mass matrix a step uses as its working buffer. What
+    a refresh writes is current whatever the kind of the array, and a step leaves every scratch array stale. Blocks
+    nest and compose, the innermost one naming an array deciding its kind. As a context manager it takes the arrays,
+    or structs standing for every array of them, and as a decorator of a method, the functions returning them from the
+    object the method belongs to, the whole method running in the block.
 
     Parameters
     ----------
+    kind : DataKind
+        The kind the arrays take, SCRATCH or DERIVED.
     *arrays : qd.Tensor | Data | Callable[[Any], qd.Tensor | Data]
         The arrays or structs, or as a decorator the functions returning them from the object of the method, every
-        derived array if none.
+        derived and scratch array if none.
     """
 
-    def __init__(self, *arrays: Any) -> None:
+    def __init__(self, kind: DataKind, *arrays: Any) -> None:
+        assert kind in _COMPUTED_KINDS
+        self._kind = kind
         self._arrays = arrays
-        self._entries: list[tuple[ChangeLog, int]] = []
 
-    def __enter__(self) -> "scratch":
-        global _scratch_all_depth
-        if not self._arrays:
-            _scratch_all_depth += 1
-        self._entries = [entry for array in self._arrays for entry in _resolve_paths([("array",)], {"array": array})]
-        for entry in self._entries:
-            _SCRATCH_ENTRIES[entry] = _SCRATCH_ENTRIES.get(entry, 0) + 1
+    def __enter__(self) -> "scoped_kind":
+        entries = None
+        if self._arrays:
+            entries = frozenset(
+                (log, entry)
+                for array in self._arrays
+                for log, entry in _resolve_paths([("array",)], {"array": array})
+                if log._entries_kind[entry] in _COMPUTED_KINDS
+            )
+        _KIND_SCOPES.append((self._kind, entries))
         return self
 
     def __exit__(self, *exc_info: Any) -> None:
-        global _scratch_all_depth
-        if not self._arrays:
-            _scratch_all_depth -= 1
-        for entry in self._entries:
-            _SCRATCH_ENTRIES[entry] -= 1
-            if not _SCRATCH_ENTRIES[entry]:
-                del _SCRATCH_ENTRIES[entry]
-        self._entries.clear()
+        _KIND_SCOPES.pop()
 
     def __call__(self, method: Callable[..., Any]) -> Callable[..., Any]:
-        arrays_of = self._arrays
+        kind, arrays_of = self._kind, self._arrays
 
         @functools.wraps(method)
         def wrapper(owner: Any, *args: Any, **kwargs: Any) -> Any:
-            with scratch(*[array_of(owner) for array_of in arrays_of]):
+            with scoped_kind(kind, *[array_of(owner) for array_of in arrays_of]):
                 return method(owner, *args, **kwargs)
 
         return wrapper
