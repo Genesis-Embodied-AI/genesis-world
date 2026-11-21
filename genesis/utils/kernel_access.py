@@ -39,7 +39,7 @@ class KernelAccess(NamedTuple):
 
 
 # The paths each function may access, by function and bound object, each entry living as long as the bound object (the
-# function itself for a free function)
+# function itself for a free function).
 _ACCESSED_PATHS_CACHE = OwnedCache()
 
 
@@ -52,8 +52,20 @@ def get_accessed_paths(fn: Callable, owner: object | None = None) -> KernelAcces
     A path is the name of a parameter followed by the struct fields reaching the array, such as
     `("dyn_state", "dofs", "vel")`. A write is an assignment to an element, an augmented assignment, the first argument
     of an atomic operation or a `fill`, in the function itself or in a func or kernel it calls with the array as
-    argument, a kernel picked through a conditional expression counting both of its branches. `owner` is the object the
-    first parameter of a method is bound to, through which it reaches the funcs of other objects.
+    argument, a kernel picked through a conditional expression counting both of its branches.
+
+    Parameters
+    ----------
+    fn : Callable
+        The kernel, func or method.
+    owner : object | None, optional
+        The object the first parameter of a method is bound to, through which it reaches the funcs of other objects.
+        Defaults to None.
+
+    Returns
+    -------
+    access : KernelAccess
+        The paths the function may read and write.
     """
     # A method under decorators is analyzed as written, in the scope it was written in
     fn = inspect.unwrap(fn)
@@ -87,7 +99,7 @@ def get_accessed_paths(fn: Callable, owner: object | None = None) -> KernelAcces
                             is_growing = True
 
     # Local names bound to funcs, directly, through 'qd.static', through either branch of a conditional expression or
-    # as the elements of a tuple
+    # as the elements of a tuple.
     funcs: dict[str, list[Callee]] = {}
     for node in assigns:
         for target in node.targets:
@@ -103,7 +115,7 @@ def get_accessed_paths(fn: Callable, owner: object | None = None) -> KernelAcces
                 ):
                     value = value.args[0]
                 values = (value.body, value.orelse) if isinstance(value, ast.IfExp) else (value,)
-                callees = [callee for callee in [_find_callee(v, fn, {}, owner_name, owner) for v in values] if callee]
+                callees = [callee for callee in [_find_callee(v, fn, owner_name, owner) for v in values] if callee]
                 if isinstance(name, ast.Name) and callees:
                     funcs.setdefault(name.id, []).extend(callees)
 
@@ -128,11 +140,11 @@ def get_accessed_paths(fn: Callable, owner: object | None = None) -> KernelAcces
             else:
                 callees = funcs.get(node.func.id, []) if isinstance(node.func, ast.Name) else []
                 if not callees:
-                    callee = _find_callee(node.func, fn, funcs, owner_name, owner)
+                    callee = _find_callee(node.func, fn, owner_name, owner)
                     callees = [] if callee is None else [callee]
                 for callee in callees:
                     # The arrays the func accesses through its parameters, bound to the arguments of the call and, for
-                    # a method, to the object it is bound to
+                    # a method, to the object it is bound to.
                     callee_params = list(inspect.signature(callee.fn).parameters)
                     bindings = []
                     if callee.owner is not None:
@@ -156,7 +168,7 @@ def get_accessed_paths(fn: Callable, owner: object | None = None) -> KernelAcces
                                     paths |= {(*path, *callee_path[1:]) for path in arg_paths}
 
     # The arrays read in place: each outermost expression naming a parameter or fields of one, the names a binding
-    # stores to and the expressions it binds aside
+    # stores to and the expressions it binds aside.
     nodes_inner = {child.value for child in ast.walk(func_def) if isinstance(child, ast.Attribute)}
     for node in ast.walk(func_def):
         if not isinstance(node, (ast.Name, ast.Attribute)) or node in nodes_inner or node in nodes_binding:
@@ -195,17 +207,13 @@ def _resolve_store(target: ast.expr, aliases: dict[str, set[tuple[str, ...]]]) -
     return set()
 
 
-def _find_callee(
-    node: ast.expr, fn: Callable, funcs: dict[str, Callee], owner_name: str | None, owner: object | None
-) -> Callee | None:
+def _find_callee(node: ast.expr, fn: Callable, owner_name: str | None, owner: object | None) -> Callee | None:
     """
     Return the Quadrants func an expression names, None for anything else.
 
-    `fn` is the function whose source holds the expression, `funcs` the local names it binds to a func, and `owner` the
-    object its first parameter, named `owner_name`, is bound to.
+    `fn` is the function whose source holds the expression, and `owner` the object its first parameter, named
+    `owner_name`, is bound to.
     """
-    if isinstance(node, ast.Name) and node.id in funcs:
-        return funcs[node.id]
     names = []
     while isinstance(node, ast.Attribute):
         names.append(node.attr)

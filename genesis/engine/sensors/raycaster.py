@@ -264,7 +264,7 @@ class RaycasterSensor(
             pos = torch.zeros((self._manager.n_envs_, len(self.ray_starts), 3), dtype=gs.tc_float, device=gs.device)
             radius = self._options.debug_sphere_radius
             # The hit points follow the configurations of the solvers of the targets and of the link of the sensor, the
-            # starts of the rays being drawn where the link stands
+            # starts of the rays being drawn where the link stands.
             solvers = (
                 *(target.scoped_context.owner for target in self._shared_context.targets),
                 self._link.entity.solver,

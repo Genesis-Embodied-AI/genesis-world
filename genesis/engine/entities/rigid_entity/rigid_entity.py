@@ -2929,6 +2929,23 @@ class RigidEntity(KinematicEntity):
 
     @gs.assert_built
     def get_mass_mat(self, envs_idx=None, decompose=False):
+        """Get the joint-space mass matrix of the degrees of freedom of the entity at the current configuration.
+
+        See 'RigidSolver.get_mass_mat'.
+
+        Parameters
+        ----------
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        decompose : bool, optional
+            Whether to return the factor M = L^T D L of the matrix instead, as its unit lower-triangular factor L and
+            the inverse of its diagonal D. Defaults to False.
+
+        Returns
+        -------
+        mass_mat : torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+            The mass matrix, or its factor L and the inverse of its diagonal.
+        """
         dofs_idx = self._get_global_idx(None, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_mass_mat(dofs_idx, envs_idx, decompose)
 
@@ -3048,8 +3065,9 @@ class RigidEntity(KinematicEntity):
         Returns
         -------
         contact_info : dict | None
-            The contact information. None after a change of the configuration until the next step, which detects the
-            contacts anew. 'force_a' and 'force_b' are None after a change of the velocities or of the model.
+            The contact information. None after a change of the configuration or of the model until the next step or
+            detection, which finds the contacts anew. 'force_a' and 'force_b' are None after any other change or a
+            detection, until the next step.
         """
         contact_data = self._solver.collider.get_contacts(as_tensor=True, to_torch=True, is_padded=is_padded)
         if contact_data is None:

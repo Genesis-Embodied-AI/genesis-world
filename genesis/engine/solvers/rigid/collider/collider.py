@@ -24,7 +24,7 @@ from genesis.engine.entities.rigid_entity.description import _balanced_variant_m
 from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
-from genesis.engine.state_change import StateChange, TrackableMixin, depends_on, scoped_kind
+from genesis.engine.state_change import StateChange, depends_on, scoped_kind
 from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data, opt_in
 from genesis.utils.misc import (
     assign_indexed_tensor,
@@ -71,12 +71,9 @@ NEUTRAL_COLLISION_RES_ABS = 0.01
 NEUTRAL_COLLISION_RES_REL = 0.05
 
 
-class Collider(TrackableMixin):
+class Collider:
     def __init__(self, rigid_solver: "RigidSolver"):
         self._solver = rigid_solver
-        # The contacts are results of the rigid solver, so the collider records its changes in the change log of its
-        # solver as its own, whose results its gated getters are among (see 'depends_on')
-        self.changelog = rigid_solver.changelog
 
         self._mc_perturbation = 1e-3 if self._solver._enable_mujoco_compatibility else 5e-3
         self._mc_tolerance = 1e-3 if self._solver._enable_mujoco_compatibility else 1.5e-2
@@ -877,6 +874,7 @@ class Collider(TrackableMixin):
                 torch.mps.synchronize()
             return
 
+        # The setters pass the indices they sanitized already
         if not isinstance(envs_idx, torch.Tensor):
             envs_idx = self._solver.sim.sanitize_envs_idx(envs_idx)
         collider_kernel_reset(
@@ -948,7 +946,7 @@ class Collider(TrackableMixin):
         self._contact_data_cache.clear()
 
     # The contact points no longer hold once the configuration or the model they were found at changed, until the next
-    # detection or step finds them anew, and their forces once anything changed, until the next step solves them
+    # detection or step finds them anew, and their forces once anything changed, until the next step solves them.
     @depends_on(attrgetter("collider_state.n_contacts"), changes=(StateChange.GEOMETRY, StateChange.MODEL))
     @depends_on(attrgetter("collider_state.contact_data.force"), recover=lambda contacts: contacts | {"force": None})
     def get_contacts(

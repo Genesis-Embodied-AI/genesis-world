@@ -161,7 +161,6 @@ def test_data_accessor(n_envs, batched, tol):
         (gs_robot.n_links, n_envs, gs_robot.get_links_acc, None, None),
         (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_control_force, None, None),
         (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_force, None, None),
-        (-1, n_envs, gs_robot.get_mass_mat, None, None),
         (-1, n_envs, gs_robot.get_links_net_contact_force, None, None),
         # SOLVER
         (gs_s.n_links, n_envs, gs_s.get_links_pos, None, gs_s.dyn_state.links.pos),
@@ -239,6 +238,7 @@ def test_data_accessor(n_envs, batched, tol):
         (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_act_bias, gs_robot.set_dofs_act_bias, None),
         (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_act_gain, gs_robot.set_dofs_act_gain, None),
         (gs_robot.n_qs, n_envs, gs_robot.get_qpos, gs_robot.set_qpos, None),
+        (-1, n_envs, gs_robot.get_mass_mat, None, None),
         (-1, n_envs, gs_robot.get_pos, gs_robot.set_pos, None),
         (-1, n_envs, gs_robot.get_quat, gs_robot.set_quat, None),
         (-1, -1, gs_robot.get_mass, gs_robot.set_mass, None),

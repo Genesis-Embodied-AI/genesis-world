@@ -469,13 +469,8 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         for system in self._active_systems:
             system.__setstate__(state.solvers[type(system).__name__])
         self._steps[:] = torch.as_tensor(state.steps, device=gs.device)
-        # A solver recorded clean holds the quantities deriving from its state as recorded, so that its getters deliver
-        # them, while one recorded with them stale has them stale again (see 'ChangeLog.invalidate')
         for solver in self._active_solvers:
-            if state.solvers_is_dirty[type(solver).__name__]:
-                solver.changelog.invalidate()
-            else:
-                solver.changelog.mark_clean()
+            solver.changelog.restore(state.solvers_is_dirty[type(solver).__name__])
         # Flush the zero-copy writes of fill_data on Metal.
         if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
             torch.mps.synchronize()
@@ -522,13 +517,13 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         with self._step_timer.phase("physics"):
             if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
                 self._steps += 1
-                # The rigid solver records what each substep writes at once (see 'ChangeLog.record_step'), which spares
-                # tracking each of its launches
+                # The rigid solver records what each substep writes at once (see 'ChangeLog.commit'), which spares
+                # tracking each of its launches.
                 with untracked_launches():
                     for _ in range(self._substeps):
                         self.rigid_solver.substep()
                         self._cur_substep_global += 1
-                self.rigid_solver.clear_external_force()
+                    self.rigid_solver.clear_external_force()
             elif self._rollout_graph.is_recording:
                 self._rollout_graph.record_step(StepOperation(self))
             else:
@@ -557,14 +552,14 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
     def _step(self):
         """Run the substeps of a step."""
         self._steps += 1
-        # The solvers record what their substeps write at once (see 'ChangeLog.record_step'), the couplers and the
-        # solvers reading the derived arrays of another one refreshing them first as the step starts
+        # The solvers record what their substeps write at once (see 'ChangeLog.commit'), the couplers and the
+        # solvers reading the derived arrays of another one refreshing them first as the step starts.
         with untracked_launches(refresh=True):
             for _ in range(self._substeps):
                 self.substep()
                 self._cur_substep_global += 1
-        if self.rigid_solver.is_active:
-            self.rigid_solver.clear_external_force()
+            if self.rigid_solver.is_active:
+                self.rigid_solver.clear_external_force()
 
     def _reverse(self, substep_start: int, steps_start: torch.Tensor, checkpoints: list[SolverCheckpoint]) -> None:
         """

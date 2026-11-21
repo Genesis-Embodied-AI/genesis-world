@@ -249,17 +249,34 @@ def field(
     """
     Declare a field of a struct (see Data).
 
-    `dtype` is the element type of an array: `float`, `int` or `bool` in the precision of the simulation, a Quadrants
-    type, a function returning one, or such a type paired with an element shape, `(float, 3)` for a vector and
-    `(float, (3, 3))` for a matrix, whose dimensions may be sizes. `shape` lists the sizes of its dimensions (see Size),
-    and a field of shape () and kind CONSTANT or INFO is a constant the constructor fills from its values, a vector
-    constant from any sequence of its length. `kind` and `shape` replace the defaults of the struct, for every array of
-    a member. `labels` select the array, or every array of a member, in the property tables of the constructor. `grad`
-    gives the array gradients when the constructor requires them. `ndarray` allocates an ndarray on every backend. An
-    `opt_in` array or member is unused until another component opts it in (see 'opt_in'). An array too large for a
-    backend to address raises at allocation, its message ending with `oversize_hint`, such as the options shrinking it.
-    `change` is the category of change a write of a STATE array records, such as `StateChange.GEOMETRY` (see
-    'genesis.engine.state_change'), a write of an INFO array changing the model whatever it is.
+    `kind` and `shape` replace the defaults of the struct, for every array of a member.
+
+    Parameters
+    ----------
+    dtype : Any, optional
+        The element type of an array: `float`, `int` or `bool` in the precision of the simulation, a Quadrants type, a
+        function returning one, or such a type paired with an element shape, `(float, 3)` for a vector and
+        `(float, (3, 3))` for a matrix, whose dimensions may be sizes. None for a member struct. Defaults to None.
+    shape : tuple[Size | int, ...] | None, optional
+        The sizes of the dimensions of the array (see Size). A field of shape () and kind CONSTANT or INFO is a constant
+        the constructor fills from its values, a vector constant from any sequence of its length. Defaults to None.
+    kind : DataKind | None, optional
+        The kind of the array. Defaults to None.
+    labels : str | tuple[str, ...], optional
+        The labels selecting the array, or every array of a member, in the property tables of the constructor.
+        Defaults to ().
+    grad : bool, optional
+        Whether the array has gradients when the constructor requires them. Defaults to False.
+    ndarray : bool, optional
+        Whether the array is an ndarray on every backend. Defaults to False.
+    opt_in : bool, optional
+        Whether the array or member is unused until another component opts it in (see 'opt_in'). Defaults to False.
+    oversize_hint : str, optional
+        The end of the message raised when the array is too large for a backend to address, such as the options
+        shrinking it. Defaults to "".
+    change : IntEnum | None, optional
+        The category of change a write of a STATE array records, such as `StateChange.GEOMETRY` (see
+        'genesis.engine.state_change'), a write of an INFO array changing the model whatever it is. Defaults to None.
     """
     labels = labels if isinstance(labels, tuple) else (labels,)
     spec = _FieldSpec(dtype, shape, kind, labels, grad, ndarray, opt_in, oversize_hint, change)
@@ -843,7 +860,7 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
     which a restore sets back. A static config yields a ConfigItem. Anything else raises.
     """
     # The attributes left to walk, depth first in declaration order, each with the kind it inherits, its name and the
-    # category of change of its field
+    # category of change of its field.
     pending = [(owner, attr, kind, attr, None)]
     while pending:
         owner, attr, kind, name, change = pending.pop()

@@ -1,6 +1,6 @@
 from collections.abc import Iterator, Sequence
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 import numpy as np
 import torch
@@ -276,7 +276,7 @@ class KinematicSolver(Solver):
             ),
         }
         # Each pass moves every link one ancestor up, so the depth of a link is the number of passes it takes to run out
-        # of parents
+        # of parents.
         links_depth = np.zeros(self.n_links, dtype=gs.np_int)
         links_ancestor_idx = self._links_parent_idx
         while (links_ancestor_idx >= 0).any():
@@ -295,7 +295,7 @@ class KinematicSolver(Solver):
 
         def links_reach(links_is_changed: torch.Tensor) -> torch.Tensor:
             # A change of a link reaches its children, added one depth of the kinematic trees at a time from the links
-            # at each depth past the roots and their parents
+            # at each depth past the roots and their parents.
             for links_idx, parents_idx in links_depth_levels:
                 links_is_changed[links_idx] = links_is_changed[links_idx] | links_is_changed[parents_idx]
             return links_is_changed
@@ -1097,8 +1097,10 @@ class KinematicSolver(Solver):
 
     @mutates(derived=True)
     def _update_forward_kinematics(self, envs_idx: torch.Tensor | None) -> None:
-        """Update the poses and the velocities of the links of some environments, given as indices or a mask, all of
-        them for None."""
+        """Update the poses and the velocities of the links in some environments.
+
+        The environments are given as indices or a mask, all of them for None.
+        """
         if envs_idx is None:
             envs_idx = self._envs_idx
         if envs_idx.dtype == torch.bool:

@@ -846,7 +846,7 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         assert_equal(replay_scene.rigid_solver.get_links_quat(), links_quat)
         assert_equal(replay_scene.entities[4].get_links_pos(), ghost_pos)
         # An exact frame holds the results of the step that reached it, which hold as long as nothing changed the rigid
-        # solver since: before the first step, and after the setter of the model halfway, they are declined whole
+        # solver since: before the first step, and after the setter of the model halfway, they are declined whole.
         replayed_contacts = replay_scene.entities[1].get_contacts()
         if box_contacts is None or box_contacts["force_a"] is None:
             assert replayed_contacts is None
@@ -854,6 +854,8 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
             assert replayed_contacts.keys() == box_contacts.keys()
             for name, value in box_contacts.items():
                 assert_equal(replayed_contacts[name], value)
+        # So are the other results of that step, such as the accelerations
+        assert (replay_scene.rigid_solver.get_dofs_acc() is None) == (replayed_contacts is None)
         assert_equal(replay_scene.get_time(), time)
         assert_equal(exact_trajectory.time(index), time)
         ctrl_pos = exact_trajectory.frame(index)["RigidSolver.dyn_state.dofs.ctrl_pos"]
@@ -892,7 +894,7 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         assert_equal(replayed_state.arrays[name], final_state.arrays[name])
     assert_equal(replay_scene.entities[1].get_contacts()["force_a"], final_force)
     # A minimal frame derives the poses of every environment from the state it restores, whichever environments a
-    # setter changed before
+    # setter changed before.
     replay_scene.entities[1].set_pos((0.0, 0.0, 5.0), envs_idx=[0] if n_envs else None)
     minimal_trajectory.seek(0)
     assert_allclose(replay_scene.rigid_solver.get_links_pos(), links_poses[0][0], tol=tol)

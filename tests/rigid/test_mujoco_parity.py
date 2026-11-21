@@ -438,7 +438,7 @@ def test_setters_getters(gs_sim, mj_sim, tol):
     mujoco.mj_step(mj_sim.model, mj_sim.data)
 
     # The getters run forward kinematics on the state the setters wrote after a step, as 'mj_forward' does, then on the
-    # state the next step reaches
+    # state the next step reaches.
     qpos = tensor_to_array(solver.get_qpos()) + 0.1
     solver.set_qpos(qpos)
     solver.set_dofs_velocity(0.1)

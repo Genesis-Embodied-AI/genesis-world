@@ -694,9 +694,14 @@ class ScopedRenderContext(TrackableMixin, Generic[OwnerT]):
         return True
 
     def refresh_shapes(self, envs_idx: torch.Tensor | None, view: str) -> tuple[Shape, ...]:
-        """Refresh the shapes and return them, which makes them current.
+        """Refresh the shapes and return them, which makes them current (see 'is_shapes_current').
 
-        See 'update_shapes' and 'is_shapes_current'.
+        Parameters
+        ----------
+        envs_idx : torch.Tensor | None
+            The environments to refresh, or None for the shapes alone (see 'update_shapes').
+        view : str
+            The representation to return (see 'update_shapes').
         """
         return self.update_shapes(envs_idx, view)
 
@@ -785,7 +790,7 @@ class SolverScopedRenderContext(ScopedRenderContext[OwnerT]):
 @dataclass(eq=False)
 class _MarkerStorage:
     # The latest marker the scoped context resized, whose arrays view the first 'n_items' rows of those of the marker
-    # the renderers draw, which hold 'capacity' rows (see 'ScopedRenderContext.resize_marker')
+    # the renderers draw, which hold 'capacity' rows (see 'ScopedRenderContext.resize_marker').
     marker: Shape
     static: Shape
     capacity: int
@@ -803,7 +808,7 @@ class _RecordedShape(NamedTuple):
 class _ScopedRecord:
     scoped_context: ScopedRenderContext
     # The markers the scoped context shows since its latest refresh of the markers, and the markers the renderers draw
-    # for them (see '_update_markers')
+    # for them (see '_update_markers').
     markers: tuple[Shape, ...] = ()
     markers_drawn: tuple[Shape, ...] = ()
     # Whether a control of the scoped context made the shapes and the markers stale (see 'invalidate'), the
@@ -1157,7 +1162,7 @@ class RenderContext:
 
     def _resize_marker(self, marker: Shape, n_items: int) -> Shape:
         # The capacity doubles once exceeded and halves once above four times the number of items, so that a number of
-        # items going back and forth reallocates seldom
+        # items going back and forth reallocates seldom.
         storage = self._markers_storage.get(marker)
         items = marker.start if isinstance(marker, Lines) else marker.pos
         n_items_before = items.shape[1] if storage is None else storage.n_items

@@ -971,6 +971,11 @@ def set_array_read_hook(hook: Callable[[Any], None] | None) -> None:
     """Set the function 'qd_to_torch' and 'qd_to_numpy' call with the array they read before reading it.
 
     It lets the arrays derived from the state refresh as they are read (see 'genesis.engine.state_change').
+
+    Parameters
+    ----------
+    hook : Callable[[Any], None] | None
+        The function called with each array read, None for none.
     """
     global _array_read_hook
     _array_read_hook = hook
@@ -1119,7 +1124,7 @@ def qd_to_numpy(
                 is_copy = True
             else:
                 # A numpy view is read-only, the arrays being written through torch views alone, which the change logs
-                # follow (see 'genesis.engine.state_change')
+                # follow (see 'genesis.engine.state_change').
                 value._np = tc.numpy()
                 value._T_np = _maybe_transpose(tc, value, True).numpy()
                 value._np.flags.writeable = value._T_np.flags.writeable = False

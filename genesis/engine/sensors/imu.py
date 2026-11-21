@@ -221,7 +221,7 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
         if not markers:
             # One arrow per reading, each following what the reading depends on: the acceleration the configuration,
             # the velocities and the model, the angular velocity the configuration and the velocities, and the
-            # magnetic field the configuration alone
+            # magnetic field the configuration alone.
             solver = self._shared_metadata.solver
             markers = tuple(
                 Arrows(

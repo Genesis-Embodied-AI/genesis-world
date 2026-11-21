@@ -34,9 +34,9 @@ from torch.autograd.graph import increment_version
 from quadrants.lang import impl
 
 import genesis as gs
-from genesis.utils.kernel_access import get_accessed_paths
 from genesis.utils.cache import OwnedCache
 from genesis.utils.data import iter_state_arrays
+from genesis.utils.kernel_access import get_accessed_paths
 from genesis.utils.misc import no_read_guard, qd_from_torch, qd_to_torch
 
 if TYPE_CHECKING:

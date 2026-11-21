@@ -590,7 +590,7 @@ class SensorScopedRenderContext(ScopedRenderContext[Sensor]):
         self._markers = self.owner._update_markers(self._markers, envs_idx)
         # A marker draws what the sensor measured, so a fork of it without any item is returned while a change it
         # follows occurred since the latest measurement, as the solvers and the sensor mark themselves clean once
-        # measured
+        # measured.
         return tuple(
             marker.fork(is_active=torch.zeros_like(marker.is_active))
             if any(

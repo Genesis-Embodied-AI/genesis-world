@@ -1095,7 +1095,8 @@ class PBDScopedRenderContext(ParticleScopedRenderContext, ScopedRenderContext[PB
     def build(self) -> None:
         super().build()
         solver = self.owner
-        # The marker of the fixed particles, drawn at every particle and shown at those fixed
+        # The marker of the fixed particles, drawn at every particle and shown at those fixed, which fixing or releasing a
+        # particle changes (see 'fix_particles').
         self._fixed_particles: Points | None = None
         if solver.options.vis.constraints:
             self._fixed_particles = Points(
@@ -1103,7 +1104,7 @@ class PBDScopedRenderContext(ParticleScopedRenderContext, ScopedRenderContext[PB
                 radius=solver.particle_radius * FIXED_PARTICLE_SIZE_SCALE,
                 color=CONSTRAINT_COLOR,
                 is_active=torch.zeros((solver.n_envs_, solver.n_particles), dtype=gs.tc_bool, device=gs.device),
-                invalidated_by={solver: (StateChange.GEOMETRY, StateChange.MODEL)},
+                invalidated_by={solver: (StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL)},
             )
 
     def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:

@@ -1044,9 +1044,6 @@ def test_derived_quantities_follow_state(show_viewer, tol):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(
-        morph=gs.morphs.Plane(),
-    )
     franka = scene.add_entity(
         morph=gs.morphs.MJCF(
             file="xml/franka_emika_panda/panda.xml",
@@ -1054,12 +1051,13 @@ def test_derived_quantities_follow_state(show_viewer, tol):
     )
     scene.build(n_envs=2)
 
+    # The arm falls under gravity, so that the poses a step leaves differ from those of the build
     for _ in range(10):
         scene.step()
-    links_pos_stepped = franka.get_links_pos().clone()
+    links_pos_stepped = franka.get_links_pos()
 
     # A configuration written in one environment moves its links there alone
-    qpos = franka.get_qpos().clone()
+    qpos = franka.get_qpos()
     qpos[1, :2] += 0.5
     franka.set_qpos(qpos[[1]], envs_idx=[1])
     links_pos, links_quat = franka.solver.forward_kinematics_query(franka, qpos)
@@ -1068,7 +1066,7 @@ def test_derived_quantities_follow_state(show_viewer, tol):
     assert_allclose(franka.get_links_pos()[0], links_pos_stepped[0], tol=gs.EPS)
 
     # The mass matrix of each environment follows its configuration
-    mass_mat = franka.get_mass_mat().clone()
+    mass_mat = franka.get_mass_mat()
     franka.set_qpos(qpos[[1]], envs_idx=[0])
     assert_allclose(franka.get_mass_mat()[0], mass_mat[1], tol=tol)
 

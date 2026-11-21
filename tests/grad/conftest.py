@@ -32,7 +32,7 @@ def step_overwrites(backend, monkeypatch):
 
     insert, entry, reverse, exit_ = operator.attrgetter("insert", "entry", "reverse", "__exit__")(LaunchRecorder)
     # Per recorder, released with it since a later one may take its identity: the arrays its closed entries used, the
-    # values before its open entry, the launches of that entry, and the entry itself
+    # values before its open entry, the launches of that entry, and the entry itself.
     arrays_used, values_before, launches_open, entry_open = (weakref.WeakKeyDictionary() for _ in range(4))
     overwrites = set()
     # The copies of the checker are kernel launches of their own without zero-copy views, which it does not record
