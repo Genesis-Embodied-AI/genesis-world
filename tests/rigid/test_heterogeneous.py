@@ -591,8 +591,19 @@ def test_morph_property_raises():
 
 
 @pytest.mark.required
-def test_root_joint_mismatch(fixed_base_dual_arm):
+def test_unsupported_variants_raise(fixed_base_dual_arm, mimic_hinges):
     scene = gs.Scene(show_viewer=False)
+
+    # The equality constraints of the first morph bind every environment, so one binding joints another variant lacks
+    # is rejected, and so is one that only a later variant states
+    with pytest.raises(gs.GenesisException, match="some heterogeneous variants do not carry"):
+        scene.add_entity(
+            morph=[gs.morphs.MJCF(file=mimic_hinges), gs.morphs.URDF(file=fixed_base_dual_arm, fixed=True)]
+        )
+    with pytest.raises(gs.GenesisException, match="no equality constraint of the first morph"):
+        scene.add_entity(
+            morph=[gs.morphs.URDF(file=fixed_base_dual_arm, fixed=True), gs.morphs.MJCF(file=mimic_hinges)]
+        )
 
     # A fixed base and a free base decide differently which links the world carries
     with pytest.raises(gs.GenesisException, match="root link"):

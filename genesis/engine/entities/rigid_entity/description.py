@@ -453,11 +453,15 @@ class Resolution:
 
     'links_inertial_info' holds one list per link, with one entry per variant in variant order, None for a variant that
     does not carry the link. The align anchoring consumes it (see 'LinkInertialInfo').
+
+    'variants_eqs_info' holds the parsed equality constraints of every variant but the primary, each with the index of
+    its variant, naming the links and joints they bind as the entity names them.
     """
 
     options: Options
     is_mujoco_compatible: bool
     links_inertial_info: list[list[LinkInertialInfo | None]] = field(default_factory=list)
+    variants_eqs_info: list[tuple[int, dict[str, Any]]] = field(default_factory=list)
 
 
 @dataclass
@@ -596,7 +600,7 @@ class KinematicEntityDescription(EntityDescription):
             offset_pos = np.array(morph.offset_pos, dtype=gs.np_float)
             offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
             if isinstance(morph, (gs.morphs.URDF, gs.morphs.MJCF)):
-                v_l_infos, v_links_j_infos, v_links_g_infos, _ = self._parse_scene(morph, resolution)
+                v_l_infos, v_links_j_infos, v_links_g_infos, v_eqs_info = self._parse_scene(morph, resolution)
                 if sum(v_l_info["parent_idx"] == -1 for v_l_info in v_l_infos) > 1:
                     gs.raise_exception("Heterogeneous morphs are not supported on multi-root entities.")
 
@@ -686,6 +690,17 @@ class KinematicEntityDescription(EntityDescription):
                         self.links[v_links_idx[v_links_name.index(name)]].name
                         for name in v_l_info.get("contact_exclusions", ())
                     ]
+                # So are the links and joints its equality constraints bind
+                v_links_entity_name = {name: self.links[i_l].name for name, i_l in zip(v_links_name, v_links_idx)}
+                v_joints_name = {
+                    v_j_desc.name: j_desc.name
+                    for v_joints, i_l in zip(v_links_joints, v_links_idx)
+                    for v_j_desc, j_desc in zip(v_joints, self.links[i_l].joints)
+                }
+                for e_info in v_eqs_info:
+                    names = v_joints_name if e_info["type"] == EQUALITY_TYPE.JOINT else v_links_entity_name
+                    objs_name = tuple(names.get(name, name) for name in e_info["objs_name"])
+                    resolution.variants_eqs_info.append((i_variant, {**e_info, "objs_name": objs_name}))
 
                 v_links_path = [v_l_info["path"] for v_l_info in v_l_infos]
                 self._resolve_geoms_values(morph, v_links_path, v_links_g_infos, resolution)
@@ -1819,8 +1834,9 @@ class RigidEntityDescription(KinematicEntityDescription):
     def _load_heterogeneous_morphs(self, resolution: Resolution):
         """Merge the kinematic trees of the variants (see 'KinematicEntityDescription._load_heterogeneous_morphs').
 
-        An equality constraint of the primary binds every environment, so the links and joints it names must be carried
-        by every variant.
+        The equality constraints of the primary bind every environment, so the links and joints they name must be
+        carried by every variant, and a variant stating a constraint the primary lacks is rejected: its environments
+        would simulate without it.
         """
         super()._load_heterogeneous_morphs(resolution)
 
@@ -1832,8 +1848,17 @@ class RigidEntityDescription(KinematicEntityDescription):
         for eq_desc in self.equalities:
             if names_partial.intersection(eq_desc.objs_name):
                 gs.raise_exception(
-                    f"Equality constraint '{eq_desc.name}' names a link or a joint that some heterogeneous variants do "
-                    "not carry."
+                    f"Equality constraint '{eq_desc.name}' binds {eq_desc.objs_name}, which some heterogeneous "
+                    "variants do not carry. An equality constraint of a heterogeneous entity must bind links and "
+                    "joints that every variant carries."
+                )
+        eqs_key = {(eq_desc.type, tuple(eq_desc.objs_name)) for eq_desc in self.equalities}
+        for i_variant, e_info in resolution.variants_eqs_info:
+            if (e_info["type"], e_info["objs_name"]) not in eqs_key:
+                gs.raise_exception(
+                    f"Equality constraint '{e_info['name']}' of heterogeneous variant {i_variant} binds "
+                    f"{e_info['objs_name']}, which no equality constraint of the first morph binds. Every environment "
+                    "takes the equality constraints of the first morph alone."
                 )
 
     def _align_free_roots(self, resolution: Resolution):
