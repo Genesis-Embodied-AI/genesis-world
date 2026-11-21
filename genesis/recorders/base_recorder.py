@@ -1,3 +1,4 @@
+import contextlib
 import functools
 import queue
 import threading
@@ -13,14 +14,6 @@ from genesis.utils.misc import BuildableMixin
 
 if TYPE_CHECKING:
     from .recorder_manager import RecorderManager
-
-
-def _stop_recorder_at_exit(recorder_ref: "weakref.ref[Recorder]") -> None:
-    # 'RecorderManager.stop' destroys the recorders it stops, which leaves nothing to stop at exit. A weak reference
-    # keeps this hook from holding the recorder alive until the interpreter exits.
-    recorder = recorder_ref()
-    if recorder is not None and recorder._is_built:
-        recorder.stop()
 
 
 class Recorder[T](BuildableMixin):
@@ -169,6 +162,13 @@ class Recorder[T](BuildableMixin):
             error, self._error = self._error, None
             gs.raise_exception_from(f"[{type(self).__name__}] Processing failed in the background: {error}", error)
 
+    def _stop_at_exit(self):
+        # Exit hook, called through a weak proxy: the recorder may be gone already, or destroyed by
+        # 'RecorderManager.stop', which leaves nothing to stop.
+        with contextlib.suppress(ReferenceError):
+            if self._is_built:
+                self.stop()
+
     @gs.assert_built
     def join_thread(self):
         """Wait for the processor thread to finish."""
@@ -187,7 +187,7 @@ class Recorder[T](BuildableMixin):
             try:
                 # Note that it is necessary to rely on private threading atexit because functions registered using
                 # 'atexit.register' are called AFTER 'threading._shutdown', causing deadlock for non-daemon threads.
-                threading._register_atexit(functools.partial(_stop_recorder_at_exit, weakref.ref(self)))
+                threading._register_atexit(functools.partial(Recorder._stop_at_exit, weakref.proxy(self)))
             except AttributeError:
                 pass
         else:
