@@ -22,7 +22,7 @@ from genesis.engine.render_context import (
     SolverScopedRenderContext,
     select_view_shapes,
 )
-from genesis.engine.state_change import StateChange, mutates
+from genesis.engine.state_change import mutates
 from genesis.options.solvers import MPMOptions, PBDOptions, SPHOptions
 from genesis.typing import UnitIntervalVec4Type
 from genesis.utils.data import ENVS, Data, DataKind, Size, eoa, field
@@ -125,7 +125,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         super().build(n_envs)
 
     @gs.assert_built
-    @mutates(StateChange.GEOMETRY)
+    @mutates()
     def set_particles_pos(self, poss, particles_idx=None, envs_idx=None) -> None:
         """
         Set the position of some particles, at rest.
@@ -153,7 +153,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
-    @mutates(StateChange.DYNAMICS)
+    @mutates()
     def set_particles_vel(self, vels, particles_idx=None, envs_idx=None) -> None:
         """Set the velocity of some particles (see 'set_particles_pos')."""
         self._write_data(
@@ -168,7 +168,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
-    @mutates(StateChange.GEOMETRY, differentiable=False)
+    @mutates(differentiable=False)
     def set_particles_active(self, actives, particles_idx=None, envs_idx=None) -> None:
         """Set whether some particles take part in the simulation (see 'set_particles_pos')."""
         actives, particles_idx, envs_idx = self._sanitize_io_variables(

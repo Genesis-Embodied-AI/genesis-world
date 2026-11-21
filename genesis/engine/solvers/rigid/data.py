@@ -8,6 +8,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.solvers.base_solver import ErrorCode
+from genesis.engine.state_change import StateChange
 from genesis.utils.data import ENVS, Config, Data, DataKind, Size, field, is_opted_in
 from genesis.utils.simt import ExactSums
 
@@ -58,7 +59,7 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     # dof-less scene pads its dof buffers to one slot and takes the slow path.
     n_awake_dofs: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
     qpos0: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.INFO)
-    qpos: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.STATE, grad=True)
+    qpos: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.STATE, grad=True, change=StateChange.GEOMETRY)
     qpos_next: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.SCRATCH, grad=True)
     geoms_init_AABB: qd.Tensor = field((float, 3), shape=(GEOMS, 8), labels=DYNAMICS)
     # Stored reversed under the cooperative constraint kernels (see RigidData), i_d1 innermost, for their readers
@@ -198,10 +199,10 @@ class DofsState(Data, kind=DataKind.DERIVED, shape=(DOFS, ENVS)):
     qf_passive: qd.Tensor = field(float, grad=True)
     qf_applied: qd.Tensor = field(float, grad=True)
     pos: qd.Tensor = field(float, grad=True)
-    vel: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
+    vel: qd.Tensor = field(float, kind=DataKind.STATE, grad=True, change=StateChange.DYNAMICS)
     vel_prev: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True)
     vel_next: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True)
-    acc: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
+    acc: qd.Tensor = field(float, kind=DataKind.STATE, grad=True, change=StateChange.DYNAMICS)
     acc_smooth: qd.Tensor = field(float, grad=True)
     acc_smooth_bw: qd.Tensor = field(float, shape=(2, DOFS, ENVS), labels=BACKWARD, grad=True)
     qf_smooth: qd.Tensor = field(float, grad=True)
@@ -431,8 +432,8 @@ class EntitiesInfo(Data, kind=DataKind.INFO, shape=(ENTITIES,)):
 class FixedRootsState(Data, kind=DataKind.STATE, shape=(FIXED_ROOTS, ENVS)):
     """The pose of each fixed root link in each environment, which forward kinematics copies into its link."""
 
-    pos: qd.Tensor = field((float, 3), grad=True)
-    quat: qd.Tensor = field((float, 4), grad=True)
+    pos: qd.Tensor = field((float, 3), grad=True, change=StateChange.GEOMETRY)
+    quat: qd.Tensor = field((float, 4), grad=True, change=StateChange.GEOMETRY)
 
 
 class EntitiesState(Data, kind=DataKind.STATE, shape=(ENTITIES, ENVS)):

@@ -8,7 +8,7 @@ import torch
 
 import genesis as gs
 from genesis.constants import link_ref_frame
-from genesis.engine.state_change import StateChange, depends_on
+from genesis.engine.state_change import depends_on
 from genesis.typing import UnitVec4FType, Vec3FType
 from genesis.utils import geom as gu
 from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_to_torch
@@ -3099,7 +3099,7 @@ class RigidEntity(KinematicEntity):
 
         return contact_data
 
-    @depends_on(StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL, on=attrgetter("_solver"), recover=False)
+    @depends_on(attrgetter("_solver.dyn_state.links.contact_force"))
     def get_links_net_contact_force(self, envs_idx=None):
         """
         Returns net force applied on each links due to direct external contacts.

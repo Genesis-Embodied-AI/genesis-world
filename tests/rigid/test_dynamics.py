@@ -849,7 +849,6 @@ def test_mass_mat(xml_path, show_viewer, tol):
         ),
     )
     scene.build()
-    scene.rigid_solver.update_forward_pos(mass_mat=True)
 
     # Two identical entities must yield identical mass matrices, and the LTDL factor must reconstruct it.
     mass_mat_1 = franka1.get_mass_mat(decompose=False)
@@ -894,7 +893,6 @@ def test_mass_block_partition(xml_path, show_viewer, tol):
         ),
     )
     scene.build(n_envs=0)
-    scene.rigid_solver.update_forward_pos(mass_mat=True)
 
     n_dofs = entity.n_dofs
     branch = n_dofs // 2
@@ -1034,7 +1032,6 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
     box_dofs = torch.arange(box.dof_start, box.dof_start + box.n_dofs)
 
     solver = scene.rigid_solver
-    solver.update_forward_pos(mass_mat=True)
     mass_mat = solver.get_mass_mat(decompose=False)
     # The merged tree reproduces the single equivalent entity's full coupled mass matrix.
     assert_allclose(mass_mat[..., pair_dofs[:, None], pair_dofs], mass_mat[..., mono_dofs[:, None], mono_dofs], tol=tol)

@@ -1067,8 +1067,6 @@ class IPCCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC)
                 qpos_new if self.n_envs > 0 else qpos_new[0],
                 qs_idx=slice(entity.q_start, entity.q_end),
             )
-            # The poses of the links are read from the solver state below
-            self.rigid_solver.update_forward_pos()
 
             # Set base link velocities from IPC if available
             if not entity.base_link.is_fixed:

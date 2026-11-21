@@ -1150,8 +1150,8 @@ def func_update_cartesian_space(
     awake trees alone (see trees_root_idx in rigid/data.py), whose static parents hold still, and a tree sleeps as a
     unit, so a hibernated tree keeps the poses of its last awake step. The refresh after setters, the initial placement
     and the backward replay cover the static links too and walk each root whole (see func_update_kinematics_root): the
-    manual reverse reads the per-joint pose cache of every link of a root. Autodiff takes a kernel made of loops alone, so the loops are the
-    outermost ones of their kernel.
+    manual reverse reads the per-joint pose cache of every link of a root. Autodiff takes a kernel made of loops alone,
+    so the loops are the outermost ones of their kernel.
     """
     if qd.static(force_update_all_geoms or is_backward):
         qd.loop_config(

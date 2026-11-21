@@ -12,7 +12,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.force_fields import ForceField, ForceFields
-from genesis.engine.state_change import ChangeLog, StateChange, TrackableMixin, mutates
+from genesis.engine.state_change import ChangeLog, TrackableMixin, mutates
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import RolloutGraph, no_grad
 from genesis.repr_base import RBC
@@ -392,11 +392,12 @@ class CheckpointMixin:
         *,
         boundary_only: bool = False,
         envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
-    ) -> None:
+    ) -> list[DataItem]:
         """Write back the arrays of a checkpoint 'save_checkpoint' returned, rejecting a record read from another build.
 
         `boundary_only` states that 'save_checkpoint' saved a boundary checkpoint, of which `envs_idx` selects the
-        environments to write back, all of them if None, along the last index of every array of the state.
+        environments to write back, all of them if None, along the last index of every array of the state. It returns
+        the items written back.
 
         Nothing is notified to the subscribers (see 'mutates'). A component whose step reads a DERIVED array before
         recomputing it overrides this to recompute or invalidate that array when the record lacks DERIVED (see
@@ -440,6 +441,7 @@ class CheckpointMixin:
             items = [item for item in self.data if not isinstance(item, ConfigItem) and item.kind in checkpoint.kinds]
             arrays = checkpoint.arrays
         fill_data(items, arrays)
+        return self._boundary_items.items if boundary_only else items
 
     def get_state(self) -> SolverCheckpoint:
         """Return the state the component holds between two steps, for 'set_state' to restore (see 'DataKind.STATE')."""
@@ -503,7 +505,7 @@ class GravityMixin(BuildableMixin):
         self._gravity.from_numpy(np.tile(np.array(self._options.gravity, dtype=gs.np_float), (self.n_envs_, 1)))
 
     @gs.assert_built
-    @mutates(StateChange.MODEL)
+    @mutates()
     def set_gravity(self, gravity, envs_idx=None):
         """
         Set the gravity acting on the bodies of this solver, in m/s^2.
@@ -572,6 +574,19 @@ class Solver(TrackableMixin, BuildableMixin, BatchedMixin, ErrnoMixin, Checkpoin
 
         # The part of the render context the solver draws, set as it builds
         self.render_context: "ScopedRenderContext | None" = None
+
+    def load_checkpoint(
+        self,
+        checkpoint: SolverCheckpoint,
+        *,
+        boundary_only: bool = False,
+        envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
+    ) -> list[DataItem]:
+        items = super().load_checkpoint(checkpoint, boundary_only=boundary_only, envs_idx=envs_idx)
+        # The restore writes through zero-copy views, which no launch tracks, the derived arrays restored with the state
+        # being current (see 'ChangeLog.record_arrays')
+        self.changelog.record_arrays([item.array for item in items if isinstance(item, ArrayItem)], envs_idx)
+        return items
 
     def _add_force_field(self, force_field: ForceField) -> None:
         self._force_fields.fields.append(force_field)
@@ -843,7 +858,7 @@ class Solver(TrackableMixin, BuildableMixin, BatchedMixin, ErrnoMixin, Checkpoin
     def reset_grad(self) -> None:
         """Zero the adjoint of the state of the solver, from which a backward pass starts."""
 
-    @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
+    @mutates()
     def set_state(
         self, state: SolverCheckpoint, envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None
     ) -> None:

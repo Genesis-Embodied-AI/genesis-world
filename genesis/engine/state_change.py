@@ -1,24 +1,36 @@
 """
-Changes of the state of a trackable, the trackers and subscribers following them, and the tags of the methods making
-them (see 'mutates') and of the getters depending on them (see 'depends_on').
+Changes of the state of a trackable, recorded per array and per category, the validity of the arrays derived from it,
+and the tags of the methods writing it (see 'mutates') and of the getters reading what a step alone computes (see
+'depends_on').
+
+Every write of a tracked array is recorded where it happens: a kernel launch through the arrays its source may write
+(see 'get_accessed_paths'), a tagged method through the kernels it names, a step at once for every array of its solvers.
+An array a launch writes is current by contract, computed from the arrays the launch read. A derived array is stale once
+an array of the state it was computed from is written again, and a read of it refreshes it first, whether it is a launch
+or a copy to the host, if a refresh of its solver computes it.
 
 The module stands outside of the solvers, so that the entities tag their own methods.
 """
 
+import contextlib
+import dataclasses
 import functools
 import inspect
-from collections.abc import Callable, Hashable
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
+import weakref
+from collections.abc import Callable, Hashable, Iterable, Iterator
+from typing import Any, NamedTuple, Protocol
 
 import torch
+
+import quadrants as qd
+from quadrants.lang import impl
 
 import genesis as gs
 from genesis.engine.entities.base_entity import Entity
 from genesis.typing import IndexType
-from genesis.utils.misc import indices_to_mask
-
-if TYPE_CHECKING:
-    from genesis.engine.solvers.base_solver import Solver
+from genesis.utils.data import ArrayItem, DataItem, DataKind
+from genesis.utils.kernel_access import get_accessed_paths
+from genesis.utils.misc import indices_to_mask, set_array_read_hook
 
 
 class StateChange(gs.IntEnum):
@@ -39,12 +51,18 @@ class StateChange(gs.IntEnum):
 
 
 # The categories are handled as plain integers below the public interface, which number them from zero so that a change
-# log indexes its versions by category, and each integer gives back its category for the consumers.
+# log indexes its versions by category, and each integer gives back its category for the consumers. The entry after
+# them is recorded by every write of the state, whatever its category, and the tracked arrays follow, one entry each.
 _ALL_CHANGES = tuple(range(len(StateChange)))
 _STATE_CHANGES = tuple(StateChange)
+_ANY_STATE = len(StateChange)
+_N_FIXED_ENTRIES = _ANY_STATE + 1
 
 # The selections an axis of a change log keeps per category before counting as changed everywhere (see '_Counters')
 _MAX_SELECTIONS = 32
+
+# The kinds of the arrays a change log tracks: the state, the model and what derives from them
+_TRACKED_KINDS = (DataKind.INFO, DataKind.STATE, DataKind.DERIVED)
 
 
 class ChangeAxis(NamedTuple):
@@ -71,7 +89,7 @@ class ChangeRecord(NamedTuple):
     """The categories of the changes of a trackable since a tracker last caught up, and where they happened."""
 
     changes: frozenset[StateChange]
-    """The categories of the changes."""
+    """The categories of the changes, empty for a change of the state of no category."""
     axes_is_changed: tuple[torch.Tensor | None, ...]
     """Whether the changes reached each entry of each axis, on the device, None for every entry, as the named tuple
     'axes_cls' of the change log (see 'ChangeLog')."""
@@ -105,8 +123,19 @@ class Tracker:
             change: [len(selections) for selections in log._counters[change].selections] for change in changes
         }
 
-    def take(self) -> ChangeRecord | None:
-        """Return the changes since the tracker last caught up, None if none, and catch up."""
+    def is_dirty(self) -> bool:
+        """Whether the trackable changed in the categories of the tracker since it last caught up, read on the host."""
+        versions = self._log._versions
+        return any([versions[change] != version for change, version in self._seen_versions.items()])
+
+    def take(self, *, catch_up: bool = True) -> ChangeRecord | None:
+        """Return the changes since the tracker last caught up, None if none.
+
+        Parameters
+        ----------
+        catch_up : bool, optional
+            Whether the tracker catches up, the changes returned being reported no more. Defaults to True.
+        """
         log = self._log
         n_axes = len(log.axes_size)
         changes: list[int] = []
@@ -117,18 +146,19 @@ class Tracker:
             version = log._versions[change]
             if version == seen_version:
                 continue
-            self._seen_versions[change] = version
             changes.append(change)
             counters = log._counters[change]
             seen_all_entries, seen_n_selections = self._seen_all_entries[change], self._seen_n_selections[change]
             for i_axis in range(n_axes):
                 selections = counters.selections[i_axis]
                 if counters.all_entries[i_axis] != seen_all_entries[i_axis]:
-                    seen_all_entries[i_axis] = counters.all_entries[i_axis]
                     axes_is_all[i_axis] = True
                 elif not axes_is_all[i_axis]:
                     axes_selections[i_axis] += selections[seen_n_selections[i_axis] :]
-                seen_n_selections[i_axis] = len(selections)
+            if catch_up:
+                self._seen_versions[change] = version
+                self._seen_all_entries[change] = counters.all_entries.copy()
+                self._seen_n_selections[change] = [len(selections) for selections in counters.selections]
         if not changes:
             return None
         axes_is_changed = []
@@ -136,20 +166,98 @@ class Tracker:
             if is_all:
                 axes_is_changed.append(None)
                 continue
-            # The entries are set in place, a write of a scalar through an index tensor synchronizing the device
-            entries_is_changed = torch.zeros(size, dtype=gs.tc_bool, device=gs.device)
+            entries_is_changed = torch.zeros(size, dtype=torch.bool, device=gs.device)
             for entries_map, indices_idx in selections:
-                (entries_mask,) = indices_to_mask(indices_idx)
-                if entries_map is not None:
-                    entries_mask = entries_map[entries_mask]
-                if not isinstance(entries_mask, torch.Tensor):
-                    entries_is_changed[entries_mask] = True
-                elif entries_mask.dtype == torch.bool:
-                    entries_is_changed |= entries_mask
-                else:
-                    entries_is_changed.index_put_((entries_mask,), log._true)
+                entries_is_changed |= _entries_mask(size, indices_idx, entries_map, log._true)
             axes_is_changed.append(entries_is_changed if axis.reach is None else axis.reach(entries_is_changed))
-        return ChangeRecord(frozenset(_STATE_CHANGES[change] for change in changes), log._axes_cls(*axes_is_changed))
+        changes_state = frozenset(_STATE_CHANGES[change] for change in changes if change < _ANY_STATE)
+        return ChangeRecord(changes_state, log._axes_cls(*axes_is_changed))
+
+
+def _entries_mask(size: int, indices_idx: IndexType, entries_map: torch.Tensor | None, true: torch.Tensor):
+    """Return the mask of the entries of an axis some indices name, mapped onto the axis by 'entries_map' if any.
+
+    The mask is of torch booleans, which the refreshes tell from indices by its dtype.
+    """
+    entries_is_changed = torch.zeros(size, dtype=torch.bool, device=gs.device)
+    (entries_mask,) = indices_to_mask(indices_idx)
+    if entries_map is not None:
+        entries_mask = entries_map[entries_mask]
+    # The entries are set in place, a write of a scalar through an index tensor synchronizing the device
+    if not isinstance(entries_mask, torch.Tensor):
+        entries_is_changed[entries_mask] = True
+    elif entries_mask.dtype == torch.bool:
+        entries_is_changed |= entries_mask
+    else:
+        entries_is_changed.index_put_((entries_mask,), true)
+    return entries_is_changed
+
+
+class _Production:
+    """The derived arrays a launch, a refresh or a step last wrote together, and the state they were computed from.
+
+    The roots are the arrays of the state and of the model the writer read, directly or through the derived arrays it
+    read. The production is stale once a root is written again, or while some of its environments were left stale as
+    it was made (see 'pending').
+    """
+
+    __slots__ = ("roots", "seen_versions", "seen_bulk", "seen_state_total", "trackers", "pending")
+
+    def __init__(self) -> None:
+        # The entries of the roots, by change log
+        self.roots: dict[ChangeLog, tuple[int, ...]] = {}
+        # The versions of the entries of each change log, the count of its steps and of its records of the state as the
+        # production was made (see 'ChangeLog._bulk')
+        self.seen_versions: dict[ChangeLog, list[int]] = {}
+        self.seen_bulk: dict[ChangeLog, int] = {}
+        self.seen_state_total: dict[ChangeLog, int] = {}
+        # The environments the state was written in since then, one tracker per change log
+        self.trackers: dict[ChangeLog, Tracker] = {}
+        # The environments the writer left stale, those it skipped while they were stale, None for none
+        self.pending: torch.Tensor | None = None
+
+    def snapshot(self, roots: dict["ChangeLog", tuple[int, ...]]) -> None:
+        self.roots = roots
+        for log in roots:
+            self.seen_versions[log] = log._versions.copy()
+            self.seen_bulk[log] = log._bulk
+            self.seen_state_total[log] = log._state_total
+            self.trackers[log] = log.track_state()
+
+    def is_stale(self, excluded: tuple[int, ...] = (), changes: tuple[int, ...] | None = None) -> bool:
+        """Whether a root changed since the production was made, counting no write of the 'excluded' entries, and the
+        writes of the roots of the given categories alone, all of them for None."""
+        if self.pending is not None:
+            return True
+        for log, roots in self.roots.items():
+            if log._state_total == self.seen_state_total[log]:
+                continue
+            versions, seen_versions, is_bulk = log._versions, self.seen_versions[log], log._is_bulk
+            entries_change = log._entries_change
+            is_bulk_changed = log._bulk != self.seen_bulk[log]
+            if any(
+                [
+                    (versions[root] != seen_versions[root] or (is_bulk_changed and is_bulk[root]))
+                    and root not in excluded
+                    and (changes is None or entries_change[root] in changes)
+                    for root in roots
+                ]
+            ):
+                return True
+        return False
+
+    def stale_envs(self) -> torch.Tensor | None:
+        """Return the mask of the environments the production is stale in, on the device, None for all of them."""
+        envs_is_stale = self.pending
+        for tracker in self.trackers.values():
+            record = tracker.take(catch_up=False)
+            if record is None:
+                continue
+            envs_is_changed = record.axes_is_changed[0]
+            if envs_is_changed is None:
+                return None
+            envs_is_stale = envs_is_changed if envs_is_stale is None else envs_is_stale | envs_is_changed
+        return envs_is_stale
 
 
 class ChangeLog:
@@ -158,6 +266,10 @@ class ChangeLog:
     A change bumps the versions of its categories, and records where it happened along each axis: every entry as a host
     count, some of them as the selection given, which a tracker resolves on the device as it catches up (see
     '_Counters'). The memory is bounded whatever the number of changes recorded in between.
+
+    The arrays the trackable registers are tracked one by one (see 'register'): each write of one of them bumps its
+    version and records the category of the array, and each derived array knows the production that last wrote it (see
+    '_Production'), so that a read refreshes it while stale (see 'refresh').
 
     Parameters
     ----------
@@ -182,12 +294,13 @@ class ChangeLog:
             for i_axis, axis in enumerate(self.axes)
             for name, entries_map in axis.indices_maps.items()
         }
-        # The version of each category, a host count every change of it bumps
-        self._versions = [0] * len(_ALL_CHANGES)
+        # The version of each entry, a host count every change of it bumps
+        self._versions = [0] * _N_FIXED_ENTRIES
         # The value the trackers set the entries some changes reached with (see 'Tracker.take')
-        self._true = torch.ones((), dtype=gs.tc_bool, device=gs.device)
-        # The changes of each category some tracker follows, made with its first tracker
-        self._counters: list[_Counters | None] = [None] * len(_ALL_CHANGES)
+        self._true = torch.ones((), dtype=torch.bool, device=gs.device)
+        # The changes of each category some tracker follows, made with its first tracker. The arrays have none.
+        self._counters: list[_Counters | None] = [None] * _N_FIXED_ENTRIES
+        self._counters[_ANY_STATE] = _Counters(len(self.axes))
         # The eager subscribers, called back inside the outermost tagged call, whose nested tagged calls accumulate
         # their changes here
         self._subscribers: list[Subscriber] = []
@@ -195,6 +308,325 @@ class ChangeLog:
         self._mutation_changes: set[int] = set()
         # The versions as each key last marked them clean, none before its first time (see 'is_dirty_since')
         self._keys_versions: dict[Hashable, list[int]] = {}
+        # The number of writes of the tracked arrays of the state and of the model, and of steps. A step writes every
+        # array of the state and every derived one at once, which counts in the version of each of them, 'is_bulk'
+        # telling which (see 'record_step').
+        self._state_total = 0
+        self._bulk = 0
+        self._is_bulk = [False] * _N_FIXED_ENTRIES
+        for change in (StateChange.GEOMETRY, StateChange.DYNAMICS, _ANY_STATE):
+            self._is_bulk[change] = True
+        # The kind and the category of each tracked array, by entry, the entries of the arrays of the state and of the
+        # model, and the production of each derived array as of the step it last wrote it in (see 'owner')
+        self._entries_kind: list[DataKind | None] = [None] * _N_FIXED_ENTRIES
+        self._entries_change: list[int | None] = [None] * _N_FIXED_ENTRIES
+        self._root_entries: tuple[int, ...] = ()
+        self._entries_owner: list[_Production | None] = [None] * _N_FIXED_ENTRIES
+        self._entries_owner_bulk: list[int] = [-1] * _N_FIXED_ENTRIES
+        # The production of every derived array as a step leaves it, None before the first step, depending on every
+        # array of the state and of the model, and those of the derived arrays a refresh computes, depending on what the
+        # refresh reads alone, by their roots (see 'register_refreshes')
+        self._step_production: _Production | None = None
+        self._step_productions: dict[tuple[int, ...], _Production] = {}
+        self._entries_step_production: dict[int, _Production] = {}
+        # The index tensors naming every environment (see 'register')
+        self._envs_idx_all: tuple[torch.Tensor, ...] = ()
+        # The number of launches whose writes the change log recorded (see 'mutates')
+        self._n_launches_records = 0
+        # The production of the derived arrays each launch writes, by key of the launch (see '_produce'), owned by the
+        # change log so that the module-level records of the launches reach no change log but weakly
+        self._productions: dict[object, _Production] = {}
+        # The method of the trackable refreshing each derived array, held weakly so that the change log keeps no
+        # trackable alive, and the entries each such method writes
+        self._entries_refresh: dict[int, weakref.WeakMethod] = {}
+        self._refresh_entries: dict[weakref.WeakMethod, tuple[int, ...]] = {}
+
+    # ------------------------------------------------------------------------------------
+    # ------------------------------------- arrays ---------------------------------------
+    # ------------------------------------------------------------------------------------
+
+    def register(self, items: Iterable[DataItem], *, envs_idx: Iterable[torch.Tensor] = ()) -> None:
+        """Track the arrays of the state, of the model and derived from them among some data items.
+
+        Parameters
+        ----------
+        items : Iterable[DataItem]
+            The data of the trackable, such as 'Solver.data', whose quadrants arrays of kind INFO or DERIVED are
+            tracked, and those of kind STATE declaring the category of their changes, gradients aside, a write of an
+            INFO array changing the model. The other arrays of the state, such as the control inputs, the warm starts
+            or the error flags, change nothing a derived array is computed from.
+        envs_idx : Iterable[torch.Tensor], optional
+            The index tensors naming every environment, which a launch reaching them all takes, so that it leaves none
+            of them stale whatever they were before, read on the host. Defaults to ().
+        """
+        self._envs_idx_all = (*self._envs_idx_all, *envs_idx)
+        log_ref = weakref.ref(self)
+        _install_launch_tracker()
+        _LAUNCH_TRACKER.clear()
+        _METHODS_WRITES.clear()
+        for item in items:
+            if not isinstance(item, ArrayItem) or item.kind not in _TRACKED_KINDS or item.name.endswith(".grad"):
+                continue
+            if item.kind == DataKind.STATE and item.change is None:
+                continue
+            # A placeholder of data allocated on first use is tracked too, so that the methods allocating it are known to
+            # write the state or the model before they do
+            if isinstance(item.array, torch.Tensor) or item.array in _TRACKED_ARRAYS:
+                continue
+            entry = len(self._versions)
+            change = StateChange.MODEL if item.kind == DataKind.INFO else item.change
+            self._versions.append(0)
+            self._counters.append(None)
+            self._is_bulk.append(item.kind != DataKind.INFO)
+            self._entries_kind.append(item.kind)
+            self._entries_change.append(None if change is None else int(change))
+            self._entries_owner.append(None)
+            self._entries_owner_bulk.append(-1)
+            _TRACKED_ARRAYS[item.array] = (log_ref, entry)
+            # A kernel taking the array alone receives it unwrapped
+            if isinstance(item.array, qd.Tensor):
+                _TRACKED_ARRAYS[item.array._unwrap()] = (log_ref, entry)
+        self._root_entries = tuple(
+            entry for entry, kind in enumerate(self._entries_kind) if kind in (DataKind.INFO, DataKind.STATE)
+        )
+
+    def register_refreshes(self, owner: Any) -> None:
+        """Make the methods of an object tagged as refreshing derived arrays refresh them as they are read stale.
+
+        Parameters
+        ----------
+        owner : Any
+            The object, whose methods tagged 'mutates(derived=True)' take the environments to refresh, None for all of
+            them, and write the derived arrays the kernels they name may write (see 'get_accessed_paths').
+        """
+        # The roots each refresh reads, and the derived arrays it reads that another refresh computes
+        refreshes_roots, refreshes_reads = {}, {}
+        for cls in reversed(type(owner).__mro__):
+            for attr_value in vars(cls).values():
+                method = _DERIVED_METHODS.get(attr_value) if callable(attr_value) else None
+                if method is None:
+                    continue
+                refresh = weakref.WeakMethod(getattr(owner, method.__name__))
+                access = get_accessed_paths(method, owner)
+                writes = _resolve_paths(access.paths_written, {"self": owner})
+                entries = tuple(
+                    entry for log, entry in writes if log is self and self._entries_kind[entry] == DataKind.DERIVED
+                )
+                self._refresh_entries[refresh] = entries
+                for entry in entries:
+                    self._entries_refresh[entry] = refresh
+                used = [entry for log, entry in _resolve_paths(access.paths_used, {"self": owner}) if log is self]
+                refreshes_roots[refresh] = {entry for entry in used if self._entries_kind[entry] != DataKind.DERIVED}
+                refreshes_reads[refresh] = {entry for entry in used if self._entries_kind[entry] == DataKind.DERIVED}
+        # A derived array a refresh computes depends on the roots of the refresh, through the derived arrays it reads
+        # as well, which a step computing it leaves current until one of them is written (see 'record_step')
+        for refresh, entries in self._refresh_entries.items():
+            roots, pending, seen = set(), [refresh], set()
+            while pending:
+                refresh_read = pending.pop()
+                if refresh_read in seen:
+                    continue
+                seen.add(refresh_read)
+                roots |= refreshes_roots[refresh_read]
+                for entry in refreshes_reads[refresh_read]:
+                    if entry in self._entries_refresh:
+                        pending.append(self._entries_refresh[entry])
+            production = self._step_productions.setdefault(tuple(sorted(roots)), _Production())
+            for entry in entries:
+                self._entries_step_production[entry] = production
+
+    def owner(self, entry: int) -> _Production | None:
+        """Return the production that last wrote a derived array, None if none did."""
+        if self._entries_owner_bulk[entry] != self._bulk:
+            if self._step_production is None:
+                return None
+            return self._entries_step_production.get(entry, self._step_production)
+        return self._entries_owner[entry]
+
+    def is_stale(
+        self, array: Any, *, excluded: tuple[Any, ...] = (), changes: tuple[StateChange, ...] | None = None
+    ) -> bool:
+        """Whether a tracked array is stale in some environment, read on the host.
+
+        A derived array is stale once an array of the state or of the model it was computed from changed since it was
+        computed. An array of the state counts as the last step left it, such as the accelerations the step computes,
+        stale once any array of the state or of the model changed since that step.
+
+        Parameters
+        ----------
+        array : qd.Tensor
+            An array of the trackable, stale until the trackable tracks it.
+        excluded : tuple[qd.Tensor, ...], optional
+            The arrays whose writes do not count, such as the configuration for a quantity of the static links alone.
+            Defaults to ().
+        changes : tuple[StateChange, ...] | None, optional
+            The categories of the writes that count, all of them for None, for a quantity that depends on some of what
+            it was computed from alone, such as contact points whatever the velocities. Defaults to None.
+        """
+        tracked = _tracked_entry(array)
+        if tracked is None:
+            return True
+        entry = tracked[1]
+        production = self.owner(entry) if self._entries_kind[entry] == DataKind.DERIVED else self._step_production
+        if production is None:
+            return True
+        excluded_entries = tuple(_tracked_entry(excluded_array)[1] for excluded_array in excluded)
+        return production.is_stale(excluded_entries, None if changes is None else tuple(map(int, changes)))
+
+    def refresh(self, array: Any) -> None:
+        """Refresh a derived array in the environments it is stale in, through the method computing it (see
+        'register_refreshes').
+
+        Parameters
+        ----------
+        array : qd.Tensor
+            A derived array that a refresh computes, left as it is until the trackable tracks it.
+        """
+        tracked = _tracked_entry(array)
+        if tracked is not None:
+            self._refresh(self._entries_refresh[tracked[1]])
+
+    def _refresh(self, refresh: weakref.WeakMethod) -> None:
+        global _refresh_depth
+        envs_is_stale, is_stale = None, False
+        for production in {self.owner(entry) for entry in self._refresh_entries[refresh]}:
+            if production is None:
+                is_stale, envs_is_stale = True, None
+                break
+            if production.is_stale():
+                envs_is_changed = production.stale_envs()
+                if envs_is_changed is None:
+                    is_stale, envs_is_stale = True, None
+                    break
+                envs_is_stale = envs_is_changed if not is_stale else envs_is_stale | envs_is_changed
+                is_stale = True
+        if not is_stale:
+            return
+        # A launch another tape records, such as the recorder of a differentiable rollout, is reversed by the autodiff
+        # of its kernel, which only the kernels running over every environment allow
+        if impl.get_runtime().target_tape not in (None, _LAUNCH_TRACKER):
+            envs_is_stale = None
+        # The mask is computed on the torch stream, which Metal does not share with the kernels reading it
+        if envs_is_stale is not None and gs.backend == gs.metal:
+            torch.mps.synchronize()
+        # The productions the refresh makes leave no environment stale, since it refreshes every stale one
+        _refresh_depth += 1
+        try:
+            refresh()(envs_is_stale)
+        finally:
+            _refresh_depth -= 1
+
+    def _produce(
+        self,
+        production_key: object,
+        entries: tuple[int, ...],
+        roots: dict["ChangeLog", tuple[int, ...]],
+        envs_idx: IndexType | None,
+    ) -> None:
+        """Make derived arrays current in some environments, all of them for None, as computed from some roots.
+
+        The production is the one of the given key, that of a launch, made on its first use.
+        """
+        production = self._productions.get(production_key)
+        if production is None:
+            production = self._productions[production_key] = _Production()
+        if envs_idx is None or _refresh_depth > 0 or any([envs_idx is envs_all for envs_all in self._envs_idx_all]):
+            production.pending = None
+        else:
+            # The environments left out keep the staleness they had, whichever production they came from
+            envs_is_stale = torch.zeros(self.axes_size[0], dtype=torch.bool, device=gs.device)
+            for previous in {self.owner(entry) for entry in entries}:
+                if previous is None:
+                    envs_is_stale[:] = True
+                    break
+                if previous.is_stale():
+                    envs_is_changed = previous.stale_envs()
+                    if envs_is_changed is None:
+                        envs_is_stale[:] = True
+                        break
+                    envs_is_stale |= envs_is_changed
+            envs_is_stale &= ~_entries_mask(self.axes_size[0], envs_idx, None, self._true)
+            production.pending = envs_is_stale
+        production.snapshot(roots)
+        for entry in entries:
+            self._entries_owner[entry] = production
+            self._entries_owner_bulk[entry] = self._bulk
+
+    def invalidate(self) -> None:
+        """Make every derived array stale in every environment, as a restore of a state recorded with them stale."""
+        self._bulk += 1
+        self._state_total += 1
+        self._step_production = None
+
+    def _invalidate_entries(self, entries: tuple[int, ...]) -> None:
+        """Make some derived arrays stale in every environment, until a refresh or a step computes them."""
+        for entry in entries:
+            self._entries_owner[entry] = None
+            self._entries_owner_bulk[entry] = self._bulk
+
+    def record_step(self) -> None:
+        """Record that a step wrote every array of the state and computed every derived one, in every environment."""
+        self._bulk += 1
+        self._state_total += 1
+        for change in (StateChange.GEOMETRY, StateChange.DYNAMICS, _ANY_STATE):
+            self._versions[change] += 1
+            counters = self._counters[change]
+            if counters is not None:
+                for i_axis in range(len(self.axes)):
+                    counters.all_entries[i_axis] += 1
+                    counters.selections[i_axis].clear()
+        if self._step_production is None:
+            self._step_production = _Production()
+        for production, roots in (
+            (self._step_production, self._root_entries),
+            *[(production, roots) for roots, production in self._step_productions.items()],
+        ):
+            production.pending = None
+            production.snapshot({self: roots})
+
+    def record_arrays(self, arrays: Iterable[Any], envs_idx: IndexType | None = None) -> None:
+        """Record writes of some tracked arrays outside any launch or tagged method, such as the restore of a record.
+
+        The derived arrays written are current in the environments written, as computed from the state.
+
+        Parameters
+        ----------
+        arrays : Iterable[qd.Tensor]
+            The arrays written, those the trackable does not track left out.
+        envs_idx : IndexType | None, optional
+            The environments written, all of them for None. Defaults to None.
+        """
+        entries = tuple(
+            entry for log, entry in [_tracked_entry(array) or (None, None) for array in arrays] if log is self
+        )
+        entries_derived = tuple(entry for entry in entries if self._entries_kind[entry] == DataKind.DERIVED)
+        self._record_entries(entries, envs_idx=envs_idx)
+        if entries_derived:
+            self._produce(object(), entries_derived, {self: self._root_entries}, envs_idx)
+
+    def _record_entries(self, entries: tuple[int, ...], **indices: IndexType | None) -> None:
+        """Bump the versions of some tracked arrays and record the categories of those of the state and of the model.
+
+        A refresh writes the state only to normalize it, such as the quaternions of the configuration, which counts as
+        no change of it.
+        """
+        versions, entries_kind, entries_change = self._versions, self._entries_kind, self._entries_change
+        changes = set()
+        for entry in entries:
+            if _refresh_depth > 0 and entries_kind[entry] != DataKind.DERIVED:
+                continue
+            versions[entry] += 1
+            if entries_kind[entry] != DataKind.DERIVED:
+                changes.add(_ANY_STATE)
+                if entries_change[entry] is not None:
+                    changes.add(entries_change[entry])
+        if changes:
+            self._state_total += 1
+            self.record(*changes, **indices)
+
+    # ------------------------------------------------------------------------------------
+    # ----------------------------------- categories -------------------------------------
+    # ------------------------------------------------------------------------------------
 
     def subscribe(self, subscriber: "Subscriber") -> None:
         """Register an eager subscriber, called back after the subscribers registered before it.
@@ -220,6 +652,10 @@ class ChangeLog:
                 self._counters[change] = _Counters(len(self.axes))
         return Tracker(self, changes_int)
 
+    def track_state(self) -> Tracker:
+        """Return a tracker of every change of the state, whatever its category, caught up with the trackable."""
+        return Tracker(self, frozenset((_ANY_STATE,)))
+
     def is_dirty_since(self, key: Hashable, *changes: StateChange) -> bool:
         """Whether the trackable changed in some categories since some key last marked it clean.
 
@@ -228,15 +664,17 @@ class ChangeLog:
         Parameters
         ----------
         key : Hashable
-            What was made current, such as the refresh of a gated getter (see 'depends_on'), None for the results of
-            the trackable as a whole. A key that never marked the trackable clean makes it dirty.
+            What was made current, such as the readings of a sensor, None for the results of the trackable as a whole.
+            A key that never marked the trackable clean makes it dirty.
         *changes : StateChange
-            The categories checked, all of them if none.
+            The categories checked, any change of the state if none.
         """
         key_versions = self._keys_versions.get(key)
         if key_versions is None:
             return True
-        return any([self._versions[change] != key_versions[change] for change in changes or _ALL_CHANGES])
+        return any(
+            [self._versions[change] != key_versions[change] for change in changes or (_ANY_STATE, *_ALL_CHANGES)]
+        )
 
     def mark_clean(self, key: Hashable = None) -> None:
         """Record the versions of the trackable as current under some key.
@@ -247,9 +685,9 @@ class ChangeLog:
             What was made current (see 'is_dirty_since'), None for the results of the trackable as a whole, which the
             component computing them marks clean once they are computed. Defaults to None.
         """
-        self._keys_versions[key] = self._versions.copy()
+        self._keys_versions[key] = self._versions[:_N_FIXED_ENTRIES]
 
-    def record(self, *changes: StateChange, **indices: IndexType | None) -> None:
+    def record(self, *changes: int, **indices: IndexType | None) -> None:
         """Record a change of some categories at some entries of each axis, all of them along an axis no index names.
 
         A category no tracker follows only bumps its version, its indices left unresolved.
@@ -265,6 +703,9 @@ class ChangeLog:
         """
         for change in changes:
             self._versions[change] += 1
+        # The categories a tagged method changed, which its outermost call notifies to the subscribers (see 'mutates')
+        if self._is_mutating:
+            self._mutation_changes.update([change for change in changes if change < _ANY_STATE])
         tracked_changes = [change for change in changes if self._counters[change] is not None]
         if not tracked_changes:
             return
@@ -334,196 +775,482 @@ class TrackableMixin:
     changelog: ChangeLog | None = None
 
 
-# What a gate reads the change logs of, from the object its getter belongs to, the object itself if None
-TrackablesOf = Callable[[Any], "TrackableMixin | tuple[TrackableMixin, ...]"] | None
+# ------------------------------------------------------------------------------------
+# ------------------------------ launches and reads ----------------------------------
+# ------------------------------------------------------------------------------------
+
+# The change log and the entry of each tracked array, as long as the array lives. The module-level records reach the
+# change logs weakly, since a change log reaches its trackable and what it holds through its subscribers.
+_TRACKED_ARRAYS: "weakref.WeakKeyDictionary[Any, tuple[weakref.ref[ChangeLog], int]]" = weakref.WeakKeyDictionary()
+
+# The depth of the refreshes running, whose productions leave no environment stale (see 'ChangeLog._refresh')
+_refresh_depth = 0
+
+# The derived arrays used as scratch by the blocks running, by change log and entry, with the number of blocks holding
+# each of them, and the number of blocks using every derived array as scratch (see 'scratch')
+_SCRATCH_ENTRIES: dict[tuple["ChangeLog", int], int] = {}
+_scratch_all_depth = 0
 
 
-class _HookedGetter:
-    """A gated getter waiting for its class to exist, to hook the refreshes it waits for.
+def _resolve_paths(paths: Iterable[tuple[str, ...]], roots: dict[str, Any]) -> list[tuple[ChangeLog, int]]:
+    """Return the tracked arrays some paths reach from the objects their first names stand for.
 
-    Each refresh comes with the trackable whose change log the gate reads (see 'depends_on').
+    A path ending on a struct reaches every array of it, and the names past an array are those of its elements.
+    """
+    arrays = {}
+    for path in paths:
+        value = roots.get(path[0])
+        for name in path[1:]:
+            if _tracked_entry(value) is not None:
+                break
+            if dataclasses.is_dataclass(value):
+                value = getattr(value, name, None)
+            else:
+                # An attribute of a plain object, such as a struct a solver holds, its properties left unevaluated
+                value = getattr(value, "__dict__", {}).get(name)
+            if value is None:
+                break
+        # The arrays of a struct, walked through its members
+        pending = [value]
+        while pending:
+            value = pending.pop()
+            entry = _tracked_entry(value)
+            if entry is not None:
+                arrays[entry] = None
+            elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+                pending += [getattr(value, field.name) for field in dataclasses.fields(value)]
+    return list(arrays)
+
+
+def _tracked_entry(value: Any) -> tuple[ChangeLog, int] | None:
+    """Return the change log and the entry of a tracked array, None for any other value."""
+    try:
+        tracked = _TRACKED_ARRAYS.get(value)
+    except TypeError:
+        # A value no weak reference may point to, such as a number, is no array
+        return None
+    if tracked is None:
+        return None
+    log = tracked[0]()
+    return None if log is None else (log, tracked[1])
+
+
+class _LogWrite(NamedTuple):
+    """The arrays of one change log a launch may write, and the positions of the arguments naming its indices."""
+
+    log: "weakref.ref[ChangeLog]"
+    entries: tuple[int, ...]
+    entries_derived: tuple[int, ...]
+    indices_positions: tuple[tuple[str, int], ...]
+
+
+class _LaunchEffect(NamedTuple):
+    """What a launch of a kernel on given structs reads and writes among the tracked arrays."""
+
+    writes: tuple[_LogWrite, ...]
+    # The derived arrays the launch reads without writing them
+    reads_derived: tuple[tuple["weakref.ref[ChangeLog]", int], ...]
+    # The arrays of the state and of the model the launch reads, by change log
+    roots: dict["weakref.ref[ChangeLog]", tuple[int, ...]]
+    # The key of the production of the derived arrays the launch writes (see 'ChangeLog._produce'), and the position
+    # of its argument 'envs_idx'
+    production_key: object | None
+    i_envs: int | None
+
+
+class _LaunchTracker:
+    """The hook Quadrants calls before every launch of a forward kernel, recording what the launch reads and writes.
+
+    It refreshes the stale derived arrays the launch reads, records the arrays it writes, and makes the derived ones
+    current (see 'ChangeLog'). What a launch accesses depends on the kernel and on the structs it takes, so it is
+    computed once per kernel and structs, the structs being compared by identity at each launch.
     """
 
-    def __init__(
-        self,
-        getter: Callable[..., Any] | property,
-        refreshes: list[tuple[Callable[[Any], Callable[..., Any]], TrackablesOf]],
-    ) -> None:
-        self.getter = getter
-        self.refreshes = refreshes
+    # The autograd tape of Quadrants also stands for a gradient checker, which this tracker is not
+    grad_checker = None
 
-    def __set_name__(self, owner: type, name: str) -> None:
-        for refresh, on in self.refreshes:
-            # Evaluated on the class, the refresh resolves the methods of the class alone, the attributes of an instance
-            # (the components it holds) being unknown yet
-            method = refresh(owner)
-            if method not in _HOOKED_REFRESHES:
-                # The refresh is hooked on the class defining it, so that every class inheriting it shares the hook
-                (defining_cls,) = (cls for cls in owner.__mro__ if cls.__dict__.get(method.__name__) is method)
-                setattr(defining_cls, method.__name__, _hook_refresh(method, on))
-        setattr(owner, name, self.getter)
+    def __init__(self) -> None:
+        # The positions of the struct arguments of each kernel, and the effect of each set of structs it took, the
+        # structs held through weak references, the first of which drops its entry once collected
+        self._kernels_effects: dict[Any, tuple[tuple[int, ...], list[tuple[tuple[weakref.ref, ...], Any]]]] = {}
+        # Whether the launches go untracked, those another tape forwards included, and whether they still refresh the
+        # stale derived arrays they read first (see 'untracked_launches')
+        self.is_suspended = False
+        self.is_refreshing = False
+
+    def clear(self) -> None:
+        """Forget the effects computed, which a registration of arrays makes out of date."""
+        self._kernels_effects.clear()
+
+    def insert(self, kernel: Any, args: tuple) -> None:
+        """Track the launch of a kernel with some arguments, before it runs (the hook of the autograd tape)."""
+        if self.is_suspended and not self.is_refreshing:
+            return
+        kernel_effects = self._kernels_effects.get(kernel)
+        if kernel_effects is None:
+            # The structs and the arrays the kernel takes, which tell its launches apart
+            positions = tuple(
+                i
+                for i, arg in enumerate(args)
+                if dataclasses.is_dataclass(arg) or isinstance(arg, (qd.Field, qd.Ndarray))
+            )
+            kernel_effects = self._kernels_effects[kernel] = (positions, [])
+        positions, structs_effects = kernel_effects
+        if not positions:
+            return
+        for structs_refs, structs_effect in structs_effects:
+            for i, struct_ref in zip(positions, structs_refs):
+                if args[i] is not struct_ref():
+                    break
+            else:
+                effect = structs_effect
+                break
+        else:
+            effect = _compute_launch_effect(kernel, args, positions)
+            structs_entry = [(), effect]
+            structs_entry[0] = tuple(
+                weakref.ref(args[i], functools.partial(_drop_structs_entry, structs_effects, structs_entry))
+                if j == 0
+                else weakref.ref(args[i])
+                for j, i in enumerate(positions)
+            )
+            structs_effects.append(structs_entry)
+        if effect is None:
+            return
+
+        for log_ref, entry in effect.reads_derived:
+            log = log_ref()
+            refresh = None if log is None else log._entries_refresh.get(entry)
+            if refresh is not None:
+                production = log.owner(entry)
+                if production is None or production.is_stale():
+                    log._refresh(refresh)
+        # The launches of a refresh are tracked whatever the block running it
+        if self.is_suspended and _refresh_depth == 0:
+            return
+        for log_ref, entries, _, indices_positions in effect.writes:
+            log = log_ref()
+            if log is not None:
+                # A refresh the call triggers writes no array the call itself does
+                log._n_launches_records += _refresh_depth == 0
+                log._record_entries(entries, **{name: args[i] for name, i in indices_positions})
+        if effect.production_key is not None:
+            envs_idx = None if effect.i_envs is None else args[effect.i_envs]
+            # The roots of the derived arrays read are roots of the arrays computed from them. A derived array read
+            # stale leaves them current all the same, since the analysis may report reads a static branch never makes
+            # (see 'get_accessed_paths'), which only a step computes in practice.
+            roots = {log_ref(): entries for log_ref, entries in effect.roots.items() if log_ref() is not None}
+            for log_ref, entry in effect.reads_derived:
+                log = log_ref()
+                production = None if log is None else log.owner(entry)
+                if production is not None:
+                    for root_log, root_entries in production.roots.items():
+                        roots[root_log] = tuple(sorted(set(roots.get(root_log, ())) | set(root_entries)))
+            for log_ref, _, entries_derived, _ in effect.writes:
+                log = log_ref()
+                if entries_derived and log is not None:
+                    # What a launch leaves in a derived array used as scratch is no result (see 'scratch')
+                    entries_scratch = ()
+                    if _scratch_all_depth > 0 and _refresh_depth == 0:
+                        entries_scratch = entries_derived
+                    elif _SCRATCH_ENTRIES and _refresh_depth == 0:
+                        entries_scratch = tuple(entry for entry in entries_derived if (log, entry) in _SCRATCH_ENTRIES)
+                    log._invalidate_entries(entries_scratch)
+                    entries_produced = tuple(entry for entry in entries_derived if entry not in entries_scratch)
+                    if entries_produced:
+                        log._produce(effect.production_key, entries_produced, roots, envs_idx)
 
 
-# The refreshes some getter waits for, hooked once whatever the number of getters waiting for them
-_HOOKED_REFRESHES: set[Callable[..., Any]] = set()
+def _drop_structs_entry(structs_effects: list, structs_entry: list, _: weakref.ref) -> None:
+    for i, entry in enumerate(structs_effects):
+        if entry is structs_entry:
+            del structs_effects[i]
+            break
 
 
-def _trackables_of(obj: Any, on: TrackablesOf) -> tuple[TrackableMixin, ...]:
-    trackables = obj if on is None else on(obj)
-    return trackables if isinstance(trackables, tuple) else (trackables,)
+def _compute_launch_effect(kernel: Any, args: tuple, positions: tuple[int, ...]) -> _LaunchEffect | None:
+    """Return what a launch of a kernel reads and writes among the tracked arrays, None if it reaches none of them."""
+    names = [arg_meta.name for arg_meta in kernel.arg_metas]
+    # A kernel of Quadrants itself moves data, such as the copy of an array to the host, which reads it as it stands
+    is_moving_data = kernel.func.__module__.startswith("quadrants.")
+    owner = args[0] if kernel.is_classkernel else None
+    access = get_accessed_paths(kernel.func, owner)
+    roots_objects = {names[i]: args[i] for i in positions}
+    if owner is not None:
+        roots_objects[names[0]] = owner
+    used = _resolve_paths(access.paths_used, roots_objects)
+    written = set(_resolve_paths(access.paths_written, roots_objects))
+    if not used:
+        return None
+    writes = []
+    logs = {log: None for log, _ in used}
+    for log in logs:
+        entries = tuple(entry for entry_log, entry in written if entry_log is log)
+        if not entries:
+            continue
+        entries_derived = tuple(entry for entry in entries if log._entries_kind[entry] == DataKind.DERIVED)
+        indices_positions = tuple((name, i) for i, name in enumerate(names) if name in log._indices_axes)
+        writes.append(_LogWrite(weakref.ref(log), entries, entries_derived, indices_positions))
+    reads_derived = tuple(
+        (weakref.ref(log), entry)
+        for log, entry in used
+        if (log, entry) not in written and log._entries_kind[entry] == DataKind.DERIVED and not is_moving_data
+    )
+    roots = {}
+    for log, entry in used:
+        if log._entries_kind[entry] != DataKind.DERIVED:
+            roots.setdefault(log, []).append(entry)
+    roots = {weakref.ref(log): tuple(entries) for log, entries in roots.items()}
+    is_producing = any([write.entries_derived for write in writes])
+    i_envs = names.index("envs_idx") if "envs_idx" in names else None
+    return _LaunchEffect(tuple(writes), reads_derived, roots, object() if is_producing else None, i_envs)
 
 
-def _hook_refresh(method: Callable[..., Any], on: TrackablesOf) -> Callable[..., Any]:
-    @functools.wraps(method)
-    def hooked(self: Any, *args: Any, **kwargs: Any) -> Any:
-        # The versions are read as the refresh starts, so that a change it records itself is not taken as refreshed
-        for trackable in _trackables_of(self, on):
-            trackable.changelog.mark_clean(hooked)
-        return method(self, *args, **kwargs)
-
-    _HOOKED_REFRESHES.add(hooked)
-    return hooked
+# The tracker of every launch, installed once the first change log tracks arrays
+_LAUNCH_TRACKER = _LaunchTracker()
 
 
-def depends_on(
-    *changes: StateChange,
-    on: TrackablesOf = None,
-    refresh: "Callable[[Any], Callable[[], Any]] | None" = None,
-    recover: "bool | Callable[[Any], Any]" = True,
-) -> Callable[[Callable[..., Any]], Any]:
-    """Gate a getter on the changes of some trackables, so that it delivers its output only while it is current.
+def _install_launch_tracker() -> None:
+    runtime = impl.get_runtime()
+    # FIXME: quadrants#1000 - the launch hook of Quadrants is reachable only through this private runtime slot
+    if runtime.target_tape is None:
+        runtime.target_tape = _LAUNCH_TRACKER
+        set_array_read_hook(_on_array_read)
 
-    The output is stale after a change of the given categories since it was last made current, and a getter that is not
-    stale delivers its output as it is. A getter may stack several gates, the outermost checked first. A gate placed
-    above '@property' gates the property.
+
+@contextlib.contextmanager
+def untracked_launches(*, refresh: bool = False) -> Iterator[None]:
+    """Run the block without recording what its launches write, for a caller recording it itself, such as a step.
+
+    A step is one operation, whose results are current once it is over, while its launches compute the derived arrays
+    the next ones read, which a launch tracked alone would refresh first, the analysis reporting more reads than the
+    kernels make (see 'get_accessed_paths'). The hook of another tape, such as the recorder of a differentiable
+    rollout, stays in place, its launches forwarded to the tracker going untracked all the same.
 
     Parameters
     ----------
-    *changes : StateChange
-        The categories whose changes make the output stale, all of them if none.
-    on : Callable[[Any], TrackableMixin | tuple[TrackableMixin, ...]] | None, optional
-        Return, from the object the getter belongs to, the trackables whose change logs the gate reads, the object
-        itself if None. A gate reading the object itself also takes the output as current while nothing changed since
-        the object last marked itself clean without a key (see 'ChangeLog.mark_clean'), its results including the
-        output, unlike the results of another trackable. Defaults to None.
-    refresh : Callable[[Any], Callable[[], Any]] | None, optional
-        Return, from the object the getter belongs to or from its class, the method of that class making the output
-        current. The output is current while nothing changed since that method last started, whoever called it. None
-        for an output no method of the class makes current. Defaults to None.
-    recover : bool | Callable[[Any], Any], optional
-        How a stale getter recovers. True calls 'refresh' first, then delivers the output, which needs a 'refresh'.
-        False delivers None. A function delivers the function applied to the output, which keeps what still holds of
-        it, an output withheld whole by an inner gate staying None. Defaults to True.
+    refresh : bool, optional
+        Whether a launch still refreshes the stale derived arrays it reads first, as a coupler reading the poses of the
+        links at the start of a step, the launches of the refresh being tracked. Defaults to False.
     """
-    # TODO: A refresh returning False recovers nothing, for a refresh that can fail.
-    assert recover is not True or refresh is not None, "A getter recovering fully needs a refresh."
-    changes_int = tuple(map(int, changes))
+    runtime = impl.get_runtime()
+    is_installed = runtime.target_tape is _LAUNCH_TRACKER
+    is_suspended, is_refreshing = _LAUNCH_TRACKER.is_suspended, _LAUNCH_TRACKER.is_refreshing
+    if is_installed and not refresh:
+        runtime.target_tape = None
+    _LAUNCH_TRACKER.is_suspended, _LAUNCH_TRACKER.is_refreshing = True, refresh
+    try:
+        yield
+    finally:
+        _LAUNCH_TRACKER.is_suspended, _LAUNCH_TRACKER.is_refreshing = is_suspended, is_refreshing
+        if is_installed:
+            runtime.target_tape = _LAUNCH_TRACKER
 
-    def decorator(method: "Callable[..., Any] | property | _HookedGetter") -> Any:
-        refreshes = []
-        if isinstance(method, _HookedGetter):
-            method, refreshes = method.getter, method.refreshes
+
+def _on_array_read(array: Any) -> None:
+    """Refresh a derived array a copy to the host or a view reads, if stale and refreshed by its trackable."""
+    entry = _tracked_entry(array)
+    if entry is None:
+        return
+    log, i_entry = entry
+    refresh = log._entries_refresh.get(i_entry)
+    if refresh is not None:
+        production = log.owner(i_entry)
+        if production is None or production.is_stale():
+            log._refresh(refresh)
+
+
+# ------------------------------------------------------------------------------------
+# ------------------------------------ the tags --------------------------------------
+# ------------------------------------------------------------------------------------
+
+# The methods tagged as refreshing derived arrays (see 'mutates'), by the function the class holds
+_DERIVED_METHODS: dict[Callable[..., Any], Callable[..., Any]] = {}
+
+# The arrays each tagged method may write, by change log, by method and bound object (see '_method_writes')
+_METHODS_WRITES: "weakref.WeakKeyDictionary[Any, dict[Callable[..., Any], tuple[_LogWrite, ...]]]"
+_METHODS_WRITES = weakref.WeakKeyDictionary()
+
+
+def _method_writes(method: Callable[..., Any], owner: Any) -> tuple[_LogWrite, ...]:
+    """Return the tracked arrays a method may write through the kernels it names, by change log."""
+    owner_writes = _METHODS_WRITES.setdefault(owner, {})
+    writes = owner_writes.get(method)
+    if writes is None:
+        names = list(inspect.signature(method).parameters)
+        written = _resolve_paths(get_accessed_paths(method, owner).paths_written, {names[0]: owner})
+        writes = []
+        for log in {log: None for log, _ in written}:
+            entries = tuple(entry for entry_log, entry in written if entry_log is log)
+            indices_positions = tuple((name, i - 1) for i, name in enumerate(names) if name in log._indices_axes)
+            writes.append(_LogWrite(weakref.ref(log), entries, (), indices_positions))
+        writes = owner_writes[method] = tuple(writes)
+    return writes
+
+
+class scratch:
+    """Use some derived arrays as scratch: what a launch writes in them leaves them stale, until a refresh or a step.
+
+    A launch computes the derived arrays it writes by contract, except those a block uses for something else, such as
+    the mass matrix of another configuration or contacts cleared, which are no result. As a context manager it takes the
+    arrays, or structs standing for every array of them, and as a decorator of a method, the functions returning them
+    from the object the method belongs to, the whole method running in the context. A refresh running within it computes
+    them all the same.
+
+    Parameters
+    ----------
+    *arrays : qd.Tensor | Data | Callable[[Any], qd.Tensor | Data]
+        The arrays or structs, or as a decorator the functions returning them from the object of the method, every
+        derived array if none.
+    """
+
+    def __init__(self, *arrays: Any) -> None:
+        self._arrays = arrays
+        self._entries: list[tuple[ChangeLog, int]] = []
+
+    def __enter__(self) -> "scratch":
+        global _scratch_all_depth
+        if not self._arrays:
+            _scratch_all_depth += 1
+        self._entries = [entry for array in self._arrays for entry in _resolve_paths([("array",)], {"array": array})]
+        for entry in self._entries:
+            _SCRATCH_ENTRIES[entry] = _SCRATCH_ENTRIES.get(entry, 0) + 1
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        global _scratch_all_depth
+        if not self._arrays:
+            _scratch_all_depth -= 1
+        for entry in self._entries:
+            _SCRATCH_ENTRIES[entry] -= 1
+            if not _SCRATCH_ENTRIES[entry]:
+                del _SCRATCH_ENTRIES[entry]
+        self._entries.clear()
+
+    def __call__(self, method: Callable[..., Any]) -> Callable[..., Any]:
+        arrays_of = self._arrays
+
+        @functools.wraps(method)
+        def wrapper(owner: Any, *args: Any, **kwargs: Any) -> Any:
+            with scratch(*[array_of(owner) for array_of in arrays_of]):
+                return method(owner, *args, **kwargs)
+
+        return wrapper
+
+
+def depends_on(
+    *arrays: Callable[[Any], Any],
+    changes: tuple[StateChange, ...] | None = None,
+    recover: Callable[[Any], Any] | None = None,
+) -> Callable[[Callable[..., Any]], Any]:
+    """Gate a getter on derived arrays only a step computes, so that it delivers its output only while they are current.
+
+    A derived array a refresh computes needs no gate, its read refreshing it (see 'ChangeLog.refresh'). A getter may
+    stack several gates, the outermost checked first. A gate placed above '@property' gates the property.
+
+    Parameters
+    ----------
+    *arrays : Callable[[Any], qd.Tensor | tuple[qd.Tensor, ...]]
+        Return, from the object the getter belongs to, the tracked arrays its output depends on, an array of the state
+        counting as the last step left it (see 'ChangeLog.is_stale').
+    changes : tuple[StateChange, ...] | None, optional
+        The categories of the writes the output depends on, all of them for None (see 'ChangeLog.is_stale'). Defaults
+        to None.
+    recover : Callable[[Any], Any] | None, optional
+        How a stale getter recovers: None delivers None, and a function delivers the function applied to the output,
+        which keeps what still holds of it, an output withheld whole by an inner gate staying None. Defaults to None.
+    """
+
+    def decorator(method: "Callable[..., Any] | property") -> Any:
         getter = method.fget if isinstance(method, property) else method
 
         @functools.wraps(getter)
         def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-            key = None if refresh is None else refresh(type(self))
-            trackables = _trackables_of(self, on)
-            is_dirty = any([trackable.changelog.is_dirty_since(key, *changes_int) for trackable in trackables])
-            if is_dirty and on is None:
-                is_dirty = any([trackable.changelog.is_dirty_since(None, *changes_int) for trackable in trackables])
-            if not is_dirty:
+            is_stale = False
+            for array_of in arrays:
+                arrays_gated = array_of(self)
+                for array in arrays_gated if isinstance(arrays_gated, tuple) else (arrays_gated,):
+                    is_stale |= _tracked_entry(array)[0].is_stale(array, changes=changes)
+            if not is_stale:
                 return getter(self, *args, **kwargs)
-            if recover is True:
-                refresh(self)()
-                return getter(self, *args, **kwargs)
-            if not callable(recover):
+            if recover is None:
                 return None
             # An output an inner gate withheld whole has nothing left to recover
             output = getter(self, *args, **kwargs)
             return output if output is None else recover(output)
 
-        gated = property(wrapper) if isinstance(method, property) else wrapper
-        if refresh is not None:
-            refreshes = [*refreshes, (refresh, on)]
-        return _HookedGetter(gated, refreshes) if refreshes else gated
+        return property(wrapper) if isinstance(method, property) else wrapper
 
     return decorator
 
 
 def mutates(
-    *changes: StateChange,
-    differentiable: bool = True,
-    derived: bool = False,
+    *, differentiable: bool = True, derived: bool = False
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Tag a state-mutating method of a solver or of one of its entities with the StateChange categories it produces.
+    """Tag a method of a solver or of one of its entities writing its state, or refreshing what derives from it.
 
-    The outermost tagged call records the changes of every tagged call it makes in the change log of its solver, where
-    the arguments naming entries of an axis of the log point (see 'ChangeAxis.indices_maps'), and calls back the eager
-    subscribers once (see 'Subscriber'). Untagged methods, reads included, record nothing.
+    A method writing the state records the arrays every kernel it names may write, whether it launched them or wrote
+    their arrays through zero-copy views instead, so that a zero-copy write lives in a tagged method next to the kernel
+    it stands for. The arguments naming entries of an axis of the change log of the arrays say where (see
+    'ChangeAxis.indices_maps'). The outermost tagged call notifies the eager subscribers once (see 'Subscriber').
 
     Parameters
     ----------
-    *changes : StateChange
-        The categories the method produces. One method may produce several (set_state changes both GEOMETRY and
-        DYNAMICS), and an input of the next step such as a control target produces none.
     differentiable : bool, optional
         Whether the inputs of the method carry a gradient. Defaults to True.
     derived : bool, optional
-        Whether the method only refreshes quantities derived from the state. Defaults to False.
+        Whether the method only refreshes arrays derived from the state, taking the environments to refresh, None for
+        all of them (see 'ChangeLog.register_refreshes'). Defaults to False.
     """
-    triggered = frozenset(map(int, changes))
-    is_recorded = StateChange.MODEL not in triggered
 
     def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
-        # The position after 'self' and the default of each argument, which a call fetches from its arguments directly,
-        # a binding of the whole signature costing more than the record itself.
-        arguments_position_default = {
-            parameter.name: (
-                i if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD) else None,
-                None if parameter.default is parameter.empty else parameter.default,
-            )
-            for i, parameter in enumerate(tuple(inspect.signature(method).parameters.values())[1:])
-        }
+        names = list(inspect.signature(method).parameters)[1:]
 
-        def get_argument(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-            if name in kwargs:
-                return kwargs[name]
-            position, default = arguments_position_default[name]
-            return args[position] if position is not None and position < len(args) else default
-
-        def run_recording(self: "Solver", *args: Any, **kwargs: Any) -> Any:
-            if not triggered:
-                return method(self, *args, **kwargs)
-            changelog = self.changelog
-            if changelog._is_mutating:
-                # Nested tagged call: the outermost call states the reach of the whole operation
-                changelog._mutation_changes |= triggered
-                return method(self, *args, **kwargs)
-            changelog._is_mutating = True
-            changelog._mutation_changes.clear()
-            changelog._mutation_changes |= triggered
+        def run_recording(self: Any, *args: Any, **kwargs: Any) -> Any:
+            writes = _method_writes(method, self)
+            # The arrays the launches of the call write are recorded as they launch, so that the derived arrays a later
+            # launch of the call computes stay current. A call launching no kernel writing a change log took the path
+            # writing its arrays through zero-copy views, whose writes the kernels it names stand for as it returns.
+            writes = [(log_ref(), *write) for log_ref, *write in writes if log_ref() is not None]
+            n_launches_records = [log._n_launches_records for log, *_ in writes]
+            # The change logs written and that of the trackable, whose subscribers the outermost tagged call of each
+            # calls back once with every category recorded in between, by launches and restores included
+            owner_log = (self._solver if isinstance(self, Entity) else self).changelog
+            logs = {owner_log: None, **{log: None for log, *_ in writes}}
+            logs_outermost = [log for log in logs if not log._is_mutating]
+            for log in logs_outermost:
+                log._is_mutating = True
+                log._mutation_changes.clear()
+            arguments = dict(zip(names, args)) | kwargs
             try:
                 result = method(self, *args, **kwargs)
+                for (log, entries, _, indices_positions), n_records in zip(writes, n_launches_records):
+                    if log._n_launches_records == n_records:
+                        log._record_entries(entries, **{name: arguments.get(name) for name, _ in indices_positions})
             finally:
-                changelog._is_mutating = False
-            mutation_changes = frozenset(changelog._mutation_changes)
-            indices = {
-                name: get_argument(name, args, kwargs)
-                for name in arguments_position_default
-                if name in changelog._indices_axes
-            }
-            changelog.record(*mutation_changes, **indices)
-            for subscriber in changelog._subscribers:
-                for changed in mutation_changes & subscriber.to:
-                    subscriber.notify(changed, **indices)
+                for log in logs_outermost:
+                    log._is_mutating = False
+            for log in logs_outermost:
+                indices = {name: arguments.get(name) for name in log._indices_axes if name in names}
+                for subscriber in log._subscribers:
+                    for changed in log._mutation_changes & subscriber.to:
+                        subscriber.notify(changed, **indices)
             return result
 
         @functools.wraps(method)
-        def wrapper(self: "Solver | Entity", *args: Any, **kwargs: Any) -> Any:
+        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
             solver = self._solver if isinstance(self, Entity) else self
-            run = run_recording if solver is self else method
-            if not is_recorded:
+            run = method if derived else run_recording
+            writes = () if derived else _method_writes(method, self)
+            is_model = any(
+                [
+                    log_ref()._entries_kind[entry] == DataKind.INFO
+                    for log_ref, entries, _, _ in writes
+                    if log_ref() is not None
+                    for entry in entries
+                ]
+            )
+            if is_model:
                 return run(self, *args, **kwargs)
             # A differentiable rollout records every call writing the state as one operation of its graph, so a
             # differentiable scene takes no shortcut around it. Its inputs are the tensors tracking gradients it takes.
@@ -536,6 +1263,8 @@ def mutates(
                 solver._rollout_graph.mark_state_changed()
             return result
 
+        if derived:
+            _DERIVED_METHODS[wrapper] = method
         return wrapper
 
     return decorator

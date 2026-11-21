@@ -169,8 +169,8 @@ class FEMVertices(Data, kind=DataKind.STATE, shape=(VERTICES, ENVS)):
     state once over (see 'kernel_copy_next_to_curr').
     """
 
-    pos: qd.Tensor = field((float, 3), grad=True)
-    vel: qd.Tensor = field((float, 3), grad=True)
+    pos: qd.Tensor = field((float, 3), grad=True, change=StateChange.GEOMETRY)
+    vel: qd.Tensor = field((float, 3), grad=True, change=StateChange.DYNAMICS)
     pos_next: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH, grad=True)
     vel_next: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH, grad=True)
 
@@ -1038,7 +1038,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------------------------------------------------------
 
     @gs.assert_built
-    @mutates(StateChange.GEOMETRY)
+    @mutates()
     def set_verts_pos(self, poss, verts_idx=None, envs_idx=None):
         """
         Set the position of some vertices.
@@ -1070,7 +1070,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
-    @mutates(StateChange.DYNAMICS)
+    @mutates()
     def set_verts_vel(self, vels, verts_idx=None, envs_idx=None):
         """Set the velocity of some vertices (see 'set_verts_pos')."""
         self._write_data(
@@ -1103,7 +1103,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             elements_idx, envs_idx, actus, self.fem_info.elements.muscle_group, self.fem_state.elements.actu
         )
 
-    @mutates(StateChange.MODEL)
+    @mutates()
     def set_elements_muscle_group(self, muscle_group, elements_idx=None):
         """Set the muscle group of some elements, shared by every environment."""
         self._write_data(
@@ -1118,7 +1118,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
 
-    @mutates(StateChange.MODEL)
+    @mutates()
     def set_elements_muscle_direction(self, muscle_direction, elements_idx=None):
         """Set the unit direction of the muscle fibers of some elements, shared by every environment."""
         self._write_data(
@@ -1138,7 +1138,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         return self._read_data(self.fem_info.elements.el2v, None, elements_idx, copy=True, is_batched=False)
 
     @gs.assert_built
-    @mutates(StateChange.MODEL)
+    @mutates()
     def set_vertex_constraints(
         self,
         verts_idx: IndexType | None = None,
@@ -1224,7 +1224,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             is_soft_constraint,
         )
 
-    @mutates(StateChange.MODEL)
+    @mutates()
     def update_constraint_targets(self, target_poss, verts_idx=None, envs_idx=None):
         """Update the target position of some constrained vertices (see 'set_vertex_constraints')."""
         if target_poss is None:
@@ -1234,7 +1234,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         )
         kernel_update_constraint_targets(verts_idx, envs_idx, target_poss, self.vertex_constraints)
 
-    @mutates(StateChange.MODEL)
+    @mutates()
     def remove_vertex_constraints(self, verts_idx=None, envs_idx=None):
         """Remove the constraints of some vertices (see 'set_vertex_constraints'), of all of them if None."""
         _, verts_idx, envs_idx = self._sanitize_io_variables(

@@ -27,11 +27,11 @@ def test_link_velocity(gs_sim, tol):
     (gs_robot,) = gs_sim.entities
 
     gs_robot.set_dofs_velocity([0.0, 1.0])
-    gs_sim.rigid_solver.update_forward_vel()
+    gs_sim.rigid_solver.update_forward_pos()
     assert_allclose(gs_sim.rigid_solver.dyn_state.links.cd_vel.to_numpy(), 0, tol=tol)
 
     gs_robot.set_dofs_velocity([1.0, 0.0])
-    gs_sim.rigid_solver.update_forward_vel()
+    gs_sim.rigid_solver.update_forward_pos()
     cvel_0, cvel_1 = gs_sim.rigid_solver.dyn_state.links.cd_vel.to_numpy()[:, 0]
     assert_allclose(cvel_0, np.array([0.0, 0.5, 0.0]), tol=tol)
     assert_allclose(cvel_1, np.array([0.0, 0.5, 0.0]), tol=tol)
@@ -1035,6 +1035,44 @@ def test_kinematics_queries(n_envs, show_viewer, tol):
             links=franka.links[: n_tgts + 1],
             poss=[target_pos] * (n_tgts + 1),
         )
+
+
+@pytest.mark.required
+def test_derived_quantities_follow_state(show_viewer, tol):
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, 1.0, 1.2),
+            camera_lookat=(0.2, 0.0, 0.3),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    franka = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        ),
+    )
+    scene.build(n_envs=2)
+
+    for _ in range(10):
+        scene.step()
+    links_pos_stepped = franka.get_links_pos().clone()
+
+    # A configuration written in one environment moves its links there alone
+    qpos = franka.get_qpos().clone()
+    qpos[1, :2] += 0.5
+    franka.set_qpos(qpos[[1]], envs_idx=[1])
+    links_pos, links_quat = franka.solver.forward_kinematics_query(franka, qpos)
+    assert_allclose(franka.get_links_pos(), links_pos, tol=gs.EPS)
+    assert_allclose(franka.get_links_quat(), links_quat, tol=gs.EPS)
+    assert_allclose(franka.get_links_pos()[0], links_pos_stepped[0], tol=gs.EPS)
+
+    # The mass matrix read after a setter is that of the configuration it wrote, which the next step assembles too
+    mass_mat = franka.get_mass_mat().clone()
+    scene.step()
+    assert_allclose(franka.get_mass_mat(), mass_mat, tol=tol)
 
 
 @pytest.mark.required

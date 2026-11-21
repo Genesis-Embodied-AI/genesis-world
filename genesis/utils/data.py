@@ -231,6 +231,7 @@ class _FieldSpec(NamedTuple):
     is_ndarray: bool = False
     opt_in: bool = False
     oversize_hint: str = ""
+    change: IntEnum | None = None
 
 
 def field(
@@ -243,6 +244,7 @@ def field(
     ndarray: bool = False,
     opt_in: bool = False,
     oversize_hint: str = "",
+    change: IntEnum | None = None,
 ):
     """
     Declare a field of a struct (see Data).
@@ -256,9 +258,11 @@ def field(
     gives the array gradients when the constructor requires them. `ndarray` allocates an ndarray on every backend. An
     `opt_in` array or member is unused until another component opts it in (see 'opt_in'). An array too large for a
     backend to address raises at allocation, its message ending with `oversize_hint`, such as the options shrinking it.
+    `change` is the category of change a write of a STATE array records, such as `StateChange.GEOMETRY` (see
+    'genesis.engine.state_change'), a write of an INFO array changing the model whatever it is.
     """
     labels = labels if isinstance(labels, tuple) else (labels,)
-    spec = _FieldSpec(dtype, shape, kind, labels, grad, ndarray, opt_in, oversize_hint)
+    spec = _FieldSpec(dtype, shape, kind, labels, grad, ndarray, opt_in, oversize_hint, change)
     return dataclasses.field(metadata={_SPEC: spec})
 
 
@@ -793,6 +797,8 @@ class ArrayItem(NamedTuple):
     name: str
     kind: DataKind
     array: qd.Tensor | qd.Field | qd.Ndarray | torch.Tensor
+    change: IntEnum | None = None
+    """The category of change a write of the array records (see 'field')."""
 
 
 class ScalarItem(NamedTuple):
@@ -836,10 +842,11 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
     'grad'. A Python native scalar of an object outside any struct, such as a flag, yields an item of the given kind,
     which a restore sets back. A static config yields a ConfigItem. Anything else raises.
     """
-    # The attributes left to walk, depth first in declaration order, each with the kind it inherits and its name
-    pending = [(owner, attr, kind, attr)]
+    # The attributes left to walk, depth first in declaration order, each with the kind it inherits, its name and the
+    # category of change of its field
+    pending = [(owner, attr, kind, attr, None)]
     while pending:
-        owner, attr, kind, name = pending.pop()
+        owner, attr, kind, name, change = pending.pop()
         value = getattr(owner, attr)
         is_owner_struct = dataclasses.is_dataclass(owner) or isinstance(owner, tuple)
         if isinstance(value, Config):
@@ -847,7 +854,7 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
         elif isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor)):
             if kind is None:
                 gs.raise_exception(f"'{attr}' holds an array that no struct or annotation gives a kind.")
-            yield ArrayItem(name, kind, value)
+            yield ArrayItem(name, kind, value, change)
             if not isinstance(value, torch.Tensor) and value.has_grad():
                 yield ArrayItem(f"{name}.grad", kind, value.grad)
         elif dataclasses.is_dataclass(value) or isinstance(value, tuple):
@@ -862,7 +869,7 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
                 if stated_kind is None and kind is None and is_member_array:
                     stated_kind = type(value).kind
                 member_kind = kind if stated_kind is None else stated_kind
-                pending.append((value, member, member_kind, f"{name}.{member}"))
+                pending.append((value, member, member_kind, f"{name}.{member}", spec.change))
         elif isinstance(value, (bool, int, float)) and not is_owner_struct:
             if kind is None:
                 gs.raise_exception(f"'{attr}' holds a {type(value).__name__} that no annotation gives a kind.")

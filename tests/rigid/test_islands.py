@@ -6,7 +6,7 @@ import pytest
 import trimesh
 
 import genesis as gs
-from genesis.utils.misc import qd_to_numpy, tensor_to_array
+from genesis.utils.misc import no_read_guard, qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -930,8 +930,10 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
     assert ((invweight_before - box_mass.base_link.get_invweight()).abs() > 1e-3).all()
 
     # The mean inertia the constraint solve is quoted on is the mean of the mass-matrix diagonal, so a mass written on
-    # a woken tree is in it; a tree left asleep would hold its contribution at whatever it last ran with.
-    diagonal = qd_to_numpy(solver.rigid_info.mass_mat, transpose=True).diagonal(axis1=-2, axis2=-1)
+    # a woken tree is in it; a tree left asleep would hold its contribution at whatever it last ran with. The matrix it
+    # is the mean of is the one the weights were solved with, which the mass matrix holds as the setter left it.
+    with no_read_guard():
+        diagonal = qd_to_numpy(solver.rigid_info.mass_mat, transpose=True).diagonal(axis1=-2, axis2=-1)
     assert_allclose(qd_to_numpy(solver.rigid_info.meaninertia), diagonal.mean(axis=-1), tol=tol)
 
     invweight_before = box_armature.get_dofs_invweight()
@@ -1087,7 +1089,7 @@ def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversa
     # follow what is awake. The solve is the only pass writing the smooth accelerations, so a sentinel written into
     # them comes back untouched for a sleeping tree of the entity and rewritten for its woken sibling.
     SENTINEL = -13.0
-    sentinels = qd_to_numpy(solver.dyn_state.dofs.acc_smooth)
+    sentinels = qd_to_numpy(solver.dyn_state.dofs.acc_smooth, copy=True)
     sentinels[disturbed.dof_start : disturbed.dof_end] = SENTINEL
     for link in multibody_bases[1:]:
         sentinels[link.dof_start : link.dof_end] = SENTINEL

@@ -6,7 +6,6 @@ import itertools
 import types
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from operator import attrgetter
 from typing import TYPE_CHECKING, ClassVar, Generic, NamedTuple, TypeVar, get_args, get_origin
 
 import numpy as np
@@ -15,7 +14,7 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.state_change import ChangeLog, StateChange, Subscriber, TrackableMixin, depends_on
+from genesis.engine.state_change import ChangeLog, StateChange, Subscriber, TrackableMixin
 from genesis.typing import (
     PositiveVec2FType,
     PositiveVec3FType,
@@ -767,13 +766,14 @@ class ScopedRenderContext(TrackableMixin, Generic[OwnerT]):
 class SolverScopedRenderContext(ScopedRenderContext[OwnerT]):
     """The scoped context of a solver, whose shapes and markers hold the state of the solver until it changes."""
 
-    @depends_on(on=attrgetter("owner"), refresh=attrgetter("refresh_shapes"), recover=lambda is_current: False)
     @property
     def is_shapes_current(self) -> bool:
-        return True
+        return not self.owner.changelog.is_dirty_since(self.refresh_shapes)
 
-    # The refresh is defined here, so that its hook reaches the scoped contexts of the solvers alone (see 'depends_on')
     def refresh_shapes(self, envs_idx: torch.Tensor | None, view: str) -> tuple[Shape, ...]:
+        # The versions are read as the refresh starts, so that a change it records itself is not taken as refreshed.
+        # The key is the refresh, the scoped context keying its markers (see 'RenderContext._refresh').
+        self.owner.changelog.mark_clean(self.refresh_shapes)
         return super().refresh_shapes(envs_idx, view)
 
 

@@ -34,10 +34,10 @@ from torch.autograd.graph import increment_version
 from quadrants.lang import impl
 
 import genesis as gs
-from genesis.grad.kernel_writes import get_written_paths
+from genesis.utils.kernel_access import get_accessed_paths
 from genesis.utils.cache import OwnedCache
 from genesis.utils.data import iter_state_arrays
-from genesis.utils.misc import qd_from_torch, qd_to_torch
+from genesis.utils.misc import no_read_guard, qd_from_torch, qd_to_torch
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.base_solver import Solver
@@ -297,7 +297,7 @@ class LaunchRecorder:
     whose launches form one entry. An entry is reversed at the values it left, as the autodiff of Quadrants expects,
     then the arrays it overwrote are restored, so that every entry before it is reversed at the values it left too.
     Before each launch, the recorder saves the arrays of the state the launch writes that an earlier entry uses: the
-    writes come from the source of the kernel (see 'get_written_paths'), narrowed to the struct members its compiled
+    writes come from the source of the kernel (see 'get_accessed_paths'), narrowed to the struct members its compiled
     form uses, and the uses of the earlier entries from their compiled form. A backward pass follows the convention of
     autodiff, consuming the adjoint of the values a launch wrote and clearing it.
     """
@@ -336,6 +336,9 @@ class LaunchRecorder:
 
     def insert(self, kernel: Callable, args: tuple) -> None:
         """Record the launch of a kernel, before it runs (the hook of the autodiff tape of Quadrants)."""
+        # The tape this recorder stands in for, such as the tracker of the change logs, sees every launch too
+        if self._previous_tape is not None:
+            self._previous_tape.insert(kernel, args)
         if self._is_saving:
             return
         for arg in args:
@@ -366,7 +369,7 @@ class LaunchRecorder:
         launch_arrays = _LAUNCH_ARRAYS_CACHE.find(launch_key)
         if launch_arrays is None:
             flat_names_used = kernel.used_py_dataclass_parameters_by_key_enforcing.get(key)
-            paths_written = get_written_paths(kernel.func, args[0] if kernel.is_classkernel else None)
+            paths_written = get_accessed_paths(kernel.func, args[0] if kernel.is_classkernel else None).paths_written
             arrays_used, arrays_written = set(), []
             for arg_meta, arg in zip(kernel.arg_metas, args):
                 if dataclasses.is_dataclass(arg):
@@ -381,9 +384,11 @@ class LaunchRecorder:
                 _LAUNCH_ARRAYS_CACHE.own(struct, launch_key, launch_arrays)
         arrays_used, arrays_written = launch_arrays
         self._is_saving = True
-        for array in arrays_written:
-            if id(array) in self._arrays_used and all([array is not saved for saved, _ in entry.arrays_saved]):
-                entry.arrays_saved.append((array, qd_to_torch(array, copy=True)))
+        # The values saved are those the launch overwrites, as they stand (see 'no_read_guard')
+        with no_read_guard():
+            for array in arrays_written:
+                if id(array) in self._arrays_used and all([array is not saved for saved, _ in entry.arrays_saved]):
+                    entry.arrays_saved.append((array, qd_to_torch(array, copy=True)))
         self._is_saving = False
         self._arrays_used_by_entry |= arrays_used
 

@@ -1,6 +1,5 @@
 from collections.abc import Iterator, Sequence
 from dataclasses import asdict
-from operator import attrgetter
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import numpy as np
@@ -39,7 +38,7 @@ from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_set_ik_targets,
 )
 from genesis.engine.solvers.rigid.data import RigidConfig, RigidData
-from genesis.engine.state_change import ChangeAxis, ChangeLog, StateChange, Tracker, depends_on, mutates
+from genesis.engine.state_change import ChangeAxis, ChangeLog, StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
@@ -212,14 +211,6 @@ class KinematicSolver(Solver):
         self.qpos = None
         self._ik_scratch: IKScratch | None = None
 
-        self._is_forward_pos_updated: bool = False
-        self._is_forward_vel_updated: bool = False
-        # Whether the poses of the static links are up to date, which only a write of the pose of their fixed root
-        # makes stale: the substep refreshes the moving links alone otherwise (see 'RigidSolver.substep')
-        self._is_static_pose_updated: bool = False
-        # The changes of the state since the last refresh of forward kinematics, a step reaching every environment,
-        # which give the environments the next refresh runs in (see 'update_forward_pos').
-        self._forward_tracker: Tracker | None = None
         # The parent of each link, -1 for a root, set at build
         self._links_parent_idx: np.ndarray | None = None
 
@@ -312,7 +303,6 @@ class KinematicSolver(Solver):
         links_axis = ChangeAxis(self.n_links, links_indices_maps, reach=links_reach)
         self.changelog = ChangeLog(max(n_envs, 1), KinematicAxes, links=links_axis)
         super().build(n_envs)
-        self._forward_tracker = self.changelog.track(StateChange.GEOMETRY, StateChange.DYNAMICS)
 
         base_links_idx = []
         for link in self.links:
@@ -475,9 +465,6 @@ class KinematicSolver(Solver):
         yield from iter_data(self.data_manager, "errno", DataKind.STATE)
         for name in ("rigid_info", "dyn_info", "dyn_state"):
             yield from iter_data(self.data_manager, name)
-        # The flags describe the derived poses and velocities, so they travel with them
-        yield from iter_data(self, "_is_forward_pos_updated", DataKind.DERIVED)
-        yield from iter_data(self, "_is_forward_vel_updated", DataKind.DERIVED)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- hook methods -------------------------------------
@@ -825,48 +812,13 @@ class KinematicSolver(Solver):
         pass
 
     def substep_post_coupling(self):
-        if not self._is_forward_pos_updated or not self._is_forward_vel_updated:
-            kernel_forward_kinematics(self._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
-            self._is_forward_pos_updated = True
-            self._is_forward_vel_updated = True
-            self._is_static_pose_updated = True
+        self.update_forward_pos()
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------
     # ------------------------------------------------------------------------------------
 
-    @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
-    def set_state(
-        self,
-        state: SolverCheckpoint,
-        envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
-    ) -> None:
-        """Write back a state of the solver in some environments, all of them if None.
-
-        The state is one 'get_state' returned.
-        """
-        super().set_state(state, envs_idx)
-        # FIXME: quadrants#1086 - fast math reassociates sums by code layout, so the kinematics recomputed from a
-        # restored state can differ in the last bits from those the step left, and a replay matches up to rounding.
-        self._is_forward_pos_updated = self._is_forward_vel_updated = self._is_static_pose_updated = False
-
-    def load_checkpoint(
-        self,
-        checkpoint: SolverCheckpoint,
-        *,
-        boundary_only: bool = False,
-        envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
-    ) -> None:
-        super().load_checkpoint(checkpoint, boundary_only=boundary_only, envs_idx=envs_idx)
-        # A record holds no flag of the static links, whose poses are refreshed whenever the poses are stale
-        self._is_static_pose_updated = self._is_forward_pos_updated
-        # Without the derived arrays, the next read or step recomputes them from the state (see 'update_forward_pos'),
-        # which the change recorded tells the gates of the getters
-        if DataKind.DERIVED not in checkpoint.kinds:
-            self._is_forward_pos_updated = self._is_forward_vel_updated = self._is_static_pose_updated = False
-            self.changelog.record(StateChange.GEOMETRY, StateChange.DYNAMICS, envs_idx=envs_idx)
-
-    @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
+    @mutates()
     def __setstate__(self, state: SolverCheckpoint) -> None:
         self.load_checkpoint(state)
 
@@ -878,7 +830,7 @@ class KinematicSolver(Solver):
     # ------------------------------------ control ---------------------------------------
     # ------------------------------------------------------------------------------------
 
-    @mutates(StateChange.GEOMETRY)
+    @mutates()
     def set_base_links_pos(self, pos, links_idx=None, envs_idx=None, *, relative=False):
         if links_idx is None:
             links_idx = self._base_links_idx
@@ -896,7 +848,6 @@ class KinematicSolver(Solver):
         if relative:
             # Compose the body-frame offset onto the authored position while keeping the current orientation, then set
             # the resulting world position.
-            self.update_forward_pos()
             cur_quat = self._read_data(self.dyn_state.links.quat, envs_idx, links_idx)
             offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
             offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
@@ -906,9 +857,8 @@ class KinematicSolver(Solver):
         kernel_set_links_pos(
             links_idx, envs_idx, pos, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
         )
-        self._is_forward_pos_updated = self._is_forward_vel_updated = self._is_static_pose_updated = False
 
-    @mutates(StateChange.GEOMETRY)
+    @mutates()
     def set_base_links_quat(self, quat, links_idx=None, envs_idx=None, *, relative=False):
         if links_idx is None:
             links_idx = self._base_links_idx
@@ -931,7 +881,6 @@ class KinematicSolver(Solver):
             if not relative_pos_passthrough:
                 # The offset position rotates with the orientation, so keep the authored-frame position fixed by
                 # rewriting the world position from the current authored position and the new authored orientation.
-                self.update_forward_pos()
                 cur_pos, cur_quat = self._read_data(
                     (self.dyn_state.links.pos, self.dyn_state.links.quat), envs_idx, links_idx
                 )
@@ -948,9 +897,8 @@ class KinematicSolver(Solver):
         kernel_set_links_quat(
             links_idx, envs_idx, quat, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
         )
-        self._is_forward_pos_updated = self._is_forward_vel_updated = self._is_static_pose_updated = False
 
-    @mutates(StateChange.GEOMETRY)
+    @mutates()
     def set_qpos(self, qpos, qs_idx=None, envs_idx=None):
         if gs.use_zerocopy:
             data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
@@ -965,9 +913,8 @@ class KinematicSolver(Solver):
             if self.n_envs == 0:
                 qpos = qpos[None]
             kernel_set_qpos(qs_idx, envs_idx, qpos, self.rigid_info, self.rigid_config)
-        self._is_forward_pos_updated = self._is_forward_vel_updated = False
 
-    @mutates(StateChange.DYNAMICS)
+    @mutates()
     def set_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None):
         if gs.use_zerocopy:
             vel = qd_to_torch(self.dyn_state.dofs.vel, transpose=True, copy=False)
@@ -986,9 +933,7 @@ class KinematicSolver(Solver):
             else:
                 kernel_set_dofs_velocity(dofs_idx, envs_idx, velocity, self.dyn_state, self.rigid_config)
 
-        self._is_forward_vel_updated = False
-
-    @mutates(StateChange.GEOMETRY)
+    @mutates()
     def set_dofs_position(self, position, dofs_idx=None, envs_idx=None):
         position, dofs_idx, envs_idx = self._sanitize_io_variables(
             position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
@@ -996,17 +941,13 @@ class KinematicSolver(Solver):
         if self.n_envs == 0:
             position = position[None]
         # The positions of the other dofs are read from the state, so that the gradient of a recorded write reaches both
-        # the positions given and the state the others are read from (see 'kernel_set_dofs_position'). They derive from
-        # the configuration, which the latest setters may have left pending.
-        self.update_forward_pos()
+        # the positions given and the state the others are read from (see 'kernel_set_dofs_position').
         positions = self._read_data(self.dyn_state.dofs.pos, envs_idx, None, copy=True)
         positions[:, dofs_idx] = position
         is_dof_set = torch.zeros((self.n_dofs,), dtype=gs.tc_bool, device=gs.device)
         is_dof_set[dofs_idx] = True
         kernel_set_dofs_position(is_dof_set, envs_idx, positions, self.dyn_info, self.rigid_info, self.rigid_config)
-        self._is_forward_pos_updated = self._is_forward_vel_updated = False
 
-    @depends_on(refresh=attrgetter("update_forward_pos"))
     def get_terrain_height(self, positions, link_idx, envs_idx=None):
         terrain = self._links[link_idx].entity
 
@@ -1046,7 +987,6 @@ class KinematicSolver(Solver):
             heights = heights[..., 0]
         return heights
 
-    @depends_on(refresh=attrgetter("update_forward_pos"))
     def get_links_pos(self, links_idx=None, envs_idx=None, *, relative=False):
         idx = links_idx if isinstance(links_idx, int) else slice(None)
         if not gs.use_zerocopy:
@@ -1061,7 +1001,6 @@ class KinematicSolver(Solver):
             tensor = tensor - _offset_world_shift(offset_pos, offset_quat, quat)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    @depends_on(refresh=attrgetter("update_forward_pos"))
     def get_links_quat(self, links_idx=None, envs_idx=None, *, relative=False):
         tensor = self._read_data(self.dyn_state.links.quat, envs_idx, links_idx, copy=True)
         idx = links_idx if isinstance(links_idx, int) else slice(None)
@@ -1070,12 +1009,10 @@ class KinematicSolver(Solver):
             tensor = gu.transform_quat_by_quat(gu.inv_quat(offset_quat), tensor)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    @depends_on(refresh=attrgetter("update_forward_pos"))
     def get_joints_anchor_pos(self, joints_idx=None, envs_idx=None):
         tensor = qd_to_torch(self.dyn_state.joints.xanchor, envs_idx, joints_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    @depends_on(refresh=attrgetter("update_forward_pos"))
     def get_joints_anchor_axis(self, joints_idx=None, envs_idx=None):
         tensor = qd_to_torch(self.dyn_state.joints.xaxis, envs_idx, joints_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
@@ -1096,7 +1033,6 @@ class KinematicSolver(Solver):
             tensor = gu.transform_quat_by_quat(gu.inv_quat(offset_quat), tensor)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    @depends_on(refresh=attrgetter("update_forward_vel"))
     def get_links_vel(self, links_idx=None, envs_idx=None, *, relative=False):
         idx = links_idx if isinstance(links_idx, int) else slice(None)
         is_relative = relative and not self._links_offset_pos_is_identity[idx].all()
@@ -1134,7 +1070,6 @@ class KinematicSolver(Solver):
         )
         return _tensor
 
-    @depends_on(refresh=attrgetter("update_forward_vel"))
     def get_links_ang(self, links_idx=None, envs_idx=None):
         tensor = self._read_data(self.dyn_state.links.cd_ang, envs_idx, links_idx, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
@@ -1147,7 +1082,6 @@ class KinematicSolver(Solver):
         tensor = self._read_data(self.dyn_state.dofs.vel, envs_idx, dofs_idx, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    @depends_on(refresh=attrgetter("update_forward_pos"))
     def get_dofs_position(self, dofs_idx=None, envs_idx=None):
         """Read current DOF positions."""
         tensor = self._read_data(self.dyn_state.dofs.pos, envs_idx, dofs_idx, copy=True)
@@ -1164,39 +1098,29 @@ class KinematicSolver(Solver):
     def update_forward_pos(self):
         """Run forward kinematics in the environments whose state changed since it last ran.
 
-        Setters write the state alone, and the quantities deriving from it wait for this call, which the next getter
-        reading them or the next step makes.
+        Setters write the state alone, and the poses and velocities deriving from it are refreshed as they are read,
+        whether by a getter, a kernel or the next step (see 'genesis.engine.state_change'). A consumer holding a view of
+        them calls this before reading it.
         """
-        # A write marking the poses stale marks the velocities stale too
-        if not self._is_forward_pos_updated:
-            self.update_forward_vel()
+        self.changelog.refresh(self.dyn_state.links.pos)
 
-    def update_forward_vel(self):
-        """Run forward kinematics and velocities in the environments whose state changed since they last ran.
-
-        See 'update_forward_pos'.
-        """
-        if not self._is_forward_vel_updated:
-            # Every environment when forward kinematics is stale with no change recorded, as a checkpoint can leave it
-            record = self._forward_tracker.take()
-            envs_is_changed = None if record is None else record.axes_is_changed.envs
-            self._update_forward_kinematics(self._envs_idx if envs_is_changed is None else envs_is_changed)
-
-    def _update_forward_kinematics(self, envs_idx: torch.Tensor) -> None:
-        """Update the poses and the velocities of the links of some environments, given as indices or a mask."""
+    @mutates(derived=True)
+    def _update_forward_kinematics(self, envs_idx: torch.Tensor | None) -> None:
+        """Update the poses and the velocities of the links of some environments, given as indices or a mask, all of
+        them for None."""
+        if envs_idx is None:
+            envs_idx = self._envs_idx
         if envs_idx.dtype == torch.bool:
             kinematics_fn, velocity_fn = kernel_masked_forward_kinematics, kernel_masked_forward_velocity
         else:
             kinematics_fn, velocity_fn = kernel_forward_kinematics, kernel_forward_velocity
         kinematics_fn(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         velocity_fn(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
-        self._is_forward_pos_updated = self._is_forward_vel_updated = self._is_static_pose_updated = True
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Jacobian & IK ------------------------------------
     # ------------------------------------------------------------------------------------
 
-    @depends_on(refresh=attrgetter("update_forward_pos"))
     def get_links_jacobian(self, link_idx, dof_start, n_dofs, local_point=None):
         """Spatial Jacobian of a link-local point, as (n_envs, 6, n_dofs), for the entity owning that link.
 
@@ -1752,8 +1676,6 @@ class KinematicScopedRenderContext(SolverScopedRenderContext[KinematicSolver]):
     def update_shapes(self, envs_idx: torch.Tensor | None, view: str) -> tuple[Shape, ...]:
         solver = self.owner
         if envs_idx is not None:
-            # The visual and collision geoms follow the poses of the links, current once forward kinematics ran
-            solver.update_forward_pos()
             # The poses and the dynamic vertices of every environment are placed at once, passing a selection costing as
             # much as a placement this light.
             if self._slots_vgeom:

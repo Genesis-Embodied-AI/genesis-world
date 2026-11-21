@@ -13,7 +13,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.render_context import RenderContext, ScopedRenderContext, Shape
 from genesis.engine.solvers.rigid.data import LinksState
-from genesis.engine.state_change import ChangeLog, StateChange, TrackableMixin, mutates
+from genesis.engine.state_change import ChangeLog, StateChange, TrackableMixin
 from genesis.repr_base import RBC
 from genesis.typing import NumArrayType, NumericType
 from genesis.utils.geom import euler_to_quat
@@ -711,14 +711,14 @@ class _LinkAttachedSensorMixin(BuildableMixin):
         raise NotImplementedError
 
     @gs.assert_built
-    @mutates(StateChange.MODEL)
     def set_pos_offset(self, pos_offset, envs_idx=None):
         self._set_metadata_field(pos_offset, self._shared_metadata.offsets_pos, self._idx, 3, envs_idx)
+        self.changelog.record(StateChange.MODEL, envs_idx=envs_idx)
 
     @gs.assert_built
-    @mutates(StateChange.MODEL)
     def set_quat_offset(self, quat_offset, envs_idx=None):
         self._set_metadata_field(quat_offset, self._shared_metadata.offsets_quat, self._idx, 4, envs_idx)
+        self.changelog.record(StateChange.MODEL, envs_idx=envs_idx)
 
 
 class RigidSensorMixin[RigidSensorMetadataMixinT: RigidSensorMetadataMixin](_LinkAttachedSensorMixin):

@@ -41,7 +41,7 @@ from .solvers.base_solver import (
     kernel_set_time,
     merge_errno,
 )
-from .state_change import StateChange, Subscriber
+from .state_change import StateChange, Subscriber, untracked_launches
 from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 
 if TYPE_CHECKING:
@@ -269,6 +269,9 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         for solver in self._solvers:
             solver.build(n_envs)
             if solver.is_active:
+                # The arrays of the solver are tracked, and its refreshes refresh them as they are read stale
+                solver.changelog.register(solver.data, envs_idx=(solver._envs_idx, self._envs_idx))
+                solver.changelog.register_refreshes(solver)
                 self._active_solvers.append(solver)
                 self._active_systems.append(solver)
                 if not isinstance(solver, RigidSolver):
@@ -466,10 +469,12 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         for system in self._active_systems:
             system.__setstate__(state.solvers[type(system).__name__])
         self._steps[:] = torch.as_tensor(state.steps, device=gs.device)
-        # A solver recorded clean holds the quantities deriving from its state as recorded, the writes of the restore
-        # included, so that its getters deliver them (see 'depends_on')
+        # A solver recorded clean holds the quantities deriving from its state as recorded, so that its getters deliver
+        # them, while one recorded with them stale has them stale again (see 'ChangeLog.invalidate')
         for solver in self._active_solvers:
-            if not state.solvers_is_dirty[type(solver).__name__]:
+            if state.solvers_is_dirty[type(solver).__name__]:
+                solver.changelog.invalidate()
+            else:
                 solver.changelog.mark_clean()
         # Flush the zero-copy writes of fill_data on Metal.
         if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
@@ -517,9 +522,12 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         with self._step_timer.phase("physics"):
             if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
                 self._steps += 1
-                for _ in range(self._substeps):
-                    self.rigid_solver.substep()
-                    self._cur_substep_global += 1
+                # The rigid solver records what each substep writes at once (see 'ChangeLog.record_step'), which spares
+                # tracking each of its launches
+                with untracked_launches():
+                    for _ in range(self._substeps):
+                        self.rigid_solver.substep()
+                        self._cur_substep_global += 1
                 self.rigid_solver.clear_external_force()
             elif self._rollout_graph.is_recording:
                 self._rollout_graph.record_step(StepOperation(self))
@@ -548,14 +556,13 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
 
     def _step(self):
         """Run the substeps of a step."""
-        # The couplers read the cartesian space of the rigid solver before its substep refreshes it (see
-        # 'RigidSolver.substep')
-        if self.rigid_solver.is_active:
-            self.rigid_solver.update_forward_vel()
         self._steps += 1
-        for _ in range(self._substeps):
-            self.substep()
-            self._cur_substep_global += 1
+        # The solvers record what their substeps write at once (see 'ChangeLog.record_step'), the couplers and the
+        # solvers reading the derived arrays of another one refreshing them first as the step starts
+        with untracked_launches(refresh=True):
+            for _ in range(self._substeps):
+                self.substep()
+                self._cur_substep_global += 1
         if self.rigid_solver.is_active:
             self.rigid_solver.clear_external_force()
 

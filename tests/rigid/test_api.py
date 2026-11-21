@@ -1114,7 +1114,7 @@ def test_inertial_property_setters(sliding_ball_pair, xml_path, implicit_inertia
     dofs_idx = slice(free_bodies.dof_start, free_bodies.dof_start + free_bodies.n_dofs)
     untouched = slice(free_bodies.dof_start + 6, free_bodies.dof_start + free_bodies.n_dofs)
     for buffer in (constraint_state.grad, constraint_state.Mgrad):
-        sentinels = qd_to_numpy(buffer)
+        sentinels = qd_to_numpy(buffer, copy=True)
         sentinels[dofs_idx] = SENTINEL
         buffer.from_numpy(sentinels)
     free_bodies.links[0].set_mass(2.0)

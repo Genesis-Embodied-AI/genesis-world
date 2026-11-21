@@ -24,7 +24,7 @@ from genesis.engine.entities.rigid_entity.description import _balanced_variant_m
 from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
-from genesis.engine.state_change import StateChange, TrackableMixin, depends_on
+from genesis.engine.state_change import StateChange, TrackableMixin, depends_on, scratch
 from genesis.utils.data import ConfigItem, DataItem, iter_data, opt_in
 from genesis.utils.misc import (
     assign_indexed_tensor,
@@ -877,11 +877,14 @@ class Collider(TrackableMixin):
                 torch.mps.synchronize()
             return
 
-        envs_idx = self._solver.sim.sanitize_envs_idx(envs_idx)
+        if not isinstance(envs_idx, torch.Tensor):
+            envs_idx = self._solver.sim.sanitize_envs_idx(envs_idx)
         collider_kernel_reset(
             envs_idx, self.collider_state, self._solver.rigid_config, self.collider_config, cache_only
         )
 
+    # The contacts it empties are no result, until the next detection or step finds them anew
+    @scratch(attrgetter("collider_state.n_contacts"), attrgetter("collider_state.contact_data"))
     def clear(self, envs_idx=None, *, reset_warm_start: bool = True):
         """Remove the contacts of the environments 'envs_idx' (None for all of them), with their forces.
 
@@ -944,15 +947,10 @@ class Collider(TrackableMixin):
         )
         self._contact_data_cache.clear()
 
-    # The contact points no longer hold where the configuration changed, until the next detection or step recomputes
-    # them, and their forces where the velocities or the model changed as well, until the next step recomputes them
-    @depends_on(StateChange.GEOMETRY, refresh=attrgetter("detection"), recover=False)
-    @depends_on(
-        StateChange.GEOMETRY,
-        StateChange.DYNAMICS,
-        StateChange.MODEL,
-        recover=lambda contacts: contacts | {"force": None},
-    )
+    # The contact points no longer hold once the configuration or the model they were found at changed, until the next
+    # detection or step finds them anew, and their forces once anything changed, until the next step solves them
+    @depends_on(attrgetter("collider_state.n_contacts"), changes=(StateChange.GEOMETRY, StateChange.MODEL))
+    @depends_on(attrgetter("collider_state.contact_data.force"), recover=lambda contacts: contacts | {"force": None})
     def get_contacts(
         self, as_tensor: bool = True, to_torch: bool = True, keep_batch_dim: bool = False, is_padded: bool = False
     ):
