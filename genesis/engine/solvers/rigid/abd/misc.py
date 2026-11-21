@@ -32,6 +32,18 @@ def linear_to_lower_tri(i_pair: qd.i32, strict: qd.template() = False):
 
 
 @qd.func
+def func_is_dof_moving(i_d: int, i_b: int, dyn_info: DynInfo, rigid_config: qd.template()):
+    """Whether a dof moves a link in an environment, as every dof of a joint does.
+
+    A heterogeneous environment simulates the links its variant does not carry as inert links, whose dofs belong to no
+    joint there and have no motion axis (see '_dispatch_heterogeneous_kinematics'). The diagonal entry of such a dof in
+    the mass matrix is its armature alone, so the averages and traces of the mass matrix leave it out.
+    """
+    I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+    return dyn_info.dofs.motion_ang[I_d].norm_sqr() + dyn_info.dofs.motion_vel[I_d].norm_sqr() > 0.0
+
+
+@qd.func
 def func_equality_links(i_eq: int, i_b: int, n_links: int, dyn_info: DynInfo, rigid_config: qd.template()):
     """Return the pair of links coupled by equality constraint i_eq of env i_b, -1 standing for a missing link.
 

@@ -33,6 +33,7 @@ from .misc import (
     func_add_safe_backward,
     func_is_awake_link,
     func_is_awake_tree,
+    func_is_dof_moving,
     func_wakeup_island,
     linear_to_lower_tri,
 )
@@ -1270,20 +1271,29 @@ def func_exit_neutral_configuration(
 
 
 @qd.func
-def func_init_meaninertia(envs_idx: qd.types.ndarray(), rigid_info: RigidInfo, rigid_config: qd.template()):
-    """Compute the mean diagonal entry of the joint-space mass matrix, which scales the solver tolerances."""
+def func_init_meaninertia(
+    envs_idx: qd.types.ndarray(), dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
+):
+    """Compute the mean diagonal entry of the joint-space mass matrix, which scales the solver tolerances.
+
+    The mean runs over the dofs moving a link (see 'func_is_dof_moving'), so a heterogeneous environment keeps the value
+    its variant has when simulated on its own.
+    """
     n_dofs = rigid_info.mass_mat.shape[0]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        if n_dofs > 0:
-            # Accumulated through the field rather than a local: a register would carry more precision than the
-            # working one, and every consumer of the mean inertia is quoted on the value the field holds.
-            rigid_info.meaninertia[i_b] = 0.0
-            for i_d in range(n_dofs):
+        # Accumulated through the field rather than a local: a register would carry more precision than the working
+        # one, and every consumer of the mean inertia is quoted on the value the field holds.
+        rigid_info.meaninertia[i_b] = 0.0
+        n_dofs_moving = 0
+        for i_d in range(n_dofs):
+            if func_is_dof_moving(i_d, i_b, dyn_info, rigid_config):
                 rigid_info.meaninertia[i_b] = rigid_info.meaninertia[i_b] + rigid_info.mass_mat[i_d, i_d, i_b]
-            rigid_info.meaninertia[i_b] = rigid_info.meaninertia[i_b] / n_dofs
+                n_dofs_moving = n_dofs_moving + 1
+        if n_dofs_moving > 0:
+            rigid_info.meaninertia[i_b] = rigid_info.meaninertia[i_b] / n_dofs_moving
         else:
             rigid_info.meaninertia[i_b] = 1.0
 
@@ -1479,7 +1489,7 @@ def func_refresh_links_invweight_and_meaninertia(
                             i_l, i_b, jac_row, solve_out, dyn_info, rigid_info, rigid_config, force_update
                         )
 
-    func_init_meaninertia(envs_idx, rigid_info, rigid_config)
+    func_init_meaninertia(envs_idx, dyn_info, rigid_info, rigid_config)
 
     # Weighing moved the poses to the neutral configuration, so bring them back to the live one when the caller had
     # them up to date, and whenever a velocity is recomputed below, since that reads the live poses. The factored mass
@@ -1567,7 +1577,7 @@ def kernel_refresh_invweight_and_meaninertia(
                     force_update,
                 )
 
-    func_init_meaninertia(envs_idx, rigid_info, rigid_config)
+    func_init_meaninertia(envs_idx, dyn_info, rigid_info, rigid_config)
 
     # Both passes are the ones func_refresh_links_invweight_and_meaninertia ends on, and are owed for the same
     # reasons, which are given there.
@@ -1824,10 +1834,10 @@ def func_midpoint_eligible(
 ):
     """Whether the link is a free rigid body eligible for midpoint integration this step.
 
-    Eligible: a 6-DOF free-joint link that is its own whole kinematic tree (no parent, and no DOF-bearing descendant, so
-    its mass block holds its own DOFs alone, see dofs_mass_block_start in array_class.py), and unconstrained this step
-    (no contact on the body, fixed children included, and no connect/weld/screw equality, per the involvement flag the
-    assembly writes, see is_constrained in array_class.py). The flag covers dynamically registered constraints, and
+    Eligible: a 6-DOF free-joint link that is its own whole kinematic tree in the environment (no parent, and no
+    DOF-bearing descendant there, the inert links of a heterogeneous environment holding none), and unconstrained this
+    step (no contact on the body, fixed children included, and no connect/weld/screw equality, per the involvement flag
+    the assembly writes, see is_constrained in array_class.py). The flag covers dynamically registered constraints, and
     entities merged at build time via attach fail the tree tests. A constrained body keeps the standard update: the
     solver resolves the constraint impulse at the current configuration, and the discrete free rigid-body equation would
     count it again. In the MuJoCo compatibility mode, the body is the link alone, without fixed children.
@@ -1837,17 +1847,14 @@ def func_midpoint_eligible(
     if dyn_info.links.n_dofs[I_l] == 6 and dyn_info.links.parent_idx[I_l] == -1:
         i_j = dyn_info.links.joint_start[I_l]
         I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
-        dof_start = dyn_info.links.dof_start[I_l]
-        is_eligible = (
-            dyn_info.joints.type[I_j] == gs.JOINT_TYPE.FREE
-            and rigid_info.dofs_mass_block_end[dof_start] <= dyn_info.links.dof_end[I_l]
-        )
+        is_eligible = dyn_info.joints.type[I_j] == gs.JOINT_TYPE.FREE
         if is_eligible:
             # The assembly marks the link a constraint acts on, a fixed child included, so the whole body is scanned.
             for j_l in range(i_l, rigid_info.links_root_end[i_l]):
                 J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
-                if dyn_info.links.root_idx[J_l] == i_l and dyn_state.links.is_constrained[j_l, i_b]:
-                    is_eligible = False
+                if dyn_info.links.root_idx[J_l] == i_l:
+                    if dyn_state.links.is_constrained[j_l, i_b] or (j_l != i_l and dyn_info.links.n_dofs[J_l] > 0):
+                        is_eligible = False
         # MuJoCo integrates a lone body only, so its compatibility mode leaves a composite on the standard update.
         if qd.static(rigid_config.enable_mujoco_compatibility):
             if is_eligible and func_midpoint_has_fixed_children(i_l, i_b, dyn_info, rigid_info, rigid_config):

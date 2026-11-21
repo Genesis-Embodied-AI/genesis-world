@@ -1596,7 +1596,7 @@ def _sort_contacts_and_build_islands(
                 if qd.static(rigid_config.use_hibernation):
                     is_partition_trivial = rigid_info.n_awake_dofs[i_b] >= dyn_state.dofs.is_hibernated.shape[0]
                 if is_partition_trivial:
-                    func_build_single_island_coop(i_b, tid, constraint_state, rigid_info, rigid_config)
+                    func_build_single_island_coop(i_b, tid, constraint_state, dyn_info, rigid_info, rigid_config)
                 else:
                     if qd.static(rigid_config.use_hibernation):
                         func_build_islands_coop(
@@ -1625,7 +1625,7 @@ def _sort_contacts_and_build_islands(
                 if qd.static(rigid_config.use_hibernation):
                     is_partition_trivial = rigid_info.n_awake_dofs[i_b] >= dyn_state.dofs.is_hibernated.shape[0]
                 if is_partition_trivial:
-                    func_build_single_island(i_b, constraint_state, rigid_info, rigid_config)
+                    func_build_single_island(i_b, constraint_state, dyn_info, rigid_info, rigid_config)
                 else:
                     if qd.static(rigid_config.use_hibernation):
                         func_build_islands(
@@ -6034,7 +6034,7 @@ def func_resolve_post(
     """
     func_update_qacc(dyn_state, constraint_state, rigid_config, errno)
     if qd.static(noslip):
-        constraint_noslip.func_noslip(dyn_state, collider_state, constraint_state, rigid_info, rigid_config)
+        constraint_noslip.func_noslip(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
     func_update_contact_force(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
 

@@ -18,7 +18,7 @@ import genesis.utils.geom as gu
 from genesis.utils.array_class import ColliderState, ConstraintState, DynInfo, DynState, RigidInfo
 
 from .forward_dynamics import func_refresh_links_invweight_and_meaninertia
-from .misc import func_apply_link_external_wrench, func_equality_links, func_wakeup_island
+from .misc import func_apply_link_external_wrench, func_equality_links, func_is_dof_moving, func_wakeup_island
 
 
 class ConstraintType(IntEnum):
@@ -701,7 +701,12 @@ def kernel_set_dofs_armature(
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     if qd.static(rigid_config.batch_dofs_info):
         for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0]):
-            dyn_info.dofs.armature[dofs_idx[i_d_], envs_idx[i_b_]] = armature[i_b_, i_d_]
+            i_d = dofs_idx[i_d_]
+            i_b = envs_idx[i_b_]
+            # A dof moving no link keeps the unit armature that is its whole row of the mass matrix (see
+            # _dispatch_heterogeneous_kinematics), which a zero would make singular
+            if func_is_dof_moving(i_d, i_b, dyn_info, rigid_config):
+                dyn_info.dofs.armature[i_d, i_b] = armature[i_b_, i_d_]
     else:
         for i_d_ in range(dofs_idx.shape[0]):
             dyn_info.dofs.armature[dofs_idx[i_d_]] = armature[i_d_]

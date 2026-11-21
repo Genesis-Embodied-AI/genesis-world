@@ -7,6 +7,7 @@ import genesis as gs
 from genesis.constants import link_ref_frame
 from genesis.repr_base import RBC
 from genesis.typing import LaxPositiveFArrayType
+from genesis.utils import geom as gu
 from genesis.utils.misc import DeprecationError, qd_to_torch
 
 from .description import KinematicLinkDescription, RigidGeomDescription, RigidLinkDescription, RigidVisGeomDescription
@@ -73,6 +74,9 @@ class KinematicLink(RBC):
 
         # Heterogeneous variant tracking (None = not heterogeneous)
         self._variant_vgeom_ranges: list[tuple[int, int]] | None = None
+
+        # For heterogeneous simulation: the environments whose variant carries this link (None = all envs)
+        self.active_envs_idx: np.ndarray | None = None
 
     def _init_variant_tracking(self):
         """Start tracking heterogeneous variants. Records first variant from current state."""
@@ -469,13 +473,17 @@ class RigidLink(KinematicLink):
         for geom in self._geoms:
             geom._build()
 
-        # Compute per-variant inertial for heterogeneous links
+        # Compute per-variant inertial for heterogeneous links. A variant not carrying the link simulates it massless.
         if self._variant_geom_ranges is not None:
-            self._variant_inertial = [
-                LinkInertial(self.desc.mass, self.desc.inertial_pos, self.desc.inertial_quat, self.desc.inertia)
-            ]
-            for variant in self.entity._desc.variants[1:]:
-                v_l_desc = variant.links[self.idx - self.entity._link_start]
+            i_l = self.idx - self.entity._link_start
+            self._variant_inertial = []
+            for i_variant, variant in enumerate(self.entity._desc.variants):
+                if i_l not in variant.links_idx:
+                    self._variant_inertial.append(
+                        LinkInertial(0.0, gu.zero_pos(), gu.identity_quat(), np.zeros((3, 3), dtype=gs.np_float))
+                    )
+                    continue
+                v_l_desc = self.desc if i_variant == 0 else variant.links[variant.links_idx.index(i_l)]
                 self._variant_inertial.append(
                     LinkInertial(v_l_desc.mass, v_l_desc.inertial_pos, v_l_desc.inertial_quat, v_l_desc.inertia)
                 )

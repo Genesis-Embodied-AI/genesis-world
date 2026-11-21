@@ -25,6 +25,9 @@ class RigidJoint(RBC):
         self._q_start = q_start
         self._dof_start = dof_start
 
+        # For heterogeneous simulation: the environments whose variant carries this joint (None = all envs)
+        self.active_envs_idx: np.ndarray | None = None
+
     def __getattr__(self, name):
         # Must be implemented to throw deprecation warnings when accessing old properties, ignoring introspection
         for name_old, name_new in (
@@ -366,7 +369,11 @@ class RigidJoint(RBC):
             if self.link._variant_geom_ranges is not None:
                 i_link, i_joint = self.link.idx - self._entity.link_start, self.idx - self.link.joint_start
                 for i_variant, (geom_start, geom_end) in enumerate(self.link._variant_geom_ranges[1:], start=1):
-                    v_joint = self._entity.desc.variants[i_variant].links[i_link].joints[i_joint]
+                    variant = self._entity.desc.variants[i_variant]
+                    # A variant not carrying the link holds no geom of it
+                    if i_link not in variant.links_idx:
+                        continue
+                    v_joint = variant.links[variant.links_idx.index(i_link)].joints[i_joint]
                     for i_g, geom in enumerate(geoms):
                         if geom_start <= geom.idx < geom_end:
                             geoms_joint[i_g] = v_joint

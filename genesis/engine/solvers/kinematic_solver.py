@@ -679,70 +679,115 @@ class KinematicSolver(Solver):
         """Write the link frames and the joint and dof parameters of each heterogeneous variant to the envs carrying it.
 
         The init kernels broadcast those of the primary to every environment, while heterogeneous simulation batches
-        the link, joint and dof info (see 'build').
+        the link, joint and dof info (see 'build'). An environment whose variant does not carry a link simulates it as
+        an inert link (see 'KinematicVariantDescription'): its joints are fixed there, so its dofs belong to no joint
+        and keep the parameters that hold them at rest.
         """
         entities = [entity for entity in self._entities if entity._desc.variants]
         if not entities:
             return
 
         # Field layout, batch second, since the arrays are written back as fields
-        links_pos = qd_to_numpy(self.dyn_info.links.pos, transpose=False, copy=True)
-        links_quat = qd_to_numpy(self.dyn_info.links.quat, transpose=False, copy=True)
-        joints_pos = qd_to_numpy(self.dyn_info.joints.pos, transpose=False, copy=True)
-        joints_sol_params = qd_to_numpy(self.dyn_info.joints.sol_params, transpose=False, copy=True)
-        dofs_info = self.dyn_info.dofs
+        links_info, joints_info, dofs_info = self.dyn_info.links, self.dyn_info.joints, self.dyn_info.dofs
+        links_fields = (links_info.pos, links_info.quat, links_info.q_end, links_info.dof_end, links_info.n_dofs)
+        joints_fields = (joints_info.type, joints_info.dof_end, joints_info.pos, joints_info.sol_params)
+        # The parameters of a dof belonging to no joint: no motion, force or actuation reaches it, so it stays at rest,
+        # decoupled from every other dof. Its unit armature is its whole row of the mass matrix, which keeps the matrix
+        # positive definite, and its zero motion axes keep it out of every Jacobian.
         dofs_fields = (
-            (dofs_info.motion_ang, "dofs_motion_ang"),
-            (dofs_info.motion_vel, "dofs_motion_vel"),
-            (dofs_info.limit, "dofs_limit"),
-            (dofs_info.stiffness, "dofs_stiffness"),
-            (dofs_info.damping, "dofs_damping"),
-            (dofs_info.frictionloss, "dofs_frictionloss"),
-            (dofs_info.armature, "dofs_armature"),
-            (dofs_info.act_gain, "dofs_act_gain"),
-            (dofs_info.act_bias, "dofs_act_bias"),
-            (dofs_info.force_range, "dofs_force_range"),
+            (dofs_info.motion_ang, "dofs_motion_ang", np.zeros(3)),
+            (dofs_info.motion_vel, "dofs_motion_vel", np.zeros(3)),
+            (dofs_info.limit, "dofs_limit", np.array([-np.inf, np.inf])),
+            (dofs_info.stiffness, "dofs_stiffness", 0.0),
+            (dofs_info.damping, "dofs_damping", 0.0),
+            (dofs_info.frictionloss, "dofs_frictionloss", 0.0),
+            (dofs_info.armature, "dofs_armature", 1.0),
+            (dofs_info.act_gain, "dofs_act_gain", 0.0),
+            (dofs_info.act_bias, "dofs_act_bias", np.zeros(3)),
+            (dofs_info.force_range, "dofs_force_range", np.zeros(2)),
         )
-        dofs_values = [qd_to_numpy(field, transpose=False, copy=True) for field, _ in dofs_fields]
+        links_values = [qd_to_numpy(field, transpose=False, copy=True) for field in links_fields]
+        joints_values = [qd_to_numpy(field, transpose=False, copy=True) for field in joints_fields]
+        dofs_values = [qd_to_numpy(field, transpose=False, copy=True) for field, _, _ in dofs_fields]
 
         for entity in entities:
-            variants_links = [entity._desc.links, *(variant.links for variant in entity._desc.variants[1:])]
-            envs_variant_idx = _balanced_variant_mapping(len(variants_links), self._B)
-            links_slice = slice(entity.link_start, entity.link_end)
-            variants_links_pos = np.stack([[l_desc.pos for l_desc in links] for links in variants_links])
-            variants_links_quat = np.stack([[l_desc.quat for l_desc in links] for links in variants_links])
-            links_pos[links_slice] = variants_links_pos[envs_variant_idx].swapaxes(0, 1)
-            links_quat[links_slice] = variants_links_quat[envs_variant_idx].swapaxes(0, 1)
+            variants = entity._desc.variants
+            envs_variant_idx = _balanced_variant_mapping(len(variants), self._B)
+            for i_l, link in enumerate(entity.links):
+                envs_is_carried = np.array([i_l in variant.links_idx for variant in variants])[envs_variant_idx]
+                (link.active_envs_idx,) = np.nonzero(envs_is_carried)
+                for joint in link.joints:
+                    joint.active_envs_idx = link.active_envs_idx
+
+            # Per variant, the value of every link, joint and dof of the entity, inert where the variant does not carry
+            # the link. The primary describes its links as the entity links.
+            variants_links_values, variants_joints_values, variants_dofs_values = [], [], []
+            for i_variant, variant in enumerate(variants):
+                if i_variant == 0:
+                    v_links_desc = {i_l: entity._desc.links[i_l] for i_l in variant.links_idx}
+                else:
+                    v_links_desc = dict(zip(variant.links_idx, variant.links))
+                v_links_values = [[] for _ in links_fields]
+                v_joints_values = [[] for _ in joints_fields]
+                v_dofs_values = [[] for _ in dofs_fields]
+                for i_l, link in enumerate(entity.links):
+                    l_desc = v_links_desc.get(i_l)
+                    is_carried = l_desc is not None
+                    for values, value in zip(
+                        v_links_values,
+                        (
+                            l_desc.pos if is_carried else gu.zero_pos(),
+                            l_desc.quat if is_carried else gu.identity_quat(),
+                            link.q_end if is_carried else link.q_start,
+                            link.dof_end if is_carried else link.dof_start,
+                            link.n_dofs if is_carried else 0,
+                        ),
+                    ):
+                        values.append(value)
+                    for i_j, joint in enumerate(link.joints):
+                        j_desc = l_desc.joints[i_j] if is_carried else joint.desc
+                        j_fields = asdict(j_desc)
+                        for values, value in zip(
+                            v_joints_values,
+                            (
+                                joint.type if is_carried else gs.JOINT_TYPE.FIXED,
+                                joint.dof_end if is_carried else joint.dof_start,
+                                j_desc.pos if is_carried else gu.zero_pos(),
+                                j_desc.sol_params,
+                            ),
+                        ):
+                            values.append(value)
+                        for values, (_, name, inert_value) in zip(v_dofs_values, dofs_fields):
+                            values.extend(j_fields[name] if is_carried else [inert_value] * joint.n_dofs)
+                variants_links_values.append(v_links_values)
+                variants_joints_values.append(v_joints_values)
+                variants_dofs_values.append(v_dofs_values)
+
+            for i_field, values in enumerate(links_values):
+                variants_value = np.stack([np.array(v_values[i_field]) for v_values in variants_links_values])
+                values[entity.link_start : entity.link_end] = variants_value[envs_variant_idx].swapaxes(0, 1)
 
             # A file morph drops its joints without degrees of freedom, so a fixed one may leave the entity without any
             if entity.n_joints == 0:
                 continue
-            variants_joints = [
-                [asdict(j_desc) for l_desc in links for j_desc in l_desc.joints] for links in variants_links
-            ]
-            joints_slice = slice(entity.joint_start, entity.joint_end)
-            variants_joints_pos = np.stack([[j_fields["pos"] for j_fields in joints] for joints in variants_joints])
-            joints_pos[joints_slice] = variants_joints_pos[envs_variant_idx].swapaxes(0, 1)
-            variants_sol_params = np.stack(
-                [[j_fields["sol_params"] for j_fields in joints] for joints in variants_joints]
-            )
-            variants_sol_params = self._sanitize_joint_sol_params(variants_sol_params).reshape(
-                variants_sol_params.shape
-            )
-            joints_sol_params[joints_slice] = variants_sol_params[envs_variant_idx].swapaxes(0, 1)
-            dofs_slice = slice(entity.dof_start, entity.dof_end)
-            for dofs_value, (_, name) in zip(dofs_values, dofs_fields):
-                variants_value = np.stack(
-                    [np.concatenate([j_fields[name] for j_fields in joints]) for joints in variants_joints]
-                )
-                dofs_value[dofs_slice] = variants_value[envs_variant_idx].swapaxes(0, 1)
+            for i_field, values in enumerate(joints_values):
+                variants_value = np.stack([np.array(v_values[i_field]) for v_values in variants_joints_values])
+                if joints_fields[i_field] is joints_info.sol_params:
+                    variants_value = self._sanitize_joint_sol_params(variants_value).reshape(variants_value.shape)
+                values[entity.joint_start : entity.joint_end] = variants_value[envs_variant_idx].swapaxes(0, 1)
+            if entity.n_dofs == 0:
+                continue
+            for i_field, values in enumerate(dofs_values):
+                variants_value = np.stack([np.array(v_values[i_field]) for v_values in variants_dofs_values])
+                values[entity.dof_start : entity.dof_end] = variants_value[envs_variant_idx].swapaxes(0, 1)
 
-        self.dyn_info.links.pos.from_numpy(links_pos)
-        self.dyn_info.links.quat.from_numpy(links_quat)
-        self.dyn_info.joints.pos.from_numpy(joints_pos)
-        self.dyn_info.joints.sol_params.from_numpy(joints_sol_params)
-        for (field, _), dofs_value in zip(dofs_fields, dofs_values):
-            field.from_numpy(dofs_value)
+        for field, values in zip(links_fields, links_values):
+            field.from_numpy(values)
+        for field, values in zip(joints_fields, joints_values):
+            field.from_numpy(values)
+        for (field, _, _), values in zip(dofs_fields, dofs_values):
+            field.from_numpy(values)
+        links_pos, links_quat = links_values[:2]
 
         # The state of a fixed root link is set at init alone (see kernel_init_link_fields), so it takes the frame of
         # the variant its environment carries too

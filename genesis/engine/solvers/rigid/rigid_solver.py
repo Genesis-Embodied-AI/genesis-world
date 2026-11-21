@@ -408,14 +408,21 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             dofs_link.extend(rotor_links)
         if dofs_idx:
             # Field layout, batch last, since the arrays are written back as fields.
+            # The default is decided per environment, since the variant an environment carries states its own armature
+            # and leaves the dofs of the links it does not carry at the unit armature of an inert link.
             dofs_armature = qd_to_numpy(self.dyn_info.dofs.armature, transpose=False, copy=True)
-            is_default = (np.atleast_2d(dofs_armature[dofs_idx].T) <= 0.0).all(axis=0)
+            envs_dofs_armature = np.atleast_2d(dofs_armature[dofs_idx].T)
+            is_default = envs_dofs_armature <= 0.0
             if is_default.any():
-                dofs_idx = np.array(dofs_idx)[is_default]
-                default_armature = np.stack(dofs_default, axis=1)[:, is_default]
-                dofs_armature[dofs_idx] = default_armature.T if self._options.batch_dofs_info else default_armature[0]
+                default_armature = np.stack(dofs_default, axis=1)[: len(envs_dofs_armature)]
+                envs_dofs_armature = np.where(is_default, default_armature, envs_dofs_armature)
+                dofs_armature[dofs_idx] = (
+                    envs_dofs_armature.T if self._options.batch_dofs_info else envs_dofs_armature[0]
+                )
                 self.dyn_info.dofs.armature.from_numpy(dofs_armature)
-                roots_idx = {link.root_idx for link, is_dof_default in zip(dofs_link, is_default) if is_dof_default}
+                roots_idx = {
+                    link.root_idx for link, is_dof_default in zip(dofs_link, is_default.any(axis=0)) if is_dof_default
+                }
                 trees_links = [link for link in self.links if link.root_idx in roots_idx]
                 dofs_invweight = qd_to_numpy(self.dyn_info.dofs.invweight, transpose=False, copy=True)
                 dofs_invweight[[i_d for link in trees_links for i_d in range(link.dof_start, link.dof_end)]] = -1.0
@@ -439,7 +446,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             for i_l in reversed(range(self._n_links)):
                 if self.links[i_l].parent_idx >= 0:
                     links_subtree_mass[:, self.links[i_l].parent_idx] += links_subtree_mass[:, i_l]
-            movable_links_mass = links_subtree_mass[:, movable_links_idx]
+            # The inert links of a heterogeneous environment are massless and move nothing, so the floor leaves them out
+            links_n_dofs = np.atleast_2d(qd_to_numpy(self.dyn_info.links.n_dofs, transpose=True))
+            movable_links_mass = np.where(
+                links_n_dofs[:, movable_links_idx] > 0, links_subtree_mass[:, movable_links_idx], np.inf
+            )
             mass_floor = np.maximum(self._options.tolerance * total_mass, 0.2 * self._options.tolerance)[:, None]
             i_b_min, i_l_min = np.unravel_index((movable_links_mass / mass_floor).argmin(), movable_links_mass.shape)
             mass_min = movable_links_mass[i_b_min, i_l_min]
@@ -831,14 +842,28 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 variants_default = np.array([entity.main_morph.default_armature or 0.0])
             else:
                 variants_default = np.zeros(1)
-            variants_links = [entity.desc.links, *(variant.links for variant in entity.desc.variants[1:])]
+            # Per variant, the description it gives each link it carries, the primary describing its own as the entity
+            # links. The subtree of a link reaches the entities attached to it, which have no variants of their own.
+            if entity.desc.variants:
+                variants_links_desc = [
+                    {entity.links[i_l].idx: entity.desc.links[i_l] for i_l in entity.desc.variants[0].links_idx}
+                ]
+                for variant in entity.desc.variants[1:]:
+                    variants_links_desc.append(
+                        {entity.links[i_l].idx: l_desc for i_l, l_desc in zip(variant.links_idx, variant.links)}
+                    )
+            else:
+                variants_links_desc = [{link.idx: link.desc for link in entity.links}]
             variants_lower, variants_upper = [], []
-            for variant_default, variant_links in zip(variants_default, variants_links):
-                # The subtree of a link reaches the entities attached to it, which have no variants of their own
-                links_desc = {link.idx: l_desc for link, l_desc in zip(entity.links, variant_links)}
+            for variant_default, links_desc in zip(variants_default, variants_links_desc):
                 lower, upper = [], []
                 for link in entity.links:
                     if link.is_fixed:
+                        continue
+                    # The dofs of an inert link hold their unit armature alone (see _dispatch_heterogeneous_kinematics)
+                    if link.idx not in links_desc:
+                        lower += [1.0] * link.n_dofs
+                        upper += [1.0] * link.n_dofs
                         continue
                     l_desc = links_desc[link.idx]
                     is_rotor = link in rotor_links
@@ -860,6 +885,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                             cur = stack.pop()
                             sub.append(cur)
                             for child in children.get(cur.idx, []):
+                                # An inert link is massless, and so is its subtree
+                                if child.entity is entity and child.idx not in links_desc:
+                                    continue
                                 child_desc = links_desc.get(child.idx, child.desc)
                                 hop = np.linalg.norm(child_desc.pos) + 2.0 * sum(
                                     np.linalg.norm(j.pos) for j in child_desc.joints
