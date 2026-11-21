@@ -3,7 +3,9 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.simt as su
 from genesis.engine.solvers.rigid.collider.data import ColliderState
-from genesis.engine.solvers.rigid.data import DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
+
+from ..abd.misc import func_is_dof_moving
 from .data import ConstraintState
 
 
@@ -443,6 +445,7 @@ def func_noslip_batch(
     dyn_state: DynState,
     collider_state: ColliderState,
     constraint_state: ConstraintState,
+    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
@@ -471,11 +474,17 @@ def func_noslip_batch(
         collider_state.n_contacts[i_b] - collider_state.n_contacts_hibernated[i_b]
     )
 
-    n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
     n_rows = constraint_state.island.constraint_slices.n[i_island, i_b]
     row_start = constraint_state.island.constraint_slices.start[i_island, i_b]
 
-    scale = 1.0 / (rigid_info.meaninertia[i_b] * qd.max(1.0, n_dofs))
+    # The dofs moving a link alone count, as for the mean inertia (see func_is_dof_moving)
+    dof_start = constraint_state.island.dof_slices.start[i_island, i_b]
+    n_dofs_moving = 0
+    for i_d_ in range(constraint_state.island.dof_slices.n[i_island, i_b]):
+        i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
+        if func_is_dof_moving(i_d, i_b, dyn_info, rigid_config):
+            n_dofs_moving = n_dofs_moving + 1
+    scale = 1.0 / (rigid_info.meaninertia[i_b] * qd.max(1.0, n_dofs_moving))
 
     for i_iter in range(rigid_info.noslip_iterations[None]):
         func_refresh_qacc_batch(i_b, i_island, tid, n_colors, dyn_state, constraint_state, rigid_info, rigid_config)
@@ -549,6 +558,7 @@ def func_noslip(
     dyn_state: DynState,
     collider_state: ColliderState,
     constraint_state: ConstraintState,
+    dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
@@ -584,7 +594,16 @@ def func_noslip(
                     func_color_rows_batch(i_b, i_island, tid, constraint_state, rigid_info)
                     n_colors = constraint_state.noslip_islands_n_colors[i_island, i_b]
                 func_noslip_batch(
-                    i_b, i_island, tid, n_colors, dyn_state, collider_state, constraint_state, rigid_info, rigid_config
+                    i_b,
+                    i_island,
+                    tid,
+                    n_colors,
+                    dyn_state,
+                    collider_state,
+                    constraint_state,
+                    dyn_info,
+                    rigid_info,
+                    rigid_config,
                 )
                 func_dual_finish_batch(
                     i_b, i_island, tid, n_colors, dyn_state, constraint_state, rigid_info, rigid_config

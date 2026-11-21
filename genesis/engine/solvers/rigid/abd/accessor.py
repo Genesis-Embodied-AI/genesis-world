@@ -21,7 +21,7 @@ from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from genesis.utils.data import eoa
 
 from .forward_dynamics import func_refresh_links_invweight_and_meaninertia
-from .misc import func_apply_link_external_wrench, func_equality_links, func_wakeup_island
+from .misc import func_apply_link_external_wrench, func_equality_links, func_is_dof_moving, func_wakeup_island
 
 
 class ConstraintType(IntEnum):
@@ -243,9 +243,12 @@ def func_set_link_mass(
     """Set the mass of one link, scaling its inertia by the same factor if requested."""
     I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
     if qd.static(is_inertia_scaled):
-        ratio = inertial_mass / dyn_info.links.inertial_mass[I_l]
-        for j1, j2 in qd.static(qd.ndrange(3, 3)):
-            dyn_info.links.inertial_i[I_l][j1, j2] = dyn_info.links.inertial_i[I_l][j1, j2] * ratio
+        # A massless link has no inertia to scale, and the ratio is undefined. The inert links of a heterogeneous
+        # environment are massless (see '_dispatch_heterogeneous_kinematics').
+        if dyn_info.links.inertial_mass[I_l] > 0.0:
+            ratio = inertial_mass / dyn_info.links.inertial_mass[I_l]
+            for j1, j2 in qd.static(qd.ndrange(3, 3)):
+                dyn_info.links.inertial_i[I_l][j1, j2] = dyn_info.links.inertial_i[I_l][j1, j2] * ratio
     dyn_info.links.inertial_mass[I_l] = inertial_mass
 
 
@@ -626,7 +629,12 @@ def kernel_set_dofs_armature(
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     if qd.static(rigid_config.batch_dofs_info):
         for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_info.dofs.armature))):
-            dyn_info.dofs.armature[dofs_idx[i_d_], envs_idx[i_b_]] = armature[i_b_, i_d_]
+            i_d = dofs_idx[i_d_]
+            i_b = envs_idx[i_b_]
+            # A dof moving no link keeps the unit armature that is its whole row of the mass matrix (see
+            # RigidJointDescription.inert), which a zero would make singular
+            if func_is_dof_moving(i_d, i_b, dyn_info, rigid_config):
+                dyn_info.dofs.armature[i_d, i_b] = armature[i_b_, i_d_]
     else:
         for i_d_ in range(dofs_idx.shape[0]):
             dyn_info.dofs.armature[dofs_idx[i_d_]] = armature[i_d_]

@@ -20,7 +20,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.description import _balanced_variant_mapping
-from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
+from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics, get_variants_kinematics
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from genesis.utils.data import ConfigItem, DataItem, iter_data, opt_in
@@ -528,10 +528,11 @@ class Collider:
             valid &= ~is_weld
 
         # Link pairs that the description of their entity excludes from collision. Each variant of a heterogeneous
-        # entity states its own, which apply to the geoms it gives those links (see 'RigidVariantLinkDescription').
+        # entity states its own, which apply to the geoms it gives those links (see 'RigidVariantLinkDescription'), and
+        # none for the links it does not carry (see 'get_variants_kinematics').
         excluded_geom_pairs = []
         for entity in self._solver.entities:
-            variants_links_desc = [entity.desc.links, *[variant.links for variant in entity.desc.variants[1:]]]
+            variants_links_desc, _, _, _ = get_variants_kinematics(entity, n_envs=self._solver.n_envs_)
             for i_variant, links_desc in enumerate(variants_links_desc):
                 for link, l_desc in zip(entity.links, links_desc):
                     for name in l_desc.contact_exclusions:

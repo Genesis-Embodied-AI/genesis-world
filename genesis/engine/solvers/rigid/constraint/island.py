@@ -6,7 +6,7 @@ import genesis.utils.simt as su
 from genesis.engine.solvers.rigid.collider.data import ColliderState
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 
-from ..abd.misc import func_equality_links, func_wakeup_link
+from ..abd.misc import func_equality_links, func_is_dof_moving, func_wakeup_link
 from ..collider.contact import func_contact_order_key, func_promote_woken_contacts
 from .data import ConstraintState
 
@@ -375,9 +375,10 @@ def func_build_islands(
                 )
                 constraint_state.island.dofs_island_idx[i_d, i_b] = i_island
                 constraint_state.island.dof_slices.curr[i_island, i_b] = i_pos + 1
-                constraint_state.island.inertia[i_island, i_b] = (
-                    constraint_state.island.inertia[i_island, i_b] + rigid_info.mass_mat[i_d, i_d, i_b]
-                )
+                if func_is_dof_moving(i_d, i_b, dyn_info, rigid_config):
+                    constraint_state.island.inertia[i_island, i_b] = (
+                        constraint_state.island.inertia[i_island, i_b] + rigid_info.mass_mat[i_d, i_d, i_b]
+                    )
     for i_island in range(n_islands):
         constraint_state.island.dof_range_start[i_island, i_b] = func_dof_range_start(i_island, i_b, constraint_state)
 
@@ -406,14 +407,15 @@ def func_build_islands(
 
 @qd.func
 def func_build_single_island(
-    i_b: int, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
+    i_b: int, constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Write the partition of one env of a single-island scene serially: one island holding every dof in order.
 
-    The lists are the identity and the island's inertia the trace of the mass matrix. Reserved for scenes off the CPU
-    skyline path, which alone reads the tree labels the full build resolves (see _sort_contacts_and_build_islands in
-    solver.py). Under hibernation the island is awake and its link list, written once at build (see
-    ConstraintSolver.__init__), stands. An env holding a sleeper takes the full build.
+    The lists are the identity and the island's inertia the trace of the mass matrix over the dofs moving a link (see
+    'func_is_dof_moving'). Reserved for scenes off the CPU skyline path, which alone reads the tree labels the full
+    build resolves (see _sort_contacts_and_build_islands in solver.py). Under hibernation the island is awake and its
+    link list, written once at build (see ConstraintSolver.__init__), stands. An env holding a sleeper goes through the
+    full build instead.
     """
     n_dofs = constraint_state.island.dof_id.shape[0]
     constraint_state.island.n_islands[i_b] = 1
@@ -426,7 +428,8 @@ def func_build_single_island(
         constraint_state.island.dof_id[i_d, i_b] = i_d
         constraint_state.island.dof_local_pos[i_d, i_b] = i_d
         constraint_state.island.dofs_island_idx[i_d, i_b] = 0
-        inertia = inertia + rigid_info.mass_mat[i_d, i_d, i_b]
+        if func_is_dof_moving(i_d, i_b, dyn_info, rigid_config):
+            inertia = inertia + rigid_info.mass_mat[i_d, i_d, i_b]
     constraint_state.island.inertia[0, i_b] = inertia
     if qd.static(rigid_config.use_hibernation):
         constraint_state.island.is_hibernated[0, i_b] = 0
@@ -434,7 +437,12 @@ def func_build_single_island(
 
 @qd.func
 def func_build_single_island_coop(
-    i_b: int, tid: int, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
+    i_b: int,
+    tid: int,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Write the partition of one env of a single-island scene with the _K lanes of its block, see
     func_build_single_island."""
@@ -454,7 +462,8 @@ def func_build_single_island_coop(
         constraint_state.island.dof_id[i_d, i_b] = i_d
         constraint_state.island.dof_local_pos[i_d, i_b] = i_d
         constraint_state.island.dofs_island_idx[i_d, i_b] = 0
-        inertia = inertia + rigid_info.mass_mat[i_d, i_d, i_b]
+        if func_is_dof_moving(i_d, i_b, dyn_info, rigid_config):
+            inertia = inertia + rigid_info.mass_mat[i_d, i_d, i_b]
         i_d = i_d + _K
     inertia = su.qd_block_sum(inertia)
     if tid == 0:
@@ -707,7 +716,8 @@ def func_build_islands_coop(
         if i_pos < n_dofs:
             i_d = constraint_state.island.dof_id[i_pos, i_b]
             i_island = constraint_state.island.dofs_island_idx[i_d, i_b]
-            mass = rigid_info.mass_mat[i_d, i_d, i_b]
+            if func_is_dof_moving(i_d, i_b, dyn_info, rigid_config):
+                mass = rigid_info.mass_mat[i_d, i_d, i_b]
         i_island_prev, i_island_next = su.qd_slot_neighbors(tid, i_island)
         total, is_tail = su.qd_segmented_sum(tid, i_island, i_island_prev, i_island_next, mass)
         if is_tail:

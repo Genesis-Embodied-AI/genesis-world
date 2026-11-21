@@ -12,6 +12,7 @@ from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.entities.rigid_entity import RigidGeom
 from genesis.engine.entities.rigid_entity.description import RigidEntityDescription, _balanced_variant_mapping
+from genesis.engine.entities.rigid_entity.rigid_entity import get_variants_kinematics
 from genesis.engine.entities.rigid_entity.rigid_equality import RigidEquality
 from genesis.engine.render_context import (
     CONSTRAINT_COLOR,
@@ -461,14 +462,21 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             dofs_link.extend(rotor_links)
         if dofs_idx:
             # Field layout, batch last, since the arrays are written back as fields.
+            # The default is decided per environment, since the variant an environment carries states its own armature
+            # and leaves the dofs of the links it does not carry at the unit armature of an inert link.
             dofs_armature = qd_to_numpy(self.dyn_info.dofs.armature, transpose=False, copy=True)
-            is_default = (np.atleast_2d(dofs_armature[dofs_idx].T) <= 0.0).all(axis=0)
+            envs_dofs_armature = np.atleast_2d(dofs_armature[dofs_idx].T)
+            is_default = envs_dofs_armature <= 0.0
             if is_default.any():
-                dofs_idx = np.array(dofs_idx)[is_default]
-                default_armature = np.stack(dofs_default, axis=1)[:, is_default]
-                dofs_armature[dofs_idx] = default_armature.T if self._options.batch_dofs_info else default_armature[0]
+                default_armature = np.stack(dofs_default, axis=1)[: len(envs_dofs_armature)]
+                envs_dofs_armature = np.where(is_default, default_armature, envs_dofs_armature)
+                dofs_armature[dofs_idx] = (
+                    envs_dofs_armature.T if self._options.batch_dofs_info else envs_dofs_armature[0]
+                )
                 self.dyn_info.dofs.armature.from_numpy(dofs_armature)
-                roots_idx = {link.root_idx for link, is_dof_default in zip(dofs_link, is_default) if is_dof_default}
+                roots_idx = {
+                    link.root_idx for link, is_dof_default in zip(dofs_link, is_default.any(axis=0)) if is_dof_default
+                }
                 trees_links = [link for link in self.links if link.root_idx in roots_idx]
                 dofs_invweight = qd_to_numpy(self.dyn_info.dofs.invweight, transpose=False, copy=True)
                 dofs_invweight[[i_d for link in trees_links for i_d in range(link.dof_start, link.dof_end)]] = -1.0
@@ -492,7 +500,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             for i_l in reversed(range(self.n_links)):
                 if self.links[i_l].parent_idx >= 0:
                     links_subtree_mass[:, self.links[i_l].parent_idx] += links_subtree_mass[:, i_l]
-            movable_links_mass = links_subtree_mass[:, movable_links_idx]
+            # The inert links of a heterogeneous environment are massless and move nothing, so the floor leaves them out
+            links_n_dofs = np.atleast_2d(qd_to_numpy(self.dyn_info.links.n_dofs, transpose=True))
+            movable_links_mass = np.where(
+                links_n_dofs[:, movable_links_idx] > 0, links_subtree_mass[:, movable_links_idx], np.inf
+            )
             mass_floor = np.maximum(self._options.tolerance * total_mass, 0.2 * self._options.tolerance)[:, None]
             i_b_min, i_l_min = np.unravel_index((movable_links_mass / mass_floor).argmin(), movable_links_mass.shape)
             mass_min = movable_links_mass[i_b_min, i_l_min]
@@ -884,7 +896,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 variants_default = np.array([entity.main_morph.default_armature or 0.0])
             else:
                 variants_default = np.zeros(1)
-            variants_links = [entity.desc.links, *(variant.links for variant in entity.desc.variants[1:])]
+            # A variant describes the links it does not carry as inert, massless and moved by no joint (see
+            # 'get_variants_kinematics')
+            variants_links, _, _, _ = get_variants_kinematics(entity, n_envs=self.n_envs_)
             variants_lower, variants_upper = [], []
             for variant_default, variant_links in zip(variants_default, variants_links):
                 # The subtree of a link reaches the entities attached to it, which have no variants of their own
@@ -1089,6 +1103,13 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         ranges and per-variant inertial properties, which the description of each variant states.
         """
         super()._dispatch_heterogeneous_vgeoms()
+        # The description of every link in each variant of its entity, a variant not carrying the link describing it
+        # massless (see 'get_variants_kinematics')
+        entities_variants_links = {
+            entity.idx: get_variants_kinematics(entity, n_envs=self.n_envs_)[0]
+            for entity in self._entities
+            if entity.desc.variants
+        }
         for link in self.links:
             if link._variant_vgeom_ranges is None:
                 continue
@@ -1101,7 +1122,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             geom_ends = np.array([link._variant_geom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
 
             # Build per-env inertial arrays from the description of the link in each variant, its own coming first
-            variants_desc = [link.desc, *(variant.links[link.idx_local] for variant in link.entity.desc.variants[1:])]
+            variants_desc = [links[link.idx_local] for links in entities_variants_links[link.entity.idx]]
             links_inertial_mass = np.array([variants_desc[v].mass for v in variant_idx], dtype=gs.np_float)
             links_inertial_pos = np.array([variants_desc[v].inertial_pos for v in variant_idx], dtype=gs.np_float)
             links_inertial_quat = np.array([variants_desc[v].inertial_quat for v in variant_idx], dtype=gs.np_float)

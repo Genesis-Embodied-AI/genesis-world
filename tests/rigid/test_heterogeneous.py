@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import pytest
 import torch
@@ -6,13 +8,22 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils.misc import tensor_to_array
 
-from ..utils.assertions import assert_allclose
+from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 @pytest.mark.parametrize("broadphase_traversal", [gs.broadphase_traversal.SAP, gs.broadphase_traversal.ALL_VS_ALL])
-def test_physics_parity(fixed_base_dual_arm, fixed_base_dual_arm_high_damping, broadphase_traversal, show_viewer, tol):
+def test_physics_parity(
+    fixed_base_dual_arm,
+    fixed_base_dual_arm_high_damping,
+    fixed_base_dual_arm_chained,
+    fixed_base_single_arm_with_forearms,
+    broadphase_traversal,
+    show_viewer,
+    tol,
+):
     # Uses the fixed-child mesh objects from 'test_convexify' (offset center of mass, distinct mass) so the per-env
     # parity check exercises the inertia alignment, not just trivially-symmetric primitives.
     N_STEPS = 100
@@ -49,7 +60,24 @@ def test_physics_parity(fixed_base_dual_arm, fixed_base_dual_arm_high_damping, b
         )
     )
 
+    # Arms whose variants differ in their kinematic trees: the primary hangs its right arm from its left one, the second
+    # variant has a single arm extended by two forearms, and the third hangs both arms from the torso. The entity holds
+    # the union of their trees: the first forearm shares the link of the right arm of the primary, which hangs from the
+    # left arm too, while the second forearm and the right arm hanging from the torso add links, the latter renamed.
+    # The arms hang low enough to swing into the ground, while a position control drives every dof of the entity.
+    ARMS_POS = (2.0, 0.0, 0.2)
+    ARMS_ENVS_VARIANT = (0, 0, 1, 2)
+    ARMS_LINKS_NAME = ("torso", "left_arm", "right_arm", "left_forearm_1", "right_arm_2")
+    # Per variant, the links and the dofs of the entity standing for its own, in its own order
+    ARMS_LINKS_IDX = ((0, 1, 2), (0, 1, 2, 3), (0, 1, 4))
+    ARMS_DOFS_IDX = ((0, 1), (0, 1, 2), (0, 3))
+    ARMS_KP = 20.0
+    ARMS_KV = 0.5
+    ARMS_MASS = 2.0
+    ARMS_TARGET = 1.2
+
     dual_arm_files = (fixed_base_dual_arm, fixed_base_dual_arm_high_damping)
+    arms_files = (fixed_base_dual_arm_chained, fixed_base_single_arm_with_forearms, fixed_base_dual_arm)
     asset_files = tuple(f"{get_hf_dataset(pattern=f'{name}/*')}/{name}/{xml}" for name, xml in VARIANTS)
 
     # One homogeneous reference entity per variant plus a single heterogeneous entity dispatching one variant per
@@ -59,12 +87,12 @@ def test_physics_parity(fixed_base_dual_arm, fixed_base_dual_arm_high_damping, b
             broadphase_traversal=broadphase_traversal,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.6, -1.6, 0.8),
-            camera_lookat=(0.6, 0.05, 0.25),
+            camera_pos=(1.0, -2.2, 1.0),
+            camera_lookat=(1.0, 0.05, 0.25),
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(gs.morphs.Plane())
     ref_dual_arms = []
     for i_env, offset in enumerate(REFERENCE_OFFSETS):
         ref_dual_arms.append(
@@ -117,7 +145,39 @@ def test_physics_parity(fixed_base_dual_arm, fixed_base_dual_arm_high_damping, b
             for file, pos, offset_euler in zip(asset_files, POSITIONS, OFFSET_EULERS)
         )
     )
+    ref_arms = []
+    for i_variant, offset in zip(ARMS_ENVS_VARIANT, REFERENCE_OFFSETS):
+        ref_arms.append(
+            scene.add_entity(
+                gs.morphs.URDF(
+                    file=arms_files[i_variant],
+                    pos=np.add(ARMS_POS, offset),
+                    fixed=True,
+                ),
+            )
+        )
+    het_arms = scene.add_entity(
+        morph=tuple(gs.morphs.URDF(file=file, pos=ARMS_POS, fixed=True) for file in arms_files),
+    )
     scene.build(n_envs=len(VARIANTS))
+
+    # Each link and joint of the arms is carried by the environments whose variant has a link standing for it
+    assert tuple(link.name for link in het_arms.links) == ARMS_LINKS_NAME
+    for i_l, link in enumerate(het_arms.links):
+        envs_idx = [i_env for i_env, i_variant in enumerate(ARMS_ENVS_VARIANT) if i_l in ARMS_LINKS_IDX[i_variant]]
+        assert_equal(link.active_envs_idx, envs_idx)
+        for joint in link.joints:
+            assert_equal(joint.active_envs_idx, envs_idx)
+
+    # The position control drives every dof of the arms, those of the links an environment does not carry included,
+    # and the total mass is rescaled over every link, the massless ones standing for the links it does not carry too
+    for arms in (het_arms, *ref_arms):
+        arms.set_mass(ARMS_MASS)
+        arms.set_dofs_kp(ARMS_KP)
+        arms.set_dofs_kv(ARMS_KV)
+    het_arms.control_dofs_position(np.full((len(VARIANTS), het_arms.n_dofs), ARMS_TARGET))
+    for ref_arm in ref_arms:
+        ref_arm.control_dofs_position(np.full((len(VARIANTS), ref_arm.n_dofs), ARMS_TARGET))
 
     # At init each variant sits at its own placement; the relative getter strips its offset (and inertial alignment) to
     # identity in the user frame, while the world frame matches the homogeneous reference's world orientation.
@@ -141,6 +201,25 @@ def test_physics_parity(fixed_base_dual_arm, fixed_base_dual_arm_high_damping, b
     assert_allclose(ref_links_pos - het_dual_arm.get_links_pos(), np.expand_dims(REFERENCE_OFFSETS, 1), tol=tol)
     ref_dofs_damping = torch.cat([ref.get_dofs_damping(envs_idx=i_env) for i_env, ref in enumerate(ref_dual_arms)])
     assert_allclose(het_dual_arm.get_dofs_damping(), ref_dofs_damping, tol=gs.EPS)
+
+    # Every environment simulates the arms of its variant as its reference does, through contacts with the ground, and
+    # the dofs of the links it does not carry stay at rest and receive no force.
+    arms_qpos = tensor_to_array(het_arms.get_qpos())
+    arms_dofs_vel = tensor_to_array(het_arms.get_dofs_velocity())
+    arms_dofs_force = tensor_to_array(het_arms.get_dofs_control_force())
+    arms_links_pos = tensor_to_array(het_arms.get_links_pos())
+    for i_env, (i_variant, ref_arm, offset) in enumerate(zip(ARMS_ENVS_VARIANT, ref_arms, REFERENCE_OFFSETS)):
+        dofs_idx = list(ARMS_DOFS_IDX[i_variant])
+        assert_allclose(arms_qpos[i_env, dofs_idx], ref_arm.get_qpos(envs_idx=i_env), tol=tol)
+        assert_allclose(arms_dofs_vel[i_env, dofs_idx], ref_arm.get_dofs_velocity(envs_idx=i_env), tol=tol)
+        assert_allclose(arms_dofs_force[i_env, dofs_idx], ref_arm.get_dofs_control_force(envs_idx=i_env), tol=tol)
+        links_pos = arms_links_pos[i_env, list(ARMS_LINKS_IDX[i_variant])]
+        assert_allclose(tensor_to_array(ref_arm.get_links_pos(envs_idx=i_env)) - links_pos, offset, tol=tol)
+        dofs_is_padding = np.ones(het_arms.n_dofs, dtype=bool)
+        dofs_is_padding[dofs_idx] = False
+        for value in (arms_qpos, arms_dofs_vel, arms_dofs_force):
+            assert_equal(value[i_env, dofs_is_padding], 0.0)
+    assert tensor_to_array(het_arms.get_contacts(with_entity=plane)["valid_mask"]).any(axis=-1).all()
 
     for _ in range(N_STEPS - N_STEPS_FALLING):
         scene.step()
@@ -514,23 +593,30 @@ def test_morph_property_raises():
 
 
 @pytest.mark.required
-def test_articulated_structure_mismatch(fixed_base_dual_arm, fixed_base_dual_arm_chained):
+def test_unsupported_variants_raise(fixed_base_dual_arm, mimic_hinges):
     scene = gs.Scene(show_viewer=False)
 
-    # two_cube_revolute has 1 revolute joint; two_link_arm has 2 continuous joints
-    with pytest.raises(gs.GenesisException):
+    # The equality constraints of the first morph bind every environment, so one binding joints another variant lacks
+    # is rejected, and so is one that only a later variant states
+    with pytest.raises(gs.GenesisException, match="some heterogeneous variants do not carry"):
         scene.add_entity(
-            morph=[
-                gs.morphs.URDF(file="urdf/simple/two_cube_revolute.urdf", pos=(0, 0, 0.1)),
-                gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf", pos=(0, 0, 0.1)),
-            ]
+            morph=[gs.morphs.MJCF(file=mimic_hinges), gs.morphs.URDF(file=fixed_base_dual_arm, fixed=True)]
         )
+    with pytest.raises(gs.GenesisException, match="no equality constraint of the first morph"):
+        scene.add_entity(
+            morph=[gs.morphs.URDF(file=fixed_base_dual_arm, fixed=True), gs.morphs.MJCF(file=mimic_hinges)]
+        )
+    # A variant stating the same constraint with other parameters would be simulated under those of the first morph
+    mimic_hinges_geared = copy.deepcopy(mimic_hinges)
+    mimic_hinges_geared.find("equality/joint").set("polycoef", "0 2 0 0 0")
+    with pytest.raises(gs.GenesisException, match="with the parameters of"):
+        scene.add_entity(morph=[gs.morphs.MJCF(file=mimic_hinges), gs.morphs.MJCF(file=mimic_hinges_geared)])
 
-    # Every variant shares the kinematic topology of the first one
-    with pytest.raises(gs.GenesisException, match="Link parent mismatch"):
+    # A fixed base and a free base decide differently which links the world carries
+    with pytest.raises(gs.GenesisException, match="root link"):
         scene.add_entity(
             morph=[
                 gs.morphs.URDF(file=fixed_base_dual_arm, fixed=True),
-                gs.morphs.URDF(file=fixed_base_dual_arm_chained, fixed=True),
+                gs.morphs.URDF(file=fixed_base_dual_arm, fixed=False),
             ]
         )

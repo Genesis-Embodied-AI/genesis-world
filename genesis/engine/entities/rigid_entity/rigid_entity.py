@@ -40,15 +40,33 @@ def get_variants_kinematics(entity, n_envs: int):
 
     The first variant holds the live links and joints, which an attach reshapes, and a homogeneous entity holds this
     one alone. The other variants of a heterogeneous entity, which an attach refuses, hold those their descriptions
-    state. Returns, for every variant, the descriptions of its links and of its joints and its neutral configuration
-    (qpos0), then the variant carried by each of the 'n_envs' environment rows.
+    state. A variant describes a link it does not carry, and the joints of that link, as an environment carrying it
+    simulates them: inert (see 'KinematicLinkDescription.inert' and 'RigidJointDescription.inert'). Returns, for every
+    variant, the descriptions of its links and of its joints, one per link and per joint of the entity, and its neutral
+    configuration (qpos0), then the variant carried by each of the 'n_envs' environment rows.
     """
-    variants = entity.desc.variants[1:]
-    variants_links = [[link.desc for link in entity.links], *[variant.links for variant in variants]]
-    variants_joints = [
-        [joint.desc for joint in entity.joints],
-        *[[j_desc for l_desc in variant.links for j_desc in l_desc.joints] for variant in variants],
-    ]
+    if not entity.desc.variants:
+        variants_links = [[link.desc for link in entity.links]]
+        variants_joints = [[joint.desc for joint in entity.joints]]
+    else:
+        variants_links, variants_joints = [], []
+    for i_variant, variant in enumerate(entity.desc.variants):
+        if i_variant == 0:
+            v_links_desc = {i_l: entity.links[i_l].desc for i_l in variant.links_idx}
+        else:
+            v_links_desc = dict(zip(variant.links_idx, variant.links))
+        links, joints = [], []
+        for i_l, link in enumerate(entity.links):
+            l_desc = v_links_desc.get(i_l)
+            if l_desc is None:
+                j_descs = [joint.desc.inert() for joint in link.joints]
+                l_desc = link.desc.inert(joints=j_descs)
+            else:
+                j_descs = [joint.desc for joint in link.joints] if i_variant == 0 else l_desc.joints
+            links.append(l_desc)
+            joints += j_descs
+        variants_links.append(links)
+        variants_joints.append(joints)
     variants_qpos0 = [variant.init_qpos for variant in entity.desc.variants] or [entity.init_qpos]
     envs_variant_idx = _balanced_variant_mapping(len(variants_links), n_envs)
     return variants_links, variants_joints, variants_qpos0, envs_variant_idx
@@ -226,13 +244,14 @@ class KinematicEntity(Entity):
         self._load_model()
 
     def _add_heterogeneous_variant(self, link, v_link):
-        """Give a link the geoms one variant describes for it. A kinematic entity holds visual geoms alone.
+        """Give a link the geoms one variant describes for it, none for a variant not carrying it ('v_link' None).
 
-        RigidEntity overrides to additionally add collision geoms.
+        A kinematic entity holds visual geoms alone. RigidEntity overrides to additionally add collision geoms.
         """
-        for g_desc in v_link.vgeoms:
+        vgeoms_desc = () if v_link is None else v_link.vgeoms
+        for g_desc in vgeoms_desc:
             link._add_vgeom(g_desc)
-        link._record_variant_vgeom_range(len(v_link.vgeoms))
+        link._record_variant_vgeom_range(len(vgeoms_desc))
 
     def _reassign_heterogeneous_indices(self):
         """Reassign vgeom indices for multi-link heterogeneous entities.
@@ -275,9 +294,11 @@ class KinematicEntity(Entity):
             # Init variant tracking on ALL links
             for link in self._links:
                 link._init_variant_tracking()
-            for v_desc in self._desc.variants:
-                for link, v_link in zip(self._links, v_desc.links):
-                    self._add_heterogeneous_variant(link, v_link)
+            # The primary describes its links as the entity links, whose geoms the links hold already
+            for v_desc in self._desc.variants[1:]:
+                v_links = dict(zip(v_desc.links_idx, v_desc.links))
+                for i_l, link in enumerate(self._links):
+                    self._add_heterogeneous_variant(link, v_links.get(i_l))
 
             # For multi-link entities, reassign indices and recompute variant ranges
             if len(self._links) > 1:
@@ -1640,7 +1661,8 @@ class RigidEntity(KinematicEntity):
     def _add_heterogeneous_variant(self, link, v_link):
         # Add collision geometries
         coup_links = self.material.coup_links
-        for g_desc in v_link.geoms:
+        geoms_desc = () if v_link is None else v_link.geoms
+        for g_desc in geoms_desc:
             needs_coup = self.material.needs_coup and (coup_links is None or link.name in coup_links)
             link._add_geom(g_desc, needs_coup=needs_coup)
 
@@ -1648,7 +1670,7 @@ class RigidEntity(KinematicEntity):
         super()._add_heterogeneous_variant(link, v_link)
 
         # Record geom range on the link (vgeom range already recorded by parent)
-        link._record_variant_geom_range(len(v_link.geoms))
+        link._record_variant_geom_range(len(geoms_desc))
 
     def _reassign_heterogeneous_indices(self):
         """Reassign collision and visual geom indices for multi-link heterogeneous entities."""

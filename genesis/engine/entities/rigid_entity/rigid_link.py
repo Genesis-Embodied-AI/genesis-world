@@ -73,6 +73,9 @@ class KinematicLink(BuildableMixin, RBC):
         # Heterogeneous variant tracking (None = not heterogeneous)
         self._variant_vgeom_ranges: list[tuple[int, int]] | None = None
 
+        # For heterogeneous simulation: the environments whose variant carries this link (None = all envs)
+        self.active_envs_idx: np.ndarray | None = None
+
     def _init_variant_tracking(self):
         """Start tracking heterogeneous variants. Records first variant from current state."""
         self._variant_vgeom_ranges = [(self._vgeom_start, self._vgeom_start + self.n_vgeoms)]
