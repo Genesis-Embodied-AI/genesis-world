@@ -1,0 +1,24 @@
+examples/deformable/mpm_ice_cream.py
+  s_6331e9b5eb051b::t_5cef449863150e 3
+  s_6331e9b5eb051b::t_d29e6ec449af2e 238,302-303
+  s_6331e9b5eb051b::t_597f087537a044 40,43-46,235-237,239-245,247,252-253,255,257-260
+  s_6331e9b5eb051b::t_91ef021a1e156a 41-42,47
+  s_6331e9b5eb051b::t_9602793c928900 4-8
+  s_6331e9b5eb051b::t_fc29d25b166a01 246,248-251,254,256
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "eb21439fe6a86c064245cf4dd62b7e2d91c0306e",
+  "prompts": {},
+  "sessions": {
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
