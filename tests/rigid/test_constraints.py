@@ -506,7 +506,7 @@ def test_dynamic_weld_scene_reset():
 
 
 @pytest.mark.required
-def test_urdf_mimic(show_viewer, tol, scaled_urdf_mimic):
+def test_joint_equality(show_viewer, tol, scaled_urdf_mimic):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             gravity=(0.0, 0.0, 0.0),
@@ -517,10 +517,10 @@ def test_urdf_mimic(show_viewer, tol, scaled_urdf_mimic):
         ),
         show_viewer=show_viewer,
     )
+    # The hand loads from MJCF and the mimic model from URDF, so that one solver holds the equalities of both parsers.
     hand = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/panda_bullet/hand.urdf",
-            fixed=True,
+        gs.morphs.MJCF(
+            file="xml/franka_emika_panda/hand.xml",
         ),
     )
     mimic = scene.add_entity(

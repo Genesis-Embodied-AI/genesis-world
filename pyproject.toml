@@ -25,7 +25,8 @@ dependencies = [
     "libigl!=2.6.2",
     # Cross-platform library to get various kind of CPU information such as model name
     "py-cpuinfo",
-    "mujoco>=3.2.5",
+    # * Mujoco 4.0 removed the 'composite' element of MJCF
+    "mujoco>=3.2.5,<4.0.0",
     # Streams video frames to file, for 'camera.start_recording' and the 'VideoFile' recorder
     "av",
     # Compresses the frames of trajectory files, fast enough for the writer thread to keep pace with stepping
