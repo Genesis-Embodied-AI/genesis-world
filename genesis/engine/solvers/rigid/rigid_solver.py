@@ -2156,7 +2156,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             values = values[None]
         # The weights are solved at the neutral configuration, after which the kernel brings back the current one, which
         # forward kinematics has to have computed for every environment the kernel overwrites
-        self.update_forward_pos()
+        self.changelog.refresh(self.dyn_state.links.pos)
         # The weights are solved again rather than scaled by the mass ratio: a weight follows the mass alone for a body
         # whose degrees of freedom carry no armature, which a model loaded from a file has.
         if name == "mass":
@@ -2427,7 +2427,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         elif name == "armature":
             kernel_set_dofs_armature(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
             # See '_set_links_info'
-            self.update_forward_pos()
+            self.changelog.refresh(self.dyn_state.links.pos)
             self._refresh_invweight_and_meaninertia(envs_idx=envs_idx, force_update=True)
         elif name == "damping":
             kernel_set_dofs_damping(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
@@ -2485,7 +2485,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._wake_dofs(dofs_idx, envs_idx)
 
         # See 'KinematicSolver.set_dofs_position'
-        self.update_forward_pos()
+        self.changelog.refresh(self.dyn_state.links.pos)
         positions = self._read_data(self.dyn_state.dofs.pos, envs_idx, None, copy=True)
         positions[:, dofs_idx] = position
         is_dof_set = torch.zeros((self.n_dofs,), dtype=gs.tc_bool, device=gs.device)
@@ -3166,7 +3166,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     @mutates()
     def add_weld_constraint(self, link1_idx, link2_idx, envs_idx=None):
         # The constraint holds the relative pose of the links, which derives from the state
-        self.update_forward_pos()
+        self.changelog.refresh(self.dyn_state.links.pos)
         # The only type-specific entry is the torque scale of the rotation rows.
         self.constraint_solver.add_dynamic_constraint(
             gs.EQUALITY_TYPE.WELD,
@@ -3278,7 +3278,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         )
         pitch_params = torch.tensor((pitch_cos, pitch_sin, *limit, frictionloss), dtype=gs.tc_float, device=gs.device)
         # See 'add_weld_constraint'
-        self.update_forward_pos()
+        self.changelog.refresh(self.dyn_state.links.pos)
         self.constraint_solver.add_dynamic_constraint(
             gs.EQUALITY_TYPE.SCREW,
             link1_idx,
@@ -3315,7 +3315,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def set_drone_rpm(self, propellers_link_idx, kf, km, propellers_rpm, propellers_spin, invert):
         # The backward pass of a step stops at the speed of the propellers, an input without gradient. The thrust
         # follows the frame of the center of mass of each propeller, which derives from the state.
-        self.update_forward_pos()
+        self.changelog.refresh(self.dyn_state.links.pos)
         kernel_set_drone_rpm(
             propellers_link_idx, kf, km, propellers_rpm, propellers_spin, self.dyn_state, self.rigid_config, invert
         )
@@ -3763,7 +3763,7 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
         link_frames = super().update_markers(envs_idx)
         solver = self.owner
         # The link frames and the constraints view the poses of the links, which derive from the state
-        solver.update_forward_pos()
+        solver.changelog.refresh(solver.dyn_state.links.pos)
         n_envs = len(envs_idx)
         markers: list = []
         if solver.options.vis.constraints:

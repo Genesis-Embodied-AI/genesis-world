@@ -755,8 +755,9 @@ class RaycastTarget:
                 return
             changelog.mark_clean(self)
         else:
-            # The collision meshes follow the poses of the geoms, which forward kinematics brings up to date
-            self.scoped_context.owner.update_forward_pos()
+            # The collision meshes follow the poses of the geoms, which forward kinematics refreshes with the links
+            solver = self.scoped_context.owner
+            solver.changelog.refresh(solver.dyn_state.links.pos)
         if self.meshes_aabb is not None:
             # The boxes of the meshes in the world, which the poses keep current, give the leaves of the trees as is
             kernel_build_instances_tree(

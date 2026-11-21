@@ -8,7 +8,7 @@ import torch
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
-from genesis.utils.misc import tensor_to_array
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -27,12 +27,10 @@ def test_link_velocity(gs_sim, tol):
     (gs_robot,) = gs_sim.entities
 
     gs_robot.set_dofs_velocity([0.0, 1.0])
-    gs_sim.rigid_solver.update_forward_pos()
-    assert_allclose(gs_sim.rigid_solver.dyn_state.links.cd_vel.to_numpy(), 0, tol=tol)
+    assert_allclose(qd_to_numpy(gs_sim.rigid_solver.dyn_state.links.cd_vel), 0, tol=tol)
 
     gs_robot.set_dofs_velocity([1.0, 0.0])
-    gs_sim.rigid_solver.update_forward_pos()
-    cvel_0, cvel_1 = gs_sim.rigid_solver.dyn_state.links.cd_vel.to_numpy()[:, 0]
+    cvel_0, cvel_1 = qd_to_numpy(gs_sim.rigid_solver.dyn_state.links.cd_vel)[:, 0]
     assert_allclose(cvel_0, np.array([0.0, 0.5, 0.0]), tol=tol)
     assert_allclose(cvel_1, np.array([0.0, 0.5, 0.0]), tol=tol)
 

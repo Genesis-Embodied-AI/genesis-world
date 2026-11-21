@@ -812,7 +812,7 @@ class KinematicSolver(Solver):
         pass
 
     def substep_post_coupling(self):
-        self.update_forward_pos()
+        self.changelog.refresh(self.dyn_state.links.pos)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------
@@ -1094,15 +1094,6 @@ class KinematicSolver(Solver):
         if self.n_envs == 0 and self._options.batch_dofs_info:
             tensor = tensor[0]
         return tensor[..., 0], tensor[..., 1]
-
-    def update_forward_pos(self):
-        """Run forward kinematics in the environments whose state changed since it last ran.
-
-        Setters write the state alone, and the poses and velocities deriving from it are refreshed as they are read,
-        whether by a getter, a kernel or the next step (see 'genesis.engine.state_change'). A consumer holding a view of
-        them calls this before reading it.
-        """
-        self.changelog.refresh(self.dyn_state.links.pos)
 
     @mutates(derived=True)
     def _update_forward_kinematics(self, envs_idx: torch.Tensor | None) -> None:
@@ -1689,7 +1680,7 @@ class KinematicScopedRenderContext(SolverScopedRenderContext[KinematicSolver]):
             return ()
         # The frames of the links view their poses, up to date once forward kinematics ran, which hidden frames skip
         if not self.is_hidden(self._link_frames):
-            self.owner.update_forward_pos()
+            self.owner.changelog.refresh(self.owner.dyn_state.links.pos)
         return (self._link_frames,)
 
     @property
