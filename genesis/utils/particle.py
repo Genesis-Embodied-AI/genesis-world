@@ -819,12 +819,12 @@ def _compute_emission_potentials(positions, velocities, support_radius, particle
 class FoamGenerator:
     """Generate the spray, foam and air bubble particles of a fluid.
 
-    The model follows Ihmsen et al., "Unified Spray, Foam and Bubbles for Particle-Based Fluids", The Visual Computer,
-    2012: Sec. 3.1 for the emission and Sec. 3.2 for the advection. Fluid particles trapping air, at a wave crest, or
-    moving fast emit foam particles at each step. A foam particle surrounded by few fluid particles is spray, falling
-    under gravity and air damping. One surrounded by many is an air bubble, rising by buoyancy and dragged by the fluid.
-    Any other one is foam, carried along by the fluid. Every foam particle disappears at the end of its lifetime or once
-    it leaves the domain of the fluid.
+    The model follows Ihmsen et al., "Unified spray, foam and air bubbles for particle-based fluids", The Visual
+    Computer, 2012 (doi:10.1007/s00371-012-0697-9): Sec. 3.1 for the emission and Sec. 3.2 for the advection. Fluid
+    particles trapping air, at a wave crest, or moving fast emit foam particles at each step. A foam particle surrounded
+    by few fluid particles is spray, falling under gravity and air damping. One surrounded by many is an air bubble,
+    rising by buoyancy and dragged by the fluid. Any other one is foam, carried along by the fluid. Every foam particle
+    disappears at the end of its lifetime or once it leaves the domain of the fluid.
 
     Parameters
     ----------
@@ -839,7 +839,8 @@ class FoamGenerator:
     spray_decay, foam_decay, bubble_decay : float
         The rate at which the lifetime of each kind of foam particle decreases.
     k_foam : float
-        The scale of the emission rate. A fluid particle emits at most 20 * k_foam foam particles per unit time.
+        The scale of the emission rate. A fluid particle emits up to 20 * k_foam foam particles per unit time, rounded
+        to a whole number at each step.
     foam_density : float
         The density of the fluid.
     """
