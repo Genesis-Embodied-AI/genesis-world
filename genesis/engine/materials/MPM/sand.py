@@ -8,7 +8,8 @@ import genesis as gs
 from genesis.constants import STRUCTURE
 from genesis.typing import PositiveFloat, ValidFloat
 
-from .base import Base, SamplerType
+from ..base import SamplerType
+from .base import Base
 
 
 @qd.data_oriented
@@ -25,7 +26,8 @@ class Sand(Base):
     rho : float, optional
         Density (kg/m³). Default is 1000.
     sampler : str, optional
-        Particle sampler. Default is 'random'.
+        Particle sampler. Default is 'random'. 'pbs-<res>' sets the resolution of the signed distance field of 'pbs', 32
+        by default.
     friction_angle : float, optional
         Friction angle in degrees, used to compute internal pressure-dependent plasticity. Default is 45.
     """

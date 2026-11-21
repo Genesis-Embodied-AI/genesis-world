@@ -460,9 +460,9 @@ class ParticleVisOptions(Options):
         renderer to the next. Defaults to False.
     recon_backend : str, optional
         How the surface of the entities whose material draws one is reconstructed from their particles. 'splashsurf'
-        extracts a smooth surface from the density of the particles, but requires all of them to share the same radius.
-        'levelset' wraps the union of the spheres of the particles, which supports a radius per particle at the cost of
-        a bumpier surface. 'openvdb' is a deprecated alias of 'levelset'. Defaults to 'splashsurf'.
+        extracts a smooth and finely tessellated surface from the density of the particles. 'levelset' wraps the union
+        of the spheres of the particles, which is faster at the cost of a coarser and bumpier surface. 'openvdb' is a
+        deprecated alias of 'levelset'. Defaults to 'splashsurf'.
     n_support_neighbors : int, optional
         The number of particles whose positions place each vertex of a visual mesh skinned on the particles of an MPM
         or PBD entity. More neighbors deform the mesh more smoothly, at the cost of the memory and of the time of
