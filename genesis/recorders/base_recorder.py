@@ -1,6 +1,8 @@
+import functools
 import queue
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -11,6 +13,14 @@ from genesis.utils.misc import BuildableMixin
 
 if TYPE_CHECKING:
     from .recorder_manager import RecorderManager
+
+
+def _stop_recorder_at_exit(recorder_ref: "weakref.ref[Recorder]") -> None:
+    # 'RecorderManager.stop' destroys the recorders it stops, which leaves nothing to stop at exit. A weak reference
+    # keeps this hook from holding the recorder alive until the interpreter exits.
+    recorder = recorder_ref()
+    if recorder is not None and recorder._is_built:
+        recorder.stop()
 
 
 class Recorder[T](BuildableMixin):
@@ -177,8 +187,7 @@ class Recorder[T](BuildableMixin):
             try:
                 # Note that it is necessary to rely on private threading atexit because functions registered using
                 # 'atexit.register' are called AFTER 'threading._shutdown', causing deadlock for non-daemon threads.
-                # 'RecorderManager.stop' destroys the recorders it stops, which leaves nothing to stop at exit.
-                threading._register_atexit(lambda: self._is_built and self.stop())
+                threading._register_atexit(functools.partial(_stop_recorder_at_exit, weakref.ref(self)))
             except AttributeError:
                 pass
         else:

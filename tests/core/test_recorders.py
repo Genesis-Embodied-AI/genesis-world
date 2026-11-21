@@ -1,4 +1,5 @@
 import csv
+import pathlib
 import subprocess
 import sys
 import time
@@ -12,6 +13,12 @@ import genesis as gs
 from genesis.utils.image_exporter import as_grayscale_image
 
 from ..utils.assertions import assert_allclose, assert_equal, rgb_array_to_png_bytes
+
+RET_SUCCESS = 42
+
+FILE_PATH = pathlib.Path(__file__)
+MODULE_ROOT_DIR = FILE_PATH.parents[2]
+MODULE = ".".join((FILE_PATH.parents[1].name, FILE_PATH.parent.name, FILE_PATH.stem))
 
 
 @pytest.fixture
@@ -301,18 +308,32 @@ def test_file_writers(tmp_path):
     assert scene.timings["period"] > timings["step"] > 0.0
 
 
+def _stop_recording_then_exit_child(args: list[str]):
+    """Child process: stop recording, then exit while the exit hook of the recorder is still registered."""
+    gs.init(backend=gs.constants.backend.cpu)
+
+    scene = gs.Scene(show_viewer=False)
+    scene.add_recorder(data_func=lambda: 1.0, rec_options=gs.recorders.NPZFile(filename=args[0]))
+    scene.build()
+    scene.step()
+    scene.stop_recording()
+
+    sys.exit(RET_SUCCESS)
+
+
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [None])
 def test_stop_recording_then_exit(tmp_path):
     npz_file = tmp_path / "data.npz"
-    script = (
-        "import genesis as gs; gs.init(backend=gs.cpu); scene = gs.Scene(show_viewer=False); "
-        f"scene.add_recorder(data_func=lambda: 1.0, rec_options=gs.recorders.NPZFile(filename={str(npz_file)!r})); "
-        "scene.build(); scene.step(); scene.stop_recording()"
-    )
-    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, encoding="utf-8")
-    assert proc.returncode == 0, proc.stderr
-    assert "Exception ignored" not in proc.stderr, proc.stderr
+    cmd_line = [sys.executable, "-m", MODULE, _stop_recording_then_exit_child.__name__, str(npz_file)]
+
+    proc = subprocess.run(cmd_line, capture_output=True, text=True, encoding="utf-8", cwd=MODULE_ROOT_DIR)
+    if proc.returncode != RET_SUCCESS or "Exception ignored" in proc.stderr:
+        print(proc.stdout)
+        print("-" * 100)
+        print(proc.stderr)
+    assert proc.returncode == RET_SUCCESS
+    assert "Exception ignored" not in proc.stderr
     assert npz_file.exists()
 
 
@@ -467,3 +488,7 @@ def test_video_writer(tmp_path):
         assert video_path.exists(), "Recorded video file should exist"
         with av.open(video_path) as container:
             assert sum(1 for _ in container.decode(video=0)) == STEPS + 1
+
+
+if __name__ == "__main__":
+    globals()[sys.argv[1]](sys.argv[2:])
