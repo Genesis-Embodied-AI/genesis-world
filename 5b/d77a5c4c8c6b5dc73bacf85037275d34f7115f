@@ -1,0 +1,45 @@
+examples/mujoco/cards.py
+  s_6331e9b5eb051b::t_2753e253356df5 1-44,47-92
+  s_6331e9b5eb051b::t_6c10c849a2bcd4 45-46
+  s_6331e9b5eb051b::t_6954f949d9af77 93-97
+examples/mujoco/stonehenge.py
+  s_6331e9b5eb051b::t_992a15ca45dd79 1-32,35-55,57-67,69-78
+  s_6331e9b5eb051b::t_6c10c849a2bcd4 68
+  s_6331e9b5eb051b::t_97e1b6cbf99254 33-34
+  s_6331e9b5eb051b::t_68dcc234d08cb0 56
+  s_6331e9b5eb051b::t_6014fa2b9d55c8 79-83
+examples/mujoco/humanoids_100.py
+  s_6331e9b5eb051b::t_c275590e3d97ec 1-79,81-82,84-89,92-97
+  s_6331e9b5eb051b::t_6c10c849a2bcd4 83
+  s_6331e9b5eb051b::t_922f33308d162d 80
+  s_6331e9b5eb051b::t_4dfc03814e7af3 90-91
+  s_6331e9b5eb051b::t_8a0c15dfde3514 98-102
+examples/mujoco/dominos.py
+  s_6331e9b5eb051b::t_aac285750f8a95 1
+  s_6331e9b5eb051b::t_78a05fc73e54d7 2-19,21-33,36-71,73-82
+  s_6331e9b5eb051b::t_6c10c849a2bcd4 72
+  s_6331e9b5eb051b::t_fd1e2b2b161a7b 20,34-35
+  s_6331e9b5eb051b::t_5edfc121bd8cc4 83-87
+examples/mujoco/humanoid_100_objects.py
+  s_6331e9b5eb051b::t_0abc48c63f46e1 1-75,77-86
+  s_6331e9b5eb051b::t_6c10c849a2bcd4 76
+  s_6331e9b5eb051b::t_12fd9aa08391c2 87-91
+examples/README.md
+  s_6331e9b5eb051b::t_29ba4279654253 148-160
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5bd77a5c4c8c6b5dc73bacf85037275d34f7115f",
+  "prompts": {},
+  "sessions": {
+    "s_6331e9b5eb051b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a91e0cf7-65c6-4cf3-98bf-4f27e22cf690",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
