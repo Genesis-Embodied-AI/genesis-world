@@ -436,7 +436,11 @@ def _parse_link(
 
             for drive_components in DRIVE_NAMES[joint_type]:
                 dof_kp, dof_kv, max_force = 0.0, 0.0, np.inf
-                if joint_axis_str:
+                if detected_axis_str is not None:
+                    # A generic joint reduced to one DOF names its drive after that DOF (rotX ... transZ).
+                    prefix = "rot" if joint_type == gs.JOINT_TYPE.REVOLUTE else "trans"
+                    drive_components = (f"{prefix}{detected_axis_str}",)
+                elif joint_axis_str:
                     drive_components = drive_components + (joint_axis_str,)
                 for drive_component in drive_components:
                     if joint_prim.HasAPI(UsdPhysics.DriveAPI, drive_component):
