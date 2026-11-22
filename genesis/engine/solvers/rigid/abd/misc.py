@@ -1,9 +1,11 @@
+from enum import IntEnum
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
-from genesis.engine.solvers.rigid.data import DynInfo, DynState, LinksState, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, LinksState, RigidConfig, RigidInfo
 from genesis.grad.bridge import no_grad
 from genesis.utils.data import eoa
 from genesis.utils.simt import func_exact_sum_add, func_exact_sum_take
@@ -122,6 +124,73 @@ def func_wakeup_link(
 
         # The entity owning this link now has an awake link
         dyn_state.entities.is_hibernated[dyn_info.links.entity_idx[link_I], i_b] = False
+
+
+class MASS_MAT_ASSEMBLY(IntEnum):
+    """Select what a substep computes of the mass matrix and of its factor (see func_forward_dynamics).
+
+    A sleeping tree keeps the mass matrix and the factor of its last awake substep, unless a pass wrote them meanwhile
+    (see func_is_mass_mat_assembled), in which case it is computed along the awake ones.
+    """
+
+    ASSEMBLE = 0
+    """Assemble and factor the mass matrix."""
+
+    FACTOR = 1
+    """Factor the mass matrix, which is updated."""
+
+    NONE = 2
+    """Neither, the mass matrix and its factor being updated."""
+
+
+# The status bits are combined on the host at every substep, where the plain integer arithmetic of an IntEnum is
+# cheaper than that of an IntFlag.
+class SUBSTEP_STATUS(IntEnum):
+    """The bits of the status of the derived arrays a substep starts from, which its kernels take as one static integer.
+
+    A substep refreshes the cartesian space from it, and selects what it computes of the mass matrix (see
+    'get_mass_mat_assembly').
+    """
+
+    FORWARD_POS_UPDATED = 1
+    """The poses of the moving links are updated."""
+
+    FORWARD_VEL_UPDATED = 2
+    """The velocities of the links are updated."""
+
+    STATIC_POSE_UPDATED = 4
+    """The poses of the static links are updated."""
+
+    MASS_MAT_UPDATED = 8
+    """The mass matrix of the awake trees is updated."""
+
+    MASS_MAT_L_UPDATED = 16
+    """The factor of the mass matrix of the awake trees is updated."""
+
+
+def get_mass_mat_assembly(rigid_config: RigidConfig, substep_status: int) -> MASS_MAT_ASSEMBLY:
+    """Select what a substep computes of the mass matrix and of its factor, as its kernels compile.
+
+    Parameters
+    ----------
+    rigid_config : RigidConfig
+        The static configuration of the rigid solver.
+    substep_status : int
+        The status of the derived arrays the substep starts from, a combination of the bits of SUBSTEP_STATUS.
+    """
+    # A mass matrix updated outside the substep holds no implicit damping term, the derived quantities stand as at the
+    # start of the substep, and no gradient flows through it.
+    if (
+        rigid_config.integrator == gs.integrator.approximate_implicitfast
+        or rigid_config.enable_mujoco_compatibility
+        or rigid_config.requires_grad
+        or not (substep_status & SUBSTEP_STATUS.MASS_MAT_UPDATED)
+    ):
+        return MASS_MAT_ASSEMBLY.ASSEMBLE
+    # The fused solve of the smooth acceleration runs in the factor pass, which it needs then
+    if rigid_config.enable_fused_smooth_acc_solve or not (substep_status & SUBSTEP_STATUS.MASS_MAT_L_UPDATED):
+        return MASS_MAT_ASSEMBLY.FACTOR
+    return MASS_MAT_ASSEMBLY.NONE
 
 
 @qd.func

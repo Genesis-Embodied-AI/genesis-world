@@ -129,6 +129,8 @@ from .abd.forward_kinematics import (
 )
 from .abd.manual_bw import kernel_manual_compute_qacc_bw
 from .abd.misc import (
+    SUBSTEP_STATUS,
+    get_mass_mat_assembly,
     kernel_apply_links_external_wrench,
     kernel_apply_links_external_wrench_at_pos,
     kernel_clear_external_force,
@@ -1335,9 +1337,13 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # recomputes the cartesian space as the substep before did. It launches every stage on its own, reversed by the
         # autodiff of its kernel or by the backward given to it (see LaunchRecorder), where the forward pass fuses them.
         is_recording = self._requires_grad and is_recording_launches()
-        is_forward_pos_updated, is_forward_vel_updated = self._is_forward_pos_updated, self._is_forward_vel_updated
-        if is_recording:
-            is_forward_pos_updated = is_forward_vel_updated = False
+        # The static links move by a setter alone, which places them right away
+        substep_status = int(SUBSTEP_STATUS.STATIC_POSE_UPDATED)
+        if not is_recording:
+            if self._is_forward_pos_updated:
+                substep_status |= SUBSTEP_STATUS.FORWARD_POS_UPDATED
+            if self._is_forward_vel_updated:
+                substep_status |= SUBSTEP_STATUS.FORWARD_VEL_UPDATED
 
         # The wrenches the other solvers summed exactly over the previous substep join the external wrench of the links
         if self._is_external_wrench_exact:
@@ -1390,8 +1396,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,
-                is_forward_pos_updated,
-                is_forward_vel_updated,
+                substep_status,
             )
             if isinstance(self.sim.coupler, SAPCoupler):
                 update_qvel(self.dyn_state, self.rigid_info, self.rigid_config)
@@ -1414,8 +1419,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,
-                self._is_forward_pos_updated,
-                self._is_forward_vel_updated,
+                substep_status,
                 not self._disable_constraint,
             )
             if self._enable_collision:
@@ -3347,19 +3351,17 @@ def func_step_1(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
-    is_forward_pos_updated: qd.template(),
-    is_forward_vel_updated: qd.template(),
+    substep_status: qd.template(),
     is_backward: qd.template(),
 ):
-    if qd.static(not is_forward_pos_updated):
-        func_update_cartesian_space(
-            dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=is_backward
-        )
-
-    if qd.static(not is_forward_vel_updated):
+    force_update_all_geoms = qd.static(not (substep_status & SUBSTEP_STATUS.STATIC_POSE_UPDATED))
+    assembly = qd.static(get_mass_mat_assembly(rigid_config, substep_status))
+    if qd.static(not (substep_status & SUBSTEP_STATUS.FORWARD_POS_UPDATED)):
+        func_update_cartesian_space(dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms, is_backward)
+    if qd.static(not (substep_status & SUBSTEP_STATUS.FORWARD_VEL_UPDATED)):
         func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
-    func_forward_dynamics(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward)
+    func_forward_dynamics(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, assembly, is_backward)
 
 
 @qd.kernel(fastcache=True)
@@ -3369,24 +3371,14 @@ def kernel_step_1(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
-    is_forward_pos_updated: qd.template(),
-    is_forward_vel_updated: qd.template(),
+    substep_status: qd.template(),
 ):
     """Run the first half of a substep on its own (see func_step_1).
 
     The constraint involvement of the links is reset, which the constraint assembly or a coupler solving instead of it
     marks back (see func_mark_link_constrained).
     """
-    func_step_1(
-        dyn_state,
-        constraint_state,
-        dyn_info,
-        rigid_info,
-        rigid_config,
-        is_forward_pos_updated,
-        is_forward_vel_updated,
-        is_backward=False,
-    )
+    func_step_1(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, substep_status, is_backward=False)
     func_clear_links_constrained(dyn_state.links, rigid_config)
 
 
@@ -3428,24 +3420,14 @@ def kernel_substep_dynamics(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
-    is_forward_pos_updated: qd.template(),
-    is_forward_vel_updated: qd.template(),
+    substep_status: qd.template(),
     enable_constraint: qd.template(),
 ):
     """Run the forward dynamics of a substep, then assemble its equality constraints, captured as one graph.
 
     enable_constraint selects the assembly of the equality constraints.
     """
-    func_step_1(
-        dyn_state,
-        constraint_state,
-        dyn_info,
-        rigid_info,
-        rigid_config,
-        is_forward_pos_updated,
-        is_forward_vel_updated,
-        is_backward=False,
-    )
+    func_step_1(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, substep_status, is_backward=False)
     if qd.static(enable_constraint):
         func_add_equality_constraints(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
