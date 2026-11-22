@@ -394,8 +394,8 @@ def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
     minimizing the mean drop in resident blocks that rounding a row count n up to the next kept size causes against its
     tightest candidate, weighted by 1 / n so that every doubling of the size counts the same.
 
-    Where the compute unit cannot be queried (Metal, Vulkan), it is taken to hold the shared memory of one block, which
-    then bounds the resident blocks alone. A row count above the largest size has no shared tile.
+    Where the compute unit cannot be queried (some ROCm builds, Metal, Vulkan), it is taken to hold the shared memory of
+    one block, which then bounds the resident blocks alone. A row count above the largest size has no shared tile.
     """
     if gs.backend == gs.cpu:
         gs.raise_exception("CPU backend not supported by this method.")
@@ -405,7 +405,7 @@ def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
     if torch.cuda.is_available():
         # CUDA and ROCm alike: a block of these tiles is one warp (wavefront), whose slots bound the resident blocks.
         device_property = torch.cuda.get_device_properties(torch.cuda.current_device())
-        unit_bytes = device_property.shared_memory_per_multiprocessor
+        unit_bytes = getattr(device_property, "shared_memory_per_multiprocessor", block_bytes)
         max_blocks = device_property.max_threads_per_multi_processor // device_property.warp_size
         if torch.version.hip:
             # FIXME: torch exposes no allocation granularity of the local data share (LDS), which AMD sets per

@@ -4,6 +4,7 @@ import gc
 import itertools
 import os
 import xml.etree.ElementTree as ET
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,11 +13,34 @@ import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
+import genesis.utils.misc as gum
 import genesis.utils.point_cloud as pc
 from genesis.utils.cache import disable_owned_cache_release, enable_owned_cache_release
 from genesis.utils.misc import assign_indexed_tensor, broadcast_tensor, indices_to_mask, sanitize_index, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
+
+
+@pytest.mark.required
+def test_gpu_shared_tile_sizes_falls_back_when_compute_unit_memory_is_unavailable(monkeypatch):
+    block_bytes = 64 * 1024
+    device_property = SimpleNamespace(
+        gcnArchName="gfx90a",
+        max_threads_per_multi_processor=2048,
+        warp_size=64,
+    )
+    monkeypatch.setattr(gum.gs, "backend", gum.gs.constants.backend.amdgpu)
+    monkeypatch.setattr(gum, "get_gpu_block_shared_memory_bytes", lambda: block_bytes)
+    monkeypatch.setattr(gum.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(gum.torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(gum.torch.cuda, "get_device_properties", lambda _: device_property)
+    monkeypatch.setattr(gum.torch.version, "hip", "7.2.4")
+
+    fallback_tile_sizes = gum.get_gpu_shared_tile_sizes(3)
+    device_property.shared_memory_per_multiprocessor = block_bytes
+    queried_tile_sizes = gum.get_gpu_shared_tile_sizes(3)
+
+    assert fallback_tile_sizes == queried_tile_sizes
 
 
 @pytest.mark.required
