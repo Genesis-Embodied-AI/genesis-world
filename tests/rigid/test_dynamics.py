@@ -951,15 +951,17 @@ def test_mass_matrix_getter(integrator, use_hibernation, show_viewer, tol):
     state = scene.get_state()
 
     # The mass matrix holds the armature, and none of the implicit damping terms a step folds into it
-    assert_allclose(
-        box_rest.get_mass_mat()[..., :3, :3], (tensor_to_array(box_rest.get_mass()) + ARMATURE) * np.eye(3), tol=tol
-    )
+    mass_mat_rest = (tensor_to_array(box_rest.get_mass()) + ARMATURE) * np.eye(3)
+    assert_allclose(box_rest.get_mass_mat()[..., :3, :3], mass_mat_rest, tol=tol)
 
-    # Reading the mass matrix or its factor before a step leaves the trajectory as it is without reading them, the
-    # dropped box falling freely, and the resting box falling asleep under hibernation until the dropped one lands.
+    # The mass matrix of the first environment stays so while the resting box sleeps. Reading it or its factor before a
+    # step leaves the trajectory as it is without reading them, the dropped box falling freely, and the resting box
+    # falling asleep under hibernation until the dropped one lands.
     qpos_read = []
     for i_step in range(30):
-        box_rest.get_mass_mat(decompose=i_step % 2 == 1)
+        assert_allclose(box_rest.get_mass_mat(envs_idx=[0])[..., :3, :3], mass_mat_rest, tol=tol)
+        if i_step % 2 == 1:
+            box_rest.get_mass_mat(envs_idx=[0], decompose=True)
         scene.step()
         qpos_read.append(scene.rigid_solver.get_qpos())
     scene.reset(state)

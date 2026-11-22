@@ -130,6 +130,11 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     n_candidate_equalities: qd.Tensor = field(int, shape=(), labels=DYNAMICS)
     hibernation_thresh_vel: qd.Tensor = field(float, shape=(), labels=DYNAMICS)
     EPS: qd.Tensor = field(float, shape=())
+    # Whether the sleeping trees of each env hold the mass matrix and the factor of their last awake substep, which the
+    # substeps leave as they are. A pass writing their mass matrix outside the substeps unsets it, its own matrix
+    # lacking the terms of the integrator (see func_compute_mass_matrix_masked), so that the next substep assembles and
+    # factors them too, and its integration sets it back (see func_integrate).
+    is_hibernated_mass_mat_updated: qd.Tensor = field(bool, shape=(ENVS,), kind=DataKind.DERIVED, labels=DYNAMICS)
 
 
 # The counts of the largest entity of the solver, each taken over every entity
