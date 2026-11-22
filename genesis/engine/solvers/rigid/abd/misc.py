@@ -1,3 +1,5 @@
+from enum import IntEnum
+
 import quadrants as qd
 
 import genesis as gs
@@ -7,6 +9,19 @@ from genesis.engine.solvers.rigid.data import DynInfo, DynState, LinksState, Rig
 from genesis.grad.bridge import no_grad
 from genesis.utils.data import eoa
 from genesis.utils.simt import func_exact_sum_add, func_exact_sum_take
+
+
+class MASS_MAT_ASSEMBLY(IntEnum):
+    """Select the kinematic trees whose mass matrix a pass assembles and factors (see func_forward_dynamics).
+
+    A sleeping tree keeps the mass matrix and the factor of its last awake substep (see func_is_awake_tree).
+    """
+
+    AWAKE = 0
+    """Assemble and factor the awake trees."""
+
+    ALL = 1
+    """Assemble and factor every tree, the sleeping ones included."""
 
 
 @qd.func

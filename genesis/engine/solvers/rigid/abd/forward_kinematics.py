@@ -26,6 +26,7 @@ from genesis.utils.data import eoa
 
 from .manual_bw import kernel_manual_forward_kinematics_bw, kernel_manual_forward_velocity_bw
 from .misc import (
+    MASS_MAT_ASSEMBLY,
     func_add_safe_backward,
     func_atomic_add_if,
     func_is_awake_link,
@@ -893,6 +894,7 @@ def func_forward_velocity(
             dyn_info,
             rigid_info,
             rigid_config,
+            assembly=MASS_MAT_ASSEMBLY.AWAKE,
             sweep_pass=LINK_SWEEP_PASS.FORWARD_VELOCITY,
             update_cacc=False,
         )
@@ -998,6 +1000,7 @@ def func_sweep_links_by_level(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
+    assembly: qd.template(),
     sweep_pass: qd.template(),
     update_cacc: qd.template(),
 ):
@@ -1006,7 +1009,8 @@ def func_sweep_links_by_level(
     The pass sweep_pass (see LINK_SWEEP_PASS) runs from the root down for the forward kinematics and velocities, on the
     links of the awake trees, and for the accelerations, on the awake links of every root. It runs from the leaves up
     for the fold of the composite inertia and of the link forces together, on the links of the awake roots, each link
-    adding its children (see links_child_start in rigid/data.py). update_cacc applies to the accelerations alone.
+    adding its children (see links_child_start in rigid/data.py), of every root when assembly selects every tree
+    (see MASS_MAT_ASSEMBLY). update_cacc applies to the accelerations alone.
 
     A block of 32 lanes holds 4 envs of one tree or root, 8 lanes per env. The lanes of an env split the links of a
     level among them, and the block syncs before the next level, whose links read their parent, or their children,
@@ -1043,9 +1047,10 @@ def func_sweep_links_by_level(
         elif qd.static(IS_LEAF_TO_ROOT):
             # The links of a root sleep as a unit (see func_crb_fold in forward_dynamics.py). The accelerations gate
             # their links one by one below.
-            if is_awake:
-                i_l_root = rigid_info.roots_link_idx[i_group]
-                is_awake = func_is_awake_link(i_l_root, i_b, dyn_state, rigid_config)
+            if qd.static(rigid_config.use_hibernation and assembly != MASS_MAT_ASSEMBLY.ALL):
+                if is_awake:
+                    i_l_root = rigid_info.roots_link_idx[i_group]
+                    is_awake = func_is_awake_link(i_l_root, i_b, dyn_state, rigid_config)
         # From the leaves up, the walk starts past the deepest level, where the entries of the next group begin, and
         # steps back through the level starts
         i_k_start = groups_level_start[i_group]
@@ -1177,6 +1182,7 @@ def func_update_cartesian_space(
             dyn_info,
             rigid_info,
             rigid_config,
+            assembly=MASS_MAT_ASSEMBLY.AWAKE,
             sweep_pass=LINK_SWEEP_PASS.FORWARD_KINEMATICS,
             update_cacc=False,
         )
