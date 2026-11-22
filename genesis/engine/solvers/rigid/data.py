@@ -59,7 +59,7 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     n_awake_dofs: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
     qpos0: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.INFO)
     qpos: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.STATE, grad=True)
-    qpos_next: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.SCRATCH, grad=True)
+    qpos_next: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.SCRATCH, grad=True, labels=DYNAMICS)
     geoms_init_AABB: qd.Tensor = field((float, 3), shape=(GEOMS, 8), labels=DYNAMICS)
     # Stored reversed under the cooperative constraint kernels (see RigidData), i_d1 innermost, for their readers
     # striding i_d1 across lanes. The writers striding i_b have cooperative variants under the same flag.
@@ -193,29 +193,29 @@ class DofsState(Data, kind=DataKind.DERIVED, shape=(DOFS, ENVS)):
     """The state of each dof of the rigid solver in each environment: its motion, forces and controls."""
 
     # A *_bw array keeps what the backward pass reads and the forward pass overwrites
-    force: qd.Tensor = field(float, grad=True)
-    qf_bias: qd.Tensor = field(float, grad=True)
-    qf_passive: qd.Tensor = field(float, grad=True)
-    qf_applied: qd.Tensor = field(float, grad=True)
+    force: qd.Tensor = field(float, grad=True, labels=DYNAMICS)
+    qf_bias: qd.Tensor = field(float, grad=True, labels=DYNAMICS)
+    qf_passive: qd.Tensor = field(float, grad=True, labels=DYNAMICS)
+    qf_applied: qd.Tensor = field(float, grad=True, labels=DYNAMICS)
     pos: qd.Tensor = field(float, grad=True)
     vel: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
-    vel_prev: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True)
-    vel_next: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True)
-    acc: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
-    acc_smooth: qd.Tensor = field(float, grad=True)
+    vel_prev: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True, labels=DYNAMICS)
+    vel_next: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True, labels=DYNAMICS)
+    acc: qd.Tensor = field(float, grad=True, labels=DYNAMICS)
+    acc_smooth: qd.Tensor = field(float, grad=True, labels=DYNAMICS)
     acc_smooth_bw: qd.Tensor = field(float, shape=(2, DOFS, ENVS), labels=BACKWARD, grad=True)
-    qf_smooth: qd.Tensor = field(float, grad=True)
+    qf_smooth: qd.Tensor = field(float, grad=True, labels=DYNAMICS)
     # Implicit damping (see func_implicit_damping in forward_dynamics.py): the implicit share h D qacc of the damping
     # force, D being the diagonal the damped mass factor adds, and the correction (M + hD)^-1 h D qacc subtracted from
     # the acceleration
-    qf_damping_implicit: qd.Tensor = field(float, kind=DataKind.SCRATCH)
-    qacc_damping_implicit: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    qf_damping_implicit: qd.Tensor = field(float, kind=DataKind.SCRATCH, labels=DYNAMICS)
+    qacc_damping_implicit: qd.Tensor = field(float, kind=DataKind.SCRATCH, labels=DYNAMICS)
     cdof_ang: qd.Tensor = field((float, 3), grad=True)
     cdof_vel: qd.Tensor = field((float, 3), grad=True)
     cdofd_ang: qd.Tensor = field((float, 3), grad=True)
     cdofd_vel: qd.Tensor = field((float, 3), grad=True)
-    f_vel: qd.Tensor = field((float, 3), grad=True)
-    f_ang: qd.Tensor = field((float, 3), grad=True)
+    f_vel: qd.Tensor = field((float, 3), grad=True, labels=DYNAMICS)
+    f_ang: qd.Tensor = field((float, 3), grad=True, labels=DYNAMICS)
     ctrl_force: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
     ctrl_pos: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
     ctrl_vel: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
@@ -226,29 +226,29 @@ class DofsState(Data, kind=DataKind.DERIVED, shape=(DOFS, ENVS)):
 class LinksInfo(Data, kind=DataKind.INFO, shape=(LINKS, LINKS_INFO_ENVS)):
     """The model parameters of each link, per environment where batched: tree, ranges, pose and inertia."""
 
-    parent_idx: qd.Tensor = field(int)
-    root_idx: qd.Tensor = field(int)
-    q_start: qd.Tensor = field(int)
-    dof_start: qd.Tensor = field(int)
-    joint_start: qd.Tensor = field(int)
-    q_end: qd.Tensor = field(int)
-    dof_end: qd.Tensor = field(int)
-    joint_end: qd.Tensor = field(int)
-    n_dofs: qd.Tensor = field(int)
+    parent_idx: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    root_idx: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    q_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    dof_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    joint_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    q_end: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    dof_end: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    joint_end: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    n_dofs: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     pos: qd.Tensor = field((float, 3))
     quat: qd.Tensor = field((float, 4))
     invweight: qd.Tensor = field((float, 2))
-    is_fixed: qd.Tensor = field(bool)
+    is_fixed: qd.Tensor = field(bool, kind=DataKind.CONSTANT)
     # The slot of a fixed root link in FixedRootsState, -1 for every other link
-    fixed_root_idx: qd.Tensor = field(int)
+    fixed_root_idx: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     inertial_pos: qd.Tensor = field((float, 3))
     inertial_quat: qd.Tensor = field((float, 4))
     inertial_i: qd.Tensor = field((float, (3, 3)))
     inertial_mass: qd.Tensor = field(float)
-    entity_idx: qd.Tensor = field(int)
+    entity_idx: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     # The geoms of each link, which heterogeneous environments vary
-    geom_start: qd.Tensor = field(int)
-    geom_end: qd.Tensor = field(int)
+    geom_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    geom_end: qd.Tensor = field(int, kind=DataKind.CONSTANT)
 
 
 class LinksState(Data, kind=DataKind.DERIVED, shape=(LINKS, ENVS)):
@@ -259,12 +259,12 @@ class LinksState(Data, kind=DataKind.DERIVED, shape=(LINKS, ENVS)):
     cinr_pos: qd.Tensor = field((float, 3), grad=True)
     cinr_quat: qd.Tensor = field((float, 4), grad=True)
     cinr_mass: qd.Tensor = field(float, grad=True)
-    crb_inertial: qd.Tensor = field((float, (3, 3)), grad=True)
-    crb_pos: qd.Tensor = field((float, 3), grad=True)
-    crb_quat: qd.Tensor = field((float, 4), grad=True)
-    crb_mass: qd.Tensor = field(float, grad=True)
-    cdd_vel: qd.Tensor = field((float, 3), grad=True)
-    cdd_ang: qd.Tensor = field((float, 3), grad=True)
+    crb_inertial: qd.Tensor = field((float, (3, 3)), grad=True, labels=DYNAMICS)
+    crb_pos: qd.Tensor = field((float, 3), grad=True, labels=DYNAMICS)
+    crb_quat: qd.Tensor = field((float, 4), grad=True, labels=DYNAMICS)
+    crb_mass: qd.Tensor = field(float, grad=True, labels=DYNAMICS)
+    cdd_vel: qd.Tensor = field((float, 3), grad=True, labels=DYNAMICS)
+    cdd_ang: qd.Tensor = field((float, 3), grad=True, labels=DYNAMICS)
     pos: qd.Tensor = field((float, 3), grad=True)
     quat: qd.Tensor = field((float, 4), grad=True)
     pos_bw: qd.Tensor = field((float, 3), shape=(LINKS, LINK_BW_SLOTS, ENVS), grad=True)
@@ -276,7 +276,7 @@ class LinksState(Data, kind=DataKind.DERIVED, shape=(LINKS, ENVS)):
     cd_vel: qd.Tensor = field((float, 3), grad=True)
     # Whether a contact or a connect or weld equality row involves the link this step, written by the constraint
     # assembly from the sorted contacts and read by the midpoint integration
-    is_constrained: qd.Tensor = field(bool)
+    is_constrained: qd.Tensor = field(bool, labels=DYNAMICS)
     # Midpoint angular velocity a free body eligible for midpoint integration converged to this substep, in its inertial
     # frame, and the residual of the midpoint equation there. The integration the backward pass reverses resumes from
     # them, since autodiff cannot reverse the Newton iteration (see func_midpoint_free_body).
@@ -288,16 +288,16 @@ class LinksState(Data, kind=DataKind.DERIVED, shape=(LINKS, ENVS)):
     # Center of mass of the kinematic tree
     root_COM: qd.Tensor = field((float, 3), grad=True)
     root_COM_bw: qd.Tensor = field((float, 3), grad=True)
-    cacc_ang: qd.Tensor = field((float, 3), grad=True)
-    cacc_lin: qd.Tensor = field((float, 3), grad=True)
-    cfrc_ang: qd.Tensor = field((float, 3), grad=True)
-    cfrc_vel: qd.Tensor = field((float, 3), grad=True)
+    cacc_ang: qd.Tensor = field((float, 3), grad=True, labels=DYNAMICS)
+    cacc_lin: qd.Tensor = field((float, 3), grad=True, labels=DYNAMICS)
+    cfrc_ang: qd.Tensor = field((float, 3), grad=True, labels=DYNAMICS)
+    cfrc_vel: qd.Tensor = field((float, 3), grad=True, labels=DYNAMICS)
     cfrc_input_ang: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
     cfrc_input_vel: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
     # The wrench the other solvers apply the links during a substep, which the next substep consumes
     cfrc_external_ang: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
     cfrc_external_vel: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
-    contact_force: qd.Tensor = field((float, 3), grad=True)
+    contact_force: qd.Tensor = field((float, 3), grad=True, labels=DYNAMICS)
     # Hibernation: is_hibernated flags a sleeping link, awake_steps counts the consecutive substeps an awake link has
     # spent below the hibernation speed tolerance, up to hibernation_min_steps (see func_count_settled_step), zero
     # again the step it exceeds the tolerance or wakes.
@@ -313,11 +313,11 @@ class LinksState(Data, kind=DataKind.DERIVED, shape=(LINKS, ENVS)):
 class JointsInfo(Data, kind=DataKind.INFO, shape=(JOINTS, JOINTS_INFO_ENVS)):
     """The model parameters of each joint, per environment where batched: type, ranges, position, solver."""
 
-    type: qd.Tensor = field(int)
+    type: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     sol_params: qd.Tensor = field((float, 7))
-    q_start: qd.Tensor = field(int)
-    dof_start: qd.Tensor = field(int)
-    dof_end: qd.Tensor = field(int)
+    q_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    dof_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    dof_end: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     pos: qd.Tensor = field((float, 3))
 
 
@@ -335,26 +335,26 @@ class GeomsInfo(Data, kind=DataKind.INFO, shape=(GEOMS,)):
     center: qd.Tensor = field((float, 3))
     quat: qd.Tensor = field((float, 4))
     data: qd.Tensor = field((float, 7))
-    link_idx: qd.Tensor = field(int)
-    type: qd.Tensor = field(int)
+    link_idx: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    type: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     friction: qd.Tensor = field(float)
     friction_torsional: qd.Tensor = field(float)
     friction_rolling: qd.Tensor = field(float)
     sol_params: qd.Tensor = field((float, 7))
-    vert_start: qd.Tensor = field(int)
-    vert_end: qd.Tensor = field(int)
-    verts_state_start: qd.Tensor = field(int)
-    face_start: qd.Tensor = field(int)
-    face_end: qd.Tensor = field(int)
-    edge_num: qd.Tensor = field(int)
-    edge_start: qd.Tensor = field(int)
-    edge_end: qd.Tensor = field(int)
-    is_convex: qd.Tensor = field(bool)
-    contype: qd.Tensor = field(int)
-    conaffinity: qd.Tensor = field(int)
-    is_fixed: qd.Tensor = field(bool)
-    is_hollow: qd.Tensor = field(bool)
-    needs_coup: qd.Tensor = field(int)
+    vert_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    vert_end: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    verts_state_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    face_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    face_end: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    edge_num: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    edge_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    edge_end: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    is_convex: qd.Tensor = field(bool, kind=DataKind.CONSTANT)
+    contype: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    conaffinity: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    is_fixed: qd.Tensor = field(bool, kind=DataKind.CONSTANT)
+    is_hollow: qd.Tensor = field(bool, kind=DataKind.CONSTANT)
+    needs_coup: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     coup_friction: qd.Tensor = field(float)
     coup_softness: qd.Tensor = field(float)
     coup_restitution: qd.Tensor = field(float)
@@ -418,13 +418,13 @@ class EqualitiesInfo(Data, kind=DataKind.INFO, shape=(CANDIDATE_EQUALITIES, ENVS
 class EntitiesInfo(Data, kind=DataKind.INFO, shape=(ENTITIES,)):
     """The model parameters of each entity of the rigid solver: dof, link and geom ranges and gravity compensation."""
 
-    dof_start: qd.Tensor = field(int)
-    dof_end: qd.Tensor = field(int)
-    n_dofs: qd.Tensor = field(int)
-    link_start: qd.Tensor = field(int)
-    link_end: qd.Tensor = field(int)
-    geom_start: qd.Tensor = field(int)
-    geom_end: qd.Tensor = field(int)
+    dof_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    dof_end: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    n_dofs: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    link_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    link_end: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    geom_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    geom_end: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     gravity_compensation: qd.Tensor = field(float)
 
 

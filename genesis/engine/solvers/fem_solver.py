@@ -199,7 +199,7 @@ class FEMElementsEnergy(Data, kind=DataKind.SCRATCH, shape=(ELEMENTS, ENVS)):
     stress: qd.Tensor = field((float, (3, 3)))
 
 
-class FEMElementsMaterial(Data, kind=DataKind.DERIVED, shape=(ELEMENTS, ENVS)):
+class FEMElementsMaterial(Data, kind=DataKind.SCRATCH, shape=(ELEMENTS, ENVS)):
     """
     The data the materials compute for each element from the deformation at the start of a substep.
 
@@ -404,7 +404,7 @@ class FEMInfo(Data, kind=DataKind.CONSTANT):
     # constrained vertices or a cluster too small to rotate leave without inertia.
     coarse_pivot_rtol: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
     # Whether some element was added with its vertices in the wrong order
-    has_inverted_elements: qd.Tensor = field(bool, shape=(), kind=DataKind.SCRATCH)
+    has_inverted_elements: qd.Tensor = field(bool, shape=(), kind=DataKind.INFO)
     # The vertices of the surface triangles, and the lumped mass of the surface at each one
     surface_vertices: qd.Tensor = field(int, shape=(SURFACE_VERTICES,))
     surface_vert_mass: qd.Tensor = field(float, shape=(SURFACE_VERTICES,))
@@ -524,6 +524,7 @@ class FEMData(Data):
                 vol_scale=solver._vol_scale,
                 rotation_atol=1e-10,
                 fiber_length_eps=1e-12,
+                has_inverted_elements=False,
             )
             if is_implicit:
                 info_values.update(

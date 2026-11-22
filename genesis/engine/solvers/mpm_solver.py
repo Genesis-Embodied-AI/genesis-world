@@ -172,7 +172,7 @@ class MPMState(Data, kind=DataKind.STATE):
     grid: MPMGrid
     particles_cpic: MPMParticlesCPIC = field(labels=CPIC)
     # The particles sorted by the lowest cell of their stencil, a slot of the hash grid hashing each cell
-    hash_grid: SpatialHashGrid = field(kind=DataKind.SCRATCH)
+    hash_grid: SpatialHashGrid
     tiles: MPMTiles = field(labels=DETERMINISTIC)
 
 

@@ -125,7 +125,7 @@ class SPHBoundaries(Data, kind=DataKind.SCRATCH):
 
     segments: SPHSegments
     # Rebuilt from the segments every substep
-    hash_grid: SpatialHashGrid = field(kind=DataKind.SCRATCH)
+    hash_grid: SpatialHashGrid
     # The impulse that the SPH particles give each segment over the substep, which its surface takes
     segments_impulse: qd.Tensor = field((float, 3), shape=(PARTICLES, ENVS))
     # The barycentric coordinates and the weights of the points of the quadrature of a segment, Radon's 7-point rule on

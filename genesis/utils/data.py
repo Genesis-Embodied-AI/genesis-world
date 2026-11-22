@@ -767,8 +767,8 @@ class DataKind(IntEnum):
     """A model parameter the setters write, such as mass, friction, gains or limits."""
 
     STATE = 2
-    """What specifies the scene with INFO: the configuration, velocities, accelerations, control inputs and the warm
-    starts of the collision detection and the constraint solve, which change the result of the next step."""
+    """What specifies the scene with INFO: the configuration, velocities, control inputs and the warm starts of the
+    collision detection and the constraint solve, which change the result of the next step."""
 
     DERIVED = 3
     """Recomputed from STATE and INFO by the next step or forward kinematics, such as the link poses, the contacts and

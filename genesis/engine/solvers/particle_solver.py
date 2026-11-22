@@ -73,7 +73,7 @@ class SkinnedMeshes(Data):
     edges_entity_idx: qd.Tensor = field(int, shape=(SKINNED_EDGES,), kind=DataKind.CONSTANT)
     # Whether the mesh of each tearable entity holds in each environment, cleared by the refresh it tears at, until a
     # reset of the scene.
-    entities_is_intact: qd.Tensor = field(bool, shape=(SKINNED_ENTITIES, ENVS), kind=DataKind.DERIVED)
+    entities_is_intact: qd.Tensor = field(bool, shape=(SKINNED_ENTITIES, ENVS), kind=DataKind.STATE)
 
 
 class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):

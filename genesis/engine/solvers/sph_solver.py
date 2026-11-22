@@ -58,11 +58,12 @@ class SPHParticles(Data, kind=DataKind.STATE, shape=(PARTICLES, ENVS)):
 
     pos: qd.Tensor = field((float, 3))
     vel: qd.Tensor = field((float, 3))
-    acc: qd.Tensor = field((float, 3))
-    rho: qd.Tensor = field(float)
+    # The substep computes them at the positions it starts from, which it moves afterward
+    acc: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH)
+    rho: qd.Tensor = field(float, kind=DataKind.SCRATCH)
     p: qd.Tensor = field(float)
-    dfsph_factor: qd.Tensor = field(float)
-    drho: qd.Tensor = field(float)
+    dfsph_factor: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    drho: qd.Tensor = field(float, kind=DataKind.SCRATCH)
     is_active: qd.Tensor = field(bool)
 
 
