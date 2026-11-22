@@ -702,15 +702,6 @@ class RasterizerContext(BuildableMixin):
                     self._read(shape.pos, shape_nodes, arrays_host), self._read(shape.quat, shape_nodes, arrays_host)
                 )
                 nodes_T[..., :3, :3] *= shape.length
-                if shape.is_active is not None:
-                    is_active = self._read(shape.is_active, shape_nodes, arrays_host, dtype=np.bool_)
-                    nodes_T[..., :3, 3] = np.where(is_active[..., None], nodes_T[..., :3, 3], gu.nowhere())
-                if self.split_envs or selection.is_shared:
-                    nodes_T = self._pad_envs(shape_nodes, nodes_T).swapaxes(0, 1)
-                else:
-                    envs_idx = np.array(self.rendered_envs_idx)[selection.envs_pos]
-                    nodes_T[..., :3, 3] += self.scene.envs_offset[envs_idx, np.newaxis]
-                    nodes_T = nodes_T.reshape((1, -1, 4, 4))
             else:
                 # The transform placing the unit mesh of each element in each rendered environment: the unit mesh
                 # stretched along its z axis by the length of the element and across by its radius gives the mesh of
@@ -727,7 +718,17 @@ class RasterizerContext(BuildableMixin):
                 R = gu.z_up_to_R(vecs.astype(np.float32))
                 R[..., :, :2] *= np.broadcast_to(radius, vecs.shape[:2])[..., None, None]
                 R[..., :, 2] *= np.linalg.norm(vecs, axis=-1)[..., None]
-                nodes_T = self._pad_envs(shape_nodes, gu.trans_R_to_T(starts.astype(np.float32), R)).swapaxes(0, 1)
+                nodes_T = gu.trans_R_to_T(starts.astype(np.float32), R)
+            # An inactive element is placed out of sight, so that its node keeps its instances
+            if shape.is_active is not None:
+                is_active = self._read(shape.is_active, shape_nodes, arrays_host, dtype=np.bool_)
+                nodes_T[..., :3, 3] = np.where(is_active[..., None], nodes_T[..., :3, 3], gu.nowhere())
+            if isinstance(shape, Frames) and not (self.split_envs or selection.is_shared):
+                envs_idx = np.array(self.rendered_envs_idx)[selection.envs_pos]
+                nodes_T[..., :3, 3] += self.scene.envs_offset[envs_idx, np.newaxis]
+                nodes_T = nodes_T.reshape((1, -1, 4, 4))
+            else:
+                nodes_T = self._pad_envs(shape_nodes, nodes_T).swapaxes(0, 1)
             if is_new and isinstance(shape, Frames):
                 mesh = trimesh.creation.axis(origin_size=0.03, axis_radius=0.025, axis_length=1.0)
                 mesh.visual.face_colors[:, :3] = (0.7 * mesh.visual.face_colors[:, :3]).astype(int)

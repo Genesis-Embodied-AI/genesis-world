@@ -458,7 +458,7 @@ class Scene(BuildableMixin, RBC):
                 surface.vis_mode = None
         if not isinstance(spec, gs.entities.Hybrid) and vis.debug_vis_mode is None and spec._debug_vis_modes:
             vis.debug_vis_mode = spec._debug_vis_modes[0]
-        spec = spec._frozen_copy(update={"vis": vis})
+        spec = spec._held_copy(update={"vis": vis})
 
         return self._sim.add_entity(surface, spec)
 

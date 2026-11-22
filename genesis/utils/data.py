@@ -247,15 +247,31 @@ def field(
     """
     Declare a field of a struct (see Data).
 
-    `dtype` is the element type of an array: `float`, `int` or `bool` in the precision of the simulation, a Quadrants
-    type, a function returning one, or such a type paired with an element shape, `(float, 3)` for a vector and
-    `(float, (3, 3))` for a matrix, whose dimensions may be sizes. `shape` lists the sizes of its dimensions (see Size),
-    and a field of shape () and kind CONSTANT or INFO is a constant the constructor fills from its values, a vector
-    constant from any sequence of its length. `kind` and `shape` replace the defaults of the struct, for every array of
-    a member. `labels` select the array, or every array of a member, in the property tables of the constructor. `grad`
-    gives the array gradients when the constructor requires them. `ndarray` allocates an ndarray on every backend. An
-    `opt_in` array or member is unused until another component opts it in (see 'opt_in'). An array too large for a
-    backend to address raises at allocation, its message ending with `oversize_hint`, such as the options shrinking it.
+    `kind` and `shape` replace the defaults of the struct, for every array of a member.
+
+    Parameters
+    ----------
+    dtype : Any, optional
+        The element type of an array: `float`, `int` or `bool` in the precision of the simulation, a Quadrants type, a
+        function returning one, or such a type paired with an element shape, `(float, 3)` for a vector and
+        `(float, (3, 3))` for a matrix, whose dimensions may be sizes. None for a member struct. Defaults to None.
+    shape : tuple[Size | int, ...] | None, optional
+        The sizes of the dimensions of the array (see Size). A field of shape () and kind CONSTANT or INFO is a constant
+        the constructor fills from its values, a vector constant from any sequence of its length. Defaults to None.
+    kind : DataKind | None, optional
+        The kind of the array. Defaults to None.
+    labels : str | tuple[str, ...], optional
+        The labels selecting the array, or every array of a member, in the property tables of the constructor.
+        Defaults to ().
+    grad : bool, optional
+        Whether the array has gradients when the constructor requires them. Defaults to False.
+    ndarray : bool, optional
+        Whether the array is an ndarray on every backend. Defaults to False.
+    opt_in : bool, optional
+        Whether the array or member is unused until another component opts it in (see 'opt_in'). Defaults to False.
+    oversize_hint : str, optional
+        The end of the message raised when the array is too large for a backend to address, such as the options
+        shrinking it. Defaults to "".
     """
     labels = labels if isinstance(labels, tuple) else (labels,)
     spec = _FieldSpec(dtype, shape, kind, labels, grad, ndarray, opt_in, oversize_hint)
@@ -767,8 +783,8 @@ class DataKind(IntEnum):
     """A model parameter the setters write, such as mass, friction, gains or limits."""
 
     STATE = 2
-    """What specifies the scene with INFO: the configuration, velocities, accelerations, control inputs and the warm
-    starts of the collision detection and the constraint solve, which change the result of the next step."""
+    """What specifies the scene with INFO: the configuration, velocities, control inputs and the warm starts of the
+    collision detection and the constraint solve, which change the result of the next step."""
 
     DERIVED = 3
     """Recomputed from STATE and INFO by the next step or forward kinematics, such as the link poses, the contacts and

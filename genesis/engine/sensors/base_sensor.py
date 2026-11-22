@@ -488,9 +488,9 @@ class Sensor(BuildableMixin, RBC, Generic[OptionsT, SharedSensorContextT, Shared
     def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
         """Return the markers showing the readings of the sensor, written in the environments `envs_idx`.
 
-        `markers` are those the latest call returned, none at the first call. The sensor makes its markers as it needs
-        them, with arrays over every environment and their style set, writes the readings of the environments
-        `envs_idx` into their arrays in place, adds or removes markers as needed, and returns them all (see
+        `markers` are those the latest call returned, none at the first call. The sensor makes markers as it needs them,
+        with arrays over every environment and their style set, writes the readings of the environments `envs_idx` into
+        their arrays in place, adds or removes markers as needed, and returns them all (see
         'ScopedRenderContext.update_markers'). `envs_idx` is None for a scene without parallel environments, which
         indexes the single row of the arrays.
 

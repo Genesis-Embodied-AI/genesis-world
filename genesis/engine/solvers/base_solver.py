@@ -396,12 +396,19 @@ class CheckpointMixin:
     ) -> None:
         """Write back the arrays of a checkpoint 'save_checkpoint' returned, rejecting a record read from another build.
 
-        `boundary_only` states that 'save_checkpoint' saved a boundary checkpoint, of which `envs_idx` selects the
-        environments to write back, all of them if None, along the last index of every array of the state.
-
         Nothing is notified to the subscribers (see 'mutates'). A component whose step reads a DERIVED array before
         recomputing it overrides this to recompute or invalidate that array when the record lacks DERIVED (see
         'DataKind'). On Metal, the caller synchronizes the torch stream before the next kernel (see 'fill_data').
+
+        Parameters
+        ----------
+        checkpoint : SolverCheckpoint
+            The checkpoint to write back.
+        boundary_only : bool, optional
+            Whether 'save_checkpoint' saved a boundary checkpoint. Defaults to False.
+        envs_idx : None | int | array_like, optional
+            The environments of a boundary checkpoint to write back, along the last index of every array of the state,
+            all of them if None. Defaults to None.
         """
         if not self.is_checkpointable:
             gs.raise_exception(f"{type(self).__name__} cannot be checkpointed yet: its state lives outside its data.")
@@ -532,7 +539,7 @@ class GravityMixin(BuildableMixin):
         gravity = broadcast_tensor(gravity, gs.tc_float, (len(envs_idx), 3), ("envs_idx", ""))
         kernel_set_gravity(gravity.contiguous(), envs_idx, self._gravity)
 
-    def get_gravity(self, envs_idx=None):
+    def get_gravity(self, envs_idx=None, *, copy: bool | None = True):
         """
         Get the gravity acting on the bodies of this solver, in m/s^2.
 
@@ -548,7 +555,7 @@ class GravityMixin(BuildableMixin):
         """
         if self._gravity is None:
             gs.raise_exception(f"{type(self).__name__} holds no body for a gravity to act on.")
-        tensor = qd_to_torch(self._gravity, envs_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self._gravity, envs_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
 
@@ -809,10 +816,12 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
         tensors = [qd_to_torch(field, transpose=is_batched, copy=copy) for field in fields]
         if self.is_recording:
             self.record_read(tuple(tensors), fields)
+        # A selection that only advanced indexing reaches is a copy, which 'copy=False' refuses as 'qd_to_torch' does
+        raise_if_fancy = copy is False
         if is_batched:
-            mask = indices_to_mask(envs_idx, idx, boolean_mask=False, pair_rows=True)
+            mask = indices_to_mask(envs_idx, idx, boolean_mask=False, raise_if_fancy=raise_if_fancy, pair_rows=True)
         else:
-            mask = indices_to_mask(idx)
+            mask = indices_to_mask(idx, raise_if_fancy=raise_if_fancy)
         tensors = [tensor[mask] for tensor in tensors]
         return tensors[0] if is_single else tensors
 

@@ -649,8 +649,7 @@ def test_box_contact_minimal_separation(detection, show_viewer, tol):
                         box.set_dofs_velocity(np.concatenate((vel_lin, np.random.normal(size=(N_ENVS, 3))), axis=-1))
                 boxes_pos[..., 1, :] = np.stack([tensor_to_array(box_b.get_pos()) for _, box_b in pairs_boxes], axis=1)
 
-                scene.rigid_solver.collider.clear()
-                scene.rigid_solver.collider.detection()
+                scene.rigid_solver.detect_collision()
             else:
                 scene.step()
             contacts = scene.rigid_solver.collider.get_contacts(to_torch=False)
@@ -771,8 +770,7 @@ def test_box_contact_true_penetration(show_viewer, tol):
         box_2.set_pos(gu.transform_by_quat(offsets_local, quats))
         box_2.set_quat(quats)
 
-        scene.rigid_solver.collider.clear()
-        scene.rigid_solver.collider.detection()
+        scene.rigid_solver.detect_collision()
         contacts = box_1.get_contacts(with_entity=box_2)
         is_contact_valid = tensor_to_array(contacts["valid_mask"])
         penetrations = tensor_to_array(contacts["penetration"])

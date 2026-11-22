@@ -56,7 +56,8 @@ class PBDParticles(Data, kind=DataKind.STATE, shape=(PARTICLES, ENVS)):
 
     pos: qd.Tensor = field((float, 3))
     vel: qd.Tensor = field((float, 3))
-    ipos: qd.Tensor = field((float, 3))
+    # The positions the substep starts from, which it moves afterward
+    ipos: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH)
     dpos: qd.Tensor = field((float, 3))
     lam: qd.Tensor = field(float)
     is_free: qd.Tensor = field(bool)

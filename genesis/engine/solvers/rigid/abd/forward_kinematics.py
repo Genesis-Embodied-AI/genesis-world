@@ -30,6 +30,7 @@ from .misc import (
     func_atomic_add_if,
     func_is_awake_link,
     func_is_awake_tree,
+    func_is_mass_mat_assembled,
     func_read_field_if,
     func_write_and_read_field_if,
     func_write_field_if,
@@ -1005,8 +1006,9 @@ def func_sweep_links_by_level(
 
     The pass sweep_pass (see LINK_SWEEP_PASS) runs from the root down for the forward kinematics and velocities, on the
     links of the awake trees, and for the accelerations, on the awake links of every root. It runs from the leaves up
-    for the fold of the composite inertia and of the link forces together, on the links of the awake roots, each link
-    adding its children (see links_child_start in rigid/data.py). update_cacc applies to the accelerations alone.
+    for the fold of the composite inertia and of the link forces together, on the links of the roots whose mass matrix
+    is assembled (see func_is_mass_mat_assembled), each link adding its children (see links_child_start in
+    rigid/data.py). update_cacc applies to the accelerations alone.
 
     A block of 32 lanes holds 4 envs of one tree or root, 8 lanes per env. The lanes of an env split the links of a
     level among them, and the block syncs before the next level, whose links read their parent, or their children,
@@ -1046,6 +1048,7 @@ def func_sweep_links_by_level(
             if is_awake:
                 i_l_root = rigid_info.roots_link_idx[i_group]
                 is_awake = func_is_awake_link(i_l_root, i_b, dyn_state, rigid_config)
+                is_awake = func_is_mass_mat_assembled(i_b, is_awake, rigid_info, rigid_config)
         # From the leaves up, the walk starts past the deepest level, where the entries of the next group begin, and
         # steps back through the level starts
         i_k_start = groups_level_start[i_group]
