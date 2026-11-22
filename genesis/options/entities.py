@@ -15,7 +15,7 @@ from genesis.repr_base import get_public_name
 from . import indices
 from .morphs import Morph
 from .options import Options
-from .patches import Geom, Patch, Vertex, VGeom, _FrozenOptions
+from .patches import Geom, Patch, Vertex, VGeom
 from .surfaces import DynamicVertices, Surface
 from .vis import EntityVisOptions
 
@@ -79,13 +79,13 @@ def get_entity_spec(
     return spec_cls(**{field: value for field, value in {**fields, "name": name}.items() if value is not None})
 
 
-class Spec(_FrozenOptions, Generic[EntityT]):
+class Spec(Options, Generic[EntityT]):
     """Spec an entity is constructed from, as passed to ``Scene.add_entity(spec=...)``.
 
     A concrete subclass decides the kind of entity and the solver simulating it, and declares the materials it admits,
     the selectors of its parts and the patches of options set on them. The fields are fixed at construction, while
     ``select`` records into the spec the options set on parts of the entity, where the kind of entity has parts.
-    The entity holds a frozen copy, which records nothing more, so later records leave the entity as it is. A copy
+    The entity holds a copy, which records nothing more, so later records leave the entity as it is. A copy
     of the spec (``model_copy()``) records again, starting from the patches recorded so far.
 
     Parameters
@@ -121,7 +121,7 @@ class Spec(_FrozenOptions, Generic[EntityT]):
     name: str | None = None
     patches: tuple[Patch, ...] = ()
 
-    _is_frozen: bool = PrivateAttr(default=False)
+    _is_held: bool = PrivateAttr(default=False)
 
     @model_validator(mode="before")
     @classmethod
@@ -197,15 +197,15 @@ class Spec(_FrozenOptions, Generic[EntityT]):
         """How the shape and the connectivity of the entity change, which its material decides."""
         return self.material.structure
 
-    # A copy records again, frozen or not
+    # A copy records again, held or not
     def __copy__(self) -> Self:
         spec = super().__copy__()
-        spec._is_frozen = False
+        spec._is_held = False
         return spec
 
     def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
         spec = super().__deepcopy__(memo)
-        spec._is_frozen = False
+        spec._is_held = False
         return spec
 
     def _check_patch(self, patch: Patch) -> None:
@@ -249,23 +249,25 @@ class Spec(_FrozenOptions, Generic[EntityT]):
             return ()
         return self.morph if isinstance(self.morph, tuple) else (self.morph,)
 
-    def _frozen_copy(self, update: dict[str, Any] | None = None) -> Self:
-        """Return a copy of this spec, with the fields 'update' gives, that records no more patches."""
+    def _held_copy(self, update: dict[str, Any] | None = None) -> Self:
+        """Return the copy of this spec an entity holds, which records no more patches.
+
+        The fields 'update' gives replace those of this spec.
+        """
         spec = self.model_copy(update=update)
-        spec._is_frozen = True
+        spec._is_held = True
         return spec
 
     def _record(self, patches: tuple[Patch, ...]) -> None:
         """Record patches after those recorded so far, each checked as at construction."""
-        if self._is_frozen:
+        if self._is_held:
             gs.raise_exception(
-                "The spec an entity holds is frozen. Select parts on a copy of it ('model_copy()') instead."
+                "The spec an entity holds records no more patches. Select parts on a copy of it ('model_copy()') "
+                "instead."
             )
         for patch in patches:
             self._check_patch(patch)
-        # The field is frozen for users, so that 'select' and its setters are the only way to record a patch
-        object.__setattr__(self, "patches", (*self.patches, *patches))
-        self.__pydantic_fields_set__.add("patches")
+        self.patches = (*self.patches, *patches)
 
 
 SpecT = TypeVar("SpecT", bound=Spec)
