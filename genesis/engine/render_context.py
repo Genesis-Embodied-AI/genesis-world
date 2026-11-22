@@ -1133,9 +1133,8 @@ class RenderContext:
                 self._shapes_record.pop(storage.static, None)
         # A marker of a size of its own is drawn through the arrays of its storage, a fork of the marker the scoped
         # context resized (a hidden one) drawing its flags over their rows. A marker the user hides is drawn as a fork
-        # without any item, which leaves the flags of the scoped context as it wrote them. A marker that a change of
-        # state since the latest step left wrong in some environments is drawn as a fork without any item there (see
-        # 'Shape.stale_on').
+        # without any item, which leaves the flags of the scoped context as it wrote them, and so is a marker in the
+        # environments a change of state since the latest step left it wrong in (see 'Shape.stale_on').
         envs_is_stale_by_changes: dict[frozenset[StateChange], torch.Tensor] = {}
         markers_drawn = []
         for marker in markers:
