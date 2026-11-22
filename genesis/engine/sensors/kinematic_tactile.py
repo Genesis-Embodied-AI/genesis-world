@@ -12,6 +12,7 @@ from genesis.engine.render_context import Shape
 from genesis.engine.solvers.rigid.collider.data import ColliderState
 from genesis.engine.solvers.rigid.collider.utils import func_point_in_geom_aabb
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
+from genesis.engine.state_change import StateChange
 from genesis.options.sensors import (
     ContactDepthProbe as ContactDepthProbeOptions,
     ContactProbe as ContactProbeOptions,
@@ -849,7 +850,11 @@ class ContactDepthProbeSensor(
         measured.copy_(measured_cols_b.T)
 
     def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
-        return self._update_probes_markers(markers, envs_idx, is_contact=self.read_ground_truth(envs_idx) >= gs.EPS)
+        # The depths follow the contacts and the poses of the configuration
+        invalidated_by = {self._shared_metadata.solver: (StateChange.GEOMETRY,), self: (StateChange.MODEL,)}
+        return self._update_probes_markers(
+            markers, envs_idx, is_contact=self.read_ground_truth(envs_idx) >= gs.EPS, invalidated_by=invalidated_by
+        )
 
 
 @dataclass
@@ -923,7 +928,11 @@ class ContactProbeSensor(
         return above_enter | (prev_state & above_exit)
 
     def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
-        return self._update_probes_markers(markers, envs_idx, is_contact=self.read_ground_truth(envs_idx))
+        # The latched contacts follow the contacts and the poses of the configuration
+        invalidated_by = {self._shared_metadata.solver: (StateChange.GEOMETRY,), self: (StateChange.MODEL,)}
+        return self._update_probes_markers(
+            markers, envs_idx, is_contact=self.read_ground_truth(envs_idx), invalidated_by=invalidated_by
+        )
 
 
 class KinematicTaxelReturnType(NamedTuple):
@@ -1118,4 +1127,11 @@ class KinematicTaxelSensor(
 
     def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
         force = self.read_ground_truth(envs_idx).force
-        return self._update_probes_markers(markers, envs_idx, is_contact=torch.linalg.norm(force, dim=-1) >= gs.EPS)
+        # The forces follow the contacts and the poses of the configuration, and the relative velocities
+        invalidated_by = {
+            self._shared_metadata.solver: (StateChange.GEOMETRY, StateChange.DYNAMICS),
+            self: (StateChange.MODEL,),
+        }
+        return self._update_probes_markers(
+            markers, envs_idx, is_contact=torch.linalg.norm(force, dim=-1) >= gs.EPS, invalidated_by=invalidated_by
+        )

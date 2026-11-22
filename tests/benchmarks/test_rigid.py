@@ -413,10 +413,10 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
 
             robot.set_dofs_stiffness(dofs_stiffness)
             robot.set_dofs_damping(dofs_damping)
-            robot.set_dofs_velocity(vel0, joints_dofs_idx, envs_idx=reset_envs_mask, skip_forward=True)
-            robot.set_qpos(qpos0, joints_qs_idx, envs_idx=reset_envs_mask, zero_velocity=False, skip_forward=True)
-            robot.set_pos(base_pos0, envs_idx=reset_envs_mask, skip_forward=True)
-            robot.set_quat(base_quat0, envs_idx=reset_envs_mask, relative=False, skip_forward=True)
+            robot.set_dofs_velocity(vel0, joints_dofs_idx, envs_idx=reset_envs_mask)
+            robot.set_qpos(qpos0, joints_qs_idx, envs_idx=reset_envs_mask, zero_velocity=False)
+            robot.set_pos(base_pos0, envs_idx=reset_envs_mask)
+            robot.set_quat(base_quat0, envs_idx=reset_envs_mask, relative=False)
 
     return (
         scene,

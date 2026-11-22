@@ -9,6 +9,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.render_context import Arrows, Shape
 from genesis.engine.solvers.rigid.data import DynState, RigidInfo
+from genesis.engine.state_change import StateChange
 from genesis.options.sensors import IMU as IMUOptions, CrossCouplingAxisType
 from genesis.utils.misc import concat_with_tensor, make_tensor_field
 
@@ -144,18 +145,21 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
         envs_idx = self._sanitize_envs_idx(envs_idx)
         rot_matrix = _get_cross_axis_coupling_to_alignment_matrix(cross_axis_coupling)
         self._shared_metadata.alignment_rot_matrix[envs_idx, self._idx * 3, :, :] = rot_matrix
+        self.changelog.add(StateChange.MODEL, envs_idx=envs_idx)
 
     @gs.assert_built
     def set_gyro_cross_axis_coupling(self, cross_axis_coupling: CrossCouplingAxisType, envs_idx=None):
         envs_idx = self._sanitize_envs_idx(envs_idx)
         rot_matrix = _get_cross_axis_coupling_to_alignment_matrix(cross_axis_coupling)
         self._shared_metadata.alignment_rot_matrix[envs_idx, self._idx * 3 + 1, :, :] = rot_matrix
+        self.changelog.add(StateChange.MODEL, envs_idx=envs_idx)
 
     @gs.assert_built
     def set_mag_cross_axis_coupling(self, cross_axis_coupling: CrossCouplingAxisType, envs_idx=None):
         envs_idx = self._sanitize_envs_idx(envs_idx)
         rot_matrix = _get_cross_axis_coupling_to_alignment_matrix(cross_axis_coupling)
         self._shared_metadata.alignment_rot_matrix[envs_idx, self._idx * 3 + 2, :, :] = rot_matrix
+        self.changelog.add(StateChange.MODEL, envs_idx=envs_idx)
 
     # ================================ internal methods ================================
 
@@ -215,16 +219,28 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
         data_xyz = data.view(data.shape[0], -1, 3)
         data_xyz.copy_(torch.matmul(shared_metadata.alignment_rot_matrix, data_xyz.unsqueeze(-1)).squeeze(-1))
 
-    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Arrows]:
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Arrows, ...]:
         options = self._options
         if not markers:
-            # The arrows of the measured acceleration, angular velocity and magnetic field
-            pos = torch.zeros((self._manager.n_envs_, 3, 3), dtype=gs.tc_float, device=gs.device)
-            radius = torch.tensor((0.006, 0.0055, 0.005), dtype=gs.tc_float, device=gs.device)
-            colors = torch.tensor(
-                (options.debug_acc_color, options.debug_gyro_color, options.debug_mag_color), dtype=gs.tc_float
+            # One arrow per reading, each following what the reading depends on: the acceleration the configuration,
+            # the velocities and the model, the angular velocity the configuration and the velocities, and the
+            # magnetic field the configuration alone.
+            solver = self._shared_metadata.solver
+            markers = tuple(
+                Arrows(
+                    torch.zeros((self._manager.n_envs_, 1, 3), dtype=gs.tc_float, device=gs.device),
+                    torch.zeros((self._manager.n_envs_, 1, 3), dtype=gs.tc_float, device=gs.device),
+                    radius,
+                    color,
+                    torch.ones((self._manager.n_envs_, 1), dtype=gs.tc_bool, device=gs.device),
+                    invalidated_by={solver: changes, self: (StateChange.MODEL,)},
+                )
+                for radius, color, changes in (
+                    (0.006, options.debug_acc_color, (StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL)),
+                    (0.0055, options.debug_gyro_color, (StateChange.GEOMETRY, StateChange.DYNAMICS)),
+                    (0.005, options.debug_mag_color, (StateChange.GEOMETRY,)),
+                )
             )
-            markers = (Arrows(pos, torch.zeros_like(pos), radius, colors),)
         link_pos = self._link.get_pos(envs_idx, relative=False)
         link_quat = self._link.get_quat(envs_idx, relative=False)
         # The offsets hold a row in a scene without parallel environments too
@@ -244,7 +260,9 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
         )
         # The readings are stated in the frame of the sensor
         sensor_quat = gu.transform_quat_by_quat(offset_quat, link_quat)
-        arrows_pos, arrows_vec = markers[0].pos, markers[0].vec
-        arrows_pos[envs_idx] = pos[..., None, :]
-        arrows_vec[envs_idx] = gu.transform_by_quat(vecs, sensor_quat[..., None, :])
+        vecs = gu.transform_by_quat(vecs, sensor_quat[..., None, :])
+        for i_m, marker in enumerate(markers):
+            arrows_pos, arrows_vec = marker.pos, marker.vec
+            arrows_pos[envs_idx] = pos[..., None, :]
+            arrows_vec[envs_idx] = vecs[..., i_m : i_m + 1, :]
         return markers

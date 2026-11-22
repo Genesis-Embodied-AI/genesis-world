@@ -201,11 +201,13 @@ class Visualizer(BuildableMixin, RBC):
             # away, the nodes of the shapes whose scoped context refreshed alone being updated (see
             # 'RasterizerContext._sync_shapes'). The window only repaints when a refresh is due, so that a loop of
             # setters does not pay one repaint per call.
-            on_setter = Subscriber(to=frozenset((StateChange.GEOMETRY,)), callback=lambda change, envs_idx: self.sync())
+            on_setter = Subscriber(
+                to=frozenset((StateChange.GEOMETRY,)), callback=lambda change, **indices: self.sync()
+            )
             for solver in self._scene.sim.active_solvers:
-                solver.subscribe(on_setter)
+                solver.changelog.subscribe(on_setter)
             self._scene.sim.render_context.subscribe(
-                Subscriber(to=frozenset((StateChange.VISUAL,)), callback=lambda change, envs_idx: self.sync())
+                Subscriber(to=frozenset((StateChange.VISUAL,)), callback=lambda change, **indices: self.sync())
             )
             # The window draws its first frames as it builds, which show the scene once its nodes exist
             self._context.update(force_render=True)

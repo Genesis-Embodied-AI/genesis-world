@@ -124,7 +124,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         super().build(n_envs)
 
     @gs.assert_built
-    @mutates(StateChange.GEOMETRY)
+    @mutates
     def set_particles_pos(self, poss, particles_idx=None, envs_idx=None) -> None:
         """
         Set the position of some particles, at rest.
@@ -152,7 +152,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
-    @mutates(StateChange.DYNAMICS)
+    @mutates
     def set_particles_vel(self, vels, particles_idx=None, envs_idx=None) -> None:
         """Set the velocity of some particles (see 'set_particles_pos')."""
         self._write_data(
@@ -167,7 +167,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
-    @mutates(StateChange.GEOMETRY, differentiable=False)
+    @mutates(differentiable=False)
     def set_particles_active(self, actives, particles_idx=None, envs_idx=None) -> None:
         """Set whether some particles take part in the simulation (see 'set_particles_pos')."""
         actives, particles_idx, envs_idx = self._sanitize_io_variables(
@@ -347,6 +347,8 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
                 physics=ParticlesPhysics(entity.material.rho, gravity, lower_bound, upper_bound),
                 roles=ShapeRoles.of(entity.idx, is_looks=is_pinned, is_debug=True),
                 _views=frozenset(("particle",)),
+                # The particles are drawn with their velocities
+                invalidated_by={solver: (StateChange.GEOMETRY, StateChange.DYNAMICS)},
             )
             self._entities_points.append(points)
             shapes.append(points)
@@ -371,6 +373,7 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
                         particles=points,
                         is_active=ArrayRef(self._skinned.entities_is_intact, i_t) if is_tearable else None,
                         roles=ShapeRoles.of(entity.idx, is_looks=not is_pinned, is_debug=False),
+                        invalidated_by={solver: (StateChange.GEOMETRY,)},
                     )
                 )
                 i_t += is_tearable

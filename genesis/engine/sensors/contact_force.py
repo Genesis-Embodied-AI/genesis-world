@@ -7,6 +7,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.render_context import Arrows, Points, Shape
+from genesis.engine.state_change import StateChange
 from genesis.options.sensors import Contact as ContactSensorOptions
 from genesis.options.sensors import ContactForce as ContactForceSensorOptions
 from genesis.utils.geom import inv_transform_by_quat, qd_inv_transform_by_quat, transform_by_quat
@@ -216,7 +217,20 @@ class ContactSensor(SimpleSensor[ContactSensorOptions, None, ContactSensorMetada
         if not markers:
             pos = torch.zeros((self._manager.n_envs_, 1, 3), dtype=gs.tc_float, device=gs.device)
             is_active = torch.zeros(pos.shape[:-1], dtype=gs.tc_bool, device=gs.device)
-            markers = (Points(pos, self._options.debug_sphere_radius, self._options.debug_color, is_active=is_active),)
+            # The contacts follow the configuration and the model of the solver (see 'ContactData')
+            invalidated_by = {
+                self._shared_metadata.solver: (StateChange.GEOMETRY, StateChange.MODEL),
+                self: (StateChange.MODEL,),
+            }
+            markers = (
+                Points(
+                    pos,
+                    self._options.debug_sphere_radius,
+                    self._options.debug_color,
+                    is_active=is_active,
+                    invalidated_by=invalidated_by,
+                ),
+            )
         pos, is_active = markers[0].pos, markers[0].is_active
         pos[envs_idx] = self._link.get_pos(envs_idx, relative=False)[..., None, :]
         is_active[envs_idx] = self.read(envs_idx)
@@ -332,7 +346,21 @@ class ContactForceSensor(
     def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Arrows]:
         if not markers:
             pos = torch.zeros((self._manager.n_envs_, 1, 3), dtype=gs.tc_float, device=gs.device)
-            markers = (Arrows(pos, torch.zeros_like(pos), radius=0.006, color=self._options.debug_color),)
+            # The contact forces follow the configuration, the velocities and the model
+            invalidated_by = {
+                self._shared_metadata.solver: (StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL),
+                self: (StateChange.MODEL,),
+            }
+            markers = (
+                Arrows(
+                    pos,
+                    torch.zeros_like(pos),
+                    radius=0.006,
+                    color=self._options.debug_color,
+                    is_active=torch.ones(pos.shape[:-1], dtype=gs.tc_bool, device=gs.device),
+                    invalidated_by=invalidated_by,
+                ),
+            )
         # The force is measured in the frame of the link
         link_quat = self._link.get_quat(envs_idx, relative=False)
         pos, vec = markers[0].pos, markers[0].vec

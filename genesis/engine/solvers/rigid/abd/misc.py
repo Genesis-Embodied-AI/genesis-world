@@ -145,21 +145,21 @@ class MASS_MAT_ASSEMBLY(IntEnum):
 
 # The status bits are combined on the host at every substep, where the plain integer arithmetic of an IntEnum is
 # cheaper than that of an IntFlag.
-class SUBSTEP_STATUS(IntEnum):
+class FORWARD_STATUS(IntEnum):
     """The bits of the status of the derived arrays a substep starts from, which its kernels take as one static integer.
 
     A substep refreshes the cartesian space from it, and selects what it computes of the mass matrix (see
     'get_mass_mat_assembly').
     """
 
-    FORWARD_POS_UPDATED = 1
+    POS_UPDATED = 1
     """The poses of the moving links are updated."""
 
-    FORWARD_VEL_UPDATED = 2
+    VEL_UPDATED = 2
     """The velocities of the links are updated."""
 
-    STATIC_POSE_UPDATED = 4
-    """The poses of the static links are updated."""
+    FIXED_POSES_UPDATED = 4
+    """The poses of the fixed links are updated."""
 
     MASS_MAT_UPDATED = 8
     """The mass matrix of the awake trees is updated."""
@@ -176,7 +176,7 @@ def get_mass_mat_assembly(rigid_config: RigidConfig, substep_status: int) -> MAS
     rigid_config : RigidConfig
         The static configuration of the rigid solver.
     substep_status : int
-        The status of the derived arrays the substep starts from, a combination of the bits of SUBSTEP_STATUS.
+        The status of the derived arrays the substep starts from, a combination of the bits of FORWARD_STATUS.
     """
     # A mass matrix updated outside the substep holds no implicit damping term, the derived quantities stand as at the
     # start of the substep, and no gradient flows through it.
@@ -184,11 +184,11 @@ def get_mass_mat_assembly(rigid_config: RigidConfig, substep_status: int) -> MAS
         rigid_config.integrator == gs.integrator.approximate_implicitfast
         or rigid_config.enable_mujoco_compatibility
         or rigid_config.requires_grad
-        or not (substep_status & SUBSTEP_STATUS.MASS_MAT_UPDATED)
+        or not (substep_status & FORWARD_STATUS.MASS_MAT_UPDATED)
     ):
         return MASS_MAT_ASSEMBLY.ASSEMBLE
     # The fused solve of the smooth acceleration runs in the factor pass, which it needs then
-    if rigid_config.enable_fused_smooth_acc_solve or not (substep_status & SUBSTEP_STATUS.MASS_MAT_L_UPDATED):
+    if rigid_config.enable_fused_smooth_acc_solve or not (substep_status & FORWARD_STATUS.MASS_MAT_L_UPDATED):
         return MASS_MAT_ASSEMBLY.FACTOR
     return MASS_MAT_ASSEMBLY.NONE
 
@@ -373,6 +373,14 @@ def kernel_init_dof_fields(
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
         for i_b in range(_B):
             rigid_info.n_awake_dofs[i_b] = n_dofs
+
+
+@qd.kernel(fastcache=True)
+def kernel_clear_hibernated_mass_mat_updated(envs_idx: qd.types.ndarray(), rigid_info: RigidInfo):
+    """Mark the mass matrix of the sleeping trees of some environments as outdated (see rigid/data.py)."""
+    for i_b_ in range(envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        rigid_info.is_hibernated_mass_mat_updated[i_b] = False
 
 
 @qd.kernel(fastcache=True)

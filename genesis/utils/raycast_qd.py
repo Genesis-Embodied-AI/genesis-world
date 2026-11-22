@@ -17,12 +17,11 @@ from genesis.engine.bvh import (
 from genesis.engine.render_context import (
     DynamicMesh,
     MeshGeometry,
-    RenderContext,
     ScopedRenderContext,
     SegmentationKeys,
     StaticMeshBatch,
 )
-from genesis.engine.state_change import StateChange, Subscriber
+from genesis.engine.state_change import StateChange
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
 from genesis.utils.misc import tensor_to_array
 
@@ -715,6 +714,8 @@ class RaycastTarget:
         self.scoped_context = scoped_context
         self.is_visual = is_visual
         self.hits = hits
+        # The refreshes of the visual meshes since the last fit
+        self.geometry_tracker = scoped_context.changelog.track(StateChange.GEOMETRY)
         self.meshes_seg_keys: "tuple[SegmentationKeys | None, ...]" = tuple(
             None if geometry is None else geometry.seg_keys for geometry in geometries
         )
@@ -745,18 +746,14 @@ class RaycastTarget:
             self.meshes,
             self.poses,
         )
-        # The record of the refreshes of the visual meshes since the last fit (see 'get_raycast_targets')
-        self.subscriber = Subscriber(to=frozenset({StateChange.GEOMETRY}))
-        self.subscriber.notify(StateChange.GEOMETRY)
 
     def update(self) -> None:
         """Fit the top-level trees to the current poses of the meshes, for visual meshes once their scoped context
         refreshed them since the last fit."""
         if self.is_visual:
             self.scoped_context.get_shapes()
-            if not self.subscriber.pending:
+            if self.geometry_tracker.pull() is None:
                 return
-            self.subscriber.clear()
         if self.meshes_aabb is not None:
             # The boxes of the meshes in the world, which the poses keep current, give the leaves of the trees as is
             kernel_build_instances_tree(
@@ -828,6 +825,8 @@ class RaycastWorldTarget(RaycastTarget):
         self.scoped_context = scoped_context
         self.is_visual = True
         self.hits = hits
+        # The refreshes of the meshes since the last build
+        self.geometry_tracker = scoped_context.changelog.track(StateChange.GEOMETRY)
         self.meshes_seg_keys = tuple(mesh.seg_keys for mesh in dynamic_meshes)
         self.info = RaycastInfo(values=dict(EPS=gs.EPS))
         self.eps = self.info.EPS
@@ -859,21 +858,17 @@ class RaycastWorldTarget(RaycastTarget):
             faces_mesh_idx=self.faces.faces_mesh_idx,
             hits=hits,
         )
-        self.subscriber = Subscriber(to=frozenset({StateChange.GEOMETRY}))
-        self.subscriber.notify(StateChange.GEOMETRY)
 
     def update(self) -> None:
         """Build the trees of the environments over the faces at their current positions, once the scoped context of the
         meshes refreshed them since the last build."""
         self.scoped_context.get_shapes()
-        if not self.subscriber.pending:
+        if self.geometry_tracker.pull() is None:
             return
-        self.subscriber.clear()
         kernel_fit_world_faces(self.verts_pos, self.tree_state, self.faces, self.meshes, self.tree_config, eps=gs.EPS)
 
 
 def get_raycast_targets(
-    context: RenderContext,
     scoped_contexts: tuple[ScopedRenderContext, ...],
     is_visual: bool,
     hits: RaycastResult | None = None,
@@ -884,8 +879,6 @@ def get_raycast_targets(
 
     Parameters
     ----------
-    context : RenderContext
-        The render context.
     scoped_contexts : tuple[ScopedRenderContext, ...]
         The scoped contexts of the solvers.
     is_visual : bool
@@ -905,9 +898,7 @@ def get_raycast_targets(
                 )
                 if any(geometry is not None for geometry in geometries):
                     targets.append(RaycastTarget(scoped_context, batch, geometries, is_visual, hits))
-                    context.subscribe(targets[-1].subscriber, (batch,))
         dynamic_meshes = tuple(shape for shape in shapes if isinstance(shape, DynamicMesh) and shape.is_ray_target)
         if dynamic_meshes:
             targets.append(RaycastWorldTarget(scoped_context, dynamic_meshes, hits))
-            context.subscribe(targets[-1].subscriber, dynamic_meshes)
     return targets
