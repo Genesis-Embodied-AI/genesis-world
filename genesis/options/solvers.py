@@ -606,13 +606,16 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         noslip is a post-processing step after the main solver to suppress slip/drift.
         Recommended to set this value to 5 for manipulation tasks or when slip/drift is a big problem.
         This option should only be enabled if necessary because it is experimental and will slow down the simulation.
+        It is the cheaper way to keep a grasped entity from slipping under the pyramidal friction cone (see
+        'gs.friction_cone').
     noslip_tolerance : float, optional
         Tolerance for the noslip solver. Defaults to 1e-6.
     friction_cone : gs.friction_cone, optional
         Contact friction cone model, trading numerical robustness for physical accuracy. 'gs.friction_cone.pyramidal'
         (default) is robust and easy to solve; 'gs.friction_cone.elliptic' is the exact isotropic cone, harder to solve
         but paired with a high 'impratio' it holds resting stacks without slow tangential creep. See 'gs.friction_cone'
-        for the description of each model. Unsupported with the noslip solver or differentiable simulation.
+        for the description of each model, including how each holds a grasped entity, which slips well below its
+        friction limit under the pyramidal cone. Unsupported with the noslip solver or differentiable simulation.
     contact_resolution : gs.contact_resolution, optional
         How a contact's normal force and friction force are resolved against each other.
         'gs.contact_resolution.signorini' bounds friction against the normal force the contact has developed, so sliding
@@ -627,7 +630,8 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         option 'friction_torsional' (see 'gs.materials.Rigid'). Enable it when spin resistance matters - a grasped
         object twisting in a gripper, a top spinning in place - motions a point contact transmits no torque against,
         so they persist indefinitely otherwise. The extra spin resistance slows down the constraint solve on every
-        contact, including those where spin is irrelevant. Defaults to False.
+        contact, including those where spin is irrelevant. Under the pyramidal friction cone, a grasped entity still
+        twists well below its torsional friction limit (see 'gs.friction_cone'). Defaults to False.
     enable_rolling_friction : bool, optional
         Whether contacts also resist rolling, with strength set per geometry by the material option 'friction_rolling'
         (see 'gs.materials.Rigid'). Enable it when rolling resistance matters - a ball or wheel coasting to rest, a

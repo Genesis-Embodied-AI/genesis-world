@@ -113,6 +113,12 @@ class friction_cone(StrEnum):
     regularized friction, in return for being harder to solve and more sensitive numerically. Prefer pyramidal for
     robustness; choose elliptic when isotropic friction or firm static friction matters - e.g. objects that must stay
     put at rest instead of slowly creeping.
+
+    A grasped entity is where the two models differ most. Under 'pyramidal', an entity squeezed between two contacts
+    slips when pulled or twisted by a load well below its Coulomb limit, and a higher 'friction' does not help and can
+    make it slip further. 'elliptic', resolved by 'gs.contact_resolution.signorini' with the default Newton solver,
+    holds the grasp up to that limit, at a much higher solve cost. 'RigidOptions.noslip_iterations' is the cheaper
+    mitigation: it holds the grasp under 'pyramidal' for a smaller overhead.
     """
 
     pyramidal = enum.auto()
