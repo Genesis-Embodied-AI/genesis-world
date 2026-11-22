@@ -185,7 +185,7 @@ class Point(ForceField):
     def _get_acc(self, pos, vel, t, i):
         relative_pos = pos - self._position_qd
         radius = relative_pos.norm(self._eps[None])
-        direction = relative_pos / radius
+        direction = -relative_pos / radius
         falloff = 1 / (radius + 1.0) ** self._falloff_pow
         acc = self._strength * direction
 

@@ -311,6 +311,19 @@ def test_force_fields(show_viewer, tol):
             falloff_max=0.5,
         )
     )
+    # Point fields act on every particle, so they stay switched off while the other force fields are checked
+    points = [
+        scene.add_force_field(
+            gs.force_fields.Point(
+                strength=strength,
+                position=(0.0, -1.0, 0.5),
+                flow=0.0,
+            )
+        )
+        for strength in (5.0, -5.0)
+    ]
+    for point in points:
+        point.deactivate()
     scene.build(n_envs=2)
 
     # The vortex accelerates the second box in the plane normal to its axis, at the field acceleration of the position
@@ -363,6 +376,22 @@ def test_force_fields(show_viewer, tol):
     n_start, n_end = 3 * N_STEPS * SUBSTEPS, 4 * N_STEPS * SUBSTEPS
     vel_x_ana = vels_x_ana[1] + substep_dt**2 * (n_end * (n_end - 1) - n_start * (n_start - 1)) / 2
     assert_allclose(particles.get_particles_vel()[0, :, 0], vel_x_ana, tol=tol)
+
+    # A point field pulls the particles towards its point for a positive strength, and away for a negative one
+    custom.deactivate()
+    for point in points:
+        point.activate()
+        particles_pos_ana = particles.get_particles_pos()
+        particles_vel_ana = particles.get_particles_vel()
+        scene.step()
+        position = torch.tensor(point.position, dtype=gs.tc_float, device=gs.device)
+        for _ in range(SUBSTEPS):
+            relative_pos = particles_pos_ana - position
+            acc = -point.strength * relative_pos / relative_pos.norm(dim=-1, keepdim=True)
+            particles_vel_ana = particles_vel_ana + substep_dt * acc
+            particles_pos_ana = particles_pos_ana + substep_dt * particles_vel_ana
+        assert_allclose(particles.get_particles_vel(), particles_vel_ana, tol=tol)
+        point.deactivate()
 
     # A zero or non-finite direction points nowhere
     for force_field_type in (gs.force_fields.Constant, gs.force_fields.Wind, gs.force_fields.Vortex):
