@@ -2578,13 +2578,13 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         kernel_control_dofs_position_velocity(dofs_idx, envs_idx, position, velocity, self.dyn_state, self.rigid_config)
 
-    def get_sol_params(self, geoms_idx=None, envs_idx=None, *, joints_idx=None, eqs_idx=None):
+    def get_sol_params(self, geoms_idx=None, envs_idx=None, *, joints_idx=None, eqs_idx=None, copy: bool | None = True):
         """
         Get constraint solver parameters.
         """
         if eqs_idx is not None:
             # Always batched
-            tensor = qd_to_torch(self.dyn_info.equalities.sol_params, envs_idx, eqs_idx, transpose=True, copy=True)
+            tensor = qd_to_torch(self.dyn_info.equalities.sol_params, envs_idx, eqs_idx, transpose=True, copy=copy)
             if self.n_envs == 0:
                 tensor = tensor[0]
         elif joints_idx is not None:
@@ -2592,13 +2592,13 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             assert envs_idx is None
             # batch_shape = (envs_idx, joints_idx) if self._options.batch_joints_info else (joints_idx,) tensor =
             # qd_to_torch(self.dyn_info.joints.sol_params, *batch_shape, transpose=True)
-            tensor = qd_to_torch(self.dyn_info.joints.sol_params, envs_idx, joints_idx, transpose=True, copy=True)
+            tensor = qd_to_torch(self.dyn_info.joints.sol_params, envs_idx, joints_idx, transpose=True, copy=copy)
             if self.n_envs == 0 and self._options.batch_joints_info:
                 tensor = tensor[0]
         else:  # geoms_idx is not None
             # Never batched
             assert envs_idx is None
-            tensor = qd_to_torch(self.dyn_info.geoms.sol_params, geoms_idx, transpose=True, copy=True)
+            tensor = qd_to_torch(self.dyn_info.geoms.sol_params, geoms_idx, transpose=True, copy=copy)
         return tensor
 
     @staticmethod
@@ -2621,6 +2621,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         *,
         ref: link_ref_frame = link_ref_frame.link_origin,
         relative=False,
+        copy: bool | None = True,
     ):
         idx = links_idx if isinstance(links_idx, int) else slice(None)
         if not gs.use_zerocopy:
@@ -2631,12 +2632,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         ref_frame = self._sanitize_ref_frame(ref)
         links_state = self.dyn_state.links
         if ref_frame == link_ref_frame.root_COM:
-            tensor = self._read_data(links_state.root_COM, envs_idx, links_idx, copy=True)
+            tensor = self._read_data(links_state.root_COM, envs_idx, links_idx, copy=copy)
         elif ref_frame == link_ref_frame.link_COM:
             i_pos, root_COM = self._read_data((links_state.i_pos, links_state.root_COM), envs_idx, links_idx)
             tensor = i_pos + root_COM
         else:
-            tensor = self._read_data(links_state.pos, envs_idx, links_idx, copy=True)
+            tensor = self._read_data(links_state.pos, envs_idx, links_idx, copy=copy)
 
         # The pose offset is defined on the link origin, so it is only stripped for the 'link_origin' reference.
         if relative and ref_frame == link_ref_frame.link_origin and not self._links_offset_pos_is_identity[idx].all():
@@ -2711,25 +2712,25 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         )
         return _tensor
 
-    def get_links_acc_ang(self, links_idx=None, envs_idx=None):
-        tensor = qd_to_torch(self.dyn_state.links.cacc_ang, envs_idx, links_idx, transpose=True, copy=True)
+    def get_links_acc_ang(self, links_idx=None, envs_idx=None, *, copy: bool | None = True):
+        tensor = qd_to_torch(self.dyn_state.links.cacc_ang, envs_idx, links_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_links_root_COM(self, links_idx=None, envs_idx=None):
+    def get_links_root_COM(self, links_idx=None, envs_idx=None, *, copy: bool | None = True):
         """
         Returns the center of mass (COM) of the entire kinematic tree to which the specified links belong.
 
         This corresponds to the global COM of each entity, assuming a single-rooted structure - that is, as long as no
         two successive links are connected by a free-floating joint (ie a joint that allows all 6 degrees of freedom).
         """
-        tensor = qd_to_torch(self.dyn_state.links.root_COM, envs_idx, links_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_state.links.root_COM, envs_idx, links_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_links_COM(self, links_idx=None, envs_idx=None):
+    def get_links_COM(self, links_idx=None, envs_idx=None, *, copy: bool | None = True):
         """The center of mass (COM) of each link, as an offset from the origin of its local frame."""
         if not self._options.batch_links_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched links info.")
-        tensor = qd_to_torch(self.dyn_info.links.inertial_pos, envs_idx, links_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_info.links.inertial_pos, envs_idx, links_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 and self._options.batch_links_info else tensor
 
     @property
@@ -2737,48 +2738,48 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         """Whether the inertial properties of a link are stored per environment rather than shared by the batch."""
         return self._options.batch_links_info
 
-    def get_links_mass(self, links_idx=None, envs_idx=None):
+    def get_links_mass(self, links_idx=None, envs_idx=None, *, copy: bool | None = True):
         """The mass of each link, as the solver currently uses it."""
         if not self._options.batch_links_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched links info.")
-        tensor = qd_to_torch(self.dyn_info.links.inertial_mass, envs_idx, links_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_info.links.inertial_mass, envs_idx, links_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 and self._options.batch_links_info else tensor
 
-    def get_links_inertia(self, links_idx=None, envs_idx=None):
+    def get_links_inertia(self, links_idx=None, envs_idx=None, *, copy: bool | None = True):
         """The inertia matrix of each link, in its inertial frame, as the solver currently uses it."""
         if not self._options.batch_links_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched links info.")
-        tensor = qd_to_torch(self.dyn_info.links.inertial_i, envs_idx, links_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_info.links.inertial_i, envs_idx, links_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 and self._options.batch_links_info else tensor
 
-    def get_links_invweight(self, links_idx=None, envs_idx=None):
+    def get_links_invweight(self, links_idx=None, envs_idx=None, *, copy: bool | None = True):
         if not self._options.batch_links_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched links info.")
-        tensor = qd_to_torch(self.dyn_info.links.invweight, envs_idx, links_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_info.links.invweight, envs_idx, links_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 and self._options.batch_links_info else tensor
 
-    def get_geoms_friction_ratio(self, geoms_idx=None, envs_idx=None):
-        tensor = qd_to_torch(self.dyn_state.geoms.friction_ratio, envs_idx, geoms_idx, transpose=True, copy=True)
+    def get_geoms_friction_ratio(self, geoms_idx=None, envs_idx=None, *, copy: bool | None = True):
+        tensor = qd_to_torch(self.dyn_state.geoms.friction_ratio, envs_idx, geoms_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_geoms_pos(self, geoms_idx=None, envs_idx=None, *, relative=False):
-        tensor = qd_to_torch(self.dyn_state.geoms.pos, envs_idx, geoms_idx, transpose=True, copy=True)
+    def get_geoms_pos(self, geoms_idx=None, envs_idx=None, *, relative=False, copy: bool | None = True):
+        tensor = qd_to_torch(self.dyn_state.geoms.pos, envs_idx, geoms_idx, transpose=True, copy=copy)
         if relative and self._geoms_offset_pos is not None:
-            quat = qd_to_torch(self.dyn_state.geoms.quat, envs_idx, geoms_idx, transpose=True, copy=True)
+            quat = qd_to_torch(self.dyn_state.geoms.quat, envs_idx, geoms_idx, transpose=True)
             offset_pos = self._geoms_offset_pos if geoms_idx is None else self._geoms_offset_pos[geoms_idx]
             offset_quat = self._geoms_offset_quat if geoms_idx is None else self._geoms_offset_quat[geoms_idx]
             tensor = tensor - _offset_world_shift(offset_pos, offset_quat, quat)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_geoms_quat(self, geoms_idx=None, envs_idx=None, *, relative=False):
-        tensor = qd_to_torch(self.dyn_state.geoms.quat, envs_idx, geoms_idx, transpose=True, copy=True)
+    def get_geoms_quat(self, geoms_idx=None, envs_idx=None, *, relative=False, copy: bool | None = True):
+        tensor = qd_to_torch(self.dyn_state.geoms.quat, envs_idx, geoms_idx, transpose=True, copy=copy)
         if relative and self._geoms_offset_quat is not None:
             offset_quat = self._geoms_offset_quat if geoms_idx is None else self._geoms_offset_quat[geoms_idx]
             tensor = gu.transform_quat_by_quat(gu.inv_quat(offset_quat), tensor)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_dofs_control_force(self, dofs_idx=None, envs_idx=None):
-        tensor = self._read_data(self.dyn_state.dofs.qf_applied, envs_idx, dofs_idx, copy=True)
+    def get_dofs_control_force(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
+        tensor = self._read_data(self.dyn_state.dofs.qf_applied, envs_idx, dofs_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_dofs_actuator_force(self, dofs_idx=None, envs_idx=None):
@@ -2821,19 +2822,19 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             actuator_force = actuator_force[indices_to_mask(None, dofs_idx)]
         return actuator_force[0] if self.n_envs == 0 else actuator_force
 
-    def get_dofs_force(self, dofs_idx=None, envs_idx=None):
-        tensor = self._read_data(self.dyn_state.dofs.force, envs_idx, dofs_idx, copy=True)
+    def get_dofs_force(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
+        tensor = self._read_data(self.dyn_state.dofs.force, envs_idx, dofs_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_dofs_acc(self, dofs_idx=None, envs_idx=None):
-        tensor = self._read_data(self.dyn_state.dofs.acc, envs_idx, dofs_idx, copy=True)
+    def get_dofs_acc(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
+        tensor = self._read_data(self.dyn_state.dofs.acc, envs_idx, dofs_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_dofs_kp(self, dofs_idx=None, envs_idx=None):
         if not self._options.batch_dofs_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
-        gain = qd_to_torch(self.dyn_info.dofs.act_gain, envs_idx, dofs_idx, transpose=True, copy=True)
-        bias = qd_to_torch(self.dyn_info.dofs.act_bias, envs_idx, dofs_idx, transpose=True, copy=True)
+        gain = qd_to_torch(self.dyn_info.dofs.act_gain, envs_idx, dofs_idx, transpose=True)
+        bias = qd_to_torch(self.dyn_info.dofs.act_bias, envs_idx, dofs_idx, transpose=True)
         if self.n_envs == 0 and self._options.batch_dofs_info:
             gain, bias = gain[0], bias[0]
         if not (torch.abs(gain + bias[..., 1]) < gs.EPS * torch.clamp(torch.abs(gain), min=1.0)).all():
@@ -2851,8 +2852,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def get_dofs_kv(self, dofs_idx=None, envs_idx=None):
         if not self._options.batch_dofs_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
-        gain = qd_to_torch(self.dyn_info.dofs.act_gain, envs_idx, dofs_idx, transpose=True, copy=True)
-        bias = qd_to_torch(self.dyn_info.dofs.act_bias, envs_idx, dofs_idx, transpose=True, copy=True)
+        gain = qd_to_torch(self.dyn_info.dofs.act_gain, envs_idx, dofs_idx, transpose=True)
+        bias = qd_to_torch(self.dyn_info.dofs.act_bias, envs_idx, dofs_idx, transpose=True)
         if self.n_envs == 0 and self._options.batch_dofs_info:
             gain, bias = gain[0], bias[0]
         if not (torch.abs(gain + bias[..., 1]) < gs.EPS * torch.clamp(torch.abs(gain), min=1.0)).all():
@@ -2867,67 +2868,67 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
         return -bias[..., 2]
 
-    def get_dofs_act_gain(self, dofs_idx=None, envs_idx=None):
+    def get_dofs_act_gain(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
         if not self._options.batch_dofs_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
-        tensor = qd_to_torch(self.dyn_info.dofs.act_gain, envs_idx, dofs_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_info.dofs.act_gain, envs_idx, dofs_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 and self._options.batch_dofs_info else tensor
 
-    def get_dofs_act_bias(self, dofs_idx=None, envs_idx=None):
+    def get_dofs_act_bias(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
         if not self._options.batch_dofs_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
-        tensor = qd_to_torch(self.dyn_info.dofs.act_bias, envs_idx, dofs_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_info.dofs.act_bias, envs_idx, dofs_idx, transpose=True, copy=copy)
         if self.n_envs == 0 and self._options.batch_dofs_info:
             tensor = tensor[0]
         return tensor[..., 0], tensor[..., 1], tensor[..., 2]
 
-    def get_dofs_force_range(self, dofs_idx=None, envs_idx=None):
+    def get_dofs_force_range(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
         if not self._options.batch_dofs_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
-        tensor = qd_to_torch(self.dyn_info.dofs.force_range, envs_idx, dofs_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_info.dofs.force_range, envs_idx, dofs_idx, transpose=True, copy=copy)
         if self.n_envs == 0 and self._options.batch_dofs_info:
             tensor = tensor[0]
         return tensor[..., 0], tensor[..., 1]
 
-    def get_dofs_stiffness(self, dofs_idx=None, envs_idx=None):
+    def get_dofs_stiffness(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
         if not self._options.batch_dofs_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
-        tensor = qd_to_torch(self.dyn_info.dofs.stiffness, envs_idx, dofs_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_info.dofs.stiffness, envs_idx, dofs_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 and self._options.batch_dofs_info else tensor
 
-    def get_dofs_invweight(self, dofs_idx=None, envs_idx=None):
+    def get_dofs_invweight(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
         if not self._options.batch_dofs_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
-        tensor = qd_to_torch(self.dyn_info.dofs.invweight, envs_idx, dofs_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_info.dofs.invweight, envs_idx, dofs_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 and self._options.batch_dofs_info else tensor
 
-    def get_dofs_armature(self, dofs_idx=None, envs_idx=None):
+    def get_dofs_armature(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
         if not self._options.batch_dofs_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
-        tensor = qd_to_torch(self.dyn_info.dofs.armature, envs_idx, dofs_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_info.dofs.armature, envs_idx, dofs_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 and self._options.batch_dofs_info else tensor
 
-    def get_dofs_damping(self, dofs_idx=None, envs_idx=None):
+    def get_dofs_damping(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
         if not self._options.batch_dofs_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
-        tensor = qd_to_torch(self.dyn_info.dofs.damping, envs_idx, dofs_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_info.dofs.damping, envs_idx, dofs_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 and self._options.batch_dofs_info else tensor
 
-    def get_dofs_frictionloss(self, dofs_idx=None, envs_idx=None):
+    def get_dofs_frictionloss(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
         if not self._options.batch_dofs_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
-        tensor = qd_to_torch(self.dyn_info.dofs.frictionloss, envs_idx, dofs_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_info.dofs.frictionloss, envs_idx, dofs_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 and self._options.batch_dofs_info else tensor
 
-    def get_mass_mat(self, dofs_idx=None, envs_idx=None, decompose=False):
-        tensor = qd_to_torch(self.mass_mat_L if decompose else self.mass_mat, envs_idx, transpose=True, copy=True)
+    def get_mass_mat(self, dofs_idx=None, envs_idx=None, decompose=False, *, copy: bool | None = True):
+        tensor = qd_to_torch(self.mass_mat_L if decompose else self.mass_mat, envs_idx, transpose=True, copy=copy)
         if dofs_idx is not None:
             tensor = tensor[indices_to_mask(None, dofs_idx, dofs_idx, boolean_mask=False)]
         if self.n_envs == 0:
             tensor = tensor[0]
 
         if decompose:
-            mass_mat_D_inv = qd_to_torch(self.rigid_info.mass_mat_D_inv, envs_idx, dofs_idx, transpose=True, copy=True)
+            mass_mat_D_inv = qd_to_torch(self.rigid_info.mass_mat_D_inv, envs_idx, dofs_idx, transpose=True, copy=copy)
             if self.n_envs == 0:
                 mass_mat_D_inv = mass_mat_D_inv[0]
             return tensor, mass_mat_D_inv
@@ -3040,14 +3041,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         """
         return self.get_kinetic_energy(envs_idx=envs_idx) + self.get_potential_energy(envs_idx=envs_idx)
 
-    def get_geoms_friction(self, geoms_idx=None):
-        return qd_to_torch(self.dyn_info.geoms.friction, geoms_idx, copy=True)
+    def get_geoms_friction(self, geoms_idx=None, *, copy: bool | None = True):
+        return qd_to_torch(self.dyn_info.geoms.friction, geoms_idx, copy=copy)
 
-    def get_geoms_friction_torsional(self, geoms_idx=None):
-        return qd_to_torch(self.dyn_info.geoms.friction_torsional, geoms_idx, copy=True)
+    def get_geoms_friction_torsional(self, geoms_idx=None, *, copy: bool | None = True):
+        return qd_to_torch(self.dyn_info.geoms.friction_torsional, geoms_idx, copy=copy)
 
-    def get_geoms_friction_rolling(self, geoms_idx=None):
-        return qd_to_torch(self.dyn_info.geoms.friction_rolling, geoms_idx, copy=True)
+    def get_geoms_friction_rolling(self, geoms_idx=None, *, copy: bool | None = True):
+        return qd_to_torch(self.dyn_info.geoms.friction_rolling, geoms_idx, copy=copy)
 
     def get_AABB(self, entities_idx=None, envs_idx=None):
         aabb_min = qd_to_torch(self.dyn_state.geoms.aabb_min, envs_idx, transpose=True)

@@ -649,9 +649,9 @@ Please decrease the simulation timestep or adjust the material parameters."""
             particles_idx, envs_idx, actus, self.mpm_info.particles.muscle_group, self.mpm_state.particles.actu
         )
 
-    def get_particles_actu(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
+    def get_particles_actu(self, particles_idx=None, envs_idx=None, *, copy: bool | None = True) -> torch.Tensor:
         """Get the actuation of some particles (see 'set_particles_actu')."""
-        tensor = self._read_data(self.mpm_state.particles.actu, envs_idx, particles_idx, copy=True)
+        tensor = self._read_data(self.mpm_state.particles.actu, envs_idx, particles_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
     @mutates(StateChange.MODEL)
@@ -669,9 +669,9 @@ Please decrease the simulation timestep or adjust the material parameters."""
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
 
-    def get_particles_muscle_group(self, particles_idx=None) -> torch.Tensor:
+    def get_particles_muscle_group(self, particles_idx=None, *, copy: bool | None = True) -> torch.Tensor:
         """Get the muscle group of some particles (see 'set_particles_muscle_group')."""
-        return self._read_data(self.mpm_info.particles.muscle_group, None, particles_idx, copy=True, is_batched=False)
+        return self._read_data(self.mpm_info.particles.muscle_group, None, particles_idx, copy=copy, is_batched=False)
 
     @mutates(StateChange.MODEL)
     def set_particles_muscle_direction(self, muscle_direction, particles_idx=None) -> None:
@@ -703,9 +703,9 @@ Please decrease the simulation timestep or adjust the material parameters."""
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
 
-    def get_particles_free(self, particles_idx=None) -> torch.Tensor:
+    def get_particles_free(self, particles_idx=None, *, copy: bool | None = True) -> torch.Tensor:
         """Get whether some particles move freely (see 'set_particles_free')."""
-        return self._read_data(self.mpm_info.particles.is_free, None, particles_idx, copy=True, is_batched=False)
+        return self._read_data(self.mpm_info.particles.is_free, None, particles_idx, copy=copy, is_batched=False)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- particle constraints ------------------------------

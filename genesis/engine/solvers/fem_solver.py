@@ -1059,14 +1059,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
 
-    def get_verts_pos(self, verts_idx=None, envs_idx=None):
+    def get_verts_pos(self, verts_idx=None, envs_idx=None, *, copy: bool | None = True):
         """Get the position of some vertices, the same in every environment (see 'set_verts_pos')."""
-        tensor = self._read_data(self.fem_state.vertices.pos, envs_idx, verts_idx, copy=True)
+        tensor = self._read_data(self.fem_state.vertices.pos, envs_idx, verts_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_verts_vel(self, verts_idx=None, envs_idx=None):
+    def get_verts_vel(self, verts_idx=None, envs_idx=None, *, copy: bool | None = True):
         """Get the velocity of some vertices, the same in every environment (see 'set_verts_pos')."""
-        tensor = self._read_data(self.fem_state.vertices.vel, envs_idx, verts_idx, copy=True)
+        tensor = self._read_data(self.fem_state.vertices.vel, envs_idx, verts_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
@@ -1133,9 +1133,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
 
-    def get_elements_el2v(self, elements_idx=None):
+    def get_elements_el2v(self, elements_idx=None, *, copy: bool | None = True):
         """Get the global index of the four vertices of some elements."""
-        return self._read_data(self.fem_info.elements.el2v, None, elements_idx, copy=True, is_batched=False)
+        return self._read_data(self.fem_info.elements.el2v, None, elements_idx, copy=copy, is_batched=False)
 
     @gs.assert_built
     @mutates(StateChange.MODEL)
