@@ -3539,6 +3539,8 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
             )
         # The size of each link, which scales the arrows of its contacts, computed once they are first drawn
         self._links_init_aabb_size: torch.Tensor | None = None
+        # The arrows of the normals and of the forces of the contacts, made as they are first drawn
+        self._contacts_markers: tuple[Arrows, Arrows] | None = None
         # The collision geoms as drawn
         self._geoms_collision: list[MeshGeometry] = []
         # The representations whose read makes the surfaces of the SDF of the collision geoms, until one is read: the
@@ -3668,9 +3670,10 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
             self._geoms_is_contact_shown = torch.zeros(self.owner.n_geoms + 1, dtype=torch.bool, device=gs.device)
         is_shown = self._geoms_is_contact_shown
         is_shown[entity.geom_start : entity.geom_end] = visualize_contact
-        # The contacts are read back only while some geom shows them
+        # The contacts are read back only while some geom shows them, and their arrows are made anew
         if not is_shown.any():
             self._geoms_is_contact_shown = None
+        self._contacts_markers = None
         self._context.invalidate((self,))
 
     def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:
@@ -3681,8 +3684,6 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
         the latest step computed, wrong once the state, the dynamics or the model changes until the next step (see
         'Shape.stale_on').
         """
-        # The contacts of the geoms showing none, and the padding of the environments holding fewer contacts, are
-        # arrows of zero length.
         link_frames = super().update_markers(envs_idx)
         solver = self.owner
         n_envs = len(envs_idx)
@@ -3734,29 +3735,44 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
                     )
                     links_init_aabb_size[link.idx] = np.linalg.norm(corners.max(axis=0) - corners.min(axis=0))
             self._links_init_aabb_size = torch.as_tensor(links_init_aabb_size, dtype=gs.tc_float, device=gs.device)
+        if self._contacts_markers is None:
+            pos = torch.zeros((solver.n_envs_, 0, 3), dtype=gs.tc_float, device=gs.device)
+            radius = torch.zeros(pos.shape[:-1], dtype=gs.tc_float, device=gs.device)
+            is_active = torch.zeros(pos.shape[:-1], dtype=gs.tc_bool, device=gs.device)
+            # The contacts the latest step computed no longer hold once the state, the dynamics or the model changes
+            stale_on = frozenset((StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL))
+            self._contacts_markers = (
+                Arrows(pos, pos.clone(), radius, CONTACT_NORMAL_COLOR, is_active, stale_on=stale_on),
+                Arrows(
+                    pos.clone(), pos.clone(), radius.clone(), CONTACT_FORCE_COLOR, is_active.clone(), stale_on=stale_on
+                ),
+            )
+        normals_marker, forces_marker = self._contacts_markers
+        # The contacts are drawn anew for every environment at once
         contacts = solver.collider.get_contacts(as_tensor=True, to_torch=True)
         if solver.n_envs == 0:
             contacts = {key: value[None] for key, value in contacts.items()}
-        if contacts["geom_a"].shape[1] == 0:
-            return tuple(markers)
-        contacts = {key: value[envs_idx] for key, value in contacts.items()}
-        arrows_scale = torch.minimum(
-            self._links_init_aabb_size[contacts["link_a"]], self._links_init_aabb_size[contacts["link_b"]]
-        )
-        radius = torch.clamp(arrows_scale * 0.04, max=0.005)
-        normals = contacts["normal"] * arrows_scale[..., None]
-        forces = contacts["force"] * solver.options.vis.contact_force_scale
-        arrows_force, arrows_normal = [], []
-        for geoms_idx, sign in ((contacts["geom_a"], -1.0), (contacts["geom_b"], 1.0)):
-            is_shown = self._geoms_is_contact_shown[geoms_idx][..., None]
-            arrows_force.append(torch.where(is_shown, sign * forces, 0.0))
-            arrows_normal.append(torch.where(is_shown, -sign * normals, 0.0))
-        arrows_pos = torch.cat((contacts["position"], contacts["position"]), dim=1)
-        arrows_radius = torch.cat((radius, radius), dim=1)
-        # The contacts the latest step computed no longer hold once the state, the dynamics or the model changes
-        stale_on = frozenset((StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL))
-        contacts_markers = tuple(
-            Arrows(arrows_pos, torch.cat(arrows_vec, dim=1), arrows_radius, color, envs_idx=envs_idx, stale_on=stale_on)
-            for arrows_vec, color in ((arrows_force, CONTACT_FORCE_COLOR), (arrows_normal, CONTACT_NORMAL_COLOR))
-        )
-        return (*markers, *contacts_markers)
+        n_contacts = contacts["geom_a"].shape[1]
+        normals_marker = self.resize_marker(normals_marker, 2 * n_contacts)
+        forces_marker = self.resize_marker(forces_marker, 2 * n_contacts)
+        self._contacts_markers = (normals_marker, forces_marker)
+        if n_contacts > 0:
+            arrows_scale = torch.minimum(
+                self._links_init_aabb_size[contacts["link_a"]], self._links_init_aabb_size[contacts["link_b"]]
+            )
+            radius = torch.clamp(arrows_scale * 0.04, max=0.005)
+            # Each arrow of a contact points along the vector at its geom A, and the opposite way at its geom B, the
+            # arrows of the geoms showing no contact and of the padding being inactive.
+            is_active = torch.cat(
+                [self._geoms_is_contact_shown[contacts[name]] for name in ("geom_a", "geom_b")], dim=1
+            )
+            markers_vec = (
+                (normals_marker, contacts["normal"] * arrows_scale[..., None]),
+                (forces_marker, -contacts["force"] * solver.options.vis.contact_force_scale),
+            )
+            for marker, vec in markers_vec:
+                marker.pos[:] = torch.cat((contacts["position"], contacts["position"]), dim=1)
+                marker.vec[:] = torch.cat((vec, -vec), dim=1)
+                marker.radius[:] = torch.cat((radius, radius), dim=1)
+                marker.is_active[:] = is_active
+        return (*markers, normals_marker, forces_marker)

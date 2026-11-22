@@ -4,6 +4,7 @@
 
 - getattr / hasattr are prohibited. Use None initialization and isinstance checks instead. The one exception is code whose consumers are unknown by design: serialization, generic reflection over the fields of a dataclass, static analysis of source code. Anywhere else, use isinstance.
 - Never add attributes on the fly to external / non-owned instances.
+- `object.__setattr__` is prohibited outside the constructor of the object it writes. A frozen object changes through a fork (`dataclasses.replace`, `model_copy`), never in place.
 - Keep interop data as torch tensors or numpy arrays from the start instead of Quadrants kernels operating on CPU numpy arrays. Numpy implementations must be fully vectorized. Use Numba (single thread, CPU backend) for computation-heavy "kernels".
 - Allocate the exact memory size needed. Preallocation based on max size is prohibited.
 - Never reallocate a quadrants data structure. Size it once, when everything that determines its size is known.

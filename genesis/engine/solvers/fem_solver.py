@@ -1341,6 +1341,8 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
                     )
                 )
         self._shapes = tuple(shapes)
+        # The points at the constrained vertices and the lines to their targets, made as they are first drawn
+        self._constraints_markers: tuple[Points, Lines] | None = None
 
     def update_shapes(self, envs_idx: torch.Tensor | None, view: str) -> tuple[Shape, ...]:
         return select_view_shapes(self._shapes, view)
@@ -1350,23 +1352,28 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
         solver = self.owner
         if not solver.options.vis.constraints:
             return ()
-        constraint = solver.get_vertices_constraint(envs_idx)
+        if self._constraints_markers is None:
+            pos = torch.zeros((solver.n_envs_, 0, 3), dtype=gs.tc_float, device=gs.device)
+            is_active = torch.zeros(pos.shape[:-1], dtype=gs.tc_bool, device=gs.device)
+            self._constraints_markers = (
+                Points(pos, CONSTRAINT_POINT_RADIUS, CONSTRAINT_COLOR, is_active=is_active),
+                Lines(pos.clone(), pos.clone(), CONSTRAINT_LINE_RADIUS, CONSTRAINT_COLOR, is_active=is_active.clone()),
+            )
+        points_marker, lines_marker = self._constraints_markers
+        # The constraints are drawn anew for every environment at once
+        constraint = solver.get_vertices_constraint()
         verts_idx = torch.nonzero(constraint.is_constrained.any(dim=0))[:, 0]
-        if len(verts_idx) == 0:
-            return ()
-        verts_pos = qd_to_torch(solver.fem_state.vertices.pos, envs_idx, verts_idx, transpose=True)
-        has_line = (constraint.is_constrained & ~constraint.is_link_target)[:, verts_idx]
-        verts_target_pos = torch.where(has_line[..., None], constraint.target_pos[:, verts_idx], verts_pos)
-        return (
-            Points(
-                verts_pos,
-                CONSTRAINT_POINT_RADIUS,
-                CONSTRAINT_COLOR,
-                is_active=constraint.is_constrained[:, verts_idx],
-                envs_idx=envs_idx,
-            ),
-            Lines(verts_pos, verts_target_pos, CONSTRAINT_LINE_RADIUS, CONSTRAINT_COLOR, envs_idx=envs_idx),
-        )
+        points_marker = self.resize_marker(points_marker, len(verts_idx))
+        lines_marker = self.resize_marker(lines_marker, len(verts_idx))
+        self._constraints_markers = (points_marker, lines_marker)
+        if len(verts_idx) > 0:
+            verts_pos = qd_to_torch(solver.fem_state.vertices.pos, None, verts_idx, transpose=True)
+            has_line = (constraint.is_constrained & ~constraint.is_link_target)[:, verts_idx]
+            points_marker.pos[:] = verts_pos
+            points_marker.is_active[:] = constraint.is_constrained[:, verts_idx]
+            lines_marker.start[:] = verts_pos
+            lines_marker.end[:] = torch.where(has_line[..., None], constraint.target_pos[:, verts_idx], verts_pos)
+        return self._constraints_markers
 
 
 # ------------------------------------------------------------------------------------

@@ -303,9 +303,12 @@ class Shape:
 
     Each array of a shape holding a value per environment holds one row per environment of 'envs_idx'. The arrays are
     read-only tensors on the device, a scoped context giving them as host arrays too. The lifetime of a shape follows
-    its identity (see 'ScopedRenderContext.update_shapes').
+    its identity, its 'uid' (see 'ScopedRenderContext.update_shapes').
     """
 
+    uid: gs.UID = dataclasses.field(default_factory=gs.UID, kw_only=True, repr=False)
+    """The identity of the shape, which two shapes compare equal by. A fork keeps it (see 'fork'), so that a renderer
+    keeps its resources for the shape. A shape made anew takes a new one."""
     envs_idx: torch.Tensor | None = dataclasses.field(default=None, kw_only=True)
     """The environments the shape appears in, all of them if None."""
     is_shared: bool = dataclasses.field(default=False, kw_only=True)
@@ -314,17 +317,38 @@ class Shape:
     roles: ShapeRoles | None = dataclasses.field(default=None, kw_only=True, repr=False)
     """What the parts of the shape draw, which the reads of the scene holding each part follow. The scene as it looks
     and the debug views hold the whole shape if None."""
-    reads: ShapeReads | None = dataclasses.field(default=None, init=False, repr=False)
-    """Which reads of the scene hold each part of the shape. The render context writes them as the debug state changes,
-    so that the shape keeps its identity (see 'RenderContext.set_debug')."""
+    reads: ShapeReads | None = dataclasses.field(default=None, kw_only=True, repr=False)
+    """Which reads of the scene hold each part of a shape the render context returns. As the debug state changes, the
+    render context returns forks of the shapes holding the new reads (see 'RenderContext.set_debug')."""
     # The representations named after a debug_vis_mode the shape belongs to (see 'select_view_shapes')
     _views: frozenset[str] = dataclasses.field(default=frozenset(), kw_only=True, repr=False)
     stale_on: frozenset[StateChange] | None = dataclasses.field(default=None, kw_only=True)
     """The changes of state of a source that leave a marker wrong until the next step in the environments they touch,
     such as a marker showing what a step computed, None for those of its scoped context (see
     'ScopedRenderContext.markers_stale_on')."""
-    refs: dict[str, ArrayRef] = dataclasses.field(default_factory=dict, init=False, repr=False)
-    """The arrays the fields given as ArrayRef view, by field name."""
+    refs: dict[str, ArrayRef] = dataclasses.field(default_factory=dict, kw_only=True, repr=False)
+    """The arrays the fields given as ArrayRef view in a shape the render context returns, by field name."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Shape) and self.uid is other.uid
+
+    def fork(self, **changes: object) -> "Shape":
+        """Return a copy of the shape with some fields changed, standing for the same shape.
+
+        A fork keeps the identity of the shape (see 'uid'), so that a renderer drawing the shape keeps its resources and
+        draws the fork in its place. A scoped context returns a fork to change what one of its shapes draws, such as the
+        flags of the items of a marker to hide some of them, and returns the fork from then on. A shape standing for
+        something else is made anew, or forked with 'uid=gs.UID()' to take an identity of its own.
+
+        Parameters
+        ----------
+        **changes : object
+            The new value of each field changed, by field name. The fork holds the arrays of the shape for the others.
+        """
+        return dataclasses.replace(self, **changes)
+
+    def __hash__(self) -> int:
+        return hash(self.uid)
 
     @functools.cached_property
     def envs(self) -> tuple[int, ...]:
@@ -475,6 +499,8 @@ class Arrows(Shape):
     """The radius of the shafts, one for every arrow or one per arrow, in each environment or in all of them."""
     color: "UnitIntervalVec4Type | torch.Tensor" = (1.0, 0.0, 0.0, 1.0)
     """The RGBA color, one for every arrow or one per arrow."""
+    is_active: torch.Tensor | None = dataclasses.field(default=None, metadata=PER_ENV)
+    """Whether each arrow is drawn in each environment, None for all of them."""
 
 
 @dataclass(frozen=True, eq=False)
@@ -492,6 +518,8 @@ class Lines(Shape):
     """The radius of the lines (see 'Arrows.radius')."""
     color: "UnitIntervalVec4Type | torch.Tensor" = (1.0, 0.0, 0.0, 1.0)
     """The RGBA color (see 'Arrows.color')."""
+    is_active: torch.Tensor | None = dataclasses.field(default=None, metadata=PER_ENV)
+    """Whether each line is drawn in each environment, None for all of them."""
 
 
 @dataclass(frozen=True, eq=False)
@@ -629,12 +657,13 @@ class ScopedRenderContext(Generic[OwnerT]):
     def update_shapes(self, envs_idx: torch.Tensor | None, view: str) -> tuple[Shape, ...]:
         """Refresh the data of the shapes, and return every shape the scoped context shows in a representation.
 
-        The lifetime of a shape follows its identity: a shape returned again as the same object is the same shape, whose
-        arrays the scoped context refreshes in place and whose resources a renderer keeps, a new object is a new shape,
-        and a shape no longer returned is gone. The render context keeps the shapes the latest call returned for each
-        representation, releasing those no representation returns any longer, and refreshes a scoped context at most
-        once per change of state and selection of environments. A field of a shape viewing an array of the scoped
-        context or of a solver is an ArrayRef.
+        The lifetime of a shape follows its identity (see 'Shape.uid'): a shape returned again, as the same object or a
+        fork of it, is the same shape, whose arrays the scoped context refreshes in place and whose resources a renderer
+        keeps, a shape made anew is a new shape, and a shape no longer returned is gone. The render context keeps the
+        shapes the latest call returned for each representation, releasing those no representation returns any longer,
+        and refreshes a scoped context at most once per change of state and selection of environments. A field of a
+        shape viewing an array of the scoped context or of a solver is an ArrayRef. The render context returns a fork of
+        each shape, its fields resolved, and leaves the shapes of the scoped context as they are.
 
         It runs for a read of the shapes alone, never for a read of the markers. Points 'is_surface' stand for the
         surface that 'reconstruct' makes from them.
@@ -659,9 +688,9 @@ class ScopedRenderContext(Generic[OwnerT]):
         or not, keeping the object and its arrays meanwhile.
 
         A marker showing what a step computed (contacts, sensor readings) is wrong once a change of state in its
-        'Shape.stale_on' touches some environments, which the render context draws it hidden in until the next step,
-        overwriting its arrays there. The render context skips the refreshes while the user hides every marker (see
-        'set_hidden').
+        'Shape.stale_on' touches some environments, which the render context draws it hidden in until the next step, as
+        a fork whose items are inactive there (see 'Shape.fork'). The render context skips the refreshes while the user
+        hides every marker (see 'set_hidden').
 
         Parameters
         ----------
@@ -673,6 +702,26 @@ class ScopedRenderContext(Generic[OwnerT]):
     def is_hidden(self, marker: Shape) -> bool:
         """Whether the user hides a marker of the scoped context (see 'set_hidden')."""
         return marker in self._hidden_markers
+
+    def resize_marker(self, marker: Shape, n_items: int) -> Shape:
+        """Return a marker holding a number of points, arrows, lines or frames, its arrays viewing that many rows.
+
+        The rows past the number held before are active, and the scoped context writes them before returning the
+        marker. The renderers draw arrays of a size of their own, which the render context grows and shrinks seldom.
+
+        Parameters
+        ----------
+        marker : Shape
+            The marker, made with the flags of its items ('is_active').
+        n_items : int
+            The number of items the marker holds from then on.
+
+        Returns
+        -------
+        marker : Shape
+            A fork of the marker (see 'Shape.fork'), which the scoped context returns from then on.
+        """
+        return self._context._resize_marker(marker, n_items)
 
     def set_hidden(self, marker: Shape, hidden: bool) -> None:
         """Hide a marker the scoped context shows, or show it again, whatever its staleness.
@@ -727,10 +776,29 @@ class _Refresh(NamedTuple):
 
 
 @dataclass(eq=False)
+class _MarkerStorage:
+    # The latest marker the scoped context resized, whose arrays view the first 'n_items' rows of those of the marker
+    # the renderers draw, which hold 'capacity' rows (see 'ScopedRenderContext.resize_marker').
+    marker: Shape
+    static: Shape
+    capacity: int
+    n_items: int
+
+
+class _RecordedShape(NamedTuple):
+    # The object of a shape the scoped context returned last, and the fork of it the render context returns
+    returned: Shape
+    resolved: Shape
+    record: "_ScopedRecord"
+
+
+@dataclass(eq=False)
 class _ScopedRecord:
     scoped_context: ScopedRenderContext
-    # The markers the scoped context shows since its latest refresh of the markers
+    # The markers the scoped context shows since its latest refresh of the markers, and the markers the renderers draw
+    # for them (see '_update_markers').
     markers: tuple[Shape, ...] = ()
+    markers_drawn: tuple[Shape, ...] = ()
     # The number of times the scoped context was made stale, and the latest refresh of its shapes and of its markers
     epoch: int = 0
     shapes_refresh: _Refresh | None = None
@@ -747,8 +815,6 @@ class _ScopedRecord:
     # The changes of state of the sources since the latest step, with the environments the setters gave them for,
     # which leave the markers stating them wrong until the next step (see 'Shape.stale_on').
     changes: list[tuple[StateChange, "IndexType | None"]] = dataclasses.field(default_factory=list)
-    # The masks the context draws the markers it hides with, by marker, for the markers telling none
-    markers_is_active: dict[Shape, torch.Tensor] = dataclasses.field(default_factory=dict)
     # Whether the user hid every marker at the latest refresh of the markers, which the next refreshes skip until the
     # user shows one again.
     is_markers_hidden: bool = False
@@ -770,9 +836,10 @@ class RenderContext:
         # The records of the scoped contexts of each source (see 'ScopedRenderContext.sources')
         self._sources_records: dict["Solver", list[_ScopedRecord]] = {}
         # The record of each shape the scoped contexts show, which notifies the subscribers of the shapes (see
-        # 'subscribe'). The shapes are the keys, so that no other object takes their identity while a scoped context
-        # shows them, and a shape a scoped context no longer returns leaves.
-        self._shapes_record: dict[Shape, _ScopedRecord] = {}
+        # 'subscribe'). A shape a scoped context no longer returns leaves.
+        self._shapes_record: dict[Shape, _RecordedShape] = {}
+        # The storage of the markers of a size of their own, by marker of the scoped contexts
+        self._markers_storage: dict[Shape, _MarkerStorage] = {}
         # The indices of every environment
         self._envs_idx: torch.Tensor | None = None
         # The number of parallel environments, and the sanitizer of a selection of them, which the simulator gives as
@@ -824,47 +891,47 @@ class RenderContext:
             self._records.append(record)
         self._pending.clear()
 
-    def _record_shape(self, record: _ScopedRecord, shape: Shape, is_marker: bool) -> None:
-        # The fields given as ArrayRef are resolved into views of their arrays, kept current by the refreshes of the
-        # scoped context: the array itself with zero-copy, a copy refreshed with the shapes or the markers otherwise.
-        # The shapes are frozen to their readers alone, which is why the context writes their fields in place.
-        if shape in self._shapes_record:
-            return
-        self._shapes_record[shape] = record
-        self._set_reads(record, shape)
-        if shape.envs_idx is None:
-            object.__setattr__(shape, "envs_idx", self._envs_idx)
-        is_recorded_before = bool(shape.refs)
+    def _record_shape(self, record: _ScopedRecord, shape: Shape, is_marker: bool) -> Shape:
+        # The render context returns a fork of each object a scoped context returns, and keeps it while the scoped
+        # context returns the same object. The fields given as ArrayRef are resolved into views of their arrays, kept
+        # current by the refreshes of the scoped context: the array itself with zero-copy, a copy refreshed with the
+        # shapes or the markers otherwise.
+        recorded = self._shapes_record.get(shape)
+        if recorded is not None and recorded.returned is shape:
+            return recorded.resolved
+        values = {}
+        refs = {}
         for shape_field in dataclasses.fields(shape):
             name = shape_field.name
             value = getattr(shape, name)
             if isinstance(value, ArrayRef):
-                shape.refs[name] = value
-                object.__setattr__(shape, name, value.view(is_per_env=True))
+                refs[name] = value
+                values[name] = value.view(is_per_env=True)
             elif isinstance(value, np.ndarray) and "torch.Tensor" in str(shape_field.type):
                 # The arrays a scoped context computes on the host are copied to the device once, the texture
                 # coordinates of a mesh staying on the host where the renderers read them.
-                object.__setattr__(shape, name, _to_device(value))
-        if not gs.use_zerocopy and shape.refs:
-            shape_copies = [(getattr(shape, name), ref) for name, ref in shape.refs.items()]
+                values[name] = _to_device(value)
+        envs_idx = self._envs_idx if shape.envs_idx is None else shape.envs_idx
+        reads = self._get_reads(record, shape)
+        resolved = shape.fork(envs_idx=envs_idx, refs=refs, reads=reads, **values)
+        if not gs.use_zerocopy and refs:
+            shape_copies = [(values[name], ref) for name, ref in refs.items()]
             (record.markers_copies if is_marker else record.shapes_copies)[shape] = shape_copies
-            # A shape returned again once gone holds the copies made as it was first returned
-            if is_recorded_before:
-                for dst, ref in shape_copies:
-                    dst.copy_(ref.view(is_per_env=True))
+        self._shapes_record[shape] = _RecordedShape(shape, resolved, record)
+        return resolved
 
-    def _set_reads(self, record: _ScopedRecord, shape: Shape) -> None:
+    def _get_reads(self, record: _ScopedRecord, shape: Shape) -> ShapeReads | None:
         # The reads holding each part of a shape stating its roles (see 'Shape.reads'). The debug read holds the debug
         # representation of an entity the debug views show in it, which leaves out an entity without one, such as a
         # kinematic entity.
         roles = shape.roles
-        if roles is not None:
-            entities_debug = record.scoped_context._entities_debug
-            entities_is_debug = np.array(
-                [entities_debug.get(i_e, self._is_debug) for i_e in roles.entities_idx], dtype=gs.np_bool
-            )
-            is_debug = np.where(entities_is_debug, roles.is_debug, roles.is_looks)
-            object.__setattr__(shape, "reads", ShapeReads(roles.is_looks, is_debug))
+        if roles is None:
+            return None
+        entities_debug = record.scoped_context._entities_debug
+        entities_is_debug = np.array(
+            [entities_debug.get(i_e, self._is_debug) for i_e in roles.entities_idx], dtype=gs.np_bool
+        )
+        return ShapeReads(roles.is_looks, np.where(entities_is_debug, roles.is_debug, roles.is_looks))
 
     def build(
         self, n_envs: int, solvers: "Sequence[Solver]", sanitize_envs_idx: "Callable[[IndexType | None], torch.Tensor]"
@@ -919,9 +986,17 @@ class RenderContext:
         # which the subscribers of the shapes and of the context are notified of as a change of their appearance.
         for record in self._records:
             if record.scoped_context is scoped_context:
-                shapes = itertools.chain(*record.views_shapes.values(), *record.reconstructed.values())
-                for shape in dict.fromkeys(shapes):
-                    self._set_reads(record, shape)
+                # The shapes are returned as forks holding the new reads, which keep their identity (see 'Shape.uid')
+                shapes_fork = {
+                    shape: shape.fork(reads=self._get_reads(record, shape))
+                    for shape in itertools.chain(*record.views_shapes.values(), *record.reconstructed.values())
+                }
+                for shape, fork in shapes_fork.items():
+                    self._shapes_record[shape] = self._shapes_record[shape]._replace(resolved=fork)
+                for view, shapes in record.views_shapes.items():
+                    record.views_shapes[view] = tuple(map(shapes_fork.get, shapes))
+                for points, meshes in record.reconstructed.items():
+                    record.reconstructed[points] = tuple(map(shapes_fork.get, meshes))
                 for subscriber in record.subscribers:
                     subscriber.notify(StateChange.VISUAL)
         for subscriber in self._subscribers:
@@ -982,9 +1057,9 @@ class RenderContext:
             self._subscribers.add(subscriber)
             return
         for shape in shapes:
-            record = self._shapes_record.get(shape)
-            if record is not None:
-                record.subscribers.add(subscriber)
+            recorded = self._shapes_record.get(shape)
+            if recorded is not None:
+                recorded.record.subscribers.add(subscriber)
 
     def unsubscribe(self, subscriber: Subscriber) -> None:
         """End the subscription of a subscriber (see 'subscribe')."""
@@ -1023,16 +1098,18 @@ class RenderContext:
                 copies = record.markers_copies
                 record.markers_refresh = _Refresh(record.epoch, envs_key, n_changes)
             else:
-                shapes = scoped_context.update_shapes(envs_idx=None if is_current else envs_idx, view=view)
-                for shape in shapes:
+                shapes = tuple(
                     self._record_shape(record, shape, is_marker=False)
+                    for shape in scoped_context.update_shapes(envs_idx=None if is_current else envs_idx, view=view)
+                )
                 shapes_before = record.views_shapes.get(view, ())
                 record.views_shapes[view] = shapes
                 # A shape that no representation returns any longer is gone
                 for shape in set(shapes_before).difference(itertools.chain(*record.views_shapes.values())):
                     del self._shapes_record[shape]
                     record.shapes_copies.pop(shape, None)
-                    record.reconstructed.pop(shape, None)
+                    for mesh in record.reconstructed.pop(shape, ()):
+                        del self._shapes_record[mesh]
                 if not is_current:
                     record.shapes_refresh = _Refresh(record.epoch, envs_key)
                 record.views_refresh[view] = record.shapes_refresh
@@ -1048,48 +1125,101 @@ class RenderContext:
     def _update_markers(self, record: _ScopedRecord, envs_idx: torch.Tensor) -> None:
         scoped_context = record.scoped_context
         markers = scoped_context.update_markers(envs_idx)
-        for marker in markers:
-            self._record_shape(record, marker, is_marker=True)
         for marker in set(record.markers).difference(markers):
             del self._shapes_record[marker]
             record.markers_copies.pop(marker, None)
-            record.markers_is_active.pop(marker, None)
-        record.markers = markers
-        # The markers hidden at the latest refresh are drawn again, then left out of the environments a change of state
-        # since the latest step left them wrong in, and of all of them where the user hides them.
-        for is_active in record.markers_is_active.values():
-            is_active[:] = True
+            storage = self._markers_storage.pop(marker, None)
+            if storage is not None:
+                self._shapes_record.pop(storage.static, None)
+        # A marker of a size of its own is drawn through the arrays of its storage, a fork of the marker the scoped
+        # context resized (a hidden one) drawing its flags over their rows. A marker the user hides is drawn as a fork
+        # without any item, which leaves the flags of the scoped context as it wrote them. A marker that a change of
+        # state since the latest step left wrong in some environments is drawn as a fork without any item there (see
+        # 'Shape.stale_on').
         envs_is_stale_by_changes: dict[frozenset[StateChange], torch.Tensor] = {}
+        markers_drawn = []
         for marker in markers:
+            marker_drawn = self._record_shape(record, marker, is_marker=True)
+            is_hidden = scoped_context.is_hidden(marker)
             stale_on = scoped_context.markers_stale_on if marker.stale_on is None else marker.stale_on
-            if scoped_context.is_hidden(marker):
-                rows = slice(None)
-            elif record.changes and stale_on:
+            envs_is_stale = None
+            if not is_hidden and record.changes and stale_on:
                 envs_is_stale = envs_is_stale_by_changes.get(stale_on)
                 if envs_is_stale is None:
                     envs_is_stale = torch.zeros(len(self._envs_idx), dtype=torch.bool, device=gs.device)
-                    for change, envs_idx in record.changes:
+                    for change, changed_envs_idx in record.changes:
                         if change in stale_on:
-                            envs_is_stale[self._sanitize_envs_idx(envs_idx)] = True
+                            envs_is_stale[self._sanitize_envs_idx(changed_envs_idx)] = True
                     envs_is_stale_by_changes[stale_on] = envs_is_stale
-                rows = envs_is_stale[marker.envs_idx]
-            else:
-                continue
-            if isinstance(marker, Arrows):
-                marker.vec[rows] = 0.0
-            elif isinstance(marker, Lines):
-                marker.end[rows] = marker.start[rows]
-            elif isinstance(marker, (Points, DynamicMesh, Frames, StaticMeshBatch)):
-                if marker.is_active is None:
-                    if isinstance(marker, DynamicMesh):
-                        is_active_shape = marker.verts.shape[:1]
-                    else:
-                        is_active_shape = marker.pos.shape[:2]
-                    is_active = torch.ones(is_active_shape, dtype=gs.tc_bool, device=gs.device)
-                    object.__setattr__(marker, "is_active", is_active)
-                    record.markers_is_active[marker] = is_active
-                marker.is_active[rows] = False
+            storage = self._markers_storage.get(marker)
+            if storage is not None:
+                static = self._record_shape(record, storage.static, is_marker=True)
+                if is_hidden or envs_is_stale is not None or marker is not storage.marker:
+                    is_active = torch.zeros_like(static.is_active)
+                    if not is_hidden:
+                        is_active[:, : storage.n_items] = marker_drawn.is_active
+                    static = static.fork(is_active=is_active)
+                marker_drawn = static
+            elif is_hidden or envs_is_stale is not None:
+                if marker_drawn.is_active is not None:
+                    is_active_shape = marker_drawn.is_active.shape
+                elif isinstance(marker_drawn, DynamicMesh):
+                    is_active_shape = marker_drawn.verts.shape[:1]
+                elif isinstance(marker_drawn, Lines):
+                    is_active_shape = marker_drawn.start.shape[:2]
+                else:
+                    is_active_shape = marker_drawn.pos.shape[:2]
+                is_active = torch.zeros(is_active_shape, dtype=gs.tc_bool, device=gs.device)
+                if not is_hidden:
+                    is_active[:] = True if marker_drawn.is_active is None else marker_drawn.is_active
+                marker_drawn = marker_drawn.fork(is_active=is_active)
+            if envs_is_stale is not None:
+                marker_drawn.is_active[envs_is_stale[marker_drawn.envs_idx]] = False
+            markers_drawn.append(marker_drawn)
+        record.markers = markers
+        record.markers_drawn = tuple(markers_drawn)
         record.is_markers_hidden = bool(markers) and all(map(scoped_context.is_hidden, markers))
+
+    def _resize_marker(self, marker: Shape, n_items: int) -> Shape:
+        # The capacity doubles once exceeded and halves once above four times the number of items, so that a number of
+        # items going back and forth reallocates seldom.
+        storage = self._markers_storage.get(marker)
+        items = marker.start if isinstance(marker, Lines) else marker.pos
+        n_items_before = items.shape[1] if storage is None else storage.n_items
+        capacity = 0 if storage is None else storage.capacity
+        # The rows past the number of items are hidden through the flags, which a resized marker is made with
+        assert marker.is_active is not None
+        # The arrays holding a row per item, along their second axis
+        names = [
+            field.name
+            for field in dataclasses.fields(marker)
+            if isinstance(value := getattr(marker, field.name), torch.Tensor)
+            and value.ndim >= 2
+            and value.shape[1] == n_items_before
+        ]
+        if storage is None or n_items > capacity or n_items < capacity // 4:
+            if n_items > capacity:
+                capacity = max(n_items, 2 * capacity)
+            while n_items < capacity // 4:
+                capacity //= 2
+            arrays = {}
+            n_kept = min(n_items_before, n_items)
+            for name in names:
+                value = getattr(marker, name)
+                array = torch.zeros((value.shape[0], capacity, *value.shape[2:]), dtype=value.dtype, device=gs.device)
+                array[:, :n_kept] = value[:, :n_kept]
+                arrays[name] = array
+            # The renderers draw arrays of another size, which a marker of a new identity tells them
+            static = marker.fork(uid=gs.UID(), **arrays)
+            if storage is not None:
+                self._shapes_record.pop(storage.static, None)
+            storage = self._markers_storage[marker] = _MarkerStorage(marker, static, capacity, n_items)
+        is_active = storage.static.is_active
+        is_active[:, n_items_before:n_items] = True
+        is_active[:, n_items:] = False
+        storage.n_items = n_items
+        storage.marker = marker.fork(**{name: getattr(storage.static, name)[:, :n_items] for name in names})
+        return storage.marker
 
     def _read(
         self,
@@ -1122,9 +1252,10 @@ class RenderContext:
                         continue
                     reconstructed = record.reconstructed.get(shape)
                     if reconstructed is None:
-                        reconstructed = record.reconstructed[shape] = record.scoped_context.reconstruct(shape)
-                        for mesh in reconstructed:
-                            self._set_reads(record, mesh)
+                        reconstructed = record.reconstructed[shape] = tuple(
+                            self._record_shape(record, mesh, is_marker=False)
+                            for mesh in record.scoped_context.reconstruct(shape)
+                        )
                     shapes += reconstructed
                 else:
                     shapes.append(shape)
@@ -1178,7 +1309,7 @@ class RenderContext:
         self._make_pending()
         envs_idx = self._envs_idx if envs_idx is None or self._n_envs == 0 else self._sanitize_envs_idx(envs_idx)
         self._refresh(envs_idx, self._records, is_markers=True)
-        return tuple(marker for record in self._records for marker in record.markers)
+        return tuple(marker for record in self._records for marker in record.markers_drawn)
 
     def destroy(self) -> None:
         """Release the data, the scoped contexts and the shapes, which the build of the scene makes anew."""
@@ -1186,5 +1317,6 @@ class RenderContext:
         self._records.clear()
         self._sources_records.clear()
         self._shapes_record.clear()
+        self._markers_storage.clear()
         self._subscribers.clear()
         self._envs_idx = None

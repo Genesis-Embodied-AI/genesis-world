@@ -1,4 +1,3 @@
-import dataclasses
 import itertools
 from typing import TYPE_CHECKING, ClassVar
 
@@ -437,8 +436,8 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
                     arrays = [array.view(is_per_env=True)[envs_shown_idx] for array in arrays]
                 pos, vel, is_active = arrays
                 surfaces_points.append(
-                    dataclasses.replace(
-                        points,
+                    points.fork(
+                        uid=gs.UID(),
                         pos=pos,
                         surface=recon_surface,
                         vel=vel,
@@ -485,8 +484,8 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
                     torch.from_numpy(mesh.vertices[None]),
                     seg_keys=points.seg_keys,
                     roles=points.roles,
-                    particles=dataclasses.replace(
-                        points,
+                    particles=points.fork(
+                        uid=gs.UID(),
                         pos=points.pos[i_r : i_r + 1],
                         vel=points.vel[i_r : i_r + 1],
                         is_active=points.is_active[i_r : i_r + 1],

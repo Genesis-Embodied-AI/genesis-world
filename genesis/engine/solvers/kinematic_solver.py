@@ -1767,8 +1767,7 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
 
     def set_link_frame_size(self, link_frame_size: float) -> None:
         """Set the length of the axes of the frames of the links (see ``KinematicVisOptions.link_frame_size``)."""
-        # The frames keep their identity, and so their resources in the renderers, which redraw them at their new size
-        object.__setattr__(self._link_frames, "length", link_frame_size)
+        self._link_frames = self._link_frames.fork(length=link_frame_size)
         self._context.invalidate((self,))
 
     def add_propellers_rpm(self, drone: DroneEntity, propellers_rpm: torch.Tensor) -> None:
