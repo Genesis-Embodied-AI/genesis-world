@@ -16,7 +16,7 @@ from genesis.engine.solvers.rigid.data import LinksState
 from genesis.engine.state_change import StateChange
 from genesis.repr_base import RBC
 from genesis.typing import NumArrayType, NumericType
-from genesis.utils.geom import euler_to_quat
+from genesis.utils.geom import euler_to_quat, transform_by_trans_quat, transform_quat_by_quat
 from genesis.utils.misc import (
     BuildableMixin,
     broadcast_tensor,
@@ -580,7 +580,9 @@ class Sensor(BuildableMixin, RBC, Generic[OptionsT, SharedSensorContextT, Shared
             # per sensor field structure
             index_slice = field_start
 
-        field[:, index_slice] = broadcast_tensor(value, field.dtype, (len(envs_idx), field_size), ("envs_idx", ""))
+        field[envs_idx, index_slice] = broadcast_tensor(
+            value, field.dtype, (len(envs_idx), field_size), ("envs_idx", "")
+        )
 
 
 class SensorScopedRenderContext(ScopedRenderContext[Sensor]):
@@ -620,17 +622,10 @@ class KinematicSensorMetadataMixin:
     Shared metadata for sensors attached to a KinematicEntity (or any subclass, including RigidEntity).
 
     Sensors are bucketed at build time into per-solver ``_SolverLinkGroup`` entries so the per-step gather is one bulk
-    read per solver. Static sensors (``entity_idx<0``) are not bucketed and keep an identity link pose, leaving the
-    kernel to apply ``pos_offset`` / ``euler_offset`` in world frame.
+    read per solver. Static sensors (``entity_idx<0``) are not bucketed and keep an identity link pose.
     """
 
-    offsets_pos: torch.Tensor = make_tensor_field((0, 0, 3))
-    offsets_quat: torch.Tensor = make_tensor_field((0, 0, 4))
     solver_groups: list[_SolverLinkGroup] = field(default_factory=list)
-
-    @property
-    def n_sensors(self) -> int:
-        return self.offsets_pos.shape[1]
 
 
 @dataclass
@@ -641,6 +636,14 @@ class RigidSensorMetadataMixin:
 
     solver: "RigidSolver | None" = None
     links_idx: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
+
+
+@dataclass
+class OffsettableSensorMetadataMixin:
+    """
+    Shared metadata for sensors mounted on their link at a fixed pose.
+    """
+
     offsets_pos: torch.Tensor = make_tensor_field((0, 0, 3))
     offsets_quat: torch.Tensor = make_tensor_field((0, 0, 4))
 
@@ -682,8 +685,7 @@ class _LinkAttachedSensorMixin(BuildableMixin):
     """
     Common boilerplate for sensors attached to a link.
 
-    Holds the python-side ``_link`` reference, concatenates per-sensor pos/euler offsets into shared metadata at build
-    time, and exposes ``set_{pos,quat}_offset``. Subclasses implement ``_register_link`` to record the link mapping in
+    Holds the python-side ``_link`` reference. Subclasses implement ``_register_link`` to record the link mapping in
     solver-specific shared-metadata shape (single tensor for ``RigidSensorMixin``, per-solver buckets for
     ``KinematicSensorMixin``).
     """
@@ -694,13 +696,26 @@ class _LinkAttachedSensorMixin(BuildableMixin):
     def build(self):
         super().build()
 
-        batch_size = self._manager.n_envs_
         if self._options.entity_idx >= 0:
             entity = self._manager.sim.entities[self._options.entity_idx]
             self._link = entity.links[self._options.link_idx_local]
             link_idx = self._options.link_idx_local + entity.link_start
             self._register_link(entity, link_idx)
 
+    def _register_link(self, entity, link_idx: int):
+        raise NotImplementedError
+
+
+class OffsettableSensorMixin(BuildableMixin):
+    """
+    Mixin for sensors mounted on their link at a fixed pose, adjustable after build through ``set_{pos,quat}_offset``.
+    """
+
+    @gs.assert_unbuilt
+    def build(self):
+        super().build()
+
+        batch_size = self._manager.n_envs_
         self._shared_metadata.offsets_pos = concat_with_tensor(
             self._shared_metadata.offsets_pos, self._options.pos_offset, expand=(batch_size, 1, 3), dim=1
         )
@@ -711,8 +726,20 @@ class _LinkAttachedSensorMixin(BuildableMixin):
             dim=1,
         )
 
-    def _register_link(self, entity, link_idx: int):
-        raise NotImplementedError
+    def _get_world_pose(self, envs_idx: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the world position and orientation of the sensor in the given environments.
+
+        A static sensor sits at its mounting offsets from the world frame.
+        """
+        sensor_envs_idx = self._sanitize_envs_idx(envs_idx)
+        pos = self._shared_metadata.offsets_pos[sensor_envs_idx, self._idx]
+        quat = self._shared_metadata.offsets_quat[sensor_envs_idx, self._idx]
+        if self._link is not None:
+            link_pos = self._link.get_pos(envs_idx, relative=False)
+            link_quat = self._link.get_quat(envs_idx, relative=False)
+            pos = transform_by_trans_quat(pos, link_pos, link_quat)
+            quat = transform_quat_by_quat(quat, link_quat)
+        return pos, quat
 
     @gs.assert_built
     def set_pos_offset(self, pos_offset, envs_idx=None):
@@ -749,7 +776,7 @@ class KinematicSensorMixin[KinematicSensorMetadataMixinT: KinematicSensorMetadat
     """
 
     def _register_link(self, entity, link_idx: int):
-        sensor_col = self._shared_metadata.n_sensors
+        sensor_col = self._idx
         groups = self._shared_metadata.solver_groups
         existing = next((i for i, g in enumerate(groups) if g.solver is entity.solver), None)
         if existing is None:
@@ -884,7 +911,7 @@ class SimpleSensor(Sensor[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
             self._shared_metadata.noise, to_tuple(self._options.noise), expand=(batch_size, -1), dim=-1
         )
         self._shared_metadata.jitter_ts = concat_with_tensor(
-            self._shared_metadata.jitter_ts, to_tuple(self._options.jitter / self._dt), expand=(batch_size, -1), dim=-1
+            self._shared_metadata.jitter_ts, self._options.jitter / self._dt, expand=(batch_size, 1), dim=1
         )
         if np.any(jitter_np > gs.EPS):
             self._shared_metadata.has_any_jitter = True

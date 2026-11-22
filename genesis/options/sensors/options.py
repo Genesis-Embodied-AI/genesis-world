@@ -105,6 +105,8 @@ class SensorOptions[SensorT: "Sensor"](Options):
 
     def _validate(self, sim: "Simulator"):
         # Checks needing the simulator. The ones on the values alone belong to model_post_init.
+        if self.entity_idx >= len(sim.entities):
+            gs.raise_exception(f"Invalid entity index {self.entity_idx}.")
         if self.delay > 0:
             delay_ratio = self.delay / sim.dt
             delay_ts = round(delay_ratio)
@@ -128,23 +130,15 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
         The global entity index of the entity to which this sensor is attached. -1 or None for static sensors.
     link_idx_local : int, optional
         The local index of the link of the entity to which this sensor is attached.
-    pos_offset : array-like[float, float, float], optional
-        The positional offset of the sensor from the link.
-    euler_offset : array-like[float, float, float], optional
-        The rotational offset of the sensor from the link in degrees.
     """
 
     link_idx_local: NonNegativeInt = 0
-    pos_offset: Vec3FType = (0.0, 0.0, 0.0)
-    euler_offset: Vec3FType = (0.0, 0.0, 0.0)
 
     def _validate(self, sim: "Simulator"):
         from genesis.engine.entities import KinematicEntity
 
         super()._validate(sim)
         if self.entity_idx >= 0:
-            if self.entity_idx >= len(sim.entities):
-                gs.raise_exception(f"Invalid entity index {self.entity_idx}.")
             entity = sim.entities[self.entity_idx]
             if not isinstance(entity, KinematicEntity):
                 gs.raise_exception(f"Entity at index {self.entity_idx} is not a KinematicEntity.")
@@ -152,33 +146,46 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
                 gs.raise_exception(f"Invalid link index {self.link_idx_local} for entity {self.entity_idx}.")
 
 
-class RigidSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMixin[SensorT]):
+class OffsettableSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMixin[SensorT]):
     """
-    Options for sensors that require a RigidEntity specifically (e.g. contact, contact force, IMU, tactile).
+    Options for sensors mounted on their link at a fixed pose, which frames their measurements.
 
-    Any sensor whose output depends on physics quantities (contact pairs, friction, inertial dynamics) belongs
-    here.
+    Parameters
+    ----------
+    pos_offset : array-like[float, float, float], optional
+        The positional offset of the sensor from the link, or from the world origin for a static sensor.
+    euler_offset : array-like[float, float, float], optional
+        The rotational offset of the sensor from the link in degrees, or from the world frame for a static sensor.
     """
 
+    pos_offset: Vec3FType = (0.0, 0.0, 0.0)
+    euler_offset: Vec3FType = (0.0, 0.0, 0.0)
+
+
+class _RigidOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
     def _validate(self, sim: "Simulator"):
         from genesis.engine.entities import RigidEntity
 
         super()._validate(sim)
-        if self.entity_idx >= 0:
-            entity = sim.entities[self.entity_idx]
-            if not isinstance(entity, RigidEntity):
-                gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
+        if self.entity_idx >= 0 and not isinstance(sim.entities[self.entity_idx], RigidEntity):
+            gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
 
 
-class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[SensorT]):
+class RigidSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMixin[SensorT], _RigidOptionsMixin[SensorT]):
+    """
+    Options for sensors mounted on one link of a RigidEntity (e.g. contact, contact force, IMU, tactile).
+
+    Any sensor whose output depends on physics quantities (contact pairs, friction, inertial dynamics) belongs here.
+    """
+
+
+class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](_RigidOptionsMixin[SensorT]):
     """
     Options for a sensor that measures nothing without a RigidEntity.
 
     The attachment is mandatory: entity_idx must refer to an existing RigidEntity, static sensors are not allowed. Such
     are the joint-space sensors, bound to a whole entity, and the sensors measuring a quantity of their link (contacts,
-    contact force, temperature).
-
-    The link offset parameters are inherited from RigidSensorOptionsMixin but ignored by joint-space sensors.
+    contact force, temperature), which combine this mixin with RigidSensorOptionsMixin.
     """
 
     def _validate(self, sim: "Simulator"):
@@ -431,7 +438,9 @@ class TemperatureProperties(NamedTuple):
 
 
 class TemperatureGrid(
-    RigidEntitySensorOptionsMixin["TemperatureGridSensor"], SimpleSensorOptions["TemperatureGridSensor"]
+    RigidEntitySensorOptionsMixin["TemperatureGridSensor"],
+    RigidSensorOptionsMixin["TemperatureGridSensor"],
+    SimpleSensorOptions["TemperatureGridSensor"],
 ):
     """
     Sensor that returns the temperature in Celsius of the associated RigidLink in its local frame.
@@ -479,7 +488,9 @@ class TemperatureGrid(
     debug_temperature_range: Vec2FType = (0.0, 100.0)
 
 
-class IMU(RigidSensorOptionsMixin["IMUSensor"], SimpleSensorOptions["IMUSensor"]):
+class IMU(
+    OffsettableSensorOptionsMixin["IMUSensor"], RigidSensorOptionsMixin["IMUSensor"], SimpleSensorOptions["IMUSensor"]
+):
     """
     IMU sensor returns the linear acceleration (accelerometer) and angular velocity (gyroscope)
     of the associated entity link.
@@ -615,7 +626,7 @@ class SurfaceDistanceProbe(
                 )
 
 
-class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOptions["RaycasterSensor"]):
+class Raycaster(OffsettableSensorOptionsMixin["RaycasterSensor"], SimpleSensorOptions["RaycasterSensor"]):
     """
     Raycaster sensor that performs ray casting to get distance measurements and point clouds.
 
@@ -624,13 +635,15 @@ class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOpti
     pattern: RaycastPatternOptions
         The raycasting pattern for the sensor.
     min_range : float, optional
-        The minimum sensing range in meters. Defaults to 0.0.
+        The minimum sensing range in meters. A ray whose closest hit is nearer reads as a miss (``no_hit_value``), as
+        a surface inside the blind zone of a real range sensor still blocks what lies behind it. Defaults to 0.0.
     max_range : float, optional
         The maximum sensing range in meters. Defaults to 20.0.
     no_hit_value : float, optional
         The value to return for no hit. Defaults to max_range if not specified.
     return_world_frame : bool, optional
-        Whether to return points in the world frame. Defaults to False (local frame).
+        Whether to return points in the world frame. Defaults to False, where each point is the hit relative to its ray
+        start, along the axes of the sensor frame (the link frame rotated by ``euler_offset``).
     return_points : bool, optional
         Whether to return the per-ray hit points. Defaults to True. When False, ``read().points`` is None and only
         the hit distances are measured, cutting the sensor's memory footprint and per-step cost to about a quarter.
@@ -655,6 +668,7 @@ class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOpti
     debug_ray_hit_color: Vec4FType = (1.0, 0.5, 0.5, 1.0)
 
     def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
         if self.no_hit_value is None:
             self.no_hit_value = self.max_range
         if self.max_range <= self.min_range:

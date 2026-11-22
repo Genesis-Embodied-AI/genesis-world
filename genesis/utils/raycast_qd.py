@@ -347,10 +347,11 @@ def kernel_cast_ray(
 @qd.kernel
 def kernel_cast_rays(
     points_to_sensor_idx: qd.types.ndarray(ndim=1),
-    links_pos: qd.types.ndarray(ndim=3),
-    links_quat: qd.types.ndarray(ndim=3),
+    sensors_pos: qd.types.ndarray(ndim=3),
+    sensors_quat: qd.types.ndarray(ndim=3),
     ray_starts: qd.types.ndarray(ndim=2),
     ray_directions: qd.types.ndarray(ndim=2),
+    min_ranges: qd.types.ndarray(ndim=1),
     max_ranges: qd.types.ndarray(ndim=1),
     no_hit_values: qd.types.ndarray(ndim=1),
     is_world_frame: qd.types.ndarray(ndim=1),
@@ -371,9 +372,10 @@ def kernel_cast_rays(
 
     `is_merge` and `is_last` chain the launches over several targets into one output: the first writes every slot and
     each later one overwrites a slot only with a closer hit. A miss never beats a hit of another launch whatever the
-    `no_hit_value` of the sensor (it may lie below the range, e.g. 0 or -1): a miss of a launch before the last seeds
-    the slot with the range, which every hit lies strictly below, and the last launch alone stamps `no_hit_value` on
-    the slots still holding the range.
+    `no_hit_value` of the sensor (it may lie below the range, e.g. 0 or -1): a miss of the first launch seeds the slot
+    with the range, which every hit lies strictly below, and the last launch alone stamps `no_hit_value` on the slots
+    still holding the range. The last launch also stamps it over a hit closer than the minimum range, which is settled
+    only then because that hit still occludes what lies behind it.
     """
     n_envs = output_hits.shape[-1]
     for i_flat in range(ray_starts.shape[0] * n_envs):
@@ -381,15 +383,15 @@ def kernel_cast_rays(
         i_p = i_flat // n_envs
         i_b = i_flat % n_envs
         i_s = points_to_sensor_idx[i_p]
-        link_pos = qd.Vector([links_pos[i_b, i_s, 0], links_pos[i_b, i_s, 1], links_pos[i_b, i_s, 2]])
-        link_quat = qd.Vector(
-            [links_quat[i_b, i_s, 0], links_quat[i_b, i_s, 1], links_quat[i_b, i_s, 2], links_quat[i_b, i_s, 3]]
+        sensor_pos = qd.Vector([sensors_pos[i_b, i_s, 0], sensors_pos[i_b, i_s, 1], sensors_pos[i_b, i_s, 2]])
+        sensor_quat = qd.Vector(
+            [sensors_quat[i_b, i_s, 0], sensors_quat[i_b, i_s, 1], sensors_quat[i_b, i_s, 2], sensors_quat[i_b, i_s, 3]]
         )
         ray_start = gu.qd_transform_by_trans_quat(
-            qd.Vector([ray_starts[i_p, 0], ray_starts[i_p, 1], ray_starts[i_p, 2]]), link_pos, link_quat
+            qd.Vector([ray_starts[i_p, 0], ray_starts[i_p, 1], ray_starts[i_p, 2]]), sensor_pos, sensor_quat
         )
         ray_dir_local = qd.Vector([ray_directions[i_p, 0], ray_directions[i_p, 1], ray_directions[i_p, 2]])
-        ray_dir = gu.qd_normalize(gu.qd_transform_by_quat(ray_dir_local, link_quat), eps)
+        ray_dir = gu.qd_normalize(gu.qd_transform_by_quat(ray_dir_local, sensor_quat), eps)
         max_range = max_ranges[i_s]
         distance = target.cast(i_b, i_p, ray_start, ray_dir, max_range)
         is_hit = distance < max_range
@@ -409,13 +411,14 @@ def kernel_cast_rays(
                 for j in qd.static(range(3)):
                     output_hits[i_p_offset + i_p_sensor * 3 + j, i_b] = hit_point[j]
         elif not is_merge:
-            if sensor_return_points[i_s]:
-                for j in qd.static(range(3)):
-                    output_hits[i_p_offset + i_p_sensor * 3 + j, i_b] = 0.0
-            output_hits[i_p_dist, i_b] = no_hit_values[i_s] if is_last else max_range
-        elif is_last:
-            if output_hits[i_p_dist, i_b] >= max_range:
+            output_hits[i_p_dist, i_b] = max_range
+        if qd.static(is_last):
+            distance_best = output_hits[i_p_dist, i_b]
+            if distance_best >= max_range or distance_best < min_ranges[i_s]:
                 output_hits[i_p_dist, i_b] = no_hit_values[i_s]
+                if sensor_return_points[i_s]:
+                    for j in qd.static(range(3)):
+                        output_hits[i_p_offset + i_p_sensor * 3 + j, i_b] = 0.0
 
 
 @qd.kernel(fastcache=True)
