@@ -83,10 +83,10 @@ class Spec(Options, Generic[EntityT]):
     """Spec an entity is constructed from, as passed to ``Scene.add_entity(spec=...)``.
 
     A concrete subclass decides the kind of entity and the solver simulating it, and declares the materials it admits,
-    the selectors of its parts and the patches of options set on them. The fields are fixed at construction, while
-    ``select`` records into the spec the options set on parts of the entity, where the kind of entity has parts.
-    The entity holds a copy, which records nothing more, so later records leave the entity as it is. A copy
-    of the spec (``model_copy()``) records again, starting from the patches recorded so far.
+    the selectors of its parts and the patches of options set on them. ``select`` records into the spec the options
+    set on parts of the entity, where the kind of entity has parts. The entity holds a copy, which records nothing
+    more, so later records leave the entity as it is. A copy of the spec (``model_copy()``) records again, starting
+    from the patches recorded so far.
 
     Parameters
     ----------

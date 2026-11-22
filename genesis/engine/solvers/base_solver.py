@@ -809,10 +809,12 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
         tensors = [qd_to_torch(field, transpose=is_batched, copy=copy) for field in fields]
         if self.is_recording:
             self.record_read(tuple(tensors), fields)
+        # A selection that only advanced indexing reaches is a copy, which 'copy=False' refuses as 'qd_to_torch' does
+        raise_if_fancy = copy is False
         if is_batched:
-            mask = indices_to_mask(envs_idx, idx, boolean_mask=False, pair_rows=True)
+            mask = indices_to_mask(envs_idx, idx, boolean_mask=False, raise_if_fancy=raise_if_fancy, pair_rows=True)
         else:
-            mask = indices_to_mask(idx)
+            mask = indices_to_mask(idx, raise_if_fancy=raise_if_fancy)
         tensors = [tensor[mask] for tensor in tensors]
         return tensors[0] if is_single else tensors
 

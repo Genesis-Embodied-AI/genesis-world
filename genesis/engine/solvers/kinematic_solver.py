@@ -1102,17 +1102,17 @@ class KinematicSolver(Solver):
         tensor = qd_to_torch(self.dyn_state.joints.xaxis, envs_idx, joints_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_vgeoms_pos(self, vgeoms_idx=None, envs_idx=None, *, relative=False):
-        tensor = self.render_context.get_vgeoms_pose(vgeoms_idx, envs_idx, is_quat=False)
+    def get_vgeoms_pos(self, vgeoms_idx=None, envs_idx=None, *, relative=False, copy: bool | None = True):
+        tensor = self.render_context.get_vgeoms_pose(vgeoms_idx, envs_idx, is_quat=False, copy=copy)
         if relative and self._vgeoms_offset_pos is not None:
-            quat = self.render_context.get_vgeoms_pose(vgeoms_idx, envs_idx, is_quat=True)
+            quat = self.render_context.get_vgeoms_pose(vgeoms_idx, envs_idx, is_quat=True, copy=None)
             offset_pos = self._vgeoms_offset_pos if vgeoms_idx is None else self._vgeoms_offset_pos[vgeoms_idx]
             offset_quat = self._vgeoms_offset_quat if vgeoms_idx is None else self._vgeoms_offset_quat[vgeoms_idx]
             tensor = tensor - _offset_world_shift(offset_pos, offset_quat, quat)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_vgeoms_quat(self, vgeoms_idx=None, envs_idx=None, *, relative=False):
-        tensor = self.render_context.get_vgeoms_pose(vgeoms_idx, envs_idx, is_quat=True)
+    def get_vgeoms_quat(self, vgeoms_idx=None, envs_idx=None, *, relative=False, copy: bool | None = True):
+        tensor = self.render_context.get_vgeoms_pose(vgeoms_idx, envs_idx, is_quat=True, copy=copy)
         if relative and self._vgeoms_offset_quat is not None:
             offset_quat = self._vgeoms_offset_quat if vgeoms_idx is None else self._vgeoms_offset_quat[vgeoms_idx]
             tensor = gu.transform_quat_by_quat(gu.inv_quat(offset_quat), tensor)
