@@ -923,7 +923,7 @@ class ContactProbeSensor(
         return above_enter | (prev_state & above_exit)
 
     def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
-        return self._update_probes_markers(markers, envs_idx, self.read_ground_truth(envs_idx))
+        return self._update_probes_markers(markers, envs_idx, is_contact=self.read_ground_truth(envs_idx))
 
 
 class KinematicTaxelReturnType(NamedTuple):

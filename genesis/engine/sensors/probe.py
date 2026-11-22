@@ -341,11 +341,17 @@ class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin](Bui
     def _update_probes_markers(
         self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None, is_contact: torch.Tensor | None
     ) -> tuple[Points, ...]:
-        """Return the markers of the probes, written in the environments `envs_idx` (see 'Sensor._update_markers').
+        """Return the markers of the probes, written in the given environments (see 'Sensor._update_markers').
 
-        `markers` are those of the probes the latest call returned. `is_contact` tells whether each probe of a tactile
-        sensor is in contact, laid out as the readings of the sensor, whose last entry of history is drawn. It is None
-        for any other sensor.
+        Parameters
+        ----------
+        markers : tuple[Shape, ...]
+            The markers of the probes the latest call returned.
+        envs_idx : torch.Tensor | None
+            The environments to write the markers in.
+        is_contact : torch.Tensor | None
+            Whether each probe of a tactile sensor is in contact, laid out as the readings of the sensor, whose last
+            entry of history is drawn. None for any other sensor.
         """
         options = self._options
         probes_radii = self._shared_metadata.probe_radii[self._probe_start_idx : self._probe_start_idx + self._n_probes]

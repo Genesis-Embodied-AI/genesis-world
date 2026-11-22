@@ -1699,11 +1699,19 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         partial: bool = False,
     ) -> None:
         """
-        Write back the state 'get_state' returned, for the given environments, all of them if None.
+        Write back the state 'get_state' returned, in some environments.
 
-        A restored state resumes fully awake (see kernel_reset_hibernation), without the contacts of the bodies it moved
-        unless `partial`, and with the warm starts of the collision detection and of the constraint solve it holds as
-        saved. The forward kinematics follows the wake-up, which it depends on.
+        A restored state resumes fully awake (see kernel_reset_hibernation), with the warm starts of the collision
+        detection and of the constraint solve as saved. The forward kinematics follows the wake-up, which it depends on.
+
+        Parameters
+        ----------
+        state : SolverCheckpoint
+            The state 'get_state' returned.
+        envs_idx : None | int | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        partial : bool, optional
+            Whether to keep the contacts of the bodies the state moves, which are dropped otherwise. Defaults to False.
         """
         super().set_state(state, envs_idx, partial=True)
         if self._use_hibernation and gs.use_zerocopy:

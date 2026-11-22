@@ -945,7 +945,12 @@ def test_trajectory_replay_across_backends(n_envs, checkpoint_scene, load_trajec
         trajectory.seek(index)
         frame = trajectory.frame(index)
         state = replay_scene.rigid_solver.get_state()
-        for name in ("rigid_info.qpos", "dyn_state.dofs.vel", "dyn_state.fixed_roots.pos"):
+        for name in (
+            "rigid_info.qpos",
+            "dyn_state.dofs.vel",
+            "dyn_state.fixed_roots.pos",
+            "dyn_state.fixed_roots.quat",
+        ):
             assert_equal(state.arrays[name], frame[f"RigidSolver.{name}"])
         # This log comes from a CPU fp32 run. One step after a seek, on the current backend and precision, matches the
         # next recorded frame within the suite's tolerance.

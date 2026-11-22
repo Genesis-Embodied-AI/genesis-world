@@ -1022,7 +1022,7 @@ class KinematicSolver(Solver):
         if self.n_envs == 0:
             position = position[None]
         # The positions of the other dofs are read from the state, so that the gradient of a recorded write reaches both
-        # the positions given and the state the others are read from (see 'kernel_set_dofs_position')
+        # the positions given and the state the others are read from (see 'kernel_set_dofs_position').
         positions = self._read_data(self.dyn_state.dofs.pos, envs_idx, None, copy=True)
         positions[:, dofs_idx] = position
         is_dof_set = torch.zeros((self.n_dofs,), dtype=gs.tc_bool, device=gs.device)

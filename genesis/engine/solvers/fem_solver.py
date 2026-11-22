@@ -34,10 +34,10 @@ from genesis.engine.materials.FEM.muscle import (
     func_muscle_stress,
 )
 from genesis.engine.render_context import (
+    ArrayRef,
     CONSTRAINT_COLOR,
     CONSTRAINT_LINE_RADIUS,
     CONSTRAINT_POINT_RADIUS,
-    ArrayRef,
     DynamicMesh,
     Lines,
     MeshKey,

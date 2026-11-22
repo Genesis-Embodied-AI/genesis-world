@@ -373,8 +373,9 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
                     quat=torch.zeros((n_envs_, len(meshes), 4), dtype=gs.tc_float, device=gs.device),
                 ),
             )
-        markers[0].pos[envs_idx] = self.get_pos(envs_idx)[..., None, :]
-        markers[0].quat[envs_idx] = self.get_quat(envs_idx)[..., None, :]
+        pos, quat = markers[0].pos, markers[0].quat
+        pos[envs_idx] = self.get_pos(envs_idx)[..., None, :]
+        quat[envs_idx] = self.get_quat(envs_idx)[..., None, :]
         return markers
 
     def _get_view(self) -> CameraView | None:

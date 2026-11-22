@@ -2932,6 +2932,23 @@ class RigidEntity(KinematicEntity):
 
     @gs.assert_built
     def get_mass_mat(self, envs_idx=None, decompose=False):
+        """Return the joint-space mass matrix of the dofs of the entity at the current configuration, armature included.
+
+        See 'RigidSolver.get_mass_mat'.
+
+        Parameters
+        ----------
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        decompose : bool, optional
+            Whether to return the lower-triangular factor and the inverse of the diagonal of its LDL^T decomposition
+            instead. Defaults to False.
+
+        Returns
+        -------
+        mass_mat : torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+            The mass matrix, or the lower-triangular factor and the inverse of the diagonal of its decomposition.
+        """
         dofs_idx = self._get_global_idx(None, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_mass_mat(dofs_idx, envs_idx, decompose)
 

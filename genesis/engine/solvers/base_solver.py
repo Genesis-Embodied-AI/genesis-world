@@ -396,12 +396,19 @@ class CheckpointMixin:
     ) -> None:
         """Write back the arrays of a checkpoint 'save_checkpoint' returned, rejecting a record read from another build.
 
-        `boundary_only` states that 'save_checkpoint' saved a boundary checkpoint, of which `envs_idx` selects the
-        environments to write back, all of them if None, along the last index of every array of the state.
-
         Nothing is notified to the subscribers (see 'mutates'). A component whose step reads a DERIVED array before
         recomputing it overrides this to recompute or invalidate that array when the record lacks DERIVED (see
         'DataKind'). On Metal, the caller synchronizes the torch stream before the next kernel (see 'fill_data').
+
+        Parameters
+        ----------
+        checkpoint : SolverCheckpoint
+            The checkpoint to write back.
+        boundary_only : bool, optional
+            Whether 'save_checkpoint' saved a boundary checkpoint. Defaults to False.
+        envs_idx : None | int | array_like, optional
+            The environments of a boundary checkpoint to write back, along the last index of every array of the state,
+            all of them if None. Defaults to None.
         """
         if not self.is_checkpointable:
             gs.raise_exception(f"{type(self).__name__} cannot be checkpointed yet: its state lives outside its data.")

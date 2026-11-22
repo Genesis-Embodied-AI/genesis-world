@@ -1082,7 +1082,7 @@ def func_factor_mass(
             rigid_info,
             rigid_config,
             implicit_damping,
-            qd.simt.Tile32x32 if qd.static(rigid_config.cholesky_tile_size == 32) else qd.simt.Tile16x16,
+            TileCls=qd.simt.Tile32x32 if qd.static(rigid_config.cholesky_tile_size == 32) else qd.simt.Tile16x16,
         )
     elif qd.static(rigid_config.enable_tiled_cholesky_mass_matrix and not rigid_config.mass_matrix_fits_shared):
         # Uncapped cooperative per-tree LDL^T, for a tree submatrix that does not fit in shared memory.
@@ -1141,7 +1141,7 @@ def func_factor_mass_masked(
             rigid_info,
             rigid_config,
             implicit_damping,
-            qd.simt.Tile32x32 if qd.static(rigid_config.cholesky_tile_size == 32) else qd.simt.Tile16x16,
+            TileCls=qd.simt.Tile32x32 if qd.static(rigid_config.cholesky_tile_size == 32) else qd.simt.Tile16x16,
         )
     elif qd.static(rigid_config.enable_tiled_cholesky_mass_matrix and not rigid_config.mass_matrix_fits_shared):
         BLOCK_DIM = qd.static(32)

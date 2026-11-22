@@ -1013,12 +1013,19 @@ def test_inertial_property_setters(sliding_ball_pair, xml_path, implicit_inertia
         assert_allclose(pair.get_dofs_position(slide_dof), authored.get_dofs_position(slide_dof), tol=tol)
         assert_allclose(pair.get_dofs_velocity(slide_dof), authored.get_dofs_velocity(slide_dof), tol=tol)
 
-    # Refreshing the weights, defined only at the neutral configuration, must leave the live one untouched.
+    # Refreshing the weights, defined only at the neutral configuration, must leave the live one untouched, in every
+    # environment whichever a setter just wrote, through a mass as through an armature.
     qpos_live = authored.get_qpos()
     vel_live = authored.get_dofs_velocity()
-    authored.links[1].set_mass(2.25)
-    assert_allclose(authored.get_qpos(), qpos_live, tol=gs.EPS)
-    assert_allclose(authored.get_dofs_velocity(), vel_live, tol=gs.EPS)
+    links_pos_live, links_vel_live = authored.get_links_pos(), authored.get_links_vel()
+    armature_live = authored.get_dofs_armature()
+    for set_model, value in ((authored.links[1].set_mass, 2.25), (authored.set_dofs_armature, armature_live)):
+        authored.set_qpos(qpos_live[[1]], envs_idx=[1], zero_velocity=False)
+        set_model(value)
+        assert_allclose(authored.get_qpos(), qpos_live, tol=gs.EPS)
+        assert_allclose(authored.get_dofs_velocity(), vel_live, tol=gs.EPS)
+        assert_allclose(authored.get_links_pos(), links_pos_live, tol=gs.EPS)
+        assert_allclose(authored.get_links_vel(), links_vel_live, tol=gs.EPS)
 
     # Where the mass of a link sits is what the dynamics turns it about, so both the place a link carries its own mass
     # and the composite place its tree turns about have to follow a mass or a center of mass being written. Asserted on
