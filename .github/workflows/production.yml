@@ -79,6 +79,7 @@ jobs:
 
     outputs:
       GENESIS_IMAGE_VER: ${{ steps.resolve.outputs.ver }}
+      GENESIS_IMAGE_VER_BENCHMARKS: ${{ steps.resolve.outputs.ver_benchmarks }}
       IS_SKIPPED: ${{ steps.check.outputs.is_skipped == 'true' }}
 
     steps:
@@ -148,21 +149,30 @@ jobs:
             core.setOutput('is_skipped', isSkipped);
 
       # The pin lives in the tree rather than in this file so that a pull request bumping it is validated by its own
-      # run instead of only taking effect once merged.
-      - name: Resolve the pinned container image version
+      # run instead of only taking effect once merged. The benchmarks of a commit selected by a call run in the image
+      # that this commit pins, since its build script is written for that image.
+      - name: Resolve the pinned container image versions
         id: resolve
         if: steps.check.outputs.is_skipped != 'true'
+        env:
+          GENESIS_SHA: ${{ inputs.genesis_sha }}
         run: |
-          if [[ ! -f .github/genesis_image_ver ]] ; then
-            echo "::error::'.github/genesis_image_ver' is missing. Rebase onto the default branch."
-            exit 1
+          if [[ -n "${GENESIS_SHA}" ]] ; then
+            git fetch --depth=1 origin "${GENESIS_SHA}"
           fi
-          VER=$(tr -d '[:space:]' < .github/genesis_image_ver)
-          if [[ ! "${VER}" =~ ^[0-9]+_[0-9]+[a-z0-9]*$ ]] ; then
-            echo "::error::'.github/genesis_image_ver' must hold a version of the form '<major>_<minor>[<suffix>]'."
-            exit 1
-          fi
-          echo "ver=${VER}" >> $GITHUB_OUTPUT
+          for OUTPUT_REF in "ver=HEAD" "ver_benchmarks=${GENESIS_SHA:-HEAD}" ; do
+            REF="${OUTPUT_REF#*=}"
+            if ! git cat-file -e "${REF}:.github/genesis_image_ver" ; then
+              echo "::error::'.github/genesis_image_ver' is missing from ${REF}. Select a later commit."
+              exit 1
+            fi
+            VER=$(git show "${REF}:.github/genesis_image_ver" | tr -d '[:space:]')
+            if [[ ! "${VER}" =~ ^[0-9]+_[0-9]+[a-z0-9]*$ ]] ; then
+              echo "::error::'.github/genesis_image_ver' must hold a version of the form '<major>_<minor>[<suffix>]'."
+              exit 1
+            fi
+            echo "${OUTPUT_REF%%=*}=${VER}" >> $GITHUB_OUTPUT
+          done
 
       # One of the two runners of this repository stays reserved to it at all times, the other going to whichever run
       # asks first. The calls of every other repository therefore take a single runner all together: a call runs one job
@@ -395,6 +405,7 @@ jobs:
     env:
       # Note that secrets are not passed to workflows that are triggered by a pull request from a fork
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      GENESIS_IMAGE_VER: ${{ needs.setup.outputs.GENESIS_IMAGE_VER_BENCHMARKS }}
       GS_ENABLE_NDARRAY: ${{ matrix.GS_ENABLE_NDARRAY }}
 
     steps:
@@ -430,10 +441,6 @@ jobs:
 
       - name: Spawn Slurm job
         run: |
-          # The commit under benchmark runs in the container image it pins, which may differ from the one of the unit
-          # tests, its build script being written for that image. The run of that commit validated the pin already.
-          GENESIS_IMAGE_VER=$(tr -d '[:space:]' < .github/genesis_image_ver)
-
           SLURM_JOB_NAME="$(uuidgen)_$(date +%Y%m%d_%H%M%S)"
           CONTAINER_NAME="${SLURM_JOB_NAME}"
           SRUN_CONTAINER_OPTS="\
