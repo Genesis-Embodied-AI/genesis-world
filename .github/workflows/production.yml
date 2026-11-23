@@ -27,9 +27,6 @@ on:
       benchmark_sha:
         description: Immutable Genesis source revision for external benchmark runs.
         type: string
-      benchmark_image_ver:
-        description: Container version recorded by the active benchmark configuration.
-        type: string
       unit_tests_markexpr:
         description: Marker expression selecting the unit tests to run, all of them by default.
         type: string
@@ -381,7 +378,6 @@ jobs:
     env:
       # Note that secrets are not passed to workflows that are triggered by a pull request from a fork
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      GENESIS_IMAGE_VER: ${{ inputs.benchmark_image_ver || needs.setup.outputs.GENESIS_IMAGE_VER }}
       GS_ENABLE_NDARRAY: ${{ matrix.GS_ENABLE_NDARRAY }}
 
     steps:
@@ -394,6 +390,11 @@ jobs:
           # Checkout full history is required to shallow cloning while mark HEAD as "grafted". This breaks remote
           # tracking thereby making it impossible to detect whether a commit is contained in upstream main.
           fetch-depth: 0
+
+      - name: Read the benchmark checkout's container image version
+        run: |
+          VER=$(tr -d '[:space:]' < .github/genesis_image_ver)
+          echo "GENESIS_IMAGE_VER=${VER}" >> "$GITHUB_ENV"
 
       # See the unit tests job for the mechanism.
       - name: Download the Quadrants wheels
