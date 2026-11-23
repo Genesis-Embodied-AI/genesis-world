@@ -12,7 +12,7 @@ from ..utils.assertions import assert_equal
 
 
 @pytest.mark.required
-def test_surface_shortcut_resolution():
+def test_surface_shortcut_resolution(tmp_path):
     # Plastic family: color resolves to diffuse_texture; the Rough subclass roughness default (1.0) feeds
     # roughness_texture and default_roughness.
     rough = gs.surfaces.Rough(color=(0.4, 0.4, 0.4))
@@ -37,6 +37,16 @@ def test_surface_shortcut_resolution():
     # Emission: color resolves to emissive_texture.
     emit = gs.surfaces.Emission(color=(1.0, 1.0, 0.0))
     assert emit.emissive_texture.color == (1.0, 1.0, 0.0)
+    # An emission read from an HDR file keeps its path rather than pixels, which no part of the resolution reads
+    hdr_path = tmp_path / "sky.hdr"
+    hdr_path.touch()
+    hdr_emit = gs.surfaces.Emission(
+        emissive_texture=gs.textures.ImageTexture(
+            image_path=str(hdr_path),
+            encoding="linear",
+        ),
+    )
+    assert hdr_emit.emissive_texture.image_path == str(hdr_path)
 
     # Explicit default_roughness wins over the roughness shortcut.
     override = gs.surfaces.Rough(roughness=0.7, default_roughness=0.5)

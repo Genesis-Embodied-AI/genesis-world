@@ -183,6 +183,9 @@ class Surface(Options):
     @model_validator(mode="after")
     def _check_dynamic_textures(self) -> Self:
         fields = dict(self)
+        # Resolving the color of a surface reads the pixels of its textures, which a texture read from an HDR file lacks
+        if not any(isinstance(value, DynamicTexture) for value in fields.values()):
+            return self
         for name, value in fields.items():
             if isinstance(value, DynamicTexture) and (
                 name not in ("diffuse_texture", "emissive_texture")
