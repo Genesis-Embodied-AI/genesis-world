@@ -294,13 +294,13 @@ class Mesh(RBC, serialization.SerializationMixin):
         *,
         n_candidates: int | None = None,
         seed: int | None = None,
-        use_cache: bool | None = None,
         return_normals: bool = False,
     ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
         """
         Sample `n_points` from mesh in local coordinates using Furthest Point Sampling.
 
-        If ``return_normals`` is True, returns ``(positions, normals)`` with face normals aligned to each sample.
+        If ``return_normals`` is True, returns ``(positions, normals)`` with face normals aligned to each sample. If
+        ``seed`` is given, the result is cached.
         """
         return pc.sample_mesh_point_cloud(
             self.verts,
@@ -308,7 +308,6 @@ class Mesh(RBC, serialization.SerializationMixin):
             n_points,
             n_candidates=n_candidates,
             seed=seed,
-            use_cache=use_cache,
             return_normals=return_normals,
         )
 

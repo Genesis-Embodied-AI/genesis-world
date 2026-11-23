@@ -437,12 +437,15 @@ def test_fps_algorithm_core():
         pc.furthest_point_sample(np.zeros((5, 3)), 10, seed=None)
 
 
+@pytest.mark.cache(False)
 @pytest.mark.required
-def test_fps_mesh_sampling_end_to_end():
+def test_fps_mesh_sampling_end_to_end(monkeypatch, tmp_path):
     # Shape/dtype/determinism, on-surface points, minimum separation, and box-aligned normals all in one scene.
     mesh = trimesh.creation.box((1.0, 1.0, 1.0))
-    points_a = pc.sample_mesh_point_cloud(mesh.vertices, mesh.faces, 16, n_candidates=400, seed=7, use_cache=False)
-    points_b = pc.sample_mesh_point_cloud(mesh.vertices, mesh.faces, 16, n_candidates=400, seed=7, use_cache=False)
+    points_a = pc.sample_mesh_point_cloud(mesh.vertices, mesh.faces, 16, n_candidates=400, seed=7)
+    # An empty cache directory makes the second call sample from scratch
+    monkeypatch.setenv("GS_CACHE_FILE_PATH", str(tmp_path / "empty_cache"))
+    points_b = pc.sample_mesh_point_cloud(mesh.vertices, mesh.faces, 16, n_candidates=400, seed=7)
     assert points_a.shape == (16, 3)
     assert points_a.dtype == gs.np_float
     assert_equal(points_a, points_b)
@@ -457,7 +460,7 @@ def test_fps_mesh_sampling_end_to_end():
     # Box face normals are axis-aligned unit vectors. Unit-length + `max(|n|) == 1` is sufficient: by Pythagoras the
     # other two components must be ~0.
     _, normals = pc.sample_mesh_point_cloud(
-        mesh.vertices, mesh.faces, 32, n_candidates=800, seed=0, use_cache=False, return_normals=True
+        mesh.vertices, mesh.faces, 32, n_candidates=800, seed=0, return_normals=True
     )
     assert_allclose(np.linalg.norm(normals, axis=1), 1.0, tol=1e-5)
     assert_allclose(np.abs(normals).max(axis=1), 1.0, tol=1e-4)
@@ -479,16 +482,17 @@ def test_fps_cache_round_trip():
             return_normals=return_normals,
             seed=7,
         )
-        first = pc.sample_mesh_point_cloud(verts=mesh.vertices, **kwargs, use_cache=True)
-        assert_equal(first, pc.sample_mesh_point_cloud(verts=mesh.vertices, **kwargs, use_cache=True))
-        assert_equal(first, pc.sample_mesh_point_cloud(verts=reexported_verts, **kwargs, use_cache=True))
+        first = pc.sample_mesh_point_cloud(verts=mesh.vertices, **kwargs)
+        assert_equal(first, pc.sample_mesh_point_cloud(verts=mesh.vertices, **kwargs))
+        assert_equal(first, pc.sample_mesh_point_cloud(verts=reexported_verts, **kwargs))
 
 
+@pytest.mark.cache(False)
 @pytest.mark.required
 def test_gs_mesh_sample_point_cloud_wrapper():
     mesh = trimesh.creation.box((0.2, 0.4, 0.6))
     gmesh = gs.Mesh.from_trimesh(mesh)
-    points, normals = gmesh.sample_point_cloud(10, n_candidates=300, seed=67, use_cache=False, return_normals=True)
+    points, normals = gmesh.sample_point_cloud(10, n_candidates=300, seed=67, return_normals=True)
     assert points.shape == (10, 3)
     assert normals.shape == (10, 3)
     _, dist, _ = mesh.nearest.on_surface(points)

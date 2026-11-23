@@ -85,7 +85,6 @@ def sample_mesh_point_cloud(
     *,
     n_candidates: int | None = None,
     seed: int | None = None,
-    use_cache: bool | None = None,
     return_normals: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """
@@ -102,9 +101,8 @@ def sample_mesh_point_cloud(
     n_candidates : int, optional
         Number of area-weighted surface samples to draw before FPS.
     seed : int, optional
-        The random seed for `trimesh.sample.sample_surface` and the first FPS pick. If None, a random seed is generated.
-    use_cache : bool, optional
-        If True, load and store results under the cache directory. If None, cache only when ``seed`` is given.
+        The random seed for `trimesh.sample.sample_surface` and the first FPS pick. If given, the result is cached
+        under the cache directory. If None, a random seed is generated.
     return_normals : bool
         If True, also return triangle face normals aligned with each FPS sample (same candidate face as the point).
 
@@ -124,16 +122,11 @@ def sample_mesh_point_cloud(
         n_candidates = max(256, n_points * 4)
     n_candidates = max(n_candidates, n_points)
 
-    if use_cache is None:
-        use_cache = seed is not None
-    elif use_cache and seed is None:
-        gs.logger.warning("Caching a point cloud sampled with a random seed fills the disk with unreusable results.")
+    cache = None
     if seed is None:
         seed = int(np.random.SeedSequence().entropy)
-
-    cache = get_fps_pc_cache(verts, faces, n_points, n_candidates, return_normals, seed)
-
-    if use_cache:
+    else:
+        cache = get_fps_pc_cache(verts, faces, n_points, n_candidates, return_normals, seed)
         data = cache.load()
         if data is not None:
             gs.logger.debug("FPS point cloud cache file found.")
@@ -155,7 +148,7 @@ def sample_mesh_point_cloud(
     else:
         output = _furthest_point_sample_impl(candidates, n_points, fps_rng, return_indices=False)
 
-    if use_cache:
+    if cache is not None:
         cache.save(output)
 
     return output
