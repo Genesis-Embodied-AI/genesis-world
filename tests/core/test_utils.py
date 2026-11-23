@@ -271,6 +271,13 @@ def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
             T_true = gu.trans_R_to_T(trans_mixed.astype(gs.np_float), R_mixed.astype(gs.np_float))
             assert_allclose(T, T_true, tol=tol)
 
+    # Vectors and quaternions of mixed precisions give rotated vectors of the higher one
+    for vec_mixed, quat_mixed in ((trans.astype(np.float16), quat), (trans, quat.astype(np.float16))):
+        vec_rotated = gu.transform_by_quat(*(torch.as_tensor(e, device=gs.device) for e in (vec_mixed, quat_mixed)))
+        assert tensor_to_array(vec_rotated).dtype == gs.np_float
+        vec_rotated_true = gu.transform_by_quat(vec_mixed.astype(gs.np_float), quat_mixed.astype(gs.np_float))
+        assert_allclose(vec_rotated, vec_rotated_true, tol=tol)
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
