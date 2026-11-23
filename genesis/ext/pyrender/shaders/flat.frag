@@ -115,12 +115,7 @@ void main()
     // Compute albedo
     vec4 base_color = material.base_color_factor;
 #ifdef HAS_BASE_COLOR_TEX
-    vec4 base_color_texel = texture(material.base_color_texture, uv_0);
-    // A texel of zero alpha is discarded (see 'mesh.frag')
-    if (base_color_texel.a < 0.5 / 255.0) {
-        discard;
-    }
-    base_color = base_color * base_color_texel;
+    base_color = base_color * texture(material.base_color_texture, uv_0);
 #endif
 
 #ifdef COLOR_0_LOC

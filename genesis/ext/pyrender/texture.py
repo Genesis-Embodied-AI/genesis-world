@@ -15,15 +15,26 @@ from .utils import format_texture_source
 from .sampler import Sampler
 
 
-def get_layers_alpha_min(images):
-    """Return the lowest alpha between 0 and 1 of the texels drawn in each of some RGBA images.
+def get_layers_alpha_min(images, skip_zero_alpha):
+    """Return the lowest alpha of the texels of each of some RGBA images, between 0 and 1.
 
-    The texels of zero alpha are discarded by the shaders, so an image holding no other alpha than 0 and 1 gives 1.
+    Parameters
+    ----------
+    images : (...,h,w,4) uint8 or float np.ndarray
+        The images, an 8-bit one storing an alpha of 1 as 255.
+    skip_zero_alpha : bool
+        Whether to leave out the texels of zero alpha, an image holding no other alpha than 0 and 1 then giving 1.
+
+    Returns
+    -------
+    layers_alpha_min : (...) float np.ndarray
+        The lowest alpha of each image.
     """
     alpha = images[..., 3]
-    # An 8-bit image stores an alpha of 1 as 255
     alpha_opaque = 255 if alpha.dtype == np.uint8 else 1.0
-    return np.where(alpha > 0, alpha, alpha_opaque).min(axis=(-2, -1)) / alpha_opaque
+    if skip_zero_alpha:
+        alpha = np.where(alpha > 0, alpha, alpha_opaque)
+    return alpha.min(axis=(-2, -1)) / alpha_opaque
 
 
 class Texture(object):
@@ -67,10 +78,11 @@ class Texture(object):
         self.source_channels = source_channels
         self.name = name
         self.sampler = sampler
+        # Set before the source, which reads it
+        self.tex_type = tex_type
         self.source = source
         self.width = width
         self.height = height
-        self.tex_type = tex_type
         self.data_format = data_format
 
         self._texid = None
@@ -119,10 +131,13 @@ class Texture(object):
         else:
             self._source = format_texture_source(value, self.source_channels)
         # The lowest alpha of each layer, which 'set_layers' keeps up to date since the host drops the layers it writes
-        # once they are uploaded
+        # once they are uploaded. The shaders of a blended material discard the texels of zero alpha, so they leave a
+        # texture array opaque. A 2D texture gets mipmaps, whose texels average those of zero alpha with their
+        # neighbours, so they count there.
         self._layers_alpha_min = None
         if self.source_channels == "RGBA" and self._source is not None:
-            self._layers_alpha_min = get_layers_alpha_min(self._source)
+            skip_zero_alpha = self.tex_type == GL_TEXTURE_2D_ARRAY
+            self._layers_alpha_min = get_layers_alpha_min(self._source, skip_zero_alpha)
 
     @property
     def source_channels(self):
@@ -170,9 +185,20 @@ class Texture(object):
         self._data_format = value
 
     def is_transparent(self, cutoff=1.0):
-        """bool : If True, the alpha of some texels drawn is below the cutoff, given between 0 and 1.
+        """Tell whether some texels shown are translucent enough to be blended with what lies behind them.
 
-        The texels of zero alpha are discarded by the shaders, so they leave the texture opaque.
+        The texels of zero alpha of a texture array are discarded by the shaders of a blended material, so they leave
+        the texture opaque.
+
+        Parameters
+        ----------
+        cutoff : float, optional
+            The alpha between 0 and 1 below which a texel is translucent. Defaults to 1.0.
+
+        Returns
+        -------
+        is_transparent : bool
+            Whether the alpha of some texels shown is below the cutoff.
         """
         if self._layers_alpha_min is None:
             return False
@@ -207,7 +233,7 @@ class Texture(object):
         for layer, image in zip(layers_idx.tolist(), images[..., : len(self.source_channels)]):
             self._pending_layers[layer] = np.ascontiguousarray(image[::-1])
         if self._layers_alpha_min is not None:
-            self._layers_alpha_min[layers_idx] = get_layers_alpha_min(images)
+            self._layers_alpha_min[layers_idx] = get_layers_alpha_min(images, skip_zero_alpha=True)
 
     def upload_layers(self) -> None:
         """Upload the layers of a texture array written since its last upload, then drop them from the host."""

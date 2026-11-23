@@ -666,8 +666,8 @@ class JITRenderer:
             self.render_flags[i, 4] = primitive.is_floor and not floor_existed
             self.render_flags[i, 5] = node_list[i].mesh.is_transparent
             self.render_flags[i, 6] = node_list[i].mesh.is_marker
-            # The shadow maps read no texture, so a mesh made transparent by the alpha of its texels alone casts the
-            # shadow of its whole surface.
+            # A mesh made transparent by the alpha of its texels alone casts the shadow of its whole surface (see
+            # 'ALPHA_BLEND' in mesh.frag)
             self.render_flags[i, 9] = node_list[i].mesh.has_translucent_color
             self.views[i] = node_list[i].mesh.views
             # A pass drawing one environment draws the instance of that environment of a per-environment instanced
