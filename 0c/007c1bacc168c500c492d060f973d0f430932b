@@ -1,0 +1,20 @@
+genesis/engine/solvers/rigid/abd/inverse_kinematics.py
+  s_44596ab701eebc::t_bbb816b28f2c71 608
+  s_44596ab701eebc::t_6dbb694def9b91 592
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0c007c1bacc168c500c492d060f973d0f430932b",
+  "prompts": {},
+  "sessions": {
+    "s_44596ab701eebc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4612133f-414c-4217-a551-d3499789ccd5",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
