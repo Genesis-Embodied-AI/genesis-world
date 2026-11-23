@@ -532,7 +532,9 @@ def data_to_array(data, *, to_torch: bool = False, copy: bool | None = None):
             data = data.clone()
         return data if to_torch else tensor_to_array(data)
     if isinstance(data, (qd.Tensor, qd.Field, qd.Ndarray)):
-        return qd_to_torch(data, copy=copy) if to_torch else qd_to_numpy(data, copy=copy)
+        # The data is copied as it stands (see 'no_read_guard')
+        with no_read_guard():
+            return qd_to_torch(data, copy=copy) if to_torch else qd_to_numpy(data, copy=copy)
     if isinstance(data, np.ndarray):
         return data
     if isinstance(data, tuple) and (data_asdict := getattr(data, "_asdict", None)) is not None:
@@ -961,6 +963,26 @@ def _apply_masks(out, value, row_mask, col_mask, keepdim, copy, *, to_torch):
     return out[mask]
 
 
+# The function each read of a tracked quadrants array calls first, by array, None for none (see '_register_readers')
+_array_readers: Mapping[Any, Callable[[], bool]] | None = None
+
+
+@contextmanager
+def no_read_guard() -> Iterator[None]:
+    """Lift the read guard within the block, the quadrants arrays being read as they stand (see 'qd_to_torch').
+
+    A copy of the data itself, such as a checkpoint or the save of a backward pass, holds what the arrays hold, while a
+    consumer of their values reads them current.
+    """
+    global _array_readers
+    readers, _array_readers = _array_readers, None
+    try:
+        yield
+    finally:
+        _array_readers = readers
+
+
+# TODO: The fixed cost of each call dominates the getters reading small arrays, which a dedicated pass should cut down.
 def qd_to_torch(
     value: qd.Tensor | qd.Field | qd.Ndarray,
     row_mask: int | range | slice | tuple[int, ...] | list[int] | torch.Tensor | np.ndarray | None = None,
@@ -969,8 +991,8 @@ def qd_to_torch(
     transpose: bool = False,
     *,
     copy: bool | None = None,
-) -> torch.Tensor:
-    """Converts a Quadrants field / ndarray instance to a PyTorch tensor.
+) -> torch.Tensor | None:
+    """Converts a Quadrants field / ndarray instance to a PyTorch tensor, None if neither fresh nor refreshable.
 
     Args:
         value (qd.Field | qd.Ndarray): Field or Ndarray to be converted.
@@ -981,6 +1003,12 @@ def qd_to_torch(
         copy (bool, optional): Wether to enforce returning a copy no matter what. None to avoid copy if possible
         without raising an exception if not.
     """
+    # A read with 'copy=False' is a handle on the memory, whose values its holder reads later, so it always goes on. Any
+    # other read may copy, and returns None for an array neither fresh nor refreshable (see 'ChangeLog.is_fresh').
+    if _array_readers is not None:
+        read = _array_readers.get(value)
+        if read is not None and not read() and copy is not False:
+            return None
     if isinstance(value, qd.Tensor):
         value = value._unwrap()
 
@@ -1033,6 +1061,25 @@ def qd_to_torch(
     return _apply_masks(tensor, value, row_mask, col_mask, keepdim, copy, to_torch=True)
 
 
+def _register_readers(readers: Mapping[Any, Callable[[], bool]] | None) -> None:
+    """Set the functions 'qd_to_torch' and 'qd_to_numpy' call before reading the arrays they are given for.
+
+    They let the arrays derived from the state refresh as they are read, and a copy of an array that is neither fresh
+    nor refreshable return None (see 'genesis.engine.state_change').
+
+    Parameters
+    ----------
+    readers : Mapping[Any, Callable[[], bool]] | None
+        The function of each array, returning whether its read goes on, kept as given so that it follows the arrays
+        added later, None for none.
+    """
+    global _array_readers
+    _array_readers = readers
+
+
+qd_to_torch.register_readers = _register_readers
+
+
 def qd_to_numpy(
     value: qd.Tensor | qd.Field | qd.Ndarray,
     row_mask: int | range | slice | tuple[int, ...] | list[int] | torch.Tensor | np.ndarray | None = None,
@@ -1041,8 +1088,8 @@ def qd_to_numpy(
     transpose: bool = False,
     *,
     copy: bool | None = None,
-) -> np.ndarray:
-    """Converts a Quadrants field / ndarray instance to a Numpy array.
+) -> np.ndarray | None:
+    """Converts a Quadrants field / ndarray instance to a Numpy array, None if neither fresh nor refreshable.
 
     Args:
         value (qd.Field | qd.Ndarray): Field or Ndarray to be converted.
@@ -1053,6 +1100,11 @@ def qd_to_numpy(
         copy (bool, optional): Wether to enforce returning a copy no matter what. None to avoid copy if possible
         without raising an exception if not.
     """
+    # See 'qd_to_torch' for the reads returning None
+    if _array_readers is not None:
+        read = _array_readers.get(value)
+        if read is not None and not read() and copy is not False:
+            return None
     if isinstance(value, qd.Tensor):
         value = value._unwrap()
 
@@ -1084,8 +1136,11 @@ def qd_to_numpy(
                 array = _maybe_transpose_np(value.to_numpy(), value, transpose)
                 is_copy = True
             else:
+                # A numpy view is read-only, the arrays being written through torch views alone, which the change logs
+                # follow (see 'genesis.engine.state_change').
                 value._np = tc.numpy()
                 value._T_np = _maybe_transpose(tc, value, True).numpy()
+                value._np.flags.writeable = value._T_np.flags.writeable = False
                 if isinstance(value, qd.Ndarray):
                     value._reset = functools.partial(_reset_ndarray_with_views, value)
                 array = value._T_np if transpose else value._np

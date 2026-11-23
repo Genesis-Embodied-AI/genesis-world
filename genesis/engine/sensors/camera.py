@@ -12,6 +12,7 @@ import trimesh
 
 import genesis as gs
 from genesis.engine.render_context import ArrayRef, MeshGeometry, Shape, StaticMeshBatch
+from genesis.engine.state_change import StateChange
 from genesis.options.renderers import BatchRenderer as BatchRendererOptions
 from genesis.options.sensors import (
     BatchRendererCameraOptions,
@@ -371,10 +372,16 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
                     ),
                     pos=torch.zeros((n_envs_, len(meshes), 3), dtype=gs.tc_float, device=gs.device),
                     quat=torch.zeros((n_envs_, len(meshes), 4), dtype=gs.tc_float, device=gs.device),
+                    is_active=torch.ones((n_envs_, len(meshes)), dtype=gs.tc_bool, device=gs.device),
+                    # The camera follows its link, if any
+                    invalidated_by={self: (StateChange.MODEL,)}
+                    if self._link is None
+                    else {self._link.entity.solver: (StateChange.GEOMETRY,), self: (StateChange.MODEL,)},
                 ),
             )
-        markers[0].pos[envs_idx] = self.get_pos(envs_idx)[..., None, :]
-        markers[0].quat[envs_idx] = self.get_quat(envs_idx)[..., None, :]
+        pos, quat = markers[0].pos, markers[0].quat
+        pos[envs_idx] = self.get_pos(envs_idx)[..., None, :]
+        quat[envs_idx] = self.get_quat(envs_idx)[..., None, :]
         return markers
 
     def _get_view(self) -> CameraView | None:

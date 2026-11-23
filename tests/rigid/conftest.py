@@ -1233,6 +1233,21 @@ def trees_and_slider_mjcf():
 
 
 @pytest.fixture(scope="session")
+def welded_to_world_mjcf():
+    """Generate an MJCF model of bodies welded to the world, which stays a link: a body, and a body carrying another."""
+    mjcf = ET.Element("mujoco", model="welded_to_world")
+    ET.SubElement(mjcf, "compiler", angle="degree")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    welded = ET.SubElement(worldbody, "body", name="welded", pos="-1 0.5 0.4", euler="15 -25 40")
+    ET.SubElement(welded, "geom", type="box", size="0.03 0.02 0.04", pos="0.01 -0.02 0.01")
+    base = ET.SubElement(worldbody, "body", name="welded_base", pos="-0.8 0.9 0.3", euler="5 30 -15")
+    ET.SubElement(base, "geom", type="box", size="0.02 0.02 0.02", pos="0.01 0.01 0.01")
+    child = ET.SubElement(base, "body", name="welded_child", pos="0.05 -0.02 0.03", euler="-20 10 35")
+    ET.SubElement(child, "geom", type="capsule", size="0.01 0.03", pos="0.01 0.02 -0.01", euler="90 0 0")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def freeflyer_urdf():
     robot = ET.Element("robot", name="freeflyer")
     ET.SubElement(robot, "link", name="world")

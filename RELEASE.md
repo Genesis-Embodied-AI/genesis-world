@@ -1,5 +1,43 @@
 # Genesis Release Note
 
+## 1.5.0
+
+This release adds support for dynamic visual textures, useful for applications ranging from animated screens to painting. It also improves support for third-party rendering backends by providing an efficient interoperability layer with a stable API and protocol. Finally, setter calls between steps are much cheaper because stale derived quantities are refreshed lazily when read.
+
+### Breaking / Changing
+
+* [FEATURE] Add debug view mode and dynamic vertices of visual geoms. (@duburcqa) (#3849)
+* [MISC] Interpret unset or zero effort in URDF as unbounded. (@jih0-kim) (#3503)
+
+### New Features
+
+* Add support of dynamic visual texture. (@Milotrince) (#3828⁠)
+
+### Bug fixes
+
+* Fix polar decomposition returning a reflection for matrices of negative det. (@duburcqa) (#3856)
+* Fix decimating a mesh with duplicate faces. (@realquantumcookie) (#3491)
+* Fix liquid scenes hanging on macOS in the debug view. (@duburcqa) (#3860)
+* Fix the gradient of the orientation set on a fixed-base entity. (@duburcqa) (#3867)
+* Fix debug mode leaking its settings of torch into later sessions. (@duburcqa) (#3869)
+* Fix mesh caches breaking across dependency versions. (@Milotrince) (#3672)
+* Fix animation frame timing and drop moviepy. (@Milotrince) (#3858)
+* Fix crashes on arrays loaded from the on-disk mesh caches. (@Milotrince) (#3874)
+* Fix recorders raising at exit after stop_recording. (@b84330808) (#3905)
+* Fix thin-lens cameras ignoring their focal length. (@duburcqa) (#3870)
+* Fix force fields ignoring their direction or deactivation, and activate them once created. (@MohammadHijjawi97) (#3486)
+* Fix USD parsing of angular joint stiffness and damping. (@jeongseok-meta) (#3872)
+* Fix creating a surface from an emission read from an HDR file. (@duburcqa) (#3915)
+
+### Miscellaneous
+
+* Fix type checkers unable to resolve genesis dtypes. (@Milotrince) (#3645)
+* Migrate examples and tests off deprecated visual options. (@duburcqa) (#3855)
+* Keep the poses of fixed root links apart from the link poses derived from the state. (@duburcqa) (#3862)
+* Add support of draw_debug for camera sensors. (@duburcqa) (#3868)
+* Let solver getters return a view on request. (@duburcqa) (#3909)
+* Refresh stale derived quantities lazily as they are read. (@duburcqa) (#3863)
+
 ## 1.4.7
 
 This release keeps polishing our non-rigid solvers and couplers. Multi-physics simulation should be faster and more reliable with a much reduced memory footprint. All solvers are now fully deterministic in `gs.init(use_deterministic_algorithms=True)` mode, at the cost of about a 15% speed drop.

@@ -3,6 +3,7 @@
 import quadrants as qd
 
 from genesis.engine.solvers.rigid.data import GEOMS, LINKS, VERTS
+from genesis.engine.state_change import StateChange
 from genesis.utils.data import ENVS, WORKERS, Config, Data, DataKind, Size, field
 
 
@@ -34,7 +35,14 @@ PERTURBED_SLOTS = "perturbed_slots"
 PRUNING = "pruning"
 
 
-class ContactData(Data, kind=DataKind.DERIVED, shape=(CANDIDATE_CONTACTS, ENVS)):
+class ContactData(
+    Data,
+    kind=DataKind.DERIVED,
+    shape=(CANDIDATE_CONTACTS, ENVS),
+    # The contact points follow the model as well, since the dynamic constraints are model data and drop the pairs of
+    # the links they hold (see 'func_is_link_pair_bound').
+    invalidated_by=(StateChange.GEOMETRY, StateChange.MODEL),
+):
     """The contacts found in each environment: geoms, links, frame, friction, solver parameters and force."""
 
     geom_a: qd.Tensor = field(int)
@@ -46,7 +54,8 @@ class ContactData(Data, kind=DataKind.DERIVED, shape=(CANDIDATE_CONTACTS, ENVS))
     friction_torsional: qd.Tensor = field(float)
     friction_rolling: qd.Tensor = field(float)
     sol_params: qd.Tensor = field((float, 7))
-    force: qd.Tensor = field((float, 3))
+    # The force is solved from the velocities as well
+    force: qd.Tensor = field((float, 3), invalidated_by=(StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL))
     link_a: qd.Tensor = field(int)
     link_b: qd.Tensor = field(int)
     pair_idx: qd.Tensor = field(int)
@@ -146,7 +155,10 @@ class ColliderState(Data, kind=DataKind.SCRATCH):
     box_pu: qd.Tensor = field((float, 3), shape=(4, ENVS), labels=BOX_BOX)
     # The prism under the triangle every thread of the terrain pass tests, which reads its thread count from its shape
     prism: qd.Tensor = field((float, 3), shape=(6, TERRAIN_THREADS))
-    n_contacts: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
+    # See 'ContactData'
+    n_contacts: qd.Tensor = field(
+        int, shape=(ENVS,), kind=DataKind.DERIVED, invalidated_by=(StateChange.GEOMETRY, StateChange.MODEL)
+    )
     # Kept contacts of the sleepers, at the front of the contact buffer with the identity permutation: a hibernated
     # link's contacts against fixed links and other sleepers are carried from step to step with the force of the last
     # solve they took part in, for the contact getters and the per-link contact force alone. Every per-step pass
@@ -161,7 +173,13 @@ class ColliderState(Data, kind=DataKind.SCRATCH):
     diff_contact_input: DiffContactInput = field(shape=(CANDIDATE_CONTACTS, ENVS), labels=DIFF_CONTACTS)
     work_queue: NarrowphaseWorkQueue
     contact_sort_key: qd.Tensor = field(float, shape=(CANDIDATE_CONTACTS, ENVS))
-    contact_sort_idx: qd.Tensor = field(int, shape=(CANDIDATE_CONTACTS, ENVS), kind=DataKind.DERIVED)
+    # The order of the contacts follows their points (see 'ContactData')
+    contact_sort_idx: qd.Tensor = field(
+        int,
+        shape=(CANDIDATE_CONTACTS, ENVS),
+        kind=DataKind.DERIVED,
+        invalidated_by=(StateChange.GEOMETRY, StateChange.MODEL),
+    )
     contact_proj_v: qd.Tensor = field(float, shape=(CANDIDATE_CONTACTS, ENVS), labels=PRUNING)
     contact_keep: qd.Tensor = field(int, shape=(CANDIDATE_CONTACTS, ENVS), labels=PRUNING)
     contact_hull_stack: qd.Tensor = field(int, shape=(CANDIDATE_CONTACTS, ENVS), labels=PRUNING)

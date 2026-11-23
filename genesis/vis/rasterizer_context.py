@@ -1,26 +1,32 @@
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, NamedTuple
 
 import numpy as np
 import torch
+
+from OpenGL.GL import GL_HALF_FLOAT, GL_TEXTURE_2D_ARRAY, GL_UNSIGNED_BYTE
 import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
+from genesis.constants import TEXTURE_MAP_TYPE
 from genesis.engine.render_context import (
     Arrows,
     DynamicMesh,
     Frames,
     Lines,
     Points,
+    ScopedRenderContext,
     SegmentationKeys,
     Shape,
     StaticMeshBatch,
+    TextureVariants,
 )
-from genesis.engine.state_change import StateChange, Subscriber
+from genesis.engine.state_change import StateChange, Subscriber, Tracker
 from genesis.ext import pyrender
 from genesis.ext.pyrender.jit_render import JITRenderer
+from genesis.typing import IndexType
 from genesis.utils.misc import BuildableMixin, tensor_to_array
 
 
@@ -105,6 +111,17 @@ class SegmentationColorMap:
             self.idxc_to_color = rgb if self.idxc_to_color is None else np.concatenate((self.idxc_to_color, rgb))
 
 
+class TextureBinding(NamedTuple):
+    """The texture array a dynamic texture of a mesh is drawn from, and the primitives drawing the mesh."""
+
+    texture: TextureVariants
+    texture_array: "pyrender.Texture"
+    """The array holding the image of each variant, then that of the batched variant in each rendered environment."""
+    primitives: list["pyrender.Primitive"]
+    tracker: Tracker
+    """The writes and resets of the texture since its images and layers were last drawn (see 'TextureVariants')."""
+
+
 @dataclass(eq=False)
 class RowsSelection:
     """The rows of the shapes of some environments holding a rendered environment, and the position of that
@@ -125,11 +142,14 @@ class ShapeNodes:
     nodes: list["pyrender.Node | None"]
     # Whether the shape is a marker, which the debug views alone draw and which takes no part in segmentation
     is_marker: bool
-    # The record of the refreshes of the shape, and of the changes of the reads holding its parts, since its nodes were
-    # last updated (see 'RenderContext.subscribe').
-    subscriber: Subscriber
     # The rows of the shape the nodes draw, shared by the shapes of the same environments
     selection: RowsSelection
+    # The refreshes of the arrays of the shape and the changes of the reads holding its parts, since the nodes were last
+    # synced (see 'RenderContext.track').
+    refreshes_tracker: Tracker
+    reads_tracker: Tracker
+    # Whether its scoped context refreshed the shape since its nodes were last updated, while no view drew it
+    is_refreshed: bool = False
     # The meshes of a StaticMeshBatch posed per rendered environment: their positions in the batch, their pyrender
     # meshes and primitives, and the positions among them of the floors.
     meshes_posed: np.ndarray | None = None
@@ -142,6 +162,8 @@ class ShapeNodes:
     rows_shown: np.ndarray | None = None
     # The views drawing each node (see 'pyrender.ViewFlags')
     nodes_views: np.ndarray | None = None
+    # The texture arrays the dynamic textures of the meshes of the shape are drawn from
+    textures: list[TextureBinding] = field(default_factory=list)
 
 
 class RasterizerContext(BuildableMixin):
@@ -201,6 +223,8 @@ class RasterizerContext(BuildableMixin):
             self.rendered_envs_idx = list(range(max(self.scene.n_envs, 1)))
         # The position of each rendered environment among them
         self._rendered_envs_pos = {i_b: i_r for i_r, i_b in enumerate(self.rendered_envs_idx)}
+        # The rendered environments on the device, which select the images of the dynamic textures they show
+        self._rendered_envs_t = torch.tensor(self.rendered_envs_idx, dtype=gs.tc_int, device=gs.device)
 
         # pyrender scene
         self._scene = pyrender.Scene(
@@ -218,7 +242,7 @@ class RasterizerContext(BuildableMixin):
 
         # A change of the render context outside a step, such as a write of the appearance of an entity, shows at the
         # next sync, which a sync between two steps skips otherwise (see 'update').
-        def on_change(change: StateChange, envs_idx: Any) -> None:
+        def on_change(change: StateChange, **indices: IndexType | None) -> None:
             self._t = -1
 
         self.sim.render_context.subscribe(Subscriber(to=frozenset(StateChange), callback=on_change))
@@ -355,24 +379,29 @@ class RasterizerContext(BuildableMixin):
                         rows = slice(None)
                     is_all_rendered = np.array_equal(envs_pos, np.arange(len(self.rendered_envs_idx)))
                     selection = self._rows_envs[shape.envs] = RowsSelection(rows, envs_pos, is_all_rendered)
-                subscriber = Subscriber(to=frozenset((StateChange.GEOMETRY, StateChange.VISUAL)))
                 shape_nodes = ShapeNodes(
-                    nodes=[], is_marker=shape in markers, subscriber=subscriber, selection=selection
+                    nodes=[],
+                    is_marker=shape in markers,
+                    selection=selection,
+                    refreshes_tracker=context.track(shape, StateChange.GEOMETRY),
+                    reads_tracker=context.track(shape, StateChange.VISUAL),
                 )
+                # The nodes are made from the shape as it stands
+                shape_nodes.refreshes_tracker.pull()
+                shape_nodes.reads_tracker.pull()
                 self._sync_shape_nodes(shape, shape_nodes, arrays_host)
-                context.subscribe(shape_nodes.subscriber, (shape,))
                 self._shapes_nodes[shape] = shape_nodes
                 continue
-            changes = shape_nodes.subscriber.pending
-            if changes:
-                shape_nodes.subscriber.clear()
-            if StateChange.GEOMETRY in changes:
-                if is_drawn:
-                    self._sync_shape_nodes(shape, shape_nodes, arrays_host)
-                else:
-                    shape_nodes.subscriber.notify(StateChange.GEOMETRY)
-            if StateChange.VISUAL in changes:
+            # The nodes of a shape no view draws are updated once some view draws it
+            if shape_nodes.refreshes_tracker.pull() is not None:
+                shape_nodes.is_refreshed = True
+            if shape_nodes.is_refreshed and is_drawn:
+                self._sync_shape_nodes(shape, shape_nodes, arrays_host)
+                shape_nodes.is_refreshed = False
+            if shape_nodes.reads_tracker.pull() is not None:
                 self._set_nodes_views(shape, shape_nodes)
+            for binding in shape_nodes.textures:
+                self._update_texture(binding)
 
     def _remove_nodes(self, shape_nodes: ShapeNodes) -> None:
         for node in shape_nodes.nodes:
@@ -383,10 +412,10 @@ class RasterizerContext(BuildableMixin):
                 if seg_nodes is not None:
                     seg_nodes.remove(node)
         shape_nodes.nodes.clear()
+        shape_nodes.textures.clear()
 
     def _remove_shape_nodes(self, shape: Shape) -> None:
         shape_nodes = self._shapes_nodes.pop(shape)
-        self.sim.render_context.unsubscribe(shape_nodes.subscriber)
         self._remove_nodes(shape_nodes)
 
     def _add_node_seg(self, mesh: "pyrender.Mesh", seg_keys: SegmentationKeys | None) -> "pyrender.Node":
@@ -504,9 +533,10 @@ class RasterizerContext(BuildableMixin):
                         )
                     else:
                         mesh.visual = geometry.visual
-                    # A marker is drawn with the colors its visual states alone
+                    # A marker is drawn with the colors its visual states alone, and a mesh showing a dynamic texture
+                    # binds the texture arrays it is drawn from to a material of its own.
                     material_keys = []
-                    if geometry.surface is not None:
+                    if geometry.surface is not None and not geometry.textures:
                         is_textured = isinstance(mesh.visual, trimesh.visual.TextureVisuals)
                         material_keys.append((geometry.surface, is_textured))
                         if is_textured:
@@ -540,6 +570,8 @@ class RasterizerContext(BuildableMixin):
                         if material is None
                     ]
                     nodes.append(self._add_node_seg(mesh_node, seg_keys=None if is_marker else geometry.seg_keys))
+                    if geometry.textures:
+                        self._bind_textures(shape_nodes, geometry.textures, mesh_node.primitives[:1])
                     if floor is not None:
                         self.set_reflection_mat(pose_T)
                 n_instances = len(poses_T)
@@ -633,6 +665,9 @@ class RasterizerContext(BuildableMixin):
                         views=views,
                     )
                     nodes.append(self._add_node_seg(mesh_node, seg_keys=None if is_marker else shape.seg_keys))
+                if shape.textures:
+                    primitives = [node.mesh.primitives[0] for node in nodes if node is not None]
+                    self._bind_textures(shape_nodes, shape.textures, primitives)
             else:
                 for node, vverts in zip(nodes, verts):
                     if node is not None:
@@ -702,15 +737,6 @@ class RasterizerContext(BuildableMixin):
                     self._read(shape.pos, shape_nodes, arrays_host), self._read(shape.quat, shape_nodes, arrays_host)
                 )
                 nodes_T[..., :3, :3] *= shape.length
-                if shape.is_active is not None:
-                    is_active = self._read(shape.is_active, shape_nodes, arrays_host, dtype=np.bool_)
-                    nodes_T[..., :3, 3] = np.where(is_active[..., None], nodes_T[..., :3, 3], gu.nowhere())
-                if self.split_envs or selection.is_shared:
-                    nodes_T = self._pad_envs(shape_nodes, nodes_T).swapaxes(0, 1)
-                else:
-                    envs_idx = np.array(self.rendered_envs_idx)[selection.envs_pos]
-                    nodes_T[..., :3, 3] += self.scene.envs_offset[envs_idx, np.newaxis]
-                    nodes_T = nodes_T.reshape((1, -1, 4, 4))
             else:
                 # The transform placing the unit mesh of each element in each rendered environment: the unit mesh
                 # stretched along its z axis by the length of the element and across by its radius gives the mesh of
@@ -727,7 +753,17 @@ class RasterizerContext(BuildableMixin):
                 R = gu.z_up_to_R(vecs.astype(np.float32))
                 R[..., :, :2] *= np.broadcast_to(radius, vecs.shape[:2])[..., None, None]
                 R[..., :, 2] *= np.linalg.norm(vecs, axis=-1)[..., None]
-                nodes_T = self._pad_envs(shape_nodes, gu.trans_R_to_T(starts.astype(np.float32), R)).swapaxes(0, 1)
+                nodes_T = gu.trans_R_to_T(starts.astype(np.float32), R)
+            # An inactive element is placed out of sight, so that its node keeps its instances
+            if shape.is_active is not None:
+                is_active = self._read(shape.is_active, shape_nodes, arrays_host, dtype=np.bool_)
+                nodes_T[..., :3, 3] = np.where(is_active[..., None], nodes_T[..., :3, 3], gu.nowhere())
+            if isinstance(shape, Frames) and not (self.split_envs or selection.is_shared):
+                envs_idx = np.array(self.rendered_envs_idx)[selection.envs_pos]
+                nodes_T[..., :3, 3] += self.scene.envs_offset[envs_idx, np.newaxis]
+                nodes_T = nodes_T.reshape((1, -1, 4, 4))
+            else:
+                nodes_T = self._pad_envs(shape_nodes, nodes_T).swapaxes(0, 1)
             if is_new and isinstance(shape, Frames):
                 mesh = trimesh.creation.axis(origin_size=0.03, axis_radius=0.025, axis_length=1.0)
                 mesh.visual.face_colors[:, :3] = (0.7 * mesh.visual.face_colors[:, :3]).astype(int)
@@ -758,6 +794,60 @@ class RasterizerContext(BuildableMixin):
         if is_new:
             shape_nodes.nodes_views = None
             self._set_nodes_views(shape, shape_nodes)
+
+    def _bind_textures(
+        self, shape_nodes: ShapeNodes, textures: tuple[TextureVariants, ...], primitives: list["pyrender.Primitive"]
+    ) -> None:
+        for texture in textures:
+            # A dynamic texture is the base color of the material when the surface draws it as its color, and its
+            # emissive texture otherwise (see 'surface_uvs_to_trimesh_visual').
+            images = texture.variants
+            if texture.batched is not None:
+                images = torch.cat((images, texture.batched[self._rendered_envs_t]))
+            # The arrays hold the images in the format of their map, which the shaders read from the type of the array
+            texture_array = pyrender.Texture(
+                source=tensor_to_array(images),
+                source_channels="RGBA" if texture.is_base_color else "RGB",
+                tex_type=GL_TEXTURE_2D_ARRAY,
+                data_format=GL_UNSIGNED_BYTE if texture.map_type == TEXTURE_MAP_TYPE.DIFFUSE else GL_HALF_FLOAT,
+            )
+            for primitive in primitives:
+                if texture.is_base_color:
+                    primitive.material.baseColorTexture = texture_array
+                else:
+                    primitive.material.emissiveTexture = texture_array
+                if primitive.texture_layers is None:
+                    primitive.texture_layers = np.zeros((len(self.rendered_envs_idx), 2), dtype=np.float32)
+            binding = TextureBinding(texture, texture_array, primitives, texture.changelog.track(StateChange.VISUAL))
+            shape_nodes.textures.append(binding)
+            self._update_texture(binding)
+
+    def _update_texture(self, binding: TextureBinding) -> None:
+        """Upload the batched images a write or a reset shows in the rendered environments, and set their layers.
+
+        A texture just bound counts as written in every environment.
+        """
+        record = binding.tracker.pull()
+        if record is None:
+            return
+        texture = binding.texture
+        n_variants = len(texture.variants)
+        # The layers are set on the host, which reads the variant of each rendered environment once
+        variants_idx = tensor_to_array(texture.variants_idx[self._rendered_envs_t])
+        is_batched = variants_idx < 0
+        envs_is_reached = True if record.envs is None else tensor_to_array(record.envs[self._rendered_envs_t])
+        envs_pos_written = np.flatnonzero(is_batched & envs_is_reached)
+        if envs_pos_written.size > 0:
+            images = tensor_to_array(texture.batched[self._rendered_envs_t[envs_pos_written]])
+            binding.texture_array.set_layers(n_variants + envs_pos_written, images)
+            self._scene.updated_textures.add(binding.texture_array)
+        envs_layer = np.where(is_batched, n_variants + np.arange(len(variants_idx)), variants_idx)
+        column = 0 if texture.is_base_color else 1
+        for primitive in binding.primitives:
+            # A primitive standing in one environment samples its layer whichever row a pass reads
+            env_idx = primitive.env_idx
+            primitive.texture_layers[:, column] = envs_layer if env_idx is None else envs_layer[env_idx]
+            self.jit.update_texture_layers(primitive)
 
     def _set_nodes_views(self, shape: Shape, shape_nodes: ShapeNodes) -> None:
         # The debug views draw the markers and the parts of the shapes the debug read holds, the other views the parts

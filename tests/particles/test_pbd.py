@@ -228,6 +228,8 @@ def test_cloth_attach_rigid_link(show_viewer):
     )
     scene.build(n_envs=2)
 
+    # Particles attached right after a setter moved the link keep their offset to its new pose
+    box.set_pos((0.25, 0.25, box_height + 0.5))
     particles_idx = [0, 1, 2, 3, 4, 5, 6, 7]
     box_link_idx = box.links[0].idx
     cloth.fix_particles_to_link(box_link_idx, particles_idx_local=particles_idx)

@@ -332,7 +332,8 @@ def parse_glb_material(glb, material_index, surface, images=None):
         double_sided=double_sided,
     )
 
-    return material_surface, uvs_used, material.name
+    asset_textures = mu.AssetTextures(color=color_texture, emission=emissive_texture, opacity=opacity_texture)
+    return material_surface, uvs_used, material.name, asset_textures
 
 
 def parse_glb_tree(glb, node_index):
@@ -392,14 +393,14 @@ def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
 
         for primitive in mesh_glb.primitives:
             if primitive.material is not None:
-                material, uv_used, material_name = materials.get(primitive.material, (None, 0, ""))
-                if material is None:
+                if primitive.material not in materials:
                     material_images = materials_images.setdefault(primitive.material, {})
-                    material, uv_used, material_name = materials.setdefault(
-                        primitive.material, parse_glb_material(glb, primitive.material, surface, material_images)
+                    materials[primitive.material] = parse_glb_material(
+                        glb, primitive.material, surface, material_images
                     )
+                material, uv_used, material_name, asset_textures = materials[primitive.material]
             else:
-                material, uv_used, material_name = surface.model_copy(), 0, ""
+                material, uv_used, material_name, asset_textures = surface.model_copy(), 0, "", None
 
             uvs = None
             if "KHR_draco_mesh_compression" in primitive.extensions:
@@ -477,7 +478,7 @@ def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
                     # Record the source mesh node so per-material submeshes can be regrouped into one physical body
                     # (e.g. merged into a single collision geom) while still rendering with their own textures.
                     metadata["node_index"] = i_node
-                mesh_info.set_property(surface=material, metadata=metadata)
+                mesh_info.set_property(surface=material, metadata=metadata, asset_textures=asset_textures)
             mesh_info.append(points, triangles, normals, uvs)
     meshes = mesh_infos.export_meshes(scale=scale, is_mesh_zup=is_mesh_zup)
     # The meshes come in the order of their groups, each mesh owning the images of its material alone

@@ -537,8 +537,7 @@ def test_contact_detection_jacobian_matches_fd(grad_capsule):
                     offset = sign * rand_dx[entity.geoms[0].idx, 0] * fd_eps
                     entity.set_pos(entities_init_pos[i_e] + offset if x_type == "pos" else entities_init_pos[i_e])
                     entity.set_quat(entities_init_quat[i_e] + offset if x_type == "quat" else entities_init_quat[i_e])
-                collider.collider_state.n_contacts.fill(0)
-                collider.detection()
+                scene.rigid_solver.detect_collision()
                 c = collider.get_contacts(as_tensor=True, to_torch=True, keep_batch_dim=True)
                 losses.append(((c["normal"] * c["position"]).sum(dim=-1) * c["penetration"]).sum())
             dL_fd = (losses[0] - losses[1]) / (2 * fd_eps)
@@ -554,8 +553,7 @@ def test_contact_detection_jacobian_matches_fd(grad_capsule):
         entity.set_pos(init_pos)
         entity.set_quat(init_quat)
     sphere1.set_pos(sphere0.get_pos())
-    collider.collider_state.n_contacts.fill(0)
-    collider.detection()
+    scene.rigid_solver.detect_collision()
     contacts = collider.get_contacts(as_tensor=True, to_torch=True, keep_batch_dim=True)
     assert torch.isfinite(contacts["normal"]).all()
     assert torch.isfinite(contacts["position"]).all()
@@ -575,6 +573,7 @@ def test_contact_detection_jacobian_matches_fd(grad_capsule):
 @pytest.mark.debug(False)
 def test_constraint_solver_backward_matches_fd(monkeypatch):
     # Engine modules resolve gs dtypes at import time, which requires gs.init: import after initialization
+    from genesis.engine.solvers.rigid.abd.misc import FORWARD_STATUS
     from genesis.engine.solvers.rigid.constraint.solver import func_solve_body, func_solve_init
     from genesis.engine.solvers.rigid.rigid_solver import kernel_step_1
 
@@ -657,8 +656,7 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
         rigid_solver.dyn_info,
         rigid_solver.rigid_info,
         rigid_solver.rigid_config,
-        is_forward_pos_updated=True,
-        is_forward_vel_updated=True,
+        substep_status=int(FORWARD_STATUS.FIXED_POSES_UPDATED),
     )
     constraint_solver.add_equality_constraints()
     rigid_solver.collider.detection()
