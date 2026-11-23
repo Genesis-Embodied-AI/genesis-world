@@ -1495,7 +1495,7 @@ def _tc_transform_by_quat(v: torch.Tensor, quat: torch.Tensor) -> torch.Tensor:
     q_w, q_vec = quat.split((1, 3), dim=-1)
     t = torch.linalg.cross(q_vec, v)
     norm_sqr = quat.square().sum(-1, keepdim=True)
-    # 'addcmul' and 'addcdiv' fuse each product or quotient with its sum into one kernel
+    # Dividing by '|q|^2' last avoids its reciprocal, which overflows when '|q|^2' is subnormal
     return torch.addcdiv(v, torch.addcmul(torch.linalg.cross(q_vec, t), q_w, t), norm_sqr, value=2.0)
 
 
