@@ -1,8 +1,7 @@
 #version 330 core
 
-// Every program drawing through the camera declares its position invariant: the color, depth, segmentation and
-// normal passes compile to distinct programs, and a driver may otherwise round the same position differently in
-// each, so that their maps would disagree on the pixels along edges.
+// The color, depth, segmentation and normal passes use different programs. Without 'invariant', a driver may round
+// the same position differently in each, so that their images would disagree on the pixels along edges.
 invariant gl_Position;
 
 // Vertex Attributes

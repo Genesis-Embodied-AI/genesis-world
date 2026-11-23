@@ -136,8 +136,7 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
         show_viewer=True,
     )
 
-    # A ground sized to hold the boxes and the hits of the rays with every vertex in view, which a software renderer
-    # needs to draw it whole
+    # A small ground whose corners all stay in view, since a software renderer misdraws geometry that leaves the view
     scene.add_entity(
         morph=gs.morphs.Plane(
             pos=(0.0, 0.3, 0.0),

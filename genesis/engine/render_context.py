@@ -1528,8 +1528,8 @@ class RenderContext:
                 for dst, ref in shape_copies:
                     dst.copy_(ref.view(is_per_env=True))
             scoped_context.changelog.add(StateChange.GEOMETRY, envs_idx=envs_idx)
-        # The shapes view their arrays with zero-copy, which read them as the last kernel left them once it is done (see
-        # 'qd_to_torch')
+        # On Metal, torch may read the zero-copy views of the shapes before the kernels writing them are done, so wait
+        # for them (see 'qd_to_torch')
         if gs.use_zerocopy and gs.backend == gs.metal:
             qd.sync()
 

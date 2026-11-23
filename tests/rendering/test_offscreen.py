@@ -1715,8 +1715,8 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
     CAM_RES = (256, 256)
     RENDERED_ENVS = (1, 2)
 
-    # One threshold for every frame, which the marker lines of the viewer frame need: they land on slightly different
-    # pixels from one rasterizer to the next.
+    # One threshold for every frame. The viewer frame needs it, because its marker lines land on slightly different
+    # pixels depending on the rasterizer.
     STD_ERR_THR = 1.5
 
     scene = gs.Scene(
