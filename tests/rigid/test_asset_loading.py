@@ -114,6 +114,43 @@ def test_ground_plane_preservation(box_plan):
 
 
 @pytest.mark.required
+def test_cable_mjcf_topology():
+    scene = gs.Scene()
+    entity = scene.add_entity(
+        gs.morphs.MJCF(
+            file="xml/cable.xml",
+        )
+    )
+    scene.build()
+
+    cable_links = ["B_first", *(f"B_{i}" for i in range(1, 24)), "B_last"]
+    assert [link.name for link in entity.links] == ["obj", "anchor", *cable_links]
+
+    cable_joints = {joint.name: joint for joint in entity.joints}
+    assert cable_joints["obj"].type == gs.JOINT_TYPE.FREE
+    assert cable_joints["J_first"].type == gs.JOINT_TYPE.FREE
+    for suffix in (*(str(i) for i in range(1, 24)), "last"):
+        joint = cable_joints[f"J_{suffix}"]
+        assert joint.type == gs.JOINT_TYPE.SPHERICAL
+        assert_allclose(joint.desc.dofs_damping, 0.01, tol=gs.EPS)
+        assert_allclose(joint.desc.dofs_armature, 0.001, tol=gs.EPS)
+
+    capsule_geoms = [geom for geom in entity.geoms if geom.type == gs.GEOM_TYPE.CAPSULE]
+    assert len(capsule_geoms) == 25
+    for geom in capsule_geoms:
+        assert_allclose(geom.data[:2], (0.005, 0.04), tol=1e-6)
+        assert geom.contype == 1
+        assert geom.conaffinity == 1
+
+    weld_pairs = {
+        (entity.solver.links[eq.eq_obj1id].name, entity.solver.links[eq.eq_obj2id].name)
+        for eq in entity.equalities
+        if eq.type == gs.EQUALITY_TYPE.WELD
+    }
+    assert weld_pairs == {("B_last", "anchor"), ("B_first", "obj")}
+
+
+@pytest.mark.required
 def test_urdf_parsing(show_viewer, tol):
     POS_OFFSET = 0.8
     WOLRD_QUAT = np.array([1.0, 1.0, -0.3, +0.3])

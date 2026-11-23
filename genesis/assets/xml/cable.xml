@@ -8,24 +8,154 @@
         <default class="conaff">
             <geom contype="0" conaffinity="1" condim="6" group="1" friction="0.4 0.002 0.00008" solref="0.004 1" />
         </default>
+        <default class="cable">
+            <joint type="ball" pos="0 0 0" armature="0.001" damping="0.01" group="3" solreflimit="0.02 1" solreffriction="0.02 1"/>
+            <geom type="capsule" quat="0.70710678118654757 0 -0.70710678118654746 0" contype="1" conaffinity="1" group="0" mass="0.001" rgba="0.8 0.6 0.4 1" solref="0.02 1"/>
+        </default>
     </default>
 
     <worldbody>
         <body name="obj" pos="-0.38 -0.26 0.05">
             <joint name="obj" type="free" />
             <geom name="obj" priority="10" class="conty" rgba="0.2 0.2 0.9 1" type="sphere" size=".01" mass="0.0005"/>
-            <site name='end2' rgba="0.2 0.2 0.9 1" type="sphere" size="0.002"/>
+            <site name="end2" rgba="0.2 0.2 0.9 1" type="sphere" size="0.002"/>
         </body>
 
         <body name="anchor" pos="-0.38 -0.26 1.07">
             <geom type="sphere" size="0.01" rgba="1 0 0 1" contype="0" conaffinity="0" />
         </body>
 
-        <composite type="cable" count="26 1 1" curve="0 0 s" offset="-0.38 -0.26 0.06" initial="free">
-            <joint kind="main" damping="0.01" armature="0.001"/>
-            <geom type="capsule" size=".005 .007" rgba="0.8 0.6 0.4 1" mass="0.001"/>
-        </composite>
+        <!-- Explicit nested cable chain equivalent to MuJoCo 3.x <composite type="cable" count="26 1 1" curve="0 0 s" offset="-0.38 -0.26 0.06" initial="free"> -->
+        <body name="B_first" pos="-0.38 -0.26000000000000001 0.059999999999999998" quat="0 0.70710678118654746 0 0.70710678118654746">
+            <joint name="J_first" type="free" group="3" solreflimit="0.02 1" solreffriction="0.02 1"/>
+            <geom name="G0" class="cable" size="0.0050000000000000001 0.019999999552965164" pos="0.019999999552965164 0 0"/>
+            <site name="S_first" pos="0 0 0" group="3"/>
+            <body name="B_1" pos="0.039999999105930328 0 0" quat="0.99999999999999978 0 0 0">
+                <joint name="J_1" class="cable"/>
+                <geom name="G1" class="cable" size="0.0050000000000000001 0.019999999552965164" pos="0.019999999552965164 0 0"/>
+                <body name="B_2" pos="0.039999999105930328 0 0" quat="0.99999999999999978 0 0 0">
+                    <joint name="J_2" class="cable"/>
+                    <geom name="G2" class="cable" size="0.0050000000000000001 0.019999999552965164" pos="0.019999999552965164 0 0"/>
+                    <body name="B_3" pos="0.039999999105930328 0 0" quat="0.99999999999999978 0 0 0">
+                        <joint name="J_3" class="cable"/>
+                        <geom name="G3" class="cable" size="0.0050000000000000001 0.019999999552965164" pos="0.019999999552965164 0 0"/>
+                        <body name="B_4" pos="0.039999999105930328 0 0" quat="0.99999999999999978 0 0 0">
+                            <joint name="J_4" class="cable"/>
+                            <geom name="G4" class="cable" size="0.0050000000000000001 0.020000003278255463" pos="0.020000003278255463 0 0"/>
+                            <body name="B_5" pos="0.040000006556510925 0 0" quat="0.99999999999999978 0 0 0">
+                                <joint name="J_5" class="cable"/>
+                                <geom name="G5" class="cable" size="0.0050000000000000001 0.019999995827674866" pos="0.019999995827674866 0 0"/>
+                                <body name="B_6" pos="0.039999991655349731 0 0" quat="0.99999999999999978 0 0 0">
+                                    <joint name="J_6" class="cable"/>
+                                    <geom name="G6" class="cable" size="0.0050000000000000001 0.020000003278255463" pos="0.020000003278255463 0 0"/>
+                                    <body name="B_7" pos="0.040000006556510925 0 0" quat="0.99999999999999978 0 0 0">
+                                        <joint name="J_7" class="cable"/>
+                                        <geom name="G7" class="cable" size="0.0050000000000000001 0.019999995827674866" pos="0.019999995827674866 0 0"/>
+                                        <body name="B_8" pos="0.039999991655349731 0 0" quat="0.99999999999999978 0 0 0">
+                                            <joint name="J_8" class="cable"/>
+                                            <geom name="G8" class="cable" size="0.0050000000000000001 0.02000001072883606" pos="0.02000001072883606 0 0"/>
+                                            <body name="B_9" pos="0.040000021457672119 0 0" quat="0.99999999999999978 0 0 0">
+                                                <joint name="J_9" class="cable"/>
+                                                <geom name="G9" class="cable" size="0.0050000000000000001 0.019999995827674866" pos="0.019999995827674866 0 0"/>
+                                                <body name="B_10" pos="0.039999991655349731 0 0" quat="0.99999999999999978 0 0 0">
+                                                    <joint name="J_10" class="cable"/>
+                                                    <geom name="G10" class="cable" size="0.0050000000000000001 0.019999995827674866" pos="0.019999995827674866 0 0"/>
+                                                    <body name="B_11" pos="0.039999991655349731 0 0" quat="0.99999999999999978 0 0 0">
+                                                        <joint name="J_11" class="cable"/>
+                                                        <geom name="G11" class="cable" size="0.0050000000000000001 0.019999995827674866" pos="0.019999995827674866 0 0"/>
+                                                        <body name="B_12" pos="0.039999991655349731 0 0" quat="0.99999999999999978 0 0 0">
+                                                            <joint name="J_12" class="cable"/>
+                                                            <geom name="G12" class="cable" size="0.0050000000000000001 0.019999995827674866" pos="0.019999995827674866 0 0"/>
+                                                            <body name="B_13" pos="0.039999991655349731 0 0" quat="0.99999999999999978 0 0 0">
+                                                                <joint name="J_13" class="cable"/>
+                                                                <geom name="G13" class="cable" size="0.0050000000000000001 0.02000001072883606" pos="0.02000001072883606 0 0"/>
+                                                                <body name="B_14" pos="0.040000021457672119 0 0" quat="0.99999999999999978 0 0 0">
+                                                                    <joint name="J_14" class="cable"/>
+                                                                    <geom name="G14" class="cable" size="0.0050000000000000001 0.02000001072883606" pos="0.02000001072883606 0 0"/>
+                                                                    <body name="B_15" pos="0.040000021457672119 0 0" quat="0.99999999999999978 0 0 0">
+                                                                        <joint name="J_15" class="cable"/>
+                                                                        <geom name="G15" class="cable" size="0.0050000000000000001 0.019999980926513672" pos="0.019999980926513672 0 0"/>
+                                                                        <body name="B_16" pos="0.039999961853027344 0 0" quat="0.99999999999999978 0 0 0">
+                                                                            <joint name="J_16" class="cable"/>
+                                                                            <geom name="G16" class="cable" size="0.0050000000000000001 0.02000001072883606" pos="0.02000001072883606 0 0"/>
+                                                                            <body name="B_17" pos="0.040000021457672119 0 0" quat="0.99999999999999978 0 0 0">
+                                                                                <joint name="J_17" class="cable"/>
+                                                                                <geom name="G17" class="cable" size="0.0050000000000000001 0.02000001072883606" pos="0.02000001072883606 0 0"/>
+                                                                                <body name="B_18" pos="0.040000021457672119 0 0" quat="0.99999999999999978 0 0 0">
+                                                                                    <joint name="J_18" class="cable"/>
+                                                                                    <geom name="G18" class="cable" size="0.0050000000000000001 0.019999980926513672" pos="0.019999980926513672 0 0"/>
+                                                                                    <body name="B_19" pos="0.039999961853027344 0 0" quat="0.99999999999999978 0 0 0">
+                                                                                        <joint name="J_19" class="cable"/>
+                                                                                        <geom name="G19" class="cable" size="0.0050000000000000001 0.02000001072883606" pos="0.02000001072883606 0 0"/>
+                                                                                        <body name="B_20" pos="0.040000021457672119 0 0" quat="0.99999999999999978 0 0 0">
+                                                                                            <joint name="J_20" class="cable"/>
+                                                                                            <geom name="G20" class="cable" size="0.0050000000000000001 0.019999980926513672" pos="0.019999980926513672 0 0"/>
+                                                                                            <body name="B_21" pos="0.039999961853027344 0 0" quat="0.99999999999999978 0 0 0">
+                                                                                                <joint name="J_21" class="cable"/>
+                                                                                                <geom name="G21" class="cable" size="0.0050000000000000001 0.02000001072883606" pos="0.02000001072883606 0 0"/>
+                                                                                                <body name="B_22" pos="0.040000021457672119 0 0" quat="0.99999999999999978 0 0 0">
+                                                                                                    <joint name="J_22" class="cable"/>
+                                                                                                    <geom name="G22" class="cable" size="0.0050000000000000001 0.02000001072883606" pos="0.02000001072883606 0 0"/>
+                                                                                                    <body name="B_23" pos="0.040000021457672119 0 0" quat="0.99999999999999978 0 0 0">
+                                                                                                        <joint name="J_23" class="cable"/>
+                                                                                                        <geom name="G23" class="cable" size="0.0050000000000000001 0.019999980926513672" pos="0.019999980926513672 0 0"/>
+                                                                                                        <body name="B_last" pos="0.039999961853027344 0 0" quat="0.99999999999999978 0 0 0">
+                                                                                                            <joint name="J_last" class="cable"/>
+                                                                                                            <geom name="G24" class="cable" size="0.0050000000000000001 0.02000001072883606" pos="0.02000001072883606 0 0"/>
+                                                                                                            <site name="S_last" pos="0.04 0 0" group="3"/>
+                                                                                                        </body>
+                                                                                                    </body>
+                                                                                                </body>
+                                                                                            </body>
+                                                                                        </body>
+                                                                                    </body>
+                                                                                </body>
+                                                                            </body>
+                                                                        </body>
+                                                                    </body>
+                                                                </body>
+                                                            </body>
+                                                        </body>
+                                                    </body>
+                                                </body>
+                                            </body>
+                                        </body>
+                                    </body>
+                                </body>
+                            </body>
+                        </body>
+                    </body>
+                </body>
+            </body>
+        </body>
     </worldbody>
+
+    <contact>
+        <exclude body1="B_first" body2="B_1"/>
+        <exclude body1="B_1" body2="B_2"/>
+        <exclude body1="B_2" body2="B_3"/>
+        <exclude body1="B_3" body2="B_4"/>
+        <exclude body1="B_4" body2="B_5"/>
+        <exclude body1="B_5" body2="B_6"/>
+        <exclude body1="B_6" body2="B_7"/>
+        <exclude body1="B_7" body2="B_8"/>
+        <exclude body1="B_8" body2="B_9"/>
+        <exclude body1="B_9" body2="B_10"/>
+        <exclude body1="B_10" body2="B_11"/>
+        <exclude body1="B_11" body2="B_12"/>
+        <exclude body1="B_12" body2="B_13"/>
+        <exclude body1="B_13" body2="B_14"/>
+        <exclude body1="B_14" body2="B_15"/>
+        <exclude body1="B_15" body2="B_16"/>
+        <exclude body1="B_16" body2="B_17"/>
+        <exclude body1="B_17" body2="B_18"/>
+        <exclude body1="B_18" body2="B_19"/>
+        <exclude body1="B_19" body2="B_20"/>
+        <exclude body1="B_20" body2="B_21"/>
+        <exclude body1="B_21" body2="B_22"/>
+        <exclude body1="B_22" body2="B_23"/>
+        <exclude body1="B_23" body2="B_last"/>
+    </contact>
 
     <equality>
         <weld body1="B_last" body2="anchor"/>
