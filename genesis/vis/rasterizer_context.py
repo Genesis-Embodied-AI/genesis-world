@@ -832,16 +832,16 @@ class RasterizerContext(BuildableMixin):
             return
         texture = binding.texture
         n_variants = len(texture.variants)
-        variants_idx = texture.variants_idx[self._rendered_envs_t]
+        # The layers are set on the host, which reads the variant of each rendered environment once
+        variants_idx = tensor_to_array(texture.variants_idx[self._rendered_envs_t])
         is_batched = variants_idx < 0
-        is_written = is_batched if record.envs is None else is_batched & record.envs[self._rendered_envs_t]
-        if is_written.any():
-            layers_idx = n_variants + torch.nonzero(is_written)[:, 0]
-            images = texture.batched[self._rendered_envs_t[is_written]]
-            binding.texture_array.set_layers(tensor_to_array(layers_idx), tensor_to_array(images))
+        envs_is_reached = True if record.envs is None else tensor_to_array(record.envs[self._rendered_envs_t])
+        envs_pos_written = np.flatnonzero(is_batched & envs_is_reached)
+        if envs_pos_written.size > 0:
+            images = tensor_to_array(texture.batched[self._rendered_envs_t[envs_pos_written]])
+            binding.texture_array.set_layers(n_variants + envs_pos_written, images)
             self._scene.updated_textures.add(binding.texture_array)
-        envs_pos = torch.arange(len(variants_idx), device=gs.device)
-        envs_layer = tensor_to_array(torch.where(is_batched, n_variants + envs_pos, variants_idx))
+        envs_layer = np.where(is_batched, n_variants + np.arange(len(variants_idx)), variants_idx)
         column = 0 if texture.is_base_color else 1
         for primitive in binding.primitives:
             # A primitive standing in one environment samples its layer whichever row a pass reads
