@@ -281,7 +281,7 @@ def main():
         duck.set_texture(variant=(i_variant + envs_idx) % len(variants))
 
     def draw():
-        duck.set_texture(np.random.rand(len(envs_idx), 1, 1, 3))
+        duck.set_texture(np.random.rand(len(envs_idx), 3))
 
     def clear():
         board.set_texture(variant="white")

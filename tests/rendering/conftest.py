@@ -105,3 +105,44 @@ def translucent_box_obj(asset_tmp_path):
     path = asset_tmp_path / "translucent_box.obj"
     box.export(path)
     return str(path)
+
+
+def build_planes_scene(planes_surface, *, plane_size, camera_pos, camera_res, split_envs, show_viewer):
+    """Return an unbuilt scene of a fixed plane per surface, with a camera looking straight down at them.
+
+    The planes stand side by side along the x axis, centered on the origin, a quarter of their width apart. The scene is
+    lit uniformly without shadows, so that each plane shows the color of its surface. Returns the scene, its planes and
+    its camera.
+    """
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=camera_pos,
+            camera_lookat=(*camera_pos[:2], 0.0),
+        ),
+        vis_options=gs.options.VisOptions(
+            shadow=False,
+            ambient_light=(1.0, 1.0, 1.0),
+            split_envs=split_envs,
+        ),
+        show_viewer=show_viewer,
+    )
+    planes_x = 1.25 * plane_size[0] * (np.arange(len(planes_surface)) - 0.5 * (len(planes_surface) - 1))
+    planes = [
+        scene.add_entity(
+            morph=gs.morphs.Plane(
+                pos=(plane_x, 0.0, 0.0),
+                plane_size=plane_size,
+                fixed=True,
+            ),
+            surface=surface,
+        )
+        for plane_x, surface in zip(planes_x, planes_surface)
+    ]
+    camera = scene.add_camera(
+        pos=camera_pos,
+        lookat=(*camera_pos[:2], 0.0),
+        res=camera_res,
+        fov=40.0,
+        GUI=show_viewer,
+    )
+    return scene, planes, camera

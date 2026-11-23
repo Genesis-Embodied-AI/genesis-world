@@ -28,7 +28,14 @@ from genesis.typing import (
     UnitVec4FType,
     Vec3FType,
 )
-from genesis.utils.misc import BuildableMixin, assign_indexed_tensor, indices_to_mask, qd_to_torch, tensor_to_array
+from genesis.utils.misc import (
+    BuildableMixin,
+    assign_indexed_tensor,
+    broadcast_tensor,
+    indices_to_mask,
+    qd_to_torch,
+    tensor_to_array,
+)
 
 if TYPE_CHECKING:
     import trimesh
@@ -1030,11 +1037,6 @@ class DynamicTextures:
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message="The given NumPy array is not writable")
                 image = torch.as_tensor(texture, device=gs.device)
-            if image.ndim not in (3, 4):
-                gs.raise_exception(
-                    "A dynamic texture takes pixels of shape (height, width, channels) for every selected environment "
-                    f"or (len(envs_idx), height, width, channels) for one each, got an array of {image.ndim} dims."
-                )
             if texture_variants.batched is None:
                 gs.raise_exception(
                     "Pixels are written into the batched variant of a dynamic texture, which this one lacks. Declare "
@@ -1044,18 +1046,8 @@ class DynamicTextures:
             if n_channels not in (3, 4):
                 gs.raise_exception(f"Pixels are written as RGB or RGBA, got {n_channels} channels.")
             width, height = record.options.resolution
-            if any(n_pixels not in (1, n_texels) for n_pixels, n_texels in zip(image.shape[-3:-1], (height, width))):
-                gs.raise_exception(
-                    f"Pixels are written at the resolution of the texture, {width}x{height}, or repeated from 1 along "
-                    f"an axis, got an image of {image.shape[-2]}x{image.shape[-3]}."
-                )
-            if image.ndim == 4:
-                n_envs_selected = texture_variants.variants_idx[mask].numel()
-                if image.shape[0] not in (1, n_envs_selected):
-                    gs.raise_exception(
-                        f"Pixels are written as one image for every selected environment or one each, got "
-                        f"{image.shape[0]} images for {n_envs_selected} environments."
-                    )
+            envs_shape = texture_variants.variants_idx[mask].shape
+            image = broadcast_tensor(image, image.dtype, (*envs_shape, height, width, n_channels))
             # The images hold uint8 sRGB values in the diffuse map, and float16 linear values in the emissive map, which
             # may exceed 1, a float array standing for 1.0 where an integer one stands for 255.
             if texture_variants.map_type == TEXTURE_MAP_TYPE.EMISSIVE:
@@ -1116,11 +1108,11 @@ class DynamicTextureMixin(BuildableMixin):
         Parameters
         ----------
         texture : None | array_like | gs.textures.ColorTexture | gs.textures.ImageTexture, optional
-            The pixels of the batched variant, exclusive with `variant`: an RGB or RGBA image of shape (height, width,
-            channels) for every selected environment or (len(envs_idx), height, width, channels) for one each, of the
-            resolution of the texture or of 1 along an axis to repeat it, or a color or an image texture resized to it.
-            An integer image holds values up to 255 and a float one values up to 1.0, clamped to [0, 1] in the diffuse
-            map and to nonnegative values in the emissive map, whose emission may exceed 1. Defaults to None.
+            The pixels of the batched variant, exclusive with `variant`: RGB or RGBA pixels broadcast against
+            (len(envs_idx), height, width, channels) at the resolution of the texture, such as a color, a color per
+            environment or an image, or a color or an image texture resized to it. Integer pixels hold values up to 255
+            and float ones values up to 1.0, clamped to [0, 1] in the diffuse map and to nonnegative values in the
+            emissive map, whose emission may exceed 1. Defaults to None.
         envs_idx : None | int | array_like, optional
             The environments to set. If None, every environment is set. Defaults to None.
         variant : None | int | str | sequence of int or str, optional

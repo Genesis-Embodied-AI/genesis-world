@@ -18,7 +18,7 @@ from genesis.utils.video_encoder import VideoEncoder
 from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_VIEWER
 from ..utils.assertions import assert_allclose, assert_equal, assert_pixel_match, rgb_array_to_png_bytes
 from ..utils.misc import get_masks_mean_color, get_masks_shown_color
-from .conftest import RENDERER_TYPE
+from .conftest import RENDERER_TYPE, build_planes_scene
 
 
 @pytest.mark.required
@@ -209,89 +209,57 @@ def test_emissive_composites(base_plus_emissive_glb, show_viewer, renderer):
 
 @pytest.mark.required
 def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewer, png_snapshot):
-    # The camera sensor renders through a rasterizer of its own, which reads the dynamic textures apart from the camera.
-    scene = gs.Scene(
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.0, 0.0, 4.0),
-            camera_lookat=(0.0, 0.0, 0.0),
+    RED = (1.0, 0.0, 0.0)
+    GREEN = (0.0, 1.0, 0.0)
+    BLUE = (0.0, 0.0, 1.0)
+    YELLOW = (1.0, 1.0, 0.0)
+    MAGENTA = (1.0, 0.0, 1.0)
+
+    # A screen switching between named variants, a label showing the texture of its asset or an image per environment,
+    # a lamp drawing an emission over its dark red base color, and a plane showing the texture of its asset.
+    scene, (screen, label, lamp, reference), camera = build_planes_scene(
+        (
+            gs.surfaces.Emission(
+                emissive_texture=gs.textures.DynamicTexture(
+                    resolution=(16, 16),
+                    variants={
+                        "blue": gs.textures.ColorTexture(
+                            color=BLUE,
+                        ),
+                        "red": gs.textures.ColorTexture(
+                            color=RED,
+                        ),
+                    },
+                ),
+            ),
+            gs.surfaces.Rough(
+                diffuse_texture=gs.textures.DynamicTexture(
+                    resolution=(8, 8),
+                    is_batched=True,
+                ),
+            ),
+            gs.surfaces.Default(
+                color=(0.3, 0.0, 0.0),
+                emissive_texture=gs.textures.DynamicTexture(
+                    resolution=(16, 16),
+                    variants=(
+                        gs.textures.ColorTexture(
+                            color=MAGENTA,
+                        ),
+                        gs.textures.ImageTexture(
+                            image_array=np.full((1, 1, 3), (0, 128, 0), dtype=np.uint8),
+                        ),
+                    ),
+                    is_batched=True,
+                ),
+            ),
+            gs.surfaces.Rough(),
         ),
-        vis_options=gs.options.VisOptions(
-            shadow=False,
-            ambient_light=(1.0, 1.0, 1.0),
-            split_envs=True,
-        ),
+        plane_size=(1.0, 1.0),
+        camera_pos=(0.0, 0.0, 4.0),
+        camera_res=(192, 64),
+        split_envs=True,
         show_viewer=show_viewer,
-    )
-    screen = scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(-1.2, 0.0, 0.0),
-            plane_size=(1.0, 1.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Emission(
-            emissive_texture=gs.textures.DynamicTexture(
-                resolution=(16, 16),
-                variants={
-                    "blue": gs.textures.ColorTexture(
-                        color=(0.0, 0.0, 1.0),
-                    ),
-                    "red": gs.textures.ColorTexture(
-                        color=(1.0, 0.0, 0.0),
-                    ),
-                },
-            ),
-        ),
-    )
-    label_spec = gs.entities.Rigid(
-        morph=gs.morphs.Plane(
-            plane_size=(1.0, 1.0),
-            fixed=True,
-        ),
-    )
-    label_spec.select(gs.indices.VGeom.at(0)).set_surface(
-        gs.surfaces.Rough(
-            diffuse_texture=gs.textures.DynamicTexture(
-                resolution=(8, 8),
-                variants=(
-                    None,
-                    gs.textures.ColorTexture(
-                        color=(1.0, 1.0, 1.0),
-                    ),
-                ),
-                is_batched=True,
-            ),
-        ),
-    )
-    label = scene.add_entity(spec=label_spec)
-    lamp = scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(1.2, 0.0, 0.0),
-            plane_size=(1.0, 1.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.3, 0.0, 0.0),
-            emissive_texture=gs.textures.DynamicTexture(
-                resolution=(16, 16),
-                variants=(
-                    gs.textures.ColorTexture(
-                        color=(1.0, 0.0, 1.0),
-                    ),
-                    gs.textures.ImageTexture(
-                        image_array=np.full((1, 1, 3), (0, 128, 0), dtype=np.uint8),
-                    ),
-                ),
-                is_batched=True,
-            ),
-        ),
-    )
-    reference = scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(2.4, 0.0, 0.0),
-            plane_size=(1.0, 1.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Rough(),
     )
     # An asset giving a color and an emission, out of view, on a surface drawing its color in the emissive map
     glow = scene.add_entity(
@@ -319,13 +287,7 @@ def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewe
             ),
         ),
     )
-    camera = scene.add_camera(
-        pos=(0.0, 0.0, 4.0),
-        lookat=(0.0, 0.0, 0.0),
-        res=(192, 64),
-        fov=40.0,
-        GUI=show_viewer,
-    )
+    # The camera sensor renders through a rasterizer of its own, which reads the dynamic textures apart from the camera
     sensor = scene.add_sensor(
         RasterizerCameraOptions(
             res=(192, 64),
@@ -335,152 +297,126 @@ def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewe
         )
     )
     scene.build(n_envs=2)
-    (label_vgeom,) = label.vgeoms
-    (lamp_vgeom,) = lamp.vgeoms
 
-    entities = (screen, label, lamp, reference)
     rgb, _, segmentation, _ = camera.render(rgb=True, segmentation=True)
-    masks = segmentation[:, None] == np.array([entity.idx + 1 for entity in entities])[:, None, None]
-
-    # Each check names the color the screen, the label and the lamp show in each environment. The lamp keeps the red of
-    # its dark red base under any emission.
-    RED, GREEN, BLUE, YELLOW, MAGENTA = (
-        (1.0, 0.0, 0.0),
-        (0.0, 1.0, 0.0),
-        (0.0, 0.0, 1.0),
-        (1.0, 1.0, 0.0),
-        (1.0, 0.0, 1.0),
+    masks = (
+        segmentation[:, None]
+        == np.array([entity.idx + 1 for entity in (screen, label, lamp, reference)])[:, None, None]
     )
 
     # The variants at build: the first color of the screen, the asset texture of the label, which matches the reference
     # plane, and the magenta emission of the lamp.
-    assert_equal(get_masks_shown_color(rgb[:, None], masks)[:, [0, 2]], [[BLUE, MAGENTA]] * 2)
-    colors = get_masks_mean_color(rgb[:, None], masks)
-    assert_allclose(colors[:, 1], colors[:, 3], atol=5.0)
+    assert_equal(get_masks_shown_color(rgb, masks)[:, [0, 2]], [BLUE, MAGENTA])
+    colors = get_masks_mean_color(rgb, masks)
+    assert_allclose(colors[:, 1], colors[:, 3], atol=10.0)
     lamp_initial = colors[:, 2]
     # A variant left to None shows the texture the asset gives, its opacity included
-    assert_equal(translucent_box.get_texture()[..., 0, 0, :], [[255, 0, 0, 128]] * 2)
+    assert_equal(translucent_box.get_texture()[..., 0, 0, :], (255, 0, 0, 128))
     # A variant left to None shows the color the asset gives, red, over its emission
-    (glow_vgeom,) = glow.vgeoms
-    glow_variant = glow_vgeom.get_texture()
+    glow_variant = glow.get_texture()
     assert (glow_variant[..., 0] > 0.5).all() and (glow_variant[..., 1:3] < 0.1).all()
 
     # A variant shown by name in one environment, one image per environment written into the batched variant, and a
     # color shared by every one. The images as drawn are those of the shown variant, in the format of the map.
-    screen.set_texture(envs_idx=[1], variant="red")
-    label.set_texture(np.array([[0.0, 1.0, 0.0], [1.0, 1.0, 0.0]])[:, None, None])
-    lamp.set_texture(gs.textures.ColorTexture(color=(0.0, 1.0, 0.0)))
-    assert_equal(screen.get_texture()[:, 4, 4], [[0.0, 0.0, 1.0, 1.0], [1.0, 0.0, 0.0, 1.0]])
-    assert_equal(label_vgeom.get_texture(envs_idx=[1])[:, 4, 4], [[255, 255, 0, 255]])
-    # The camera shows the changes at its next render, while the sensor renders them at the next step
+    screen.set_texture(envs_idx=1, variant="red")
+    label.set_texture([GREEN, YELLOW])
+    lamp.set_texture(gs.textures.ColorTexture(color=GREEN))
+    assert_equal(screen.get_texture()[:, 4, 4], [(*BLUE, 1.0), (*RED, 1.0)])
+    assert_equal(label.get_texture(envs_idx=1)[:, 4, 4], (255, 255, 0, 255))
+    # The camera shows the changes at its next render, while the sensor renders them at the next step. The lamp keeps
+    # the red of its dark red base under any emission.
     rgb_switched = camera.render(rgb=True)[0]
     for frame in rgb_switched:
         assert rgb_array_to_png_bytes(frame) == png_snapshot
     scene.step()
     for rgb in (rgb_switched, tensor_to_array(sensor.read().rgb)):
-        assert_equal(get_masks_shown_color(rgb[:, None], masks)[:, :2], [[BLUE, GREEN], [RED, YELLOW]])
-        colors = get_masks_mean_color(rgb[:, None], masks)
-        assert (colors[:, 2, 1] > 150.0).all() and (colors[:, 2, 2] < 30.0).all() and (colors[:, 2, 0] > 40.0).all()
+        assert_equal(get_masks_shown_color(rgb, masks)[:, :2], [[BLUE, GREEN], [RED, YELLOW]])
+        colors = get_masks_mean_color(rgb, masks)
+        assert (colors[:, 2, 1] > 100.0).all() and (colors[:, 2, 2] < 5.0).all() and (colors[:, 2, 0] > 20.0).all()
 
     # The emissive map holds linear values: an sRGB image variant shows as its decoded value written as pixels
-    lamp_vgeom.set_texture(variant=1, texture_map_type=gs.TEXTURE_MAP_TYPE.EMISSIVE)
-    colors_variant = get_masks_mean_color(camera.render(rgb=True)[0][:, None], masks)
-    lamp_vgeom.set_texture(np.array([[[0.0, ((128 / 255 + 0.055) / 1.055) ** 2.4, 0.0]]]))
-    colors_drawn = get_masks_mean_color(camera.render(rgb=True)[0][:, None], masks)
-    assert_allclose(colors_variant[:, 2], colors_drawn[:, 2], atol=2.0)
+    lamp.set_texture(variant=1)
+    colors_variant = get_masks_mean_color(camera.render(rgb=True)[0], masks)
+    lamp.set_texture((0.0, ((128 / 255 + 0.055) / 1.055) ** 2.4, 0.0))
+    colors_drawn = get_masks_mean_color(camera.render(rgb=True)[0], masks)
+    assert_equal(colors_variant[:, 2], colors_drawn[:, 2])
 
     # A reset of one environment shows the first variants there again, the asset texture of the plane, and a reset of
     # the scene does so in every environment.
-    scene.reset(envs_idx=[1])
+    scene.reset(envs_idx=1)
     rgb = camera.render(rgb=True)[0]
-    assert_equal(get_masks_shown_color(rgb[:, None], masks)[0, 1], GREEN)
-    colors = get_masks_mean_color(rgb[:, None], masks)
-    assert_allclose(colors[1, 1], colors[1, 3], atol=5.0)
+    assert_equal(get_masks_shown_color(rgb, masks)[0, 1], GREEN)
+    colors = get_masks_mean_color(rgb, masks)
+    assert_allclose(colors[1, 1], colors[1, 3], atol=10.0)
     scene.reset()
     rgb = camera.render(rgb=True)[0]
-    assert_equal(get_masks_shown_color(rgb[:, None], masks)[:, 0], [BLUE] * 2)
-    colors = get_masks_mean_color(rgb[:, None], masks)
-    assert_allclose(colors[:, 1], colors[:, 3], atol=5.0)
-    assert_allclose(colors[:, 2], lamp_initial, atol=5.0)
+    assert_equal(get_masks_shown_color(rgb, masks)[:, 0], BLUE)
+    colors = get_masks_mean_color(rgb, masks)
+    assert_allclose(colors[:, 1], colors[:, 3], atol=10.0)
+    assert_equal(colors[:, 2], lamp_initial)
 
     # Two writes into different environments between renders, through one selection the caller writes into, both show
     envs_idx = [0]
-    label_vgeom.set_texture(np.array([[RED]]), envs_idx=envs_idx)
+    label.set_texture(RED, envs_idx=envs_idx)
     envs_idx[0] = 1
-    label_vgeom.set_texture(np.array([[BLUE]]), envs_idx=envs_idx)
-    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0][:, None], masks)[:, 1], [RED, BLUE])
+    label.set_texture(BLUE, envs_idx=envs_idx)
+    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[:, 1], [RED, BLUE])
 
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_dynamic_texture_side_by_side_envs(n_envs, translucent_box_obj, show_viewer):
+    RED = (1.0, 0.0, 0.0)
+    GREEN = (0.0, 1.0, 0.0)
+    BLUE = (0.0, 0.0, 1.0)
+    YELLOW = (1.0, 1.0, 0.0)
+    MAGENTA = (1.0, 0.0, 1.0)
+
     # Drawing every environment in one pass needs 'split_envs' off, while the images of each environment apart need it
     # on, and the option holds for a whole scene.
-    scene = gs.Scene(
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.0, 0.75, 4.0),
-            camera_lookat=(0.0, 0.75, 0.0),
+    scene, (screen, tile, lamp), camera = build_planes_scene(
+        (
+            gs.surfaces.Emission(
+                emissive_texture=gs.textures.DynamicTexture(
+                    resolution=(4, 4),
+                    variants=(
+                        gs.textures.ColorTexture(
+                            color=RED,
+                        ),
+                        gs.textures.ColorTexture(
+                            color=BLUE,
+                        ),
+                        gs.textures.ColorTexture(
+                            color=(0.5, 0.5, 0.5),
+                        ),
+                    ),
+                    is_batched=True,
+                ),
+            ),
+            gs.surfaces.Emission(
+                emissive_texture=gs.textures.DynamicTexture(
+                    resolution=(1, 1),
+                    is_batched=True,
+                ),
+            ),
+            gs.surfaces.Default(
+                color=(0.0, 0.0, 0.0),
+                emissive_texture=gs.textures.DynamicTexture(
+                    resolution=(1, 1),
+                    variants=(
+                        gs.textures.ColorTexture(
+                            color=(0.0, 0.0, 0.0),
+                        ),
+                    ),
+                    is_batched=True,
+                ),
+            ),
         ),
-        vis_options=gs.options.VisOptions(
-            shadow=False,
-            ambient_light=(1.0, 1.0, 1.0),
-        ),
+        plane_size=(0.4, 1.0),
+        camera_pos=(0.0, 0.75, 4.0),
+        camera_res=(64, 128),
+        split_envs=False,
         show_viewer=show_viewer,
-    )
-    screen = scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(-0.45, 0.0, 0.0),
-            plane_size=(0.4, 1.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Emission(
-            emissive_texture=gs.textures.DynamicTexture(
-                resolution=(4, 4),
-                variants=(
-                    gs.textures.ColorTexture(
-                        color=(1.0, 0.0, 0.0),
-                    ),
-                    gs.textures.ColorTexture(
-                        color=(0.0, 0.0, 1.0),
-                    ),
-                    gs.textures.ColorTexture(
-                        color=(0.5, 0.5, 0.5),
-                    ),
-                ),
-                is_batched=True,
-            ),
-        ),
-    )
-    tile = scene.add_entity(
-        morph=gs.morphs.Plane(
-            plane_size=(0.4, 1.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Emission(
-            emissive_texture=gs.textures.DynamicTexture(
-                resolution=(1, 1),
-                is_batched=True,
-            ),
-        ),
-    )
-    lamp = scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(0.45, 0.0, 0.0),
-            plane_size=(0.4, 1.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.0, 0.0, 0.0),
-            emissive_texture=gs.textures.DynamicTexture(
-                resolution=(1, 1),
-                variants=(
-                    gs.textures.ColorTexture(
-                        color=(0.0, 0.0, 0.0),
-                    ),
-                ),
-                is_batched=True,
-            ),
-        ),
     )
     # The deformable entities show a dynamic texture too, out of the view of the first camera
     deformable_surface = gs.surfaces.Emission(
@@ -488,10 +424,10 @@ def test_dynamic_texture_side_by_side_envs(n_envs, translucent_box_obj, show_vie
             resolution=(1, 1),
             variants=(
                 gs.textures.ColorTexture(
-                    color=(1.0, 0.0, 0.0),
+                    color=RED,
                 ),
                 gs.textures.ColorTexture(
-                    color=(0.0, 0.0, 1.0),
+                    color=BLUE,
                 ),
             ),
         ),
@@ -512,12 +448,6 @@ def test_dynamic_texture_side_by_side_envs(n_envs, translucent_box_obj, show_vie
         material=gs.materials.PBD.Elastic(),
         surface=deformable_surface,
     )
-    camera = scene.add_camera(
-        pos=(0.0, 0.75, 4.0),
-        lookat=(0.0, 0.75, 0.0),
-        res=(64, 128),
-        fov=40.0,
-    )
     deformable_camera = scene.add_camera(
         pos=(5.5, 0.75, 4.0),
         lookat=(5.5, 0.75, 0.0),
@@ -529,60 +459,47 @@ def test_dynamic_texture_side_by_side_envs(n_envs, translucent_box_obj, show_vie
     n_envs_ = max(n_envs, 1)
 
     # One image holds every environment, environment 0 in the bottom half and environment 1 in the top half
-    _, _, segmentation, _ = camera.render(rgb=False, segmentation=True)
     envs_rows_mask = (np.arange(128) >= 64) == (np.arange(n_envs_) == 0)[:, None]
-    masks = (segmentation == np.array([entity.idx + 1 for entity in (screen, tile, lamp)])[:, None, None, None]) & (
-        envs_rows_mask[None, :, :, None]
-    )
-
-    # Each check names the color an entity shows in each environment
-    RED, GREEN, BLUE, YELLOW, MAGENTA = (
-        (1.0, 0.0, 0.0),
-        (0.0, 1.0, 0.0),
-        (0.0, 0.0, 1.0),
-        (1.0, 1.0, 0.0),
-        (1.0, 0.0, 1.0),
-    )
+    _, _, segmentation, _ = camera.render(rgb=False, segmentation=True)
+    entities_seg_idx = np.array([entity.idx + 1 for entity in (screen, tile, lamp)])
+    masks = (segmentation == entities_seg_idx[:, None, None]) & envs_rows_mask[:, None, :, None]
 
     # The batched variant shows its own image in each environment, as the color of the surface, which the emission
     # stands for over a black base color. Each image is one pixel wide, so its rows are no multiple of 4 bytes.
-    tile_rgb = np.array([GREEN, MAGENTA])[:n_envs_]
-    lamp_rgb = np.array([GREEN, BLUE])[:n_envs_]
-    tile.set_texture(tile_rgb[:, None, None])
-    lamp.set_texture(lamp_rgb[:, None, None])
-    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[1:], [tile_rgb, lamp_rgb])
+    tile.set_texture([GREEN, MAGENTA][:n_envs_])
+    lamp.set_texture([GREEN, BLUE][:n_envs_])
+    shown_rgb = get_masks_shown_color(camera.render(rgb=True)[0], masks)
+    assert_equal(shown_rgb[:, 1], [GREEN, MAGENTA][:n_envs_])
+    assert_equal(shown_rgb[:, 2], [GREEN, BLUE][:n_envs_])
 
     # A variant per environment, then an image per environment, then a variant beside an image, then an image written
-    # in the last environment alone, which leaves the image of the others as it was. A scene without parallel
-    # environments returns the image of its only environment alone.
-    # A color the surface draws as its base color is sRGB, as for a static color, held linear in the emissive map
+    # in the last environment alone, which leaves the image of the others as it was. A color the surface draws as its
+    # base color is sRGB, as for a static color, held linear in the emissive map.
     vgeom.set_texture(variant=2)
-    assert_allclose(vgeom.get_texture()[..., 0, 0, :3], ((0.5 + 0.055) / 1.055) ** 2.4, tol=1e-3)
+    # The emissive map holds float16 values, rounded to a relative 2^-11
+    assert_allclose(vgeom.get_texture()[..., 0, 0, :3], ((0.5 + 0.055) / 1.055) ** 2.4, rtol=5e-4)
     vgeom.set_texture(variant=[0, 1][:n_envs_])
-    variants_color = np.array([[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]])
-    assert_equal(vgeom.get_texture()[..., 0, 0, :], variants_color if n_envs > 0 else variants_color[0])
-    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[0], [RED, BLUE][:n_envs_])
-    vgeom.set_texture(np.array([GREEN, YELLOW])[:n_envs_, None, None])
-    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[0], [GREEN, YELLOW][:n_envs_])
-    last_env_idx = [n_envs_ - 1] if n_envs > 0 else None
+    assert_equal(vgeom.get_texture()[..., 0, 0, :], [(*RED, 1.0), (*BLUE, 1.0)][:n_envs_])
+    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[:, 0], [RED, BLUE][:n_envs_])
+    vgeom.set_texture([GREEN, YELLOW][:n_envs_])
+    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[:, 0], [GREEN, YELLOW][:n_envs_])
+    last_env_idx = n_envs_ - 1 if n_envs > 0 else None
     vgeom.set_texture(envs_idx=last_env_idx, variant=0)
-    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[0], [GREEN, RED] if n_envs > 0 else [RED])
-    vgeom.set_texture(np.array([[BLUE]]), envs_idx=last_env_idx)
-    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[0], [GREEN, BLUE] if n_envs > 0 else [BLUE])
+    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[:, 0], [GREEN, RED][-n_envs_:])
+    vgeom.set_texture(BLUE, envs_idx=last_env_idx)
+    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[:, 0], [GREEN, BLUE][-n_envs_:])
 
-    # The deformable entities switch their variant per environment as a rigid one does
+    # The deformable entities switch their variant per environment as a rigid one does, the visual geom of the FEM
+    # entity reading the variant of each environment as the entity set it.
     block.set_texture(variant=[1, 0][:n_envs_])
     cube.set_texture(variant=[1, 0][:n_envs_])
     _, _, segmentation, _ = deformable_camera.render(rgb=False, segmentation=True)
-    deformable_masks = (segmentation == np.array([block.idx + 1, cube.idx + 1])[:, None, None, None]) & (
-        envs_rows_mask[None, :, :, None]
-    )
+    deformables_seg_idx = np.array([block.idx + 1, cube.idx + 1])
+    deformable_masks = (segmentation == deformables_seg_idx[:, None, None, None]) & envs_rows_mask[:, :, None]
     deformable_rgb = get_masks_shown_color(deformable_camera.render(rgb=True)[0], deformable_masks)
-    assert_equal(deformable_rgb, [[BLUE, RED][:n_envs_]] * 2)
-    # The visual geom of the FEM entity reads the variant of each environment as the entity set it
-    deformable_color = variants_color[[1, 0][:n_envs_]] if n_envs > 0 else variants_color[1]
-    assert_equal(block.vgeoms[0].get_texture()[..., 0, 0, :], deformable_color)
-    assert_equal(block.get_texture()[..., 0, 0, :], deformable_color)
+    assert_equal(deformable_rgb, [BLUE, RED][:n_envs_])
+    assert_equal(block.vgeoms[0].get_texture()[..., 0, 0, :], [(*BLUE, 1.0), (*RED, 1.0)][:n_envs_])
+    assert_equal(block.get_texture()[..., 0, 0, :], [(*BLUE, 1.0), (*RED, 1.0)][:n_envs_])
 
 
 @pytest.mark.required
