@@ -380,8 +380,7 @@ def test_inverse_kinematics_multilink(xml_path, show_viewer, tol):
     assert_allclose(middle_finger_distal.get_pos(envs_idx=(1,)), middle_finger_pos, tol=tol)
     assert_allclose(wrist.get_pos(envs_idx=(1,)), wrist_pos, tol=tol)
 
-    # A target given its orientation alone leaves its position free. The point 1 m along the arm only has to turn, so
-    # one damped step about the hinge leaves the residual theta * damping^2 / (1 + damping^2) and nothing else.
+    # An orientation-only target ignores its position error, so one damped step turns the arm by theta / (1 + damping^2)
     arm, base = pendulum.get_link("PendulumArm_0"), pendulum.get_link("base")
     theta, damping = 0.3, 0.01
     qpos, err = pendulum.inverse_kinematics_multilink(
@@ -398,8 +397,7 @@ def test_inverse_kinematics_multilink(xml_path, show_viewer, tol):
     assert_allclose(err[:, 0, 3], theta * damping**2 / (1.0 + damping**2), tol=tol)
     assert_allclose(err[:, 0, 4:], 0.0, tol=tol)
 
-    # A target given its position alone leaves its orientation free. The point moves along -y at the rate of the hinge,
-    # so one damped step towards the point turned by theta is sin(theta) / (1 + damping^2).
+    # A position-only target ignores its orientation error, so one damped step is sin(theta) / (1 + damping^2)
     qpos = pendulum.inverse_kinematics_multilink(
         links=(arm, base),
         poss=((0.0, -0.5 - np.sin(theta), np.cos(theta)), None),
