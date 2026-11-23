@@ -666,8 +666,8 @@ class JITRenderer:
             self.render_flags[i, 4] = primitive.is_floor and not floor_existed
             self.render_flags[i, 5] = node_list[i].mesh.is_transparent
             self.render_flags[i, 6] = node_list[i].mesh.is_marker
-            # A mesh made transparent by the alpha of its texels alone casts the shadow of its whole surface (see
-            # 'ALPHA_BLEND' in mesh.frag)
+            # The shadow maps sample no texture, so a mesh made transparent by the alpha of its texels alone casts the
+            # shadow of its whole surface
             self.render_flags[i, 9] = node_list[i].mesh.has_translucent_color
             self.views[i] = node_list[i].mesh.views
             # A pass drawing one environment draws the instance of that environment of a per-environment instanced
@@ -1547,8 +1547,14 @@ class JITRenderer:
         i = self._primitive_index.get(primitive)
         if i is not None:
             self.texture_layers[self.texture_layers_idx[i]] = primitive.texture_layers
-            # The alpha of the layers shown decides whether the mesh is drawn with the transparent ones
-            self.render_flags[i, 5] = self.node_list[i].mesh.is_transparent
+            # The alpha of the layers shown decides whether the mesh is drawn with the transparent ones, a flag that
+            # every primitive of the mesh carries
+            mesh = self.node_list[i].mesh
+            is_transparent = mesh.is_transparent
+            for mesh_primitive in mesh.primitives:
+                i_p = self._primitive_index.get(mesh_primitive)
+                if i_p is not None:
+                    self.render_flags[i_p, 5] = is_transparent
 
     def update_buffer(self, primitives, buffer_name, data):
         """Queue the update of one buffer of several primitives, flushed during the next render pass.

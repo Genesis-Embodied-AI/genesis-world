@@ -855,8 +855,6 @@ class Renderer(object):
                     defines["EMISSIVE_TEX_ARRAY"] = 1
             if tf & TexFlags.BASE_COLOR:
                 defines["HAS_BASE_COLOR_TEX"] = 1
-                if primitive.material.alphaMode == "BLEND":
-                    defines["ALPHA_BLEND"] = 1
                 if primitive.material.baseColorTexture.tex_type == GL_TEXTURE_2D_ARRAY:
                     defines["BASE_COLOR_TEX_ARRAY"] = 1
                     if primitive.material.baseColorTexture.data_format == GL_HALF_FLOAT:

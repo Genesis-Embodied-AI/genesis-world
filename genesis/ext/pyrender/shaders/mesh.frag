@@ -384,19 +384,10 @@ void main()
     // A texture array holding linear values is encoded to sRGB, the encoding of every other base color
     base_color_texel = linear_to_srgb(base_color_texel);
 #endif
-#else
-    vec4 base_color_texel = texture(material.base_color_texture, uv_0);
-#endif
-#ifdef ALPHA_BLEND
-    // A blended texel of zero alpha adds no color, while the depth it writes would hide the meshes drawn after it.
-    // Discarding it lets a texture array whose texels are either opaque or fully transparent be drawn with the opaque
-    // meshes (see 'Texture.source' in texture.py). The depth, segmentation and shadow passes sample no texture, so they
-    // draw these texels as they draw a surface of translucent color.
-    if (base_color_texel.a < 0.5 / 255.0) {
-        discard;
-    }
-#endif
     base_color = base_color * base_color_texel;
+#else
+    base_color = base_color * texture(material.base_color_texture, uv_0);
+#endif
 #endif
 
 #ifdef COLOR_0_LOC
