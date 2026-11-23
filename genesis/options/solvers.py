@@ -426,7 +426,8 @@ class KinematicVisOptions(Options):
 
 class RigidVisOptions(KinematicVisOptions):
     """
-    Options configuring the markers of the rigid solver, which the interactive viewer and the debug cameras draw.
+    Options configuring the markers of the rigid solver and the colors of its links, which the interactive viewer and
+    the debug cameras draw.
 
     Parameters
     ----------
@@ -442,10 +443,21 @@ class RigidVisOptions(KinematicVisOptions):
         The length of the arrow of a contact force per newton, in meters, e.g. the arrow of a 10 N force is 0.1 m long
         at 0.01 (see ``gs.options.Geom.visualize_contact``). A larger scale shows small forces at the cost of long
         arrows crossing the scene under heavy loads. Defaults to 0.01.
+    islands : bool, optional
+        Whether to color each link by its island: the links that contacts, joints and equality constraints couple
+        together, which the solver solves as one group. The links of one island share one hue, which changes only when
+        the island merges into another. Each geom keeps its own brightness, so the pieces of a convex decomposition
+        stay distinct. The links no constraint moves, such as fixed ones, keep their colors. The hues hide the colors
+        of the entities, and are computed at each frame drawn. Defaults to False.
+    hibernation : bool, optional
+        Whether to fade the links that sleep toward grey (see ``RigidOptions.use_hibernation``, which it requires).
+        With ``islands``, a sleeping link keeps a faded version of the hue of its island. Defaults to False.
     """
 
     constraints: StrictBool = False
     contact_force_scale: PositiveFloat = 0.01
+    islands: StrictBool = False
+    hibernation: StrictBool = False
 
 
 class ParticleVisOptions(Options):
@@ -772,6 +784,8 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
             gs.raise_exception("The elliptic friction cone is not supported with the noslip solver.")
         if self.enable_rolling_friction and not self.enable_torsional_friction:
             gs.raise_exception("'enable_rolling_friction' requires 'enable_torsional_friction'.")
+        if self.vis.hibernation and not self.use_hibernation:
+            gs.raise_exception("'RigidVisOptions.hibernation' requires 'RigidOptions.use_hibernation'.")
 
 
 class MPMOptions(GravityMixin, TimeBasedMixin):

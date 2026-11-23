@@ -63,6 +63,11 @@ class Primitive(object):
         Morph target indices.
     poses : (x,4,4), float
         Array of 4x4 transformation matrices for instancing this object.
+    inst_tints : (x,4) float
+        RGBA tint of every instance, which the debug views alone show (see :class:`.ViewFlags`). The base color of the
+        material, textures included, takes the hue of the rgb of the tint and keeps its own brightness, the tint giving
+        its own color to a mid-grey material. The alpha weighs the tint, a zero alpha drawing the instance as is.
+        Streamed like the poses.
     """
 
     def __init__(
@@ -86,6 +91,7 @@ class Primitive(object):
         double_sided=False,
         is_floor=False,
         envs=None,
+        inst_tints=None,
     ):
         if mode is None:
             mode = GLTF.TRIANGLES
@@ -115,6 +121,7 @@ class Primitive(object):
         # For a material whose base color or emissive texture is a texture array, the layers of the base color (column
         # 0) and of the emissive (column 1) array that each rendered environment samples, else None.
         self.texture_layers: np.ndarray | None = None
+        self.inst_tints = inst_tints
 
         self._bounds = None
         self._bounds_0 = None
@@ -284,6 +291,19 @@ class Primitive(object):
                 raise ValueError("Pose matrices must be of shape (n,4,4), got {}".format(value.shape))
         self._poses = value
         self._bounds = None
+
+    @property
+    def inst_tints(self):
+        """(x,4) float : RGBA tint of every instance, None to draw them as they are."""
+        return self._inst_tints
+
+    @inst_tints.setter
+    def inst_tints(self, value):
+        if value is not None:
+            value = np.asanyarray(value, order="C", dtype=np.float32)
+            if value.ndim != 2 or value.shape[1] != 4:
+                raise ValueError("Instance tints must be of shape (n,4), got {}".format(value.shape))
+        self._inst_tints = value
 
     @property
     def bounds(self):
@@ -502,6 +522,17 @@ class Primitive(object):
                     idx, 3, GL_FLOAT, GL_FALSE, FLOAT_SZ * 3, ctypes.c_void_p(FLOAT_SZ * 3 * self.env_idx)
                 )
                 glVertexAttribDivisor(idx, max(n_instances, 1))
+
+        if self.inst_tints is not None:
+            tint_buffer = glGenBuffers(1)
+            self._buffers["inst_tint"] = tint_buffer
+            glBindBuffer(GL_ARRAY_BUFFER, tint_buffer)
+            tint_data = np.ascontiguousarray(self.inst_tints, dtype=np.float32).reshape((-1,))
+            glBufferData(GL_ARRAY_BUFFER, FLOAT_SZ * len(tint_data), tint_data, GL_STREAM_DRAW)
+            idx = self._inst_attr_start + 5
+            glEnableVertexAttribArray(idx)
+            glVertexAttribPointer(idx, 4, GL_FLOAT, GL_FALSE, FLOAT_SZ * 4, ctypes.c_void_p(0))
+            glVertexAttribDivisor(idx, 1)
 
         #######################################################################
         # Fill element buffer

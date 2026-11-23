@@ -557,6 +557,22 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                 for links_context in links_contexts:
                     links_context.set_link_frame_size(link_frame_size)
 
+        # Colors of the rigid links by island and by sleep (see 'RigidVisOptions.islands')
+        rigid_solver = self.scene.sim.rigid_solver
+        if rigid_solver.is_active:
+            rigid_context = rigid_solver.render_context
+            is_changed, is_islands_shown = imgui.checkbox("Islands", rigid_context.islands)
+            if is_changed:
+                rigid_context.set_islands(is_islands_shown)
+            is_hibernation_disabled = not rigid_solver.options.use_hibernation
+            imgui.begin_disabled(is_hibernation_disabled)
+            is_changed, is_hibernation_shown = imgui.checkbox("Hibernation", rigid_context.hibernation)
+            imgui.end_disabled()
+            if is_hibernation_disabled and imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled.value):
+                imgui.set_tooltip("Requires RigidOptions.use_hibernation")
+            if is_changed:
+                rigid_context.set_hibernation(is_hibernation_shown)
+
         # Camera Frustum
         changed, new_val = imgui.checkbox("Camera Frustum", gs_context.camera_frustum_shown)
         if changed:

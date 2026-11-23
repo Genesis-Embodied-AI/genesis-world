@@ -147,6 +147,11 @@ in vec2 uv_1;
 #ifdef COLOR_0_LOC
 in vec4 color_multiplier;
 #endif
+#ifdef INST_TINT_LOC
+flat in vec4 tint;
+// Whether the pass draws a debug view, the only views showing the tint (see 'Primitive.inst_tints')
+uniform bool debug_view;
+#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 // OUTPUTS
@@ -387,6 +392,21 @@ void main()
 
 #ifdef COLOR_0_LOC
     base_color *= color_multiplier;
+#endif
+
+#ifdef INST_TINT_LOC
+    // The tint sets the hue and the material keeps its brightness. This way the geoms and the textures of one instance
+    // stay distinct. A color out of gamut moves toward the grey of the same luminance, so its hue stays the same.
+    if (debug_view) {
+        const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+        vec3 tinted = tint.rgb * (2.0 * dot(base_color.rgb, luma));
+        float lum_tinted = dot(tinted, luma);
+        float peak = max(max(tinted.r, tinted.g), tinted.b);
+        if (peak > 1.0) {
+            tinted = mix(vec3(lum_tinted), tinted, clamp((1.0 - lum_tinted) / max(peak - lum_tinted, 1e-6), 0.0, 1.0));
+        }
+        base_color.rgb = mix(base_color.rgb, tinted, tint.a);
+    }
 #endif
 
     base_color = srgb_to_linear(base_color);

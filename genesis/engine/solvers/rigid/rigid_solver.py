@@ -11,6 +11,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+import genesis.utils.mesh as mu
 from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.entities.rigid_entity import RigidGeom
@@ -51,6 +52,7 @@ from genesis.utils.misc import (
     broadcast_tensor,
     get_gpu_core_count,
     get_gpu_shared_tile_sizes,
+    get_last_occurrence,
     indices_to_mask,
     qd_to_numpy,
     qd_to_torch,
@@ -3531,6 +3533,12 @@ def kernel_substep_post(
 # The colors of the arrows of the force and of the normal of a contact
 CONTACT_FORCE_COLOR = (0.0, 0.9, 0.8, 1.0)
 CONTACT_NORMAL_COLOR = (0.9, 0.0, 0.8, 1.0)
+# The hue of the color of an island steps by the golden ratio conjugate from one link to the next (see
+# 'RigidScopedRenderContext.update_shapes'). This way, the links of one entity, whose indices are close, get distant hues.
+ISLANDS_HUE_STEP = 0.618034
+# The tint of a sleeping link: a grey, weighted by the alpha. A sleeping link colored by its island blends that color
+# toward the grey by the same weight.
+HIBERNATION_TINT = (0.35, 0.35, 0.38, 0.7)
 
 
 class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext[RigidSolver]):
@@ -3538,7 +3546,8 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
 
     The collision geoms of the entities are their debug representation, their mesh or the surface of their signed
     distance field (SDF). The markers are the frames of the links, the equality constraints and the arrows of the force
-    and of the normal of the contacts of the geoms showing them, as the options of the solver and of its geoms ask.
+    and of the normal of the contacts of the geoms showing them, as the options of the solver and of its geoms ask. The
+    debug views color the links by island and fade the sleeping ones on request (see ``RigidVisOptions.islands``).
     """
 
     debug_vis_modes = ("collision", "sdf")
@@ -3551,8 +3560,9 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
         # 'is_looks' holds.
         geoms_cols = slice(geom_start, geom_start + len(geometries))
         geoms = self.owner.dyn_state.geoms
-        entities = [geom.entity for geom in self.owner.geoms[geoms_cols]]
-        return StaticMeshBatch(
+        batch_geoms = self.owner.geoms[geoms_cols]
+        entities = [geom.entity for geom in batch_geoms]
+        batch = StaticMeshBatch(
             geometries,
             ArrayRef(geoms.pos, geoms_cols),
             ArrayRef(geoms.quat, geoms_cols),
@@ -3567,6 +3577,10 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
             _views=frozenset() if is_looks else frozenset((debug_vis_mode,)),
             invalidated_by={self.owner: (StateChange.GEOMETRY,)},
         )
+        self._shapes_links_idx[batch] = torch.tensor(
+            [geom.link.idx for geom in batch_geoms], dtype=gs.tc_int, device=gs.device
+        )
+        return batch
 
     def build(self) -> None:
         """Build the data of the visual geoms, of the collision geoms and of the markers, and the shapes of the visual
@@ -3618,6 +3632,14 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
         self._constraints_markers: tuple[Lines, Points] | tuple[()] = ()
         # The marker of each constraint added at runtime, by the links it binds, kept while the constraint is removed
         self._dynamic_constraints_marker: dict[tuple[int, int], Lines] = {}
+        # Whether the debug views color the links by island and fade the sleeping ones, and the color of each link, which
+        # an island takes from its smallest link (see 'update_shapes').
+        self._is_islands_shown = solver.options.vis.islands
+        self._is_hibernation_shown = solver.options.vis.hibernation
+        links_hue = (np.arange(solver.n_links) * ISLANDS_HUE_STEP) % 1.0
+        self._links_island_color = torch.as_tensor(
+            mu.hsv_to_rgb(links_hue, saturation=0.8, value=0.95), dtype=gs.tc_float, device=gs.device
+        )
         super().build()
         if solver.n_geoms > 0:
             dyn_info = solver.dyn_info
@@ -3677,7 +3699,9 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
         """Refresh the shapes of the visual geoms and of the collision geoms, and return those of a representation.
 
         The batches of the surfaces of the SDF of the collision geoms are made at the first read asking for one, the
-        surfaces being extracted from the grids of the geoms.
+        surfaces being extracted from the grids of the geoms. While the islands or the sleeping links are shown (see
+        ``RigidVisOptions.islands``), each mesh is tinted by the state of its link. Turning them on or off adds or removes
+        the tint of the shapes, which keep their identity.
         """
         solver = self.owner
         if view in self._sdf_views:
@@ -3704,7 +3728,62 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
                     self._shapes += (
                         self._get_geoms_batch("sdf", geometries, is_looks=True, geom_start=entity.geom_start),
                     )
+        if envs_idx is not None:
+            links_tint = None
+            if self._is_islands_shown or self._is_hibernation_shown:
+                links_tint = torch.zeros((solver.n_envs_, solver.n_links, 4), dtype=gs.tc_float, device=gs.device)
+            if self._is_islands_shown:
+                # The islands are labeled in the order of their smallest tree, so a merge or a split relabels every
+                # island after it. The color is keyed on the smallest link of the island instead, which changes only
+                # when the island merges into one holding a smaller link. The smallest link of an island is its first
+                # link, found as its last one in the reversed order.
+                island = solver.constraint_solver.constraint_state.island
+                links_island_idx = qd_to_torch(island.links_island_idx, transpose=True)
+                links_first = solver.n_links - 1 - get_last_occurrence(links_island_idx.flip(-1)).flip(-1)
+                links_tint[..., :3] = self._links_island_color[links_first]
+                links_tint[..., 3] = links_island_idx >= 0
+            if self._is_hibernation_shown:
+                is_hibernated = qd_to_torch(solver.dyn_state.links.is_hibernated, transpose=True)[..., None] != 0
+                hibernation_tint = torch.tensor(HIBERNATION_TINT, dtype=gs.tc_float, device=gs.device)
+                if self._is_islands_shown:
+                    hibernation_rgb = torch.lerp(links_tint[..., :3], hibernation_tint[:3], hibernation_tint[3])
+                    hibernation_tint = torch.cat((hibernation_rgb, links_tint[..., 3:]), dim=-1)
+                links_tint = torch.where(is_hibernated, hibernation_tint, links_tint)
+            # A shape gains or loses its tint as a fork, which keeps its identity, and is tinted in place otherwise
+            shapes = []
+            for shape in self._shapes:
+                links_idx = self._shapes_links_idx.get(shape)
+                if links_idx is not None:
+                    tint = None if links_tint is None else links_tint[:, links_idx]
+                    if (tint is None) != (shape.tint is None):
+                        shape = shape.fork(tint=tint)
+                    elif tint is not None:
+                        shape.tint.copy_(tint)
+                shapes.append(shape)
+            self._shapes = tuple(shapes)
         return super().update_shapes(envs_idx, view)
+
+    @property
+    def islands(self) -> bool:
+        """Whether the debug views color the links by island (see ``RigidVisOptions.islands``)."""
+        return self._is_islands_shown
+
+    def set_islands(self, islands: bool) -> None:
+        """Color the links by island in the debug views, or stop coloring them (see ``RigidVisOptions.islands``)."""
+        self._is_islands_shown = islands
+        self._context.invalidate((self,))
+
+    @property
+    def hibernation(self) -> bool:
+        """Whether the debug views fade the sleeping links (see ``RigidVisOptions.hibernation``)."""
+        return self._is_hibernation_shown
+
+    def set_hibernation(self, hibernation: bool) -> None:
+        """Fade the sleeping links in the debug views, or stop fading them (see ``RigidVisOptions.hibernation``)."""
+        if hibernation and not self.owner.options.use_hibernation:
+            gs.raise_exception("'RigidVisOptions.hibernation' requires 'RigidOptions.use_hibernation'.")
+        self._is_hibernation_shown = hibernation
+        self._context.invalidate((self,))
 
     def get_visualize_contact(self, entity: RigidEntity) -> bool:
         """Whether the contacts of an entity are drawn (see the ``visualize_contact`` of its entity spec)."""
