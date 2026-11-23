@@ -294,7 +294,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         *,
         n_candidates: int | None = None,
         seed: int | None = None,
-        use_cache: bool = True,
+        use_cache: bool | None = None,
         return_normals: bool = False,
     ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
         """

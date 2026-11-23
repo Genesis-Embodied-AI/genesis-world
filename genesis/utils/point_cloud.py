@@ -85,7 +85,7 @@ def sample_mesh_point_cloud(
     *,
     n_candidates: int | None = None,
     seed: int | None = None,
-    use_cache: bool = True,
+    use_cache: bool | None = None,
     return_normals: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """
@@ -103,8 +103,10 @@ def sample_mesh_point_cloud(
         Number of area-weighted surface samples to draw before FPS.
     seed : int, optional
         The random seed for `trimesh.sample.sample_surface` and the first FPS pick. If None, a random seed is generated.
-    use_cache : bool
-        If True and ``seed`` is set, load and store results under the cache directory.
+    use_cache : bool, optional
+        If True, load and store results under the cache directory, which saves the sampling cost on repeated calls at
+        the cost of disk space. A result sampled with a random seed is never requested again, so caching it only fills
+        the disk. If None, results are cached exactly when ``seed`` is given.
     return_normals : bool
         If True, also return triangle face normals aligned with each FPS sample (same candidate face as the point).
 
@@ -124,9 +126,12 @@ def sample_mesh_point_cloud(
         n_candidates = max(256, n_points * 4)
     n_candidates = max(n_candidates, n_points)
 
+    if use_cache is None:
+        use_cache = seed is not None
+    elif use_cache and seed is None:
+        gs.logger.warning("Caching a point cloud sampled with a random seed fills the disk with unreusable results.")
     if seed is None:
         seed = int(np.random.SeedSequence().entropy)
-        use_cache = False  # Do not cache on random seed
 
     cache = get_fps_pc_cache(verts, faces, n_points, n_candidates, return_normals, seed)
 
