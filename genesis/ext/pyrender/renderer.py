@@ -3,11 +3,13 @@
 Author: Matthew Matl
 """
 
+import os
 import sys
+
+import numpy as np
 
 import PIL
 import pyglet
-import numpy as np
 from OpenGL.GL import *
 
 from .constants import (
@@ -27,8 +29,8 @@ from .jit_render import is_env_pass
 from .light import DirectionalLight, PointLight, SpotLight
 from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
 from .shader_program import NormalShaderCache, ShaderProgramCache
-from .utils import format_color_vector
 from .texture import Texture
+from .utils import format_color_vector
 
 
 MARKER_XRAY_DIM_FACTOR = 0.3
@@ -1008,8 +1010,10 @@ class Renderer(object):
             glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, self._main_cb)
             glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, self._main_db)
 
-            # Generate multisample buffer
-            num_samples = min(glGetIntegerv(GL_MAX_SAMPLES), 4)
+            # Generate multisample buffer. Each driver picks its own sample positions within a pixel, so pixels on
+            # edges differ between drivers. Tests use no multisampling, so that images match across platforms, as in the
+            # viewer window (see 'PYTEST_VERSION' in viewer.py).
+            num_samples = 0 if "PYTEST_VERSION" in os.environ else min(glGetIntegerv(GL_MAX_SAMPLES), 4)
             self._main_cb_ms, self._main_db_ms = glGenRenderbuffers(2)
             glBindRenderbuffer(GL_RENDERBUFFER, self._main_cb_ms)
             glRenderbufferStorageMultisample(

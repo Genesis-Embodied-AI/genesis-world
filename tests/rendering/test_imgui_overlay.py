@@ -11,7 +11,7 @@ import genesis as gs
 from genesis.ext.pyrender.overlay import ImGuiOverlayPlugin
 
 from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_IMGUI_BUNDLE, is_imgui_bundle_supported
-from ..utils.assertions import assert_allclose, assert_equal, assert_pixel_match, rgb_array_to_png_bytes
+from ..utils.assertions import assert_allclose, assert_pixel_match, rgb_array_to_png_bytes
 
 
 def _apply_deterministic_imgui_overrides(monkeypatch):
@@ -411,7 +411,8 @@ def test_scene_rebuild():
     is_frame = (rgb_frames != rgb_looks).any(axis=-1)
     assert is_frame.any() and (rgb_frames_large != rgb_looks).any(axis=-1).sum() > is_frame.sum()
     assert (rgb_robot_debug != rgb_frames_large).any()
-    assert_equal(rgb_restored, rgb_looks)
+    # Rendering the same geometry again may round a color to the next level
+    assert_allclose(rgb_restored, rgb_looks, atol=1)
 
     # The frames of the links drawn at runtime keep being drawn at their size once the scene is rebuilt
     scene.visualizer.set_link_frames(True)

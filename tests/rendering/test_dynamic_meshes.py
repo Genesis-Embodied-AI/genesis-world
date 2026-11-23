@@ -19,11 +19,8 @@ from .conftest import RENDERER_TYPE
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
 def test_batch_deformable_render(monkeypatch, png_snapshot):
-    # Having many particles in the scene creates artifacts that are not deterministic between different hardware. Every
-    # visible feature spans several pixels, since each renderer rasterizes sub-pixel geometry its own way: the liquid
-    # holds a few hundred particles 5 pixels wide, and the sub-pixel wireframes of the solver boundaries are left out.
-    png_snapshot.extension._std_err_threshold = 2.0
-    png_snapshot.extension._blurred_kernel_size = 3
+    # Every visible feature spans several pixels, since each renderer rasterizes sub-pixel geometry its own way: the
+    # liquid holds a few hundred particles 5 pixels wide, and the wireframes of the solver boundaries are left out.
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -180,8 +177,9 @@ def test_deformable_uv_textures(renderer_type, renderer, show_viewer, png_snapsh
 
     # Relax pixel matching because RayTracer is not deterministic between different hardware (eg RTX6000 vs H100), even
     # without denoiser.
-    png_snapshot.extension._std_err_threshold = 3.0
-    png_snapshot.extension._blurred_kernel_size = 3
+    if renderer_type == RENDERER_TYPE.RAYTRACER:
+        png_snapshot.extension._std_err_threshold = 3.0
+        png_snapshot.extension._blurred_kernel_size = 3
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -378,10 +376,8 @@ def test_set_vverts(renderer, show_viewer):
     scene.reset()
     assert_allclose(entity.get_vverts(), sphere_vverts, tol=gs.EPS)
     rgb_restored = tensor_to_array(cam.render(rgb=True, force_render=True)[0])
-    if sys.platform == "darwin" and scene.visualizer.is_software:
-        assert np.abs(rgb_restored.astype(np.float32) - rgb_baseline.astype(np.float32)).mean() < 1.0
-    else:
-        assert_equal(rgb_restored, rgb_baseline)
+    # Rendering the same geometry again may round a color to the next level
+    assert_allclose(rgb_restored, rgb_baseline, atol=1)
 
     # get_vverts returns a copy: mutating the result does not change the vertices drawn.
     copy = entity.get_vverts()

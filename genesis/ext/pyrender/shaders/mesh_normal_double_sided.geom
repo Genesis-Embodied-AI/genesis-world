@@ -1,4 +1,8 @@
 #version 330 core
+
+// See the invariance of the position in mesh.vert
+invariant gl_Position;
+
 layout (triangles) in;
 layout (triangle_strip, max_vertices=6) out;
 

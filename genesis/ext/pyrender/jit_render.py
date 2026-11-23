@@ -1394,9 +1394,11 @@ class JITRenderer:
         # Computed here rather than once and for all, so it follows the camera of this pass and of this environment.
         centres_local = self.centroid_local[:, min(max(env_idx, 0), self.centroid_local.shape[1] - 1)]
         centroids = np.einsum("nij,nj->ni", self.pose[:, :3, :3], centres_local) + self.pose[:, :3, 3]
-        # The vertex shader positions through 'V * reflection_mat', which mirrors heights in the floor pass and hence
-        # reverses which of two meshes lies behind the other, so the depth row must carry the reflection too
-        view_row = V[2] @ reflection_mat
+        # The floor pass mirrors the scene through the view matrix itself, so that every pass positions its vertices
+        # with the same expression (see 'invariant' in mesh.vert). The mirror reverses which of two meshes lies behind
+        # the other, so the depth row carries it too.
+        V = V @ reflection_mat
+        view_row = V[2]
         depths = centroids @ view_row[:3] + view_row[3]
         is_transparent = self.render_flags[:, 5].astype(bool)
         # Depth along the view axis grows towards the viewer, so ascending depth is farthest first

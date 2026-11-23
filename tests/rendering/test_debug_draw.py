@@ -126,7 +126,7 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
             res=(320, 320),
             # Enable running in background thread if supported by the platform
             run_in_thread=(sys.platform == "linux"),
-            camera_pos=(1.2, 1.2, 1.2),
+            camera_pos=(2.0, 2.0, 2.0),
             camera_lookat=(0.0, 0.0, 0.2),
         ),
         profiling_options=gs.options.ProfilingOptions(
@@ -136,7 +136,13 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
         show_viewer=True,
     )
 
-    scene.add_entity(gs.morphs.Plane())
+    # A small ground whose corners all stay in view, since a software renderer misdraws geometry that leaves the view
+    scene.add_entity(
+        morph=gs.morphs.Plane(
+            pos=(0.0, 0.3, 0.0),
+            plane_size=(1.0, 1.2),
+        ),
+    )
 
     floating_box = scene.add_entity(
         gs.morphs.Box(
@@ -224,12 +230,6 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
     rgb_arr, *_ = pyrender_viewer.render_offscreen(
         pyrender_viewer._camera_node, pyrender_viewer._renderer, rgb=True, depth=False, seg=False, normal=False
     )
-
-    if sys.platform == "darwin":
-        glinfo = pyrender_viewer.context.get_info()
-        renderer = glinfo.get_renderer()
-        if renderer == "Apple Software Renderer":
-            pytest.xfail("Tile ground colors are altered on Apple Software Renderer.")
 
     assert rgb_array_to_png_bytes(rgb_arr) == png_snapshot
 
@@ -332,7 +332,4 @@ def test_draw_debug_frustum_and_trajectory(n_envs, renderer_type, renderer, png_
         pyrender_viewer._camera_node, pyrender_viewer._renderer, rgb=True, depth=False, seg=False, normal=False
     )
 
-    # Apple Software Rendering has issues rendering sharp edges
-    if sys.platform == "darwin" and scene.visualizer.is_software:
-        png_snapshot.extension._blurred_kernel_size = 3
     assert rgb_array_to_png_bytes(rgb_arr) == png_snapshot
