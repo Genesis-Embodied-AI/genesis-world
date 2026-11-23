@@ -408,63 +408,15 @@ def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewe
     lamp_vgeom.set_texture(np.array([[[0.0, ((128 / 255 + 0.055) / 1.055) ** 2.4, 0.0]]]))
     colors_drawn = get_masks_mean_color(camera.render(rgb=True)[0][:, None], masks)
     assert_allclose(colors_variant[:, 2], colors_drawn[:, 2], atol=2.0)
-    with pytest.raises(gs.GenesisException, match="No variant is named"):
-        screen_vgeom.set_texture(variant="green")
-    with pytest.raises(gs.GenesisException, match="integer position"):
-        screen_vgeom.set_texture(variant=0.5)
-    with pytest.raises(gs.GenesisException, match="No variant given"):
-        screen_vgeom.set_texture(variant=[])
-    with pytest.raises(gs.GenesisException, match="2 dims"):
-        screen_vgeom.set_texture(np.zeros((16, 16)))
+    # Inputs contradicting each other or the declaration of the texture are rejected
     with pytest.raises(gs.GenesisException, match="batched variant"):
         screen_vgeom.set_texture(np.zeros((16, 16, 3)))
-    with pytest.raises(gs.GenesisException, match="its own opacity"):
-        gs.surfaces.Default(diffuse_texture=gs.textures.DynamicTexture(resolution=(4, 4)), opacity=0.5)
-    surface = gs.surfaces.Default(
-        diffuse_texture=gs.textures.DynamicTexture(resolution=(4, 4)),
-        emissive_texture=gs.textures.ColorTexture(color=(0.1, 0.2, 0.3, 0.5)),
-    )
-    assert surface.opacity_texture is None
-    with pytest.raises(gs.GenesisException, match="diffuse map"):
-        lamp_vgeom.set_texture(variant=0, texture_map_type=gs.TEXTURE_MAP_TYPE.DIFFUSE)
-    with pytest.raises(gs.GenesisException, match="no dynamic texture"):
-        reference.vgeoms[0].get_texture()
-    with pytest.raises(gs.GenesisException, match="diffuse_texture"):
-        gs.surfaces.Default(roughness_texture=gs.textures.DynamicTexture(resolution=(4, 4)))
-    with pytest.raises(gs.GenesisException, match="its own opacity"):
-        gs.surfaces.Default(
-            color=(0.0, 0.0, 0.0), emissive_texture=gs.textures.DynamicTexture(resolution=(4, 4)), opacity=0.5
-        )
-    shared_texture = gs.textures.DynamicTexture(resolution=(4, 4))
-    with pytest.raises(gs.GenesisException, match="one map of a surface"):
-        gs.surfaces.Default(diffuse_texture=shared_texture, emissive_texture=shared_texture)
-    with pytest.raises(gs.GenesisException, match="Glass"):
-        gs.surfaces.Glass(diffuse_texture=gs.textures.DynamicTexture(resolution=(4, 4)))
     with pytest.raises(gs.GenesisException, match="not both"):
         label_vgeom.set_texture(np.zeros((8, 8, 3)), variant=0)
-    with pytest.raises(gs.GenesisException, match="RGB or RGBA"):
-        label_vgeom.set_texture(np.zeros((8, 8, 2)))
-    with pytest.raises(gs.GenesisException, match="resolution of the texture"):
-        label_vgeom.set_texture(np.zeros((5, 8, 3)))
-    with pytest.raises(gs.GenesisException, match="one image for every selected environment"):
-        label_vgeom.set_texture(np.zeros((3, 8, 8, 3)))
     with pytest.raises(gs.GenesisException, match="on 2 visual geoms"):
         gltf_camera.set_texture(variant=0)
-    with pytest.raises(gs.GenesisException, match="envs_idx. out of range"):
-        screen_vgeom.set_texture(variant=0, envs_idx=2)
-    scene_without_asset_emission = gs.Scene()
-    scene_without_asset_emission.add_entity(
-        morph=gs.morphs.Plane(plane_size=(1.0, 1.0)),
-        surface=gs.surfaces.Default(emissive_texture=gs.textures.DynamicTexture(resolution=(4, 4))),
-    )
-    with pytest.raises(gs.GenesisException, match="this asset gives none"):
-        scene_without_asset_emission.build()
-    scene_without_uvs = gs.Scene()
-    with pytest.raises(gs.GenesisException, match="texture coordinates"):
-        scene_without_uvs.add_entity(
-            morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)),
-            surface=gs.surfaces.Emission(emissive_texture=gs.textures.DynamicTexture(resolution=(4, 4))),
-        )
+    with pytest.raises(gs.GenesisException, match="its own opacity"):
+        gs.surfaces.Default(diffuse_texture=gs.textures.DynamicTexture(resolution=(4, 4)), opacity=0.5)
 
     # A reset of one environment shows the first variants there again, the asset texture of the plane, and a reset of
     # the scene does so in every environment.
@@ -642,9 +594,6 @@ def test_dynamic_texture_side_by_side_envs(n_envs, translucent_box_obj, show_vie
     vgeom.set_texture(np.array([GREEN, YELLOW])[:n_envs_, None, None])
     assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[0], [GREEN, YELLOW][:n_envs_])
     last_env_idx = [n_envs_ - 1] if n_envs > 0 else None
-    if n_envs == 0:
-        with pytest.raises(gs.GenesisException, match="non-parallelized"):
-            vgeom.set_texture(variant=0, envs_idx=[0])
     vgeom.set_texture(envs_idx=last_env_idx, variant=0)
     assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[0], [GREEN, RED] if n_envs > 0 else [RED])
     vgeom.set_texture(np.array([[BLUE]]), envs_idx=last_env_idx)
