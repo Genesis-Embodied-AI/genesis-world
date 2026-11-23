@@ -14,13 +14,15 @@ from genesis.engine.render_context import (
     Frames,
     Lines,
     Points,
+    ScopedRenderContext,
     SegmentationKeys,
     Shape,
     StaticMeshBatch,
 )
-from genesis.engine.state_change import StateChange, Subscriber
+from genesis.engine.state_change import StateChange, Subscriber, Tracker
 from genesis.ext import pyrender
 from genesis.ext.pyrender.jit_render import JITRenderer
+from genesis.typing import IndexType
 from genesis.utils.misc import BuildableMixin, tensor_to_array
 
 
@@ -125,11 +127,14 @@ class ShapeNodes:
     nodes: list["pyrender.Node | None"]
     # Whether the shape is a marker, which the debug views alone draw and which takes no part in segmentation
     is_marker: bool
-    # The record of the refreshes of the shape, and of the changes of the reads holding its parts, since its nodes were
-    # last updated (see 'RenderContext.subscribe').
-    subscriber: Subscriber
     # The rows of the shape the nodes draw, shared by the shapes of the same environments
     selection: RowsSelection
+    # The refreshes of the arrays of the shape and the changes of the reads holding its parts, since the nodes were last
+    # synced (see 'RenderContext.track').
+    refreshes_tracker: Tracker
+    reads_tracker: Tracker
+    # Whether its scoped context refreshed the shape since its nodes were last updated, while no view drew it
+    is_refreshed: bool = False
     # The meshes of a StaticMeshBatch posed per rendered environment: their positions in the batch, their pyrender
     # meshes and primitives, and the positions among them of the floors.
     meshes_posed: np.ndarray | None = None
@@ -218,7 +223,7 @@ class RasterizerContext(BuildableMixin):
 
         # A change of the render context outside a step, such as a write of the appearance of an entity, shows at the
         # next sync, which a sync between two steps skips otherwise (see 'update').
-        def on_change(change: StateChange, envs_idx: Any) -> None:
+        def on_change(change: StateChange, **indices: IndexType | None) -> None:
             self._t = -1
 
         self.sim.render_context.subscribe(Subscriber(to=frozenset(StateChange), callback=on_change))
@@ -355,23 +360,26 @@ class RasterizerContext(BuildableMixin):
                         rows = slice(None)
                     is_all_rendered = np.array_equal(envs_pos, np.arange(len(self.rendered_envs_idx)))
                     selection = self._rows_envs[shape.envs] = RowsSelection(rows, envs_pos, is_all_rendered)
-                subscriber = Subscriber(to=frozenset((StateChange.GEOMETRY, StateChange.VISUAL)))
                 shape_nodes = ShapeNodes(
-                    nodes=[], is_marker=shape in markers, subscriber=subscriber, selection=selection
+                    nodes=[],
+                    is_marker=shape in markers,
+                    selection=selection,
+                    refreshes_tracker=context.track(shape, StateChange.GEOMETRY),
+                    reads_tracker=context.track(shape, StateChange.VISUAL),
                 )
+                # The nodes are made from the shape as it stands
+                shape_nodes.refreshes_tracker.pull()
+                shape_nodes.reads_tracker.pull()
                 self._sync_shape_nodes(shape, shape_nodes, arrays_host)
-                context.subscribe(shape_nodes.subscriber, (shape,))
                 self._shapes_nodes[shape] = shape_nodes
                 continue
-            changes = shape_nodes.subscriber.pending
-            if changes:
-                shape_nodes.subscriber.clear()
-            if StateChange.GEOMETRY in changes:
-                if is_drawn:
-                    self._sync_shape_nodes(shape, shape_nodes, arrays_host)
-                else:
-                    shape_nodes.subscriber.notify(StateChange.GEOMETRY)
-            if StateChange.VISUAL in changes:
+            # The nodes of a shape no view draws are updated once some view draws it
+            if shape_nodes.refreshes_tracker.pull() is not None:
+                shape_nodes.is_refreshed = True
+            if shape_nodes.is_refreshed and is_drawn:
+                self._sync_shape_nodes(shape, shape_nodes, arrays_host)
+                shape_nodes.is_refreshed = False
+            if shape_nodes.reads_tracker.pull() is not None:
                 self._set_nodes_views(shape, shape_nodes)
 
     def _remove_nodes(self, shape_nodes: ShapeNodes) -> None:
@@ -386,7 +394,6 @@ class RasterizerContext(BuildableMixin):
 
     def _remove_shape_nodes(self, shape: Shape) -> None:
         shape_nodes = self._shapes_nodes.pop(shape)
-        self.sim.render_context.unsubscribe(shape_nodes.subscriber)
         self._remove_nodes(shape_nodes)
 
     def _add_node_seg(self, mesh: "pyrender.Mesh", seg_keys: SegmentationKeys | None) -> "pyrender.Node":
@@ -702,15 +709,6 @@ class RasterizerContext(BuildableMixin):
                     self._read(shape.pos, shape_nodes, arrays_host), self._read(shape.quat, shape_nodes, arrays_host)
                 )
                 nodes_T[..., :3, :3] *= shape.length
-                if shape.is_active is not None:
-                    is_active = self._read(shape.is_active, shape_nodes, arrays_host, dtype=np.bool_)
-                    nodes_T[..., :3, 3] = np.where(is_active[..., None], nodes_T[..., :3, 3], gu.nowhere())
-                if self.split_envs or selection.is_shared:
-                    nodes_T = self._pad_envs(shape_nodes, nodes_T).swapaxes(0, 1)
-                else:
-                    envs_idx = np.array(self.rendered_envs_idx)[selection.envs_pos]
-                    nodes_T[..., :3, 3] += self.scene.envs_offset[envs_idx, np.newaxis]
-                    nodes_T = nodes_T.reshape((1, -1, 4, 4))
             else:
                 # The transform placing the unit mesh of each element in each rendered environment: the unit mesh
                 # stretched along its z axis by the length of the element and across by its radius gives the mesh of
@@ -727,7 +725,17 @@ class RasterizerContext(BuildableMixin):
                 R = gu.z_up_to_R(vecs.astype(np.float32))
                 R[..., :, :2] *= np.broadcast_to(radius, vecs.shape[:2])[..., None, None]
                 R[..., :, 2] *= np.linalg.norm(vecs, axis=-1)[..., None]
-                nodes_T = self._pad_envs(shape_nodes, gu.trans_R_to_T(starts.astype(np.float32), R)).swapaxes(0, 1)
+                nodes_T = gu.trans_R_to_T(starts.astype(np.float32), R)
+            # An inactive element is placed out of sight, so that its node keeps its instances
+            if shape.is_active is not None:
+                is_active = self._read(shape.is_active, shape_nodes, arrays_host, dtype=np.bool_)
+                nodes_T[..., :3, 3] = np.where(is_active[..., None], nodes_T[..., :3, 3], gu.nowhere())
+            if isinstance(shape, Frames) and not (self.split_envs or selection.is_shared):
+                envs_idx = np.array(self.rendered_envs_idx)[selection.envs_pos]
+                nodes_T[..., :3, 3] += self.scene.envs_offset[envs_idx, np.newaxis]
+                nodes_T = nodes_T.reshape((1, -1, 4, 4))
+            else:
+                nodes_T = self._pad_envs(shape_nodes, nodes_T).swapaxes(0, 1)
             if is_new and isinstance(shape, Frames):
                 mesh = trimesh.creation.axis(origin_size=0.03, axis_radius=0.025, axis_length=1.0)
                 mesh.visual.face_colors[:, :3] = (0.7 * mesh.visual.face_colors[:, :3]).astype(int)

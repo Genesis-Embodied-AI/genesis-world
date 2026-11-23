@@ -11,6 +11,7 @@ import genesis.utils.geom as gu
 from genesis.engine.render_context import DynamicMesh, Shape
 from genesis.engine.solvers.rigid.collider.data import ColliderState
 from genesis.engine.solvers.rigid.data import DynState
+from genesis.engine.state_change import ChangeLog, StateChange, TrackableMixin
 from genesis.options.sensors import TemperatureGrid as TemperatureGridOptions, TemperatureProperties
 from genesis.utils.misc import concat_with_tensor, make_tensor_field
 from genesis.utils.ring_buffer import TensorRingBuffer
@@ -472,9 +473,12 @@ def _apply_T_measured_filter(
         start += size
 
 
-@dataclass
-class TemperatureGridSensorMetadata(RigidSensorMetadataMixin, SimpleSensorMetadata):
-    """Shared metadata for all temperature grid sensors."""
+@dataclass(eq=False)
+class TemperatureGridSensorMetadata(TrackableMixin, RigidSensorMetadataMixin, SimpleSensorMetadata):
+    """Shared metadata for all temperature grid sensors.
+
+    Its change log records the changes of the temperatures, the state of the sensors that each measurement advances.
+    """
 
     ambient_temperature: float = 21.0
     convection_coeff: float = 1.0
@@ -519,6 +523,8 @@ class TemperatureGridSensor(
     @gs.assert_unbuilt
     def build(self):
         super().build()
+        if self._shared_metadata.changelog is None:
+            self._shared_metadata.changelog = ChangeLog(self._manager.n_envs_)
 
         solver = self._shared_metadata.solver
 
@@ -679,6 +685,7 @@ class TemperatureGridSensor(
             )
             n_envs = envs_idx.shape[0]
             shared_metadata.link_temps[envs_idx, :] = base_T_per_link.unsqueeze(0).expand(n_envs, -1)
+        shared_metadata.changelog.add(StateChange.DYNAMICS, envs_idx=envs_idx)
 
     @classmethod
     def _update_raw_data(
@@ -686,6 +693,8 @@ class TemperatureGridSensor(
     ):
         solver = shared_metadata.solver
         dt = solver.sim.dt
+        # The measurement advances the temperatures, which the readings it makes sample as they stand
+        shared_metadata.changelog.commit()
         props = shared_metadata.link_material_properties
         link_conductivity = props[_PropIdx.CONDUCTIVITY]
         link_base_temperature = props[_PropIdx.BASE_TEMP]
@@ -806,7 +815,18 @@ class TemperatureGridSensor(
             verts_shape = (self._manager.n_envs_, len(self._debug_cells_verts))
             verts = torch.zeros((*verts_shape, 3), dtype=gs.tc_float, device=gs.device)
             colors = torch.zeros((*verts_shape, 4), dtype=gs.tc_float, device=gs.device)
-            markers = (DynamicMesh(faces, surface=None, verts=verts, colors=colors),)
+            # The cells follow the link, and their colors the temperatures
+            invalidated_by = {
+                self._link.entity.solver: (StateChange.GEOMETRY,),
+                self: (StateChange.MODEL,),
+                self._shared_metadata: (StateChange.DYNAMICS,),
+            }
+            is_active = torch.ones(verts_shape[:1], dtype=gs.tc_bool, device=gs.device)
+            markers = (
+                DynamicMesh(
+                    faces, surface=None, verts=verts, colors=colors, is_active=is_active, invalidated_by=invalidated_by
+                ),
+            )
         link_pos = self._link.get_pos(envs_idx, relative=False)[..., None, :]
         link_quat = self._link.get_quat(envs_idx, relative=False)[..., None, :]
         temps = self.read_ground_truth(envs_idx).reshape((*link_pos.shape[:-2], -1))

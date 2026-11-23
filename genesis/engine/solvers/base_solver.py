@@ -1,4 +1,6 @@
-from collections.abc import Callable, Iterator, Sequence
+import functools
+import weakref
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from enum import IntFlag
 from typing import TYPE_CHECKING, ClassVar, NamedTuple, overload
 
@@ -12,7 +14,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.force_fields import ForceField, ForceFields
-from genesis.engine.state_change import StateChange, Subscriber, mutates
+from genesis.engine.state_change import ChangeLog, TrackableMixin, mutates
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import RolloutGraph, no_grad
 from genesis.repr_base import RBC
@@ -42,7 +44,6 @@ from genesis.utils.misc import (
     qd_from_torch,
     qd_to_numpy,
     qd_to_torch,
-    sanitize_index,
     sanitize_indexed_tensor,
     tensor_to_array,
 )
@@ -393,15 +394,27 @@ class CheckpointMixin:
         *,
         boundary_only: bool = False,
         envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
-    ) -> None:
+    ) -> list[DataItem]:
         """Write back the arrays of a checkpoint 'save_checkpoint' returned, rejecting a record read from another build.
-
-        `boundary_only` states that 'save_checkpoint' saved a boundary checkpoint, of which `envs_idx` selects the
-        environments to write back, all of them if None, along the last index of every array of the state.
 
         Nothing is notified to the subscribers (see 'mutates'). A component whose step reads a DERIVED array before
         recomputing it overrides this to recompute or invalidate that array when the record lacks DERIVED (see
         'DataKind'). On Metal, the caller synchronizes the torch stream before the next kernel (see 'fill_data').
+
+        Parameters
+        ----------
+        checkpoint : SolverCheckpoint
+            The checkpoint to write back.
+        boundary_only : bool, optional
+            Whether 'save_checkpoint' saved a boundary checkpoint. Defaults to False.
+        envs_idx : None | int | array_like, optional
+            The environments of a boundary checkpoint to write back, along the last index of every array of the state,
+            all of them if None. Defaults to None.
+
+        Returns
+        -------
+        items : list[DataItem]
+            The items written back.
         """
         if not self.is_checkpointable:
             gs.raise_exception(f"{type(self).__name__} cannot be checkpointed yet: its state lives outside its data.")
@@ -441,6 +454,7 @@ class CheckpointMixin:
             items = [item for item in self.data if not isinstance(item, ConfigItem) and item.kind in checkpoint.kinds]
             arrays = checkpoint.arrays
         fill_data(items, arrays)
+        return self._boundary_items.items if boundary_only else items
 
     def get_state(self) -> SolverCheckpoint:
         """Return the state the component holds between two steps, for 'set_state' to restore (see 'DataKind.STATE')."""
@@ -504,7 +518,7 @@ class GravityMixin(BuildableMixin):
         self._gravity.from_numpy(np.tile(np.array(self._options.gravity, dtype=gs.np_float), (self.n_envs_, 1)))
 
     @gs.assert_built
-    @mutates(StateChange.MODEL)
+    @mutates
     def set_gravity(self, gravity, envs_idx=None):
         """
         Set the gravity acting on the bodies of this solver, in m/s^2.
@@ -532,7 +546,7 @@ class GravityMixin(BuildableMixin):
         gravity = broadcast_tensor(gravity, gs.tc_float, (len(envs_idx), 3), ("envs_idx", ""))
         kernel_set_gravity(gravity.contiguous(), envs_idx, self._gravity)
 
-    def get_gravity(self, envs_idx=None):
+    def get_gravity(self, envs_idx=None, *, copy: bool | None = True):
         """
         Get the gravity acting on the bodies of this solver, in m/s^2.
 
@@ -548,11 +562,11 @@ class GravityMixin(BuildableMixin):
         """
         if self._gravity is None:
             gs.raise_exception(f"{type(self).__name__} holds no body for a gravity to act on.")
-        tensor = qd_to_torch(self._gravity, envs_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self._gravity, envs_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
 
-class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
+class Solver(TrackableMixin, BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
     # Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must
     is_differentiable: bool = False
     # The entity spec class whose entities the solver simulates, which the simulator dispatches on
@@ -571,54 +585,24 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
         # The force fields acting on the entities of the solver, which its kernels take as a template
         self._force_fields = ForceFields()
 
-        # Registered Subscribers, notified after @mutates-tagged methods run; see subscribe(). The re-entrancy guard
-        # below defers notification to the outermost tagged call, accumulating every change that occurred in between,
-        # so a setter calling other tagged setters notifies once rather than per nested call. The order of subscription
-        # is kept, so that a consumer of the render context, which subscribes after it, finds the change recorded there.
-        self._subscribers: list[Subscriber] = []
-        self._is_mutating = False
-        self._mutation_changes: set[StateChange] = set()
-        self._mutation_links_idx_list: list[np.ndarray] | None = None
-        # The kinematic structure resolving the reach of the notifications (see 'mutates'): the links holding a degree
-        # of freedom, the parent of each link (-1 for a root), and the link holding each degree of freedom and each
-        # configuration entry, by name of index argument. Set at build by the solvers exposing a kinematic structure
-        # (see KinematicSolver), the notifications staying unbounded otherwise.
-        self._articulated_links_idx: np.ndarray | None = None
-        self._links_parent_idx: np.ndarray | None = None
-        self._indices_link_idx: dict[str, np.ndarray] = {}
-        # The links whose change can move a link of the filter of each link-filtered subscriber, its filtered links and
-        # their ancestors, which a notification of a change of other links skips.
-        self._subscribers_links_watched: dict[Subscriber, np.ndarray] = {}
-        # The changes some link-filtered subscriber listens to, the only ones whose reach a notification resolves
-        self._links_watched_changes: frozenset[StateChange] = frozenset()
         # The part of the render context the solver draws, set as it builds
         self.render_context: "ScopedRenderContext | None" = None
 
+    def load_checkpoint(
+        self,
+        checkpoint: SolverCheckpoint,
+        *,
+        boundary_only: bool = False,
+        envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
+    ) -> list[DataItem]:
+        items = super().load_checkpoint(checkpoint, boundary_only=boundary_only, envs_idx=envs_idx)
+        # The restore writes through zero-copy views, which no launch tracks, the derived arrays restored with the state
+        # being fresh (see 'ChangeLog.add').
+        self.changelog.add(*[item.array for item in items if isinstance(item, ArrayItem)], envs_idx=envs_idx)
+        return items
+
     def _add_force_field(self, force_field: ForceField) -> None:
         self._force_fields.fields.append(force_field)
-
-    def subscribe(self, subscriber: Subscriber):
-        """Register a Subscriber to be notified after any @mutates-tagged method whose change is in its filter, after
-        the subscribers registered before it."""
-        # A change of a link moves its whole kinematic subtree, so the filter closes over the ancestors of its links
-        # once, here, rather than over the subtrees of the links of each change.
-        if subscriber.links_filter is not None and self._links_parent_idx is not None:
-            links_filter = tensor_to_array(
-                sanitize_index(
-                    subscriber.links_filter, expected_size=-1, max_size=self.n_links, dim=0, name="links_filter"
-                )
-            )
-            links_watched = np.zeros(len(self._links_parent_idx), dtype=np.bool_)
-            links_watched[links_filter] = True
-            while True:
-                parents_idx = self._links_parent_idx[links_watched]
-                parents_idx = parents_idx[parents_idx >= 0]
-                if links_watched[parents_idx].all():
-                    break
-                links_watched[parents_idx] = True
-            self._subscribers_links_watched[subscriber] = links_watched
-            self._links_watched_changes |= subscriber.to
-        self._subscribers.append(subscriber)
 
     def _sanitize_io_variables(
         self,
@@ -709,10 +693,24 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
         """Settle the parallel environments the solver simulates and allocate its error flags.
 
         'n_envs' is the number of parallel environments, 0 for a scene without them. The build of a derived solver
-        calls it first, then sets `_is_built` once its own data is valid.
+        calls it first, then sets `_is_built` once its own data is valid, and registers its arrays in its change log.
         """
         super().build(n_envs)
 
+        solver_ref = weakref.ref(self)
+
+        # A refresh running while a differentiable rollout records is one operation of its graph, as the call of a
+        # setter is (see 'mutates'), and leaves the state as it stands. The change log holds the solver weakly, so that
+        # it keeps no scene alive.
+        def run_refresh(refresh: Callable[[torch.Tensor | None], None], envs_idx: torch.Tensor | None) -> None:
+            solver = solver_ref()
+            if solver.is_recording:
+                solver._rollout_graph.run_call(solver, lambda solver, envs_idx: refresh(envs_idx), (envs_idx,), {})
+            else:
+                refresh(envs_idx)
+
+        envs_idx = (self._envs_idx, self._sim.sanitize_envs_idx(None))
+        self.changelog = ChangeLog(self.n_envs_, envs_idx=envs_idx, run_refresh=run_refresh)
         self.build_errno(self.n_envs_)
         if self._requires_grad:
             self._error_reports = {
@@ -779,7 +777,7 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
         *,
         copy: bool | None = None,
         is_batched: bool = True,
-    ) -> torch.Tensor: ...
+    ) -> torch.Tensor | None: ...
 
     @overload
     def _read_data(
@@ -790,7 +788,7 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
         *,
         copy: bool | None = None,
         is_batched: bool = True,
-    ) -> list[torch.Tensor]: ...
+    ) -> list[torch.Tensor] | None: ...
 
     def _read_data(self, data, envs_idx, idx, *, copy=None, is_batched=True):
         """
@@ -802,17 +800,22 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
         to 'qd_to_torch': a getter returning what it reads asks for a copy, since a getter returns by value. While the
         operations of the solver are recorded, the read is one operation of the rollout whose outputs are copies of the
         whole arrays, which a later step leaves untouched, and from which torch selects the slots (see 'record_read').
+        None when one of the arrays is neither fresh nor refreshable (see 'qd_to_torch').
         """
         is_single = isinstance(data, (qd.Tensor, qd.Field, qd.Ndarray))
         fields = (data,) if is_single else tuple(data)
         copy = True if self.is_recording else copy
         tensors = [qd_to_torch(field, transpose=is_batched, copy=copy) for field in fields]
+        if any([tensor is None for tensor in tensors]):
+            return None
         if self.is_recording:
             self.record_read(tuple(tensors), fields)
+        # A selection that only advanced indexing reaches is a copy, which 'copy=False' refuses as 'qd_to_torch' does
+        raise_if_fancy = copy is False
         if is_batched:
-            mask = indices_to_mask(envs_idx, idx, boolean_mask=False, pair_rows=True)
+            mask = indices_to_mask(envs_idx, idx, boolean_mask=False, raise_if_fancy=raise_if_fancy, pair_rows=True)
         else:
-            mask = indices_to_mask(idx)
+            mask = indices_to_mask(idx, raise_if_fancy=raise_if_fancy)
         tensors = [tensor[mask] for tensor in tensors]
         return tensors[0] if is_single else tensors
 
@@ -851,6 +854,8 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
             else:
                 mask = indices_to_mask(envs_idx, idx, pair_rows=True)
             assign_indexed_tensor(view, mask, values)
+            # A write through a view launches no kernel, whose write set would stand for it in a tagged setter
+            self.changelog.add(data, envs_idx=envs_idx if is_batched else None)
             return
         values, idx, envs_idx = self._sanitize_io_variables(
             values,
@@ -885,7 +890,7 @@ class Solver(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC):
     def reset_grad(self) -> None:
         """Zero the adjoint of the state of the solver, from which a backward pass starts."""
 
-    @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
+    @mutates
     def set_state(
         self, state: SolverCheckpoint, envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None
     ) -> None:

@@ -8,7 +8,7 @@ import torch
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
-from genesis.utils.misc import tensor_to_array
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -27,10 +27,10 @@ def test_link_velocity(gs_sim, tol):
     (gs_robot,) = gs_sim.entities
 
     gs_robot.set_dofs_velocity([0.0, 1.0])
-    assert_allclose(gs_sim.rigid_solver.dyn_state.links.cd_vel.to_numpy(), 0, tol=tol)
+    assert_allclose(qd_to_numpy(gs_sim.rigid_solver.dyn_state.links.cd_vel), 0, tol=tol)
 
     gs_robot.set_dofs_velocity([1.0, 0.0])
-    cvel_0, cvel_1 = gs_sim.rigid_solver.dyn_state.links.cd_vel.to_numpy()[:, 0]
+    cvel_0, cvel_1 = qd_to_numpy(gs_sim.rigid_solver.dyn_state.links.cd_vel)[:, 0]
     assert_allclose(cvel_0, np.array([0.0, 0.5, 0.0]), tol=tol)
     assert_allclose(cvel_1, np.array([0.0, 0.5, 0.0]), tol=tol)
 
@@ -677,7 +677,7 @@ def test_path_planning_avoidance(backend, n_envs, batch_dofs_info, show_viewer, 
     qpos_goal = franka.inverse_kinematics(hand, pos=hand_pos_ref, quat=hand_quat_ref)
     qpos_goal[..., -2:] = 0.04
     franka.set_qpos(qpos_goal)
-    scene.rigid_solver.collider.detection()
+    scene.rigid_solver.detect_collision()
     assert not collider_state.n_contacts.to_numpy().any()
     franka.set_qpos(torch.zeros_like(qpos_goal))
 
@@ -725,7 +725,7 @@ def test_path_planning_avoidance(backend, n_envs, batch_dofs_info, show_viewer, 
             franka.set_qpos(waypoint)
 
             # Check if the cube is colliding with the robot
-            scene.rigid_solver.collider.detection()
+            scene.rigid_solver.detect_collision()
             n_contacts = collider_state.n_contacts.to_numpy()
             for i_b in range(max(scene.n_envs, 1)):
                 for i_c in range(n_contacts[i_b]):
@@ -798,6 +798,12 @@ def test_setters(show_viewer, tol):
         material=gs.materials.Kinematic(),
         surface=gs.surfaces.Default(
             color=(0.0, 1.0, 0.0, 0.7),
+        ),
+    )
+    robot = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file="urdf/simple/two_cube_prismatic.urdf",
+            fixed=False,
         ),
     )
 
@@ -883,10 +889,17 @@ def test_setters(show_viewer, tol):
     ghost_robot.set_qpos([1.0, 2.0, 3.0, 1.0, 1.0, 0.0, 0.0, 1.0])
     assert_allclose(ghost_robot.get_vAABB(), ((0.95, 1.95, 2.95), (2.15, 2.05, 3.05)), tol=tol)
 
-    frozen_vaabb = [tensor_to_array(entity.get_vAABB()) for entity in scene.entities]
+    # A setter of some degrees of freedom keeps the others where the configuration the latest setter wrote puts them
+    qpos = (1.0, 2.0, 3.0, np.cos(np.pi / 4), np.sin(np.pi / 4), 0.0, 0.0, 1.0)
+    for entity in (ghost_robot, robot):
+        entity.set_qpos(qpos)
+        entity.set_dofs_position(0.5, dofs_idx_local=0)
+        assert_allclose(entity.get_qpos(), (0.5, *qpos[1:]), tol=tol)
+
+    frozen_vaabb = [entity.get_vAABB() for entity in (ghost_box, ghost_robot)]
     for _ in range(5):
         scene.step()
-    assert_allclose([tensor_to_array(entity.get_vAABB()) for entity in scene.entities], frozen_vaabb, tol=gs.EPS)
+    assert_allclose([entity.get_vAABB() for entity in (ghost_box, ghost_robot)], frozen_vaabb, tol=gs.EPS)
 
 
 @pytest.mark.required
@@ -1023,8 +1036,44 @@ def test_kinematics_queries(n_envs, show_viewer, tol):
 
 
 @pytest.mark.required
+def test_derived_quantities_follow_state(show_viewer, tol):
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, 1.0, 1.2),
+            camera_lookat=(0.2, 0.0, 0.3),
+        ),
+        show_viewer=show_viewer,
+    )
+    franka = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        ),
+    )
+    scene.build(n_envs=2)
+
+    # The arm falls under gravity, so that the poses a step leaves differ from those of the build
+    for _ in range(10):
+        scene.step()
+    links_pos_stepped = franka.get_links_pos()
+
+    # A configuration written in one environment moves its links there alone
+    qpos = franka.get_qpos()
+    qpos[1, :2] += 0.5
+    franka.set_qpos(qpos[[1]], envs_idx=[1])
+    links_pos, links_quat = franka.solver.forward_kinematics_query(franka, qpos)
+    assert_allclose(franka.get_links_pos(), links_pos, tol=gs.EPS)
+    assert_allclose(franka.get_links_quat(), links_quat, tol=gs.EPS)
+    assert_allclose(franka.get_links_pos()[0], links_pos_stepped[0], tol=gs.EPS)
+
+    # The mass matrix of each environment follows its configuration
+    mass_mat = franka.get_mass_mat()
+    franka.set_qpos(qpos[[1]], envs_idx=[0])
+    assert_allclose(franka.get_mass_mat()[0], mass_mat[1], tol=tol)
+
+
+@pytest.mark.required
 def test_host_forward_kinematics(
-    trees_and_slider_mjcf, fixed_base_dual_arm, fixed_base_dual_arm_high_damping, show_viewer, tol
+    trees_and_slider_mjcf, welded_to_world_mjcf, fixed_base_dual_arm, fixed_base_dual_arm_high_damping, show_viewer, tol
 ):
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
@@ -1158,3 +1207,18 @@ def test_host_forward_kinematics(
         assert_allclose(geoms_quat, solver.get_geoms_quat(geoms_idx), tol=tol)
         assert_allclose(joints_xanchor[:, joints_mask], solver.get_joints_anchor_pos(joints_idx), tol=tol)
         assert_allclose(joints_xaxis[:, joints_mask], solver.get_joints_anchor_axis(joints_idx), tol=tol)
+
+    # A scene without dofs runs the forward kinematics once as it builds, the bodies welded to the world included
+    scene_without_dofs = gs.Scene(
+        show_viewer=show_viewer,
+    )
+    scene_without_dofs.add_entity(
+        morph=gs.morphs.MJCF(
+            file=welded_to_world_mjcf,
+        ),
+    )
+    scene_without_dofs.build(n_envs=2)
+    solver = scene_without_dofs.rigid_solver
+    links_pos, links_quat, *_ = compute_forward_kinematics(solver.entities, n_envs=2)
+    assert_allclose(links_pos, solver.get_links_pos(), tol=tol)
+    assert_allclose(links_quat, solver.get_links_quat(), tol=tol)

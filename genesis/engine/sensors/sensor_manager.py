@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ForwardRef, get_args, get_origin
 import torch
 
 import genesis as gs
+from genesis.engine.state_change import StateChange
 from genesis.options.sensors import types as _sensor_types_namespace
 from genesis.options.sensors.options import SensorOptions
 from genesis.utils.misc import BatchedMixin, BuildableMixin
@@ -398,6 +399,11 @@ class SensorManager(BuildableMixin, BatchedMixin):
             # `_apply_delay` is an overrideable classmethod on `Sensor` whose default ZOH implementation is dtype-safe
             # for any return space (bool, uint8, quantized float, ...).
             sensor_cls._apply_delay(metadata, measured_return_ring, self._return_cache[sensor_cls])
+
+        # The readings sample the sensors as they stand (see 'Shape.invalidated_by')
+        for sensors in self._sensors_by_type.values():
+            for sensor in sensors:
+                sensor.changelog.commit()
 
         step_timer.stop_phase()
 

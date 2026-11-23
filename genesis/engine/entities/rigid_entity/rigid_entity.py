@@ -514,13 +514,16 @@ class KinematicEntity(Entity):
         # Overwrite parent link
         base_link._parent_idx = parent_link.idx
 
-        # Re-root the whole tree hanging from this entity's base link - scene-wide, because entities previously
-        # attached into this one already share its root and must follow it (chained attaches may run in any order);
-        # links of other trees declared in the same file keep their own root, as do the fixed flag and invweight. A
-        # link is fixed when its own joints and every joint above it are fixed, the base link's being gone, so the
-        # flag follows the parent link's down the tree, which the link order walks parents first.
+        # Re-root every link hanging from this entity's base link - scene-wide, because entities previously attached
+        # into this one already share its root and must follow it (chained attaches may run in any order). The trees
+        # hanging from the base link follow too, their parent moving from now on (see root_idx in rigid/data.py), while
+        # the trees of the same file without parent keep their own root. A link is fixed when its own joints and every
+        # joint above it are fixed, the base link's being gone, so the flag follows the parent link's down the tree,
+        # which the link order walks parents first.
+        links_hanging_idx = {base_link.idx}
         for link in self._solver.links:
-            if link.root_idx == base_link.idx:
+            if link.root_idx == base_link.idx or link.parent_idx in links_hanging_idx:
+                links_hanging_idx.add(link.idx)
                 link._root_idx = parent_link.root_idx
                 link._is_fixed = self._solver.links[link.parent_idx].is_fixed and all(
                     joint.type is gs.JOINT_TYPE.FIXED for joint in link.joints
@@ -837,7 +840,7 @@ class KinematicEntity(Entity):
         return self._solver.get_links_ang(links_idx, envs_idx)
 
     @gs.assert_built
-    def set_pos(self, pos, envs_idx=None, *, zero_velocity=False, relative=True, skip_forward=False):
+    def set_pos(self, pos, envs_idx=None, *, zero_velocity=False, relative=True):
         """
         Set position of the entity's base link.
 
@@ -853,18 +856,16 @@ class KinematicEntity(Entity):
             Whether 'pos' places the authored link origin rather than directly the internal link origin used by the
             solver. The internal link origin is the authored one moved by the morph 'offset_pos' / 'offset_quat' and, on
             a free root link with 'align=True', by the inertial alignment. Defaults to True.
-        skip_forward : bool, optional
-            Whether to skip forward kinematics after setting position. Defaults to False.
         """
         # Throw exception in entity no longer has a "true" base link becaused it has attached
         if self._is_attached:
             gs.raise_exception("Impossible to set position of an entity that has been attached.")
         if zero_velocity:
-            self.zero_all_dofs_velocity(envs_idx=envs_idx, skip_forward=True)
-        self._solver.set_base_links_pos(pos, self.base_link_idx, envs_idx, relative=relative, skip_forward=skip_forward)
+            self.zero_all_dofs_velocity(envs_idx=envs_idx)
+        self._solver.set_base_links_pos(pos, self.base_link_idx, envs_idx, relative=relative)
 
     @gs.assert_built
-    def set_quat(self, quat, envs_idx=None, *, zero_velocity=False, relative=True, skip_forward=False):
+    def set_quat(self, quat, envs_idx=None, *, zero_velocity=False, relative=True):
         """
         Set quaternion of the entity's base link.
 
@@ -880,19 +881,15 @@ class KinematicEntity(Entity):
             Whether 'quat' orients the authored link origin rather than directly the internal link origin used by the
             solver. The internal link origin is the authored one moved by the morph 'offset_pos' / 'offset_quat' and, on
             a free root link with 'align=True', by the inertial alignment. Defaults to True.
-        skip_forward : bool, optional
-            Whether to skip forward kinematics after setting quaternion. Defaults to False.
         """
         if self._is_attached:
             gs.raise_exception("Impossible to set position of an entity that has been attached.")
         if zero_velocity:
-            self.zero_all_dofs_velocity(envs_idx=envs_idx, skip_forward=True)
-        self._solver.set_base_links_quat(
-            quat, self.base_link_idx, envs_idx, relative=relative, skip_forward=skip_forward
-        )
+            self.zero_all_dofs_velocity(envs_idx=envs_idx)
+        self._solver.set_base_links_quat(quat, self.base_link_idx, envs_idx, relative=relative)
 
     @gs.assert_built
-    def set_qpos(self, qpos, qs_idx_local=None, envs_idx=None, *, zero_velocity=False, skip_forward=False):
+    def set_qpos(self, qpos, qs_idx_local=None, envs_idx=None, *, zero_velocity=False):
         """
         Set the entity's qpos.
 
@@ -910,11 +907,11 @@ class KinematicEntity(Entity):
         """
         qs_idx = self._get_global_idx(qs_idx_local, self.n_qs, self._q_start, unsafe=True)
         if zero_velocity:
-            self.zero_all_dofs_velocity(envs_idx=envs_idx, skip_forward=True)
-        self._solver.set_qpos(qpos, qs_idx, envs_idx, skip_forward=skip_forward)
+            self.zero_all_dofs_velocity(envs_idx=envs_idx)
+        self._solver.set_qpos(qpos, qs_idx, envs_idx)
 
     @gs.assert_built
-    def set_dofs_velocity(self, velocity=None, dofs_idx_local=None, envs_idx=None, *, skip_forward=False):
+    def set_dofs_velocity(self, velocity=None, dofs_idx_local=None, envs_idx=None):
         """
         Set the entity's dofs' velocity.
 
@@ -928,7 +925,7 @@ class KinematicEntity(Entity):
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
-        self._solver.set_dofs_velocity(velocity, dofs_idx, envs_idx, skip_forward=skip_forward)
+        self._solver.set_dofs_velocity(velocity, dofs_idx, envs_idx)
 
     @gs.assert_built
     def set_dofs_position(self, position, dofs_idx_local=None, envs_idx=None, *, zero_velocity=False):
@@ -948,7 +945,7 @@ class KinematicEntity(Entity):
             Whether to zero the velocity of all the entity's dofs. Defaults to False.
         """
         if zero_velocity:
-            self.zero_all_dofs_velocity(envs_idx=envs_idx, skip_forward=True)
+            self.zero_all_dofs_velocity(envs_idx=envs_idx)
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         self._solver.set_dofs_position(position, dofs_idx, envs_idx)
 
@@ -1038,7 +1035,7 @@ class KinematicEntity(Entity):
         return self._solver.get_dofs_limit(dofs_idx, envs_idx)
 
     @gs.assert_built
-    def zero_all_dofs_velocity(self, envs_idx=None, *, skip_forward=False):
+    def zero_all_dofs_velocity(self, envs_idx=None):
         """
         Zero the velocity of all the entity's dofs.
 
@@ -1047,7 +1044,7 @@ class KinematicEntity(Entity):
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         """
-        self.set_dofs_velocity(None, slice(0, self._n_dofs), envs_idx, skip_forward=skip_forward)
+        self.set_dofs_velocity(None, slice(0, self._n_dofs), envs_idx)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------
@@ -2152,8 +2149,9 @@ class RigidEntity(KinematicEntity):
 
         Returns
         -------
-        acc : torch.Tensor, shape (n_links, 3) or (n_envs, n_links, 3)
+        acc : torch.Tensor | None, shape (n_links, 3) or (n_envs, n_links, 3)
             The classical linear acceleration of all the entity's links.
+            None after a change of the state or of the model, until the next step computes it anew.
         """
         links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
         return self._solver.get_links_acc(links_idx, envs_idx, relative=relative)
@@ -2307,7 +2305,7 @@ class RigidEntity(KinematicEntity):
     # ------------------------------------------------------------------------------------
 
     @gs.assert_built
-    def set_pos(self, pos, envs_idx=None, *, zero_velocity=True, relative=True, skip_forward=False):
+    def set_pos(self, pos, envs_idx=None, *, zero_velocity=True, relative=True):
         """
         Set position of the entity's base link.
 
@@ -2324,8 +2322,6 @@ class RigidEntity(KinematicEntity):
             Whether 'pos' places the authored link origin rather than directly the internal link origin used by the
             solver. The internal link origin is the authored one moved by the morph 'offset_pos' / 'offset_quat' and, on
             a free root link with 'align=True', by the inertial alignment. Defaults to True.
-        skip_forward : bool, optional
-            Whether to skip forward kinematics after setting position. Defaults to False.
         """
         from genesis.engine.couplers import IPCCoupler
 
@@ -2337,10 +2333,10 @@ class RigidEntity(KinematicEntity):
             gs.raise_exception(
                 "This method is only supported by `RigidMaterial.coup_type=None` for fixed-based rigid entities."
             )
-        super().set_pos(pos, envs_idx, zero_velocity=zero_velocity, relative=relative, skip_forward=skip_forward)
+        super().set_pos(pos, envs_idx, zero_velocity=zero_velocity, relative=relative)
 
     @gs.assert_built
-    def set_quat(self, quat, envs_idx=None, *, zero_velocity=True, relative=True, skip_forward=False):
+    def set_quat(self, quat, envs_idx=None, *, zero_velocity=True, relative=True):
         """
         Set quaternion of the entity's base link.
 
@@ -2357,8 +2353,6 @@ class RigidEntity(KinematicEntity):
             Whether 'quat' orients the authored link origin rather than directly the internal link origin used by the
             solver. The internal link origin is the authored one moved by the morph 'offset_pos' / 'offset_quat' and, on
             a free root link with 'align=True', by the inertial alignment. Defaults to True.
-        skip_forward : bool, optional
-            Whether to skip forward kinematics after setting quaternion. Defaults to False.
         """
         from genesis.engine.couplers import IPCCoupler
 
@@ -2370,7 +2364,7 @@ class RigidEntity(KinematicEntity):
             gs.raise_exception(
                 "This method is only supported by `RigidMaterial.coup_type=None` for fixed-based rigid entities."
             )
-        super().set_quat(quat, envs_idx, zero_velocity=zero_velocity, relative=relative, skip_forward=skip_forward)
+        super().set_quat(quat, envs_idx, zero_velocity=zero_velocity, relative=relative)
 
     @gs.assert_built
     def get_verts(self) -> torch.Tensor:
@@ -2410,7 +2404,7 @@ class RigidEntity(KinematicEntity):
     # ------------------------------------------------------------------------------------
 
     @gs.assert_built
-    def set_qpos(self, qpos, qs_idx_local=None, envs_idx=None, *, zero_velocity=True, skip_forward=False):
+    def set_qpos(self, qpos, qs_idx_local=None, envs_idx=None, *, zero_velocity=True):
         """
         Set the entity's qpos.
 
@@ -2431,7 +2425,7 @@ class RigidEntity(KinematicEntity):
 
         if isinstance(self._solver.sim.coupler, IPCCoupler) and self.material.coup_type == "external_articulation":
             gs.raise_exception("This method is not supported by `RigidMaterial.coup_type='external_articulation'`.")
-        super().set_qpos(qpos, qs_idx_local, envs_idx, zero_velocity=zero_velocity, skip_forward=skip_forward)
+        super().set_qpos(qpos, qs_idx_local, envs_idx, zero_velocity=zero_velocity)
 
     @gs.assert_built
     def set_dofs_kp(self, kp, dofs_idx_local=None, envs_idx=None):
@@ -2723,8 +2717,9 @@ class RigidEntity(KinematicEntity):
 
         Returns
         -------
-        control_force : torch.Tensor, shape (n_dofs,) or (n_envs, n_dofs)
+        control_force : torch.Tensor | None, shape (n_dofs,) or (n_envs, n_dofs)
             The control force of the entity's dofs.
+            None after a change of the state or of the model, until the next step computes it anew.
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_dofs_control_force(dofs_idx, envs_idx)
@@ -2747,8 +2742,9 @@ class RigidEntity(KinematicEntity):
 
         Returns
         -------
-        actuator_force : torch.Tensor, shape (n_dofs,) or (n_envs, n_dofs)
+        actuator_force : torch.Tensor | None, shape (n_dofs,) or (n_envs, n_dofs)
             The actuator force of the entity's dofs.
+            None after a change of the state or of the model, until the next step computes it anew.
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_dofs_actuator_force(dofs_idx, envs_idx)
@@ -2770,8 +2766,9 @@ class RigidEntity(KinematicEntity):
 
         Returns
         -------
-        force : torch.Tensor, shape (n_dofs,) or (n_envs, n_dofs)
+        force : torch.Tensor | None, shape (n_dofs,) or (n_envs, n_dofs)
             The entity's dofs' force.
+            None after a change of the state or of the model, until the next step computes it anew.
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_dofs_force(dofs_idx, envs_idx)
@@ -2790,8 +2787,9 @@ class RigidEntity(KinematicEntity):
 
         Returns
         -------
-        acc : torch.Tensor, shape (n_dofs,) or (n_envs, n_dofs)
+        acc : torch.Tensor | None, shape (n_dofs,) or (n_envs, n_dofs)
             The entity's dofs' acceleration.
+            None after a change of the state or of the model, until the next step computes it anew.
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_dofs_acc(dofs_idx, envs_idx)
@@ -2932,6 +2930,23 @@ class RigidEntity(KinematicEntity):
 
     @gs.assert_built
     def get_mass_mat(self, envs_idx=None, decompose=False):
+        """Return the joint-space mass matrix of the dofs of the entity at the current configuration, armature included.
+
+        See 'RigidSolver.get_mass_mat'.
+
+        Parameters
+        ----------
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        decompose : bool, optional
+            Whether to return the lower-triangular factor and the inverse of the diagonal of its LDL^T decomposition
+            instead. Defaults to False.
+
+        Returns
+        -------
+        mass_mat : torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+            The mass matrix, or the lower-triangular factor and the inverse of the diagonal of its decomposition.
+        """
         dofs_idx = self._get_global_idx(None, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_mass_mat(dofs_idx, envs_idx, decompose)
 
@@ -3050,10 +3065,14 @@ class RigidEntity(KinematicEntity):
 
         Returns
         -------
-        contact_info : dict
-            The contact information.
+        contact_info : dict | None
+            The contact information. None after a change of the configuration or of the model, a dynamic constraint
+            added or removed included, until the next step or detection, which finds the contacts anew. 'force_a' and
+            'force_b' are None after any other change or a detection, until the next step.
         """
         contact_data = self._solver.collider.get_contacts(as_tensor=True, to_torch=True, is_padded=is_padded)
+        if contact_data is None:
+            return None
         n_contacts = contact_data["n_contacts"] if is_padded else None
         if is_padded:
             del contact_data["n_contacts"]
@@ -3088,14 +3107,14 @@ class RigidEntity(KinematicEntity):
             else:
                 valid_mask = torch.logical_and(valid_mask, slots[None, :] < n_contacts[:, None])
 
+        force = contact_data.pop("force")
         if self._solver.n_envs == 0 and not is_padded:
             contact_data = {key: value[valid_mask] for key, value in contact_data.items()}
+            force = None if force is None else force[valid_mask]
         else:
             contact_data["valid_mask"] = valid_mask
-
-        contact_data["force_a"] = -contact_data["force"]
-        contact_data["force_b"] = +contact_data["force"]
-        del contact_data["force"]
+        contact_data["force_a"] = None if force is None else -force
+        contact_data["force_b"] = None if force is None else +force
 
         return contact_data
 
@@ -3105,12 +3124,13 @@ class RigidEntity(KinematicEntity):
 
         Returns
         -------
-        entity_links_force : torch.Tensor, shape (n_links, 3) or (n_envs, n_links, 3)
+        entity_links_force : torch.Tensor | None, shape (n_links, 3) or (n_envs, n_links, 3)
             The net force applied on each links due to direct external contacts.
+            None after a change of the state or of the model, until the next step computes it anew.
         """
         links_idx = slice(self.link_start, self.link_end)
         tensor = qd_to_torch(self._solver.dyn_state.links.contact_force, envs_idx, links_idx, transpose=True, copy=True)
-        return tensor[0] if self._solver.n_envs == 0 else tensor
+        return tensor if tensor is None or self._solver.n_envs > 0 else tensor[0]
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- friction ---------------------------------------

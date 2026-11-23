@@ -167,10 +167,6 @@ def fmt_num(v, is_int: bool):
 
 
 class WandbParser:
-    @property
-    def project(self):
-        raise NotImplementedError()
-
     def __call__(
         self,
         benchmark_under_test: "BenchmarkRunUnderTest",
@@ -183,10 +179,6 @@ class WandbParser:
 
 
 class WandbParserNewFormat(WandbParser):
-    @property
-    def project(self):
-        return "genesis-benchmarks-2"
-
     def __call__(
         self,
         benchmark_under_test: "BenchmarkRunUnderTest",
@@ -277,6 +269,8 @@ class Alarm:
         assert "WANDB_API_KEY" in os.environ
 
         self.wandb_entity = os.environ["WANDB_ENTITY"]
+        self.wandb_project = args.wandb_project
+        self.wandb_filters = args.wandb_filters
 
     def fetch_wandb_data(
         self,
@@ -285,7 +279,11 @@ class Alarm:
         wandb_parser: WandbParser,
     ) -> dict[str, dict[frozendict[str, str], dict[str, float | int]]]:
         api = wandb.Api()
-        runs_iter: Iterable[Run] = api.runs(f"{self.wandb_entity}/{wandb_parser.project}", order="-created_at")
+        runs_iter: Iterable[Run] = api.runs(
+            f"{self.wandb_entity}/{self.wandb_project}",
+            filters=self.wandb_filters,
+            order="-created_at",
+        )
 
         commit_hashes = set()
         records_by_commit_hash: dict[str, dict[frozendict[str, str], dict[str, float | int]]] = defaultdict(
@@ -348,6 +346,10 @@ class Alarm:
                 summary=summary,
                 commit_hash=commit_hash,
             )
+        if self.wandb_filters and not any(
+            benchmark_under_test.all_config_param_fdicts.issubset(record) for record in records_by_commit_hash.values()
+        ):
+            raise ValueError("No complete baseline matches the W&B filters.")
         return records_by_commit_hash
 
     def build_table(
@@ -459,6 +461,8 @@ class Alarm:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--wandb-project", required=True)
+    parser.add_argument("--wandb-filters", type=json.loads, default={})
     parser.add_argument("--speed-artifacts-dir", type=str, required=True)
     parser.add_argument("--mem-artifacts-dir", type=str, required=True)
     parser.add_argument(
@@ -480,6 +484,8 @@ if __name__ == "__main__":
     parser.add_argument("--dev-skip-speed", action="store_true")
     parser.add_argument("--dev-allow-all-branches", action="store_true")
     args = parser.parse_args()
+    if not args.wandb_project.strip():
+        parser.error("--wandb-project must not be empty")
 
     alarm = Alarm(args=args)
 
@@ -543,8 +549,8 @@ if __name__ == "__main__":
             "### Memory usage",
             *table_by_metric_name[alarm.metric_max_mem_mb],
             "",
-            f"- (*1) last: last commit on main, mean/std: stats over commit hashes {alarm.max_valid_revisions} commits if available.",
-            "- (*2) Δ: relative difference between PR and last commit on main, i.e. (PR - main) / main * 100%.",
+            f"- (*1) last: first selected baseline revision, mean/std: stats over {alarm.max_valid_revisions} selected revisions if available.",
+            "- (*2) Δ: relative difference between PR and selected baseline, i.e. (PR - baseline) / baseline * 100%.",
         ]
     )
 

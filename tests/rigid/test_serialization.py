@@ -654,6 +654,7 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
     for _ in range(10):
         scene.step()
     landing_state = scene.rigid_solver.get_state()
+    landing_dofs_acc = scene.rigid_solver.get_dofs_acc()
     landing_links_pos, landing_links_quat = scene.rigid_solver.get_links_pos(), scene.rigid_solver.get_links_quat()
     landing_ghost_pos = ghost.get_links_pos()
     landing_contacts = box.get_contacts()
@@ -670,14 +671,9 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
     for _ in range(10):
         twin_scene.step()
     resumed_state = twin_scene.rigid_solver.get_state()
-    for name in (
-        "rigid_info.qpos",
-        "dyn_state.dofs.vel",
-        "dyn_state.dofs.acc",
-        "dyn_state.fixed_roots.pos",
-        "dyn_state.fixed_roots.quat",
-    ):
+    for name in ("rigid_info.qpos", "dyn_state.dofs.vel", "dyn_state.fixed_roots.pos", "dyn_state.fixed_roots.quat"):
         assert_equal(resumed_state.arrays[name], landing_state.arrays[name])
+    assert_equal(twin_scene.rigid_solver.get_dofs_acc(), landing_dofs_acc)
     assert_equal(twin_scene.rigid_solver.get_links_pos(), landing_links_pos)
     assert_equal(twin_scene.rigid_solver.get_links_quat(), landing_links_quat)
     assert_equal(twin_scene.entities[4].get_links_pos(), landing_ghost_pos)
@@ -779,7 +775,7 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
     scene.register_pre_step_callback(lambda: is_paused)
     # A frame is the state a step starts from, so the record of frame i is read right before step i. A model parameter
     # changed by a setter halfway is recorded with the frames from there on.
-    states, links_poses, ghosts_pos, forces, times, kps = [], [], [], [], [], []
+    states, links_poses, ghosts_pos, times, kps, contacts, dofs_accs = [], [], [], [], [], [], []
     for i_step in range(N_STEPS):
         steps_count[0] = i_step
         if i_step == VETO_STEP:
@@ -793,8 +789,9 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         links_poses.append((scene.rigid_solver.get_links_pos(), scene.rigid_solver.get_links_quat()))
         kps.append(arm.get_dofs_kp())
         ghosts_pos.append(ghost.get_links_pos())
-        forces.append(box.get_contacts()["force_a"])
         times.append(scene.get_time())
+        contacts.append(box.get_contacts())
+        dofs_accs.append(scene.rigid_solver.get_dofs_acc())
         scene.step()
     final_state = scene.rigid_solver.get_state()
     final_force = box.get_contacts()["force_a"]
@@ -828,8 +825,8 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
             )
             # The first step has no previous one to measure its period from
             assert np.isnan(timings["period"]) == (index == 1)
-    for index, (state, (links_pos, links_quat), ghost_pos, force, time, kp) in enumerate(
-        zip(states, links_poses, ghosts_pos, forces, times, kps)
+    for index, (state, (links_pos, links_quat), ghost_pos, time, kp, box_contacts, dofs_acc) in enumerate(
+        zip(states, links_poses, ghosts_pos, times, kps, contacts, dofs_accs)
     ):
         # An exact frame puts back everything a step reads or writes, so the scene stands exactly where it stood
         exact_trajectory.seek(index)
@@ -837,7 +834,6 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         for name in (
             "rigid_info.qpos",
             "dyn_state.dofs.vel",
-            "dyn_state.dofs.acc",
             "dyn_state.fixed_roots.pos",
             "dyn_state.fixed_roots.quat",
         ):
@@ -845,7 +841,22 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         assert_equal(replay_scene.rigid_solver.get_links_pos(), links_pos)
         assert_equal(replay_scene.rigid_solver.get_links_quat(), links_quat)
         assert_equal(replay_scene.entities[4].get_links_pos(), ghost_pos)
-        assert_equal(replay_scene.entities[1].get_contacts()["force_a"], force)
+        # An exact frame holds the results of the step that reached it, which hold as long as nothing changed the rigid
+        # solver since: before the first step, and after the setter of the model halfway, they are declined whole.
+        replayed_contacts = replay_scene.entities[1].get_contacts()
+        if box_contacts is None or box_contacts["force_a"] is None:
+            assert replayed_contacts is None
+        else:
+            assert replayed_contacts.keys() == box_contacts.keys()
+            for name, value in box_contacts.items():
+                assert_equal(replayed_contacts[name], value)
+        # So are the other results of that step, such as the accelerations
+        replayed_dofs_acc = replay_scene.rigid_solver.get_dofs_acc()
+        assert (replayed_dofs_acc is None) == (replayed_contacts is None)
+        if dofs_acc is None:
+            assert replayed_dofs_acc is None
+        else:
+            assert_equal(replayed_dofs_acc, dofs_acc)
         assert_equal(replay_scene.get_time(), time)
         assert_equal(exact_trajectory.time(index), time)
         ctrl_pos = exact_trajectory.frame(index)["RigidSolver.dyn_state.dofs.ctrl_pos"]
@@ -855,7 +866,7 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         # which the mode documents as lossy at the last bits
         minimal_trajectory.seek(index)
         replayed_state = replay_scene.rigid_solver.get_state()
-        for name in ("rigid_info.qpos", "dyn_state.dofs.vel", "dyn_state.dofs.acc"):
+        for name in ("rigid_info.qpos", "dyn_state.dofs.vel"):
             assert_equal(replayed_state.arrays[name], state.arrays[name])
         assert_allclose(replay_scene.rigid_solver.get_links_pos(), links_pos, tol=tol)
         assert_allclose(replay_scene.rigid_solver.get_links_quat(), links_quat, tol=tol)
@@ -883,6 +894,12 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
     for name in DOFS_NAMES:
         assert_equal(replayed_state.arrays[name], final_state.arrays[name])
     assert_equal(replay_scene.entities[1].get_contacts()["force_a"], final_force)
+    # A minimal frame derives the poses of every environment from the state it restores, whichever environments a
+    # setter changed before.
+    replay_scene.entities[1].set_pos((0.0, 0.0, 5.0), envs_idx=[0] if n_envs else None)
+    minimal_trajectory.seek(0)
+    assert_allclose(replay_scene.rigid_solver.get_links_pos(), links_poses[0][0], tol=tol)
+
     # The frame after the run is the state the reset left behind, and seeking it puts the scene where the run ended
     assert_equal(exact_trajectory.frame(N_STEPS)["RigidSolver.rigid_info.qpos"], final_state.arrays["rigid_info.qpos"])
     minimal_trajectory.seek(N_STEPS)
@@ -948,7 +965,12 @@ def test_trajectory_replay_across_backends(n_envs, checkpoint_scene, load_trajec
         trajectory.seek(index)
         frame = trajectory.frame(index)
         state = replay_scene.rigid_solver.get_state()
-        for name in ("rigid_info.qpos", "dyn_state.dofs.vel", "dyn_state.fixed_roots.pos"):
+        for name in (
+            "rigid_info.qpos",
+            "dyn_state.dofs.vel",
+            "dyn_state.fixed_roots.pos",
+            "dyn_state.fixed_roots.quat",
+        ):
             assert_equal(state.arrays[name], frame[f"RigidSolver.{name}"])
         # This log comes from a CPU fp32 run. One step after a seek, on the current backend and precision, matches the
         # next recorded frame within the suite's tolerance.

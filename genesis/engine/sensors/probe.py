@@ -9,11 +9,11 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.render_context import Points, Shape
+from genesis.engine.state_change import StateChange, TrackableMixin
 from genesis.options.sensors.tactile import TactileProbeSensorOptionsMixin
 from genesis.utils.misc import BuildableMixin, concat_with_tensor, make_tensor_field, tensor_to_array
 
 if TYPE_CHECKING:
-    from genesis.engine.solvers.base_solver import Solver
     from genesis.options.sensors.options import SensorOptions
     from genesis.utils.ring_buffer import TensorRingBuffer
 
@@ -277,6 +277,7 @@ class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin](Bui
         self._shared_metadata.probe_gains[envs_idx, probe_slice] = row
         # Conservatively mark gain in use (a user-set gain may be non-unit); never reset to False.
         self._shared_metadata.has_any_probe_gain = True
+        self.changelog.add(StateChange.MODEL, envs_idx=envs_idx)
 
     @classmethod
     def _apply_hardware_imperfections(cls, shared_metadata, measured_slot_0):
@@ -333,19 +334,26 @@ class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin](Bui
     def n_probes(self) -> int:
         return self._n_probes
 
-    @property
-    def _sources(self) -> "tuple[Solver, ...]":
-        # The probes sense the links and the contacts of the rigid solver
-        return tuple(dict.fromkeys((*super()._sources, self._shared_metadata.solver)))
-
     def _update_probes_markers(
-        self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None, is_contact: torch.Tensor | None
+        self,
+        markers: tuple[Shape, ...],
+        envs_idx: torch.Tensor | None,
+        is_contact: torch.Tensor | None,
+        invalidated_by: dict[TrackableMixin, tuple[StateChange, ...]],
     ) -> tuple[Points, ...]:
-        """Return the markers of the probes, written in the environments `envs_idx` (see 'Sensor._update_markers').
+        """Return the markers of the probes, written in the given environments (see 'Sensor._update_markers').
 
-        `markers` are those of the probes the latest call returned. `is_contact` tells whether each probe of a tactile
-        sensor is in contact, laid out as the readings of the sensor, whose last entry of history is drawn. It is None
-        for any other sensor.
+        Parameters
+        ----------
+        markers : tuple[Shape, ...]
+            The markers of the probes the latest call returned.
+        envs_idx : torch.Tensor | None
+            The environments to write the markers in.
+        is_contact : torch.Tensor | None
+            Whether each probe of a tactile sensor is in contact, laid out as the readings of the sensor, whose last
+            entry of history is drawn. None for any other sensor.
+        invalidated_by : dict[TrackableMixin, tuple[StateChange, ...]]
+            The changes the markers follow (see 'Shape.invalidated_by').
         """
         options = self._options
         probes_radii = self._shared_metadata.probe_radii[self._probe_start_idx : self._probe_start_idx + self._n_probes]
@@ -373,9 +381,10 @@ class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin](Bui
                 ]
             # Every marker draws a sphere at each probe, showing those of its group alone
             pos = torch.zeros((self._manager.n_envs_, self._n_probes, 3), dtype=gs.tc_float, device=gs.device)
+            styles_is_active = torch.zeros((len(styles), *pos.shape[:-1]), dtype=gs.tc_bool, device=gs.device)
             markers = tuple(
-                Points(pos, radius, color, is_active=torch.zeros(pos.shape[:-1], dtype=gs.tc_bool, device=gs.device))
-                for radius, color in styles
+                Points(pos, radius, color, is_active=is_active, invalidated_by=invalidated_by)
+                for (radius, color), is_active in zip(styles, styles_is_active)
             )
 
         if self._link is None:
