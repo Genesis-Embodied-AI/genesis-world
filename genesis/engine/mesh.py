@@ -299,8 +299,8 @@ class Mesh(RBC, serialization.SerializationMixin):
         """
         Sample `n_points` from mesh in local coordinates using Furthest Point Sampling.
 
-        If ``return_normals`` is True, returns ``(positions, normals)`` with face normals aligned to each sample. If
-        ``seed`` is given, the result is cached.
+        If ``return_normals`` is True, returns ``(positions, normals)`` with face normals aligned to each sample.
+        If ``seed`` is given, the result is cached.
         """
         return pc.sample_mesh_point_cloud(
             self.verts,
