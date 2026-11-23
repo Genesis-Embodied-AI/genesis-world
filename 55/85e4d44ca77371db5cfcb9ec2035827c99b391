@@ -1,0 +1,20 @@
+tests/rigid/test_kinematics.py
+  s_44596ab701eebc::t_6737c515c0a671 401-402
+  s_44596ab701eebc::t_310e4dfe8b5477 383-384
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5585e4d44ca77371db5cfcb9ec2035827c99b391",
+  "prompts": {},
+  "sessions": {
+    "s_44596ab701eebc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4612133f-414c-4217-a551-d3499789ccd5",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
