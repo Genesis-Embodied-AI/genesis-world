@@ -1,0 +1,19 @@
+genesis/engine/entities/emitter.py
+  s_b583a5dad36b55::t_1da55c3e928f74 1-2,94
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d950c6c28848bf0770768272437aae36b98e9e76",
+  "prompts": {},
+  "sessions": {
+    "s_b583a5dad36b55": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "14746812-520d-43f2-8648-85a5400ae21f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
