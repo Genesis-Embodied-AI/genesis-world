@@ -35,11 +35,14 @@ from genesis.engine.render_context import (
     select_view_shapes,
 )
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
+    IK_RESTART_LANES,
     IKScratch,
     kernel_forward_kinematics_query,
     kernel_get_jacobian,
     kernel_get_jacobian_zero,
     kernel_inverse_kinematics_entity,
+    kernel_inverse_kinematics_keep_best,
+    kernel_inverse_kinematics_restarts,
     kernel_set_ik_targets,
 )
 from genesis.engine.solvers.rigid.data import RigidConfig, RigidData
@@ -1193,21 +1196,30 @@ class KinematicSolver(Solver):
         """
         n_links = len(links_idx)
         n_tgts = self._options.IK_max_targets
+        # A CPU runs restarts in sequence, since its cores are busy with environments and a parallel restart past the one
+        # that solves is wasted
+        n_lanes = 1 if gs.backend == gs.cpu else IK_RESTART_LANES
         if n_links > n_tgts:
             gs.raise_exception(f"Cannot solve for {n_links} targets. Raise 'IK_max_targets' above {n_tgts}.")
+        # Masked axes and targets leave zero rows in the Jacobian, so the normal matrix is singular without damping
+        if damping <= 0.0:
+            gs.raise_exception(f"'damping' must be strictly positive, got {damping}.")
 
-        # The damped normal matrix of inverse kinematics is quadratic in RigidOptions.IK_max_targets, so the scratch is
-        # allocated by the first solve and a scene that never solves inverse kinematics allocates none of it
+        # The scratch of inverse kinematics grows with RigidOptions.IK_max_targets, so it is allocated by the first solve
+        # and a scene that never solves inverse kinematics allocates none of it
         if self._ik_scratch is None:
             entities = self.entities
+            entity_dofs = max([entity.n_dofs for entity in entities], default=0)
             self._ik_scratch = IKScratch(
                 sizes=dict(
                     envs=self.n_envs_,
+                    workers=self.n_envs_ * n_lanes,
                     entity_qs=max([entity.n_qs for entity in entities], default=0),
-                    entity_dofs=max([entity.n_dofs for entity in entities], default=0),
+                    entity_dofs=entity_dofs,
                     entity_links=max([entity.n_links for entity in entities], default=0),
                     entity_joints=max([entity.n_joints for entity in entities], default=0),
                     ik_targets=n_tgts,
+                    ik_normal=min(6 * n_tgts, entity_dofs),
                 ),
                 # The initial configuration of an environment is read as a whole
                 env_first={IKScratch.targets.init_qpos: True},
@@ -1255,11 +1267,12 @@ class KinematicSolver(Solver):
                 targets,
             )
 
-        kernel_inverse_kinematics_entity(
+        ik_args = (
             entity_idx,
             q_start,
             link_start,
             joint_start,
+            seed,
             self.dyn_state,
             ik_state,
             ik_fk,
@@ -1272,16 +1285,34 @@ class KinematicSolver(Solver):
             n_links,
             len(dofs_idx),
             len(envs_idx),
-            custom_init_qpos,
+            n_lanes,
             max_samples,
             max_solver_iters,
             damping,
             pos_tol,
             rot_tol,
             max_step_size,
-            seed,
+            custom_init_qpos,
             respect_joint_limit,
         )
+        kernel_inverse_kinematics_entity(*ik_args)
+        # The restarts after the first are solved n_lanes at a time for the environments whose restarts are independent,
+        # every other environment having run them all already
+        if n_lanes > 1:
+            for i_sample_start in range(1, max_samples, n_lanes):
+                kernel_inverse_kinematics_restarts(i_sample_start, *ik_args)
+                kernel_inverse_kinematics_keep_best(
+                    i_sample_start,
+                    ik_state,
+                    ik_fk,
+                    targets,
+                    self.rigid_config,
+                    n_qs,
+                    n_links,
+                    len(envs_idx),
+                    n_lanes,
+                    max_samples,
+                )
 
         qpos = qd_to_torch(ik_state.qpos_best, transpose=True, copy=True)[..., :n_qs]
         err_pose = qd_to_torch(ik_state.err_pose_best, transpose=True, copy=True).reshape((-1, n_tgts, 6))

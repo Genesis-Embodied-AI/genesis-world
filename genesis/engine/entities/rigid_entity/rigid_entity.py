@@ -1359,7 +1359,8 @@ class KinematicEntity(DynamicTextureMixin, Entity):
         max_solver_iters : int, optional
             Maximum number of solver iterations per sample. Defaults to 20.
         damping : float, optional
-            Damping for damped least squares. Defaults to 0.01.
+            Damping for damped least squares, strictly positive. A larger value takes shorter, more stable steps near
+            singular configurations, at the cost of more iterations to converge. Defaults to 0.01.
         pos_tol : float, optional
             Position tolerance for normalized position error (in meter). Defaults to 1e-4.
         rot_tol : float, optional
@@ -1465,7 +1466,8 @@ class KinematicEntity(DynamicTextureMixin, Entity):
         max_solver_iters : int, optional
             Maximum number of solver iterations per sample. Defaults to 20.
         damping : float, optional
-            Damping for damped least squares. Defaults to 0.01.
+            Damping for damped least squares, strictly positive. A larger value takes shorter, more stable steps near
+            singular configurations, at the cost of more iterations to converge. Defaults to 0.01.
         pos_tol : float, optional
             Position tolerance for normalized position error (in meter). Defaults to 1e-4.
         rot_tol : float, optional
