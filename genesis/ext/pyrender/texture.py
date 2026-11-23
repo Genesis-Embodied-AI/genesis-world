@@ -174,9 +174,9 @@ class Texture(object):
         """
         if self._layers_alpha_min is None:
             return False
-        layers_alpha_min = self._layers_alpha_min
-        if self.layers_shown is not None:
-            layers_alpha_min = layers_alpha_min[self.layers_shown]
+        layers_alpha_min = (
+            self._layers_alpha_min if self.layers_shown is None else self._layers_alpha_min[self.layers_shown]
+        )
         # An 8-bit source stores an alpha of 1 as 255
         alpha_opaque = 255 if self._source.dtype == np.uint8 else 1.0
         return (layers_alpha_min < cutoff * alpha_opaque).any()
