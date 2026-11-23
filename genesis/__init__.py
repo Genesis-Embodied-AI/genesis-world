@@ -25,17 +25,6 @@ except ImportError as e:
     raise ImportError(
         "'torch' module not available. Please install pytorch manually: https://pytorch.org/get-started/locally/"
     ) from e
-# Genesis requires:
-# * torch 2.8.0: writes in place through integer index tensors into zero-copy views.
-# * torch 2.10.0 on Apple Metal: supports the zero-copy of 'qd.Field'.
-#   See https://github.com/pytorch/pytorch/pull/168193
-# * torch 2.12.0 on Apple Metal: fills uint64 tensors, as deterministic algorithms do on every allocation.
-#   See https://github.com/pytorch/pytorch/pull/179230
-_TORCH_VERSION = tuple(map(int, torch.__version__.split(".")[:2]))
-if _TORCH_VERSION < (2, 8):
-    raise ImportError(
-        "'torch<2.8.0' is not supported. Please upgrade pytorch manually: https://pytorch.org/get-started/locally/"
-    )
 import numpy as np
 
 from .constants import backend as _gs_backend
@@ -143,9 +132,25 @@ def init(
             if not backend_candidates:
                 raise_exception_from(f"Backend ~<{_backend}>~ not available on this machine.", e)
     globals()["backend"] = backend
-    if backend == _gs_backend.metal and _TORCH_VERSION < (2, 12):
+
+    # Genesis requires:
+    # * torch 2.8.0: writes in place through integer index tensors into zero-copy views.
+    # * torch 2.10.0 on Apple Metal: supports the zero-copy of 'qd.Field'.
+    #   See https://github.com/pytorch/pytorch/pull/168193
+    # * torch 2.11.0 on AMD GPU: exposes the shared memory per compute unit, which sizes the shared tiles.
+    #   See https://github.com/pytorch/pytorch/pull/170572
+    # * torch 2.12.0 on Apple Metal: fills uint64 tensors, as deterministic algorithms do on every allocation.
+    #   See https://github.com/pytorch/pytorch/pull/179230
+    torch_requirements = {
+        _gs_backend.cpu: ("CPU", (2, 8)),
+        _gs_backend.cuda: ("NVIDIA GPU", (2, 8)),
+        _gs_backend.amdgpu: ("AMD GPU", (2, 11)),
+        _gs_backend.metal: ("Apple Metal", (2, 12)),
+    }
+    backend_name, (major, minor) = torch_requirements[backend]
+    if tuple(map(int, torch.__version__.split(".")[:2])) < (major, minor):
         raise_exception(
-            "'torch<2.12.0' is not supported on Apple Metal. Please upgrade pytorch manually: "
+            f"'torch<{major}.{minor}.0' is not supported on {backend_name}. Please upgrade pytorch manually: "
             "https://pytorch.org/get-started/locally/"
         )
 
