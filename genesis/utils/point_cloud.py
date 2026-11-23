@@ -104,9 +104,7 @@ def sample_mesh_point_cloud(
     seed : int, optional
         The random seed for `trimesh.sample.sample_surface` and the first FPS pick. If None, a random seed is generated.
     use_cache : bool, optional
-        If True, load and store results under the cache directory, which saves the sampling cost on repeated calls at
-        the cost of disk space. A result sampled with a random seed is never requested again, so caching it only fills
-        the disk. If None, results are cached exactly when ``seed`` is given.
+        If True, load and store results under the cache directory. If None, cache only when ``seed`` is given.
     return_normals : bool
         If True, also return triangle face normals aligned with each FPS sample (same candidate face as the point).
 
