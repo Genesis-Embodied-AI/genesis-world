@@ -2223,17 +2223,17 @@ def test_transparent_surfaces_show_what_lies_behind_them(alpha_source, transluce
     # Same size and lined up along the axis the camera sits on, so that the nearer one covers the farther one
     red = scene.add_entity(
         gs.morphs.Mesh(
+            pos=(0.6, 0.0, 0.5),
             file=translucent_box_obj,
             scale=0.5,
-            pos=(0.6, 0.0, 0.5),
         ),
         surface=surfaces[0],
     )
     blue = scene.add_entity(
         gs.morphs.Mesh(
+            pos=(-0.6, 0.0, 0.5),
             file=translucent_box_obj,
             scale=0.5,
-            pos=(-0.6, 0.0, 0.5),
         ),
         surface=surfaces[1],
     )

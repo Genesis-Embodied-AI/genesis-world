@@ -546,9 +546,9 @@ class JITRenderer:
         self.texture_layers = np.zeros((np.count_nonzero(is_layered), len(self.envs_offset), 2), np.float32)
         self.pbr_mat = np.zeros((n, 9), np.float32)  # base_color <- 4, metallic <- 1, roughness <- 1, emissive <- 3
         self.spec_mat = np.zeros((n, 11), np.float32)  # diffuse <- 4, specular <- 3, glossiness <- 1, emissive <- 3
-        self.render_flags = np.zeros(
-            (n, 9), np.int8
-        )  # (blend, wireframe, double sided, pbr texture, reflective floor, transparent, marker, env shared, env filtered)
+        # (blend, wireframe, double sided, pbr texture, reflective floor, transparent, marker, env shared, env filtered,
+        # translucent color)
+        self.render_flags = np.zeros((n, 10), np.int8)
         self.mode = np.zeros(n, np.int32)
         self.n_instances = np.zeros(n, np.int32)
         # Per-(primitive, env) visibility used only when a primitive is "env filtered" (render_flags column 8), i.e. a
@@ -666,6 +666,9 @@ class JITRenderer:
             self.render_flags[i, 4] = primitive.is_floor and not floor_existed
             self.render_flags[i, 5] = node_list[i].mesh.is_transparent
             self.render_flags[i, 6] = node_list[i].mesh.is_marker
+            # The shadow maps read no texture, so a mesh that the alpha of its texels alone makes transparent casts the
+            # shadow of its whole surface, the texels shown in each environment aside
+            self.render_flags[i, 9] = node_list[i].mesh.has_translucent_color
             self.views[i] = node_list[i].mesh.views
             # A pass drawing one environment draws the instance of that environment of a per-environment instanced
             # primitive, and every instance of any other, which the culling below keeps to its environment
@@ -1086,8 +1089,8 @@ class JITRenderer:
         ):
             last_pid = -1
             for id in range(len(vao_id)):
-                # Do not render shadows for markers and transparent objects
-                if render_flags[id, 5] or render_flags[id, 6]:
+                # Do not render shadows for markers and objects of translucent color
+                if render_flags[id, 9] or render_flags[id, 6]:
                     continue
 
                 pid = program_id[id]
@@ -1223,8 +1226,8 @@ class JITRenderer:
         ):
             last_pid = -1
             for id in range(len(vao_id)):
-                # Do not render shadows for markers and transparent objects
-                if render_flags[id, 5] or render_flags[id, 6]:
+                # Do not render shadows for markers and objects of translucent color
+                if render_flags[id, 9] or render_flags[id, 6]:
                     continue
 
                 pid = program_id[id]

@@ -106,6 +106,11 @@ class Mesh(object):
                 return True
         return False
 
+    @property
+    def has_translucent_color(self):
+        """bool : If True, the color of some primitives is partially transparent, whatever the alpha of the textures."""
+        return any(p.has_translucent_color for p in self.primitives)
+
     @staticmethod
     def from_points(
         points,
