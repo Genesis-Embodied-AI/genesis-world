@@ -2162,8 +2162,12 @@ def test_video_recording_lifecycle(tmp_path, monkeypatch, renderer, show_viewer)
 
 @pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
-def test_transparent_surfaces_show_what_lies_behind_them(renderer, show_viewer):
-    ALPHA = 0.5
+@pytest.mark.parametrize("alpha_source", ["color", "image_texture", "dynamic_texture"])
+def test_transparent_surfaces_show_what_lies_behind_them(alpha_source, translucent_box_obj, renderer, show_viewer):
+    # The alpha that 8-bit texels store exactly, so that every source gives the same opacity
+    ALPHA = 128 / 255
+    RED = (1.0, 0.0, 0.0)
+    BLUE = (0.0, 0.0, 1.0)
     RES = 64
     # Wholly inside the field of view, high enough above the pair to project clear of the patch sampled below. Geometry
     # straddling the frustum boundary is misrasterized by software rendering backends, so it stays clear of the edge.
@@ -2187,24 +2191,51 @@ def test_transparent_surfaces_show_what_lies_behind_them(renderer, show_viewer):
         renderer=renderer,
         show_viewer=show_viewer,
     )
+    # The red box of a dynamic texture shows a translucent variant from build, and the blue one an opaque variant until
+    # its translucent image is written between two renders.
+    if alpha_source == "color":
+        surfaces = [
+            gs.surfaces.Default(
+                color=(*color, ALPHA),
+            )
+            for color in (RED, BLUE)
+        ]
+    elif alpha_source == "image_texture":
+        surfaces = [
+            gs.surfaces.Default(
+                diffuse_texture=gs.textures.ImageTexture(
+                    image_array=np.array([[(*color, ALPHA)]]),
+                ),
+            )
+            for color in (RED, BLUE)
+        ]
+    else:
+        surfaces = [
+            gs.surfaces.Default(
+                diffuse_texture=gs.textures.DynamicTexture(
+                    resolution=(4, 4),
+                    variants=(gs.textures.ColorTexture(color=color),),
+                    is_batched=is_batched,
+                ),
+            )
+            for color, is_batched in (((*RED, ALPHA), False), (BLUE, True))
+        ]
     # Same size and lined up along the axis the camera sits on, so that the nearer one covers the farther one
     red = scene.add_entity(
-        gs.morphs.Box(
+        gs.morphs.Mesh(
+            file=translucent_box_obj,
+            scale=0.5,
             pos=(0.6, 0.0, 0.5),
-            size=(0.2, 0.2, 0.2),
         ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, ALPHA),
-        ),
+        surface=surfaces[0],
     )
     blue = scene.add_entity(
-        gs.morphs.Box(
+        gs.morphs.Mesh(
+            file=translucent_box_obj,
+            scale=0.5,
             pos=(-0.6, 0.0, 0.5),
-            size=(0.2, 0.2, 0.2),
         ),
-        surface=gs.surfaces.Default(
-            color=(0.0, 0.0, 1.0, ALPHA),
-        ),
+        surface=surfaces[1],
     )
     cam = scene.add_camera(
         res=(RES, RES),
@@ -2224,6 +2255,8 @@ def test_transparent_surfaces_show_what_lies_behind_them(renderer, show_viewer):
     # one plus what survives of the far one. A far surface painted before the near one keeps that contribution; painted
     # afterwards it fails the depth test and vanishes, leaving the near box alone.
     patch_red = centre_patch((0.6, 0.0, 0.5), PARKED)
+    if alpha_source == "dynamic_texture":
+        blue.set_texture((*BLUE, ALPHA))
     patch_blue = centre_patch(PARKED, (-0.6, 0.0, 0.5))
     patch_pair = centre_patch((0.6, 0.0, 0.5), (-0.6, 0.0, 0.5))
     assert_allclose(patch_pair, patch_red + (1.0 - ALPHA) * patch_blue, atol=1.0)

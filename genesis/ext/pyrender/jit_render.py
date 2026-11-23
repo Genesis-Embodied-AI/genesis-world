@@ -1540,10 +1540,15 @@ class JITRenderer:
             return self._update_normal_flat(vertices.reshape((-1, 3, 3)))
 
     def update_texture_layers(self, primitive) -> None:
-        """Copy the texture array layers each rendered environment of a primitive samples, for the next render pass."""
+        """Copy the texture array layers each rendered environment of a primitive samples, for the next render pass.
+
+        The layers shown decide whether the mesh of the primitive is transparent, which sets when it is drawn, so its
+        transparency is read again.
+        """
         i = self._primitive_index.get(primitive)
         if i is not None:
             self.texture_layers[self.texture_layers_idx[i]] = primitive.texture_layers
+            self.render_flags[i, 5] = self.node_list[i].mesh.is_transparent
 
     def update_buffer(self, primitives, buffer_name, data):
         """Queue the update of one buffer of several primitives, flushed during the next render pass.

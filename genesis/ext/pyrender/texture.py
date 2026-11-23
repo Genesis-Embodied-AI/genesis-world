@@ -63,9 +63,12 @@ class Texture(object):
         self.data_format = data_format
 
         self._texid = None
-        self._is_transparent = False
         # The layers written by 'set_layers' and not uploaded yet, held only on the host until the next upload
         self._pending_layers: dict[int, np.ndarray] = {}
+        # The layers of a texture array that some primitive samples, None standing for every layer. 'is_transparent'
+        # reads the alpha of these alone, since a layer left unshown may hold any image, such as the blank batched
+        # variant of a dynamic texture before its first write.
+        self.layers_shown: np.ndarray | None = None
 
     @property
     def name(self):
@@ -104,7 +107,11 @@ class Texture(object):
             self._source = np.ascontiguousarray(value[..., : len(self.source_channels)])
         else:
             self._source = format_texture_source(value, self.source_channels)
-        self._is_transparent = False
+        # The lowest alpha of each layer, in the scale of the source, which 'set_layers' keeps up to date since the host
+        # drops the layers it writes once they are uploaded
+        self._layers_alpha_min = None
+        if self.source_channels == "RGBA" and self._source is not None:
+            self._layers_alpha_min = self._source[..., 3].min(axis=(-2, -1))
 
     @property
     def source_channels(self):
@@ -152,13 +159,15 @@ class Texture(object):
         self._data_format = value
 
     def is_transparent(self, cutoff=1.0):
-        """bool : If True, the texture is partially transparent."""
-        if self._is_transparent is None:
-            self._is_transparent = False
-            if self.source_channels == "RGBA" and self.source is not None:
-                if np.any(self.source[:, :, 3] < cutoff):
-                    self._is_transparent = True
-        return self._is_transparent
+        """bool : If True, the alpha of some texels shown is below the cutoff, given between 0 and 1."""
+        if self._layers_alpha_min is None:
+            return False
+        layers_alpha_min = self._layers_alpha_min
+        if self.layers_shown is not None:
+            layers_alpha_min = layers_alpha_min[self.layers_shown]
+        # An 8-bit source stores an alpha of 1 as 255
+        alpha_opaque = 255 if self._source.dtype == np.uint8 else 1.0
+        return bool((layers_alpha_min < cutoff * alpha_opaque).any())
 
     def delete(self):
         """Remove this texture from the OpenGL context."""
@@ -185,6 +194,8 @@ class Texture(object):
         """Write (len(layers_idx),h,w,c) images into layers of a texture array, uploaded by 'upload_layers'."""
         for layer, image in zip(layers_idx.tolist(), images[..., : len(self.source_channels)]):
             self._pending_layers[layer] = np.ascontiguousarray(image[::-1])
+        if self._layers_alpha_min is not None:
+            self._layers_alpha_min[layers_idx] = images[..., 3].min(axis=(-2, -1))
 
     def upload_layers(self) -> None:
         """Upload the layers of a texture array written since its last upload, then drop them from the host."""
