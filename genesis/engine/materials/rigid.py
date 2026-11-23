@@ -1,16 +1,14 @@
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any
 
-from pydantic import Field, StrictBool, model_validator
+from pydantic import Field, StrictBool
 
 import genesis as gs
-from genesis.typing import NonNegativeFloat, PositiveFloat, StrictInt, StrArrayType, ValidFloat
+from genesis.typing import NonNegativeFloat, PositiveFloat, StrictInt, ValidFloat
 
 from .kinematic import Kinematic
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity import RigidEntity
-
-CoupType = Literal["two_way_soft_constraint", "external_articulation", "ipc_only"]
 
 
 class Rigid(Kinematic["RigidEntity"]):
@@ -60,33 +58,6 @@ class Rigid(Kinematic["RigidEntity"]):
         Maximum resolution of the SDF grid. Must be >= sdf_min_res. Default is 128.
     gravity_compensation : float, optional
         Compensation factor for gravity. 1.0 cancels gravity. Default is 0.
-    coup_type : str or None, optional
-        Coupling mode for this entity. Only used by the IPC coupler. Requires ``needs_coup=True``.
-        If None, auto-selected based on entity type: ``'external_articulation'`` for fixed-base
-        articulated robots, ``'two_way_soft_constraint'`` for floating-base robots, and
-        ``'ipc_only'`` for non-articulated objects. Valid values:
-          - 'two_way_soft_constraint': Two-way soft coupling.
-          - 'external_articulation': Joint-level coupling for articulated bodies. Joint positions will be coupled at
-            the DOF level.
-          - 'ipc_only': IPC controls entity, transforms copied to Genesis (one-way). Only supported by rigid
-            non-articulated objects.
-        Default is None.
-    coup_links : tuple of str or None, optional
-        Tuple of link names to include in coupling. When set, only the named links participate
-        in coupling; other links are excluded. Only supported with needs_coup=True and
-        ``two_way_soft_constraint`` type in IPC. Default is None.
-    enable_coup_collision : bool, optional
-        Whether coupler collision is enabled for this entity's links. Only used by the IPC coupler.
-        Unlike ``needs_coup=False`` (which removes the entity from the coupler entirely), setting this to
-        False keeps the entity in the coupler for coupling forces but disables contact response. Default is True.
-    coup_collision_links : tuple of str or None, optional
-        Tuple of link names whose geoms participate in coupler collision. Only used by the IPC coupler.
-        Only effective when ``enable_coup_collision=True``. If None, all coupled links have collision.
-        When set, only the named links get coupler collision; other links are marked no-collision.
-        Default is None.
-    contact_resistance : float or None, optional
-        IPC coupling contact resistance/stiffness override for this entity. ``None`` means use
-        ``IPCCouplerOptions.contact_resistance``. Default is None.
     """
 
     use_visual_raycasting: StrictBool = False
@@ -103,49 +74,8 @@ class Rigid(Kinematic["RigidEntity"]):
     sdf_min_res: Annotated[StrictInt, Field(ge=16)] = 32
     sdf_max_res: Annotated[StrictInt, Field(ge=16)] = 128
     gravity_compensation: ValidFloat = 0.0
-    coup_type: CoupType | None = None
-    coup_links: StrArrayType | None = None
-    enable_coup_collision: StrictBool = True
-    coup_collision_links: StrArrayType | None = None
-    contact_resistance: PositiveFloat | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _resolve_defaults(cls, data: dict) -> dict:
-        # ipc_only entities have their dynamics fully controlled by IPC (gravity + collision).
-        # Genesis gravity must be disabled to avoid double-counting.
-        if data.get("coup_type") == "ipc_only":
-            grav_comp = data.get("gravity_compensation")
-            if grav_comp is not None and grav_comp != 0.0:
-                gs.raise_exception(
-                    "`gravity_compensation` must be 0 with coup_type='ipc_only'. "
-                    "IPC controls gravity for ipc_only entities."
-                )
-            data["gravity_compensation"] = 0.0
-        return data
 
     def model_post_init(self, context: Any) -> None:
-        if self.coup_type is not None and not self.needs_coup:
-            gs.raise_exception(
-                "`coup_type` is only supported with needs_coup=True. "
-                f"Got needs_coup={self.needs_coup}, coup_type={self.coup_type!r}."
-            )
-
-        if self.coup_links is not None and (
-            not self.needs_coup or self.coup_type not in (None, "two_way_soft_constraint")
-        ):
-            gs.raise_exception(
-                "`coup_links` is only supported with needs_coup=True and "
-                f"'two_way_soft_constraint' type in IPC. "
-                f"Got needs_coup={self.needs_coup}, coup_type={self.coup_type!r}."
-            )
-
-        if self.coup_collision_links is not None and not self.enable_coup_collision:
-            gs.raise_exception(
-                "`coup_collision_links` is only effective when `enable_coup_collision=True`. "
-                "Set `enable_coup_collision=False` to disable collision for all links."
-            )
-
         if self.sdf_min_res > self.sdf_max_res:
             gs.raise_exception("`sdf_min_res` must be smaller than or equal to `sdf_max_res`.")
 

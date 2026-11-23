@@ -568,8 +568,9 @@ class FEMEntity(Entity):
             is_soft_constraint: bool
                 By default, use a hard constraint directly sets position and zero velocity.
                 A soft constraint pulls the vertices toward their targets with critically damped springs under the
-                explicit solver, while the implicit solver holds them at their targets (see
-                'FEMSolver.set_vertex_constraints').
+                explicit solver, while the implicit solver holds them at their targets. The vertices of a cloth move
+                toward their targets within its solve instead, its contact stopping them short of crossing a surface
+                (see 'FEMSolver.set_vertex_constraints').
             stiffness : float
                 Stiffness of the springs of a soft constraint, in N/m.
             envs_idx : array_like, optional

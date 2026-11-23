@@ -188,7 +188,6 @@ SKIP_NO_MADRONA = _skip_reason("BatchRenderer is not supported because 'gs_madro
 SKIP_NO_LUISA = _skip_reason("RayTracer is not supported because 'LuisaRenderPy' is not available.")
 SKIP_NO_VIEWER = _skip_reason("Interactive viewer not supported on this platform.")
 SKIP_NO_OMNIVERSE_KIT = _skip_reason("omniverse-kit support not available")
-SKIP_NO_IPC = _skip_reason("IPC Coupler is not supported because 'uipc' module is not available.")
 SKIP_NO_IMGUI_BUNDLE = _skip_reason("'imgui-bundle' is not available.")
 
 # Modules whose import is delayed until the environment of the worker is set, since they read environment variables

@@ -27,8 +27,6 @@ class Muscle(Elastic):
         Number of muscle groups. Default is 1.
     friction_mu : float, optional
         Contact friction coefficient. Default is 0.1.
-    contact_resistance : float | None, optional
-        IPC contact resistance/stiffness override. Default is None.
     """
 
     n_groups: PositiveInt = 1

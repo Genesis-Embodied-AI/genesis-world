@@ -353,6 +353,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         self.legacy_coupler_info: LegacyCouplerInfo | None = None
         self.legacy_coupler_config: LegacyCouplerConfig | None = None
         self.sph_boundaries: SPHBoundaries | None = None
+        self._is_mpm_implicit = False
 
         # The MPM and PBD particles and the FEM vertices collide with the rigid geoms through their SDF
         opt_in(SDFInfo, cond=lambda: any([self.rigid_couplings[i] for i in (0, 2, 3)]))
@@ -410,7 +411,11 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
 
     @property
     def rigid_couplings(self) -> tuple[bool, bool, bool, bool]:
-        """Whether the rigid geoms couple with the MPM, SPH, PBD and FEM solvers, in this order."""
+        """Whether the rigid geoms couple with the MPM, SPH, PBD and FEM solvers, in this order.
+
+        The cloth solved by the Newton solver touches the rigid planes through its own contact (see
+        'FEMSolver.is_solved_in_global_newton'), apart from the coupler.
+        """
         return tuple(
             [
                 self.rigid_solver.is_active and solver.is_active and is_enabled
@@ -418,7 +423,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     (self.mpm_solver, self.options.rigid_mpm),
                     (self.sph_solver, self.options.rigid_sph),
                     (self.pbd_solver, self.options.rigid_pbd),
-                    (self.fem_solver, self.options.rigid_fem),
+                    (self.fem_solver, self.options.rigid_fem and not self.fem_solver.is_solved_in_global_newton),
                 )
             ]
         )
@@ -427,6 +432,22 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         has_rigid_mpm, _, has_rigid_pbd, has_rigid_fem = self.rigid_couplings
         has_mpm_sph = self.mpm_solver.is_active and self.sph_solver.is_active and self.options.mpm_sph
         has_mpm_pbd = self.mpm_solver.is_active and self.pbd_solver.is_active and self.options.mpm_pbd
+        has_fem_mpm = self.fem_solver.is_active and self.mpm_solver.is_active and self.options.fem_mpm
+        # The Newton solve couples the implicit MPM solver with the rigid geoms (see NewtonSolver), and the grid
+        # operations of the coupler run for the explicit solver alone
+        self._is_mpm_implicit = self.mpm_solver.is_active and self.mpm_solver._use_implicit_solver
+        if self._is_mpm_implicit:
+            for is_coupled, name, option in (
+                (has_mpm_sph, "SPH", "mpm_sph"),
+                (has_mpm_pbd, "PBD", "mpm_pbd"),
+                (has_fem_mpm, "FEM", "fem_mpm"),
+            ):
+                if is_coupled:
+                    gs.raise_exception(
+                        f"Coupling MPM with {name} requires the explicit MPM solver: set "
+                        f"MPMOptions(use_implicit_solver=False), or LegacyCouplerOptions({option}=False)."
+                    )
+            has_rigid_mpm = False
         has_rigid_sph, has_fixed_rigid_sph = self._build_sph_boundaries(self.rigid_sph_geoms)
         n_segments = self.sph_boundaries.segments_impulse.shape[0] if has_rigid_sph or self.has_fem_sph else 0
         self.legacy_coupler_config = LegacyCouplerConfig(
@@ -437,7 +458,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             has_rigid_fem=has_rigid_fem,
             has_mpm_sph=has_mpm_sph,
             has_mpm_pbd=has_mpm_pbd,
-            has_fem_mpm=self.fem_solver.is_active and self.mpm_solver.is_active and self.options.fem_mpm,
+            has_fem_mpm=has_fem_mpm,
             has_fem_sph=self.has_fem_sph,
             is_links_info_batched=self.rigid_solver.rigid_config.batch_links_info,
             is_external_wrench_exact=has_rigid_sph and is_opted_in(RigidData.dyn_state.links.cfrc_external_sums),
@@ -997,7 +1018,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
 
     def couple(self) -> None:
         # MPM <-> all others
-        if self.mpm_solver.is_active:
+        if self.mpm_solver.is_active and not self._is_mpm_implicit:
             kernel_mpm_grid_op(
                 self.sim.sim_state,
                 self.mpm_solver.mpm_state,
@@ -1058,7 +1079,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 self.legacy_coupler_info,
             )
 
-        if self.fem_solver.is_active:
+        if self.fem_solver.is_active and not self.fem_solver.is_solved_in_global_newton:
             kernel_fem_surface_force(
                 self.fem_solver.fem_state,
                 self.mpm_solver.mpm_state,

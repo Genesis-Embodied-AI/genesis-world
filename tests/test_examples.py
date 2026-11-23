@@ -19,7 +19,6 @@ IGNORE_SCRIPT_PATTERNS = {"*_train.py", "*_eval.py", "*_env.py", "behavior_cloni
 # Directory keys apply recursively to all scripts within that directory.
 EXAMPLE_DEPENDENCIES = {
     "usd": ["pxr"],  # USD examples require the usd-core package (provides pxr module)
-    "ipc": ["uipc"],  # Requires pyuipc package (provides uipc module)
     "single_franka_batch_render.py": ["gs_madrona"],
     "demo.py": ["LuisaRenderPy"],
 }

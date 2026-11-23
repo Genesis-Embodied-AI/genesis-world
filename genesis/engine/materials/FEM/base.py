@@ -30,9 +30,6 @@ class Base(Material["FEMEntity"]):
         Hydroelastic modulus for hydroelastic contact. Default is 1e7.
     friction_mu : float, optional
         Friction coefficient. Default is 0.1.
-    contact_resistance : float | None, optional
-        IPC contact resistance/stiffness override for this material. ``None`` means
-        use the IPC coupler global default (``IPCCouplerOptions.contact_resistance``).
     """
 
     E: PositiveFloat = 1e6
@@ -40,7 +37,6 @@ class Base(Material["FEMEntity"]):
     rho: PositiveFloat = 1000.0
     hydroelastic_modulus: PositiveFloat = 1e7
     friction_mu: NonNegativeFloat = 0.1
-    contact_resistance: PositiveFloat | None = None
 
     # Auto-generated fields, computed in model_post_init and never set by the user.
     mu: ValidFloat = Field(default=0.0, exclude=True)
