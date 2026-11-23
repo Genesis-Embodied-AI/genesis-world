@@ -1,0 +1,22 @@
+genesis/engine/solvers/rigid/abd/inverse_kinematics.py
+  s_44596ab701eebc::t_a3e68ad86d0f81 592
+  s_44596ab701eebc::t_bbb816b28f2c71 608
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_44596ab701eebc::t_c9972fa1b92c87 1366-1368,1475-1477
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4cd111b8f5eaf5fc7b62c6aeb548ef9e1cc52066",
+  "prompts": {},
+  "sessions": {
+    "s_44596ab701eebc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4612133f-414c-4217-a551-d3499789ccd5",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
