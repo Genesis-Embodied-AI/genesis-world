@@ -243,8 +243,13 @@ class ArrayRef(NamedTuple):
         """Return the elements of the array, one row per environment for an array holding a value per environment,
         viewing the array with zero-copy and copying it otherwise."""
         if isinstance(self.array, (torch.Tensor, np.ndarray)):
-            # An array of the host, such as a mesh computed in memory, is copied to the device
-            array = _to_device(self.array) if isinstance(self.array, np.ndarray) else self.array
+            # An array of the host, such as a mesh computed in memory, is copied to the device. The view being
+            # read-only, a read-only host array, such as the cached vertices of a mesh, may back it on CPU.
+            array = self.array
+            if isinstance(array, np.ndarray):
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message="The given NumPy array is not writable")
+                    array = _to_device(array)
             if is_per_env:
                 return array if self.cols is None else array[:, self.cols]
             return array if self.cols is None else array[self.cols]
