@@ -475,14 +475,14 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
     # particles, more than the emitter has left.
     particle_size = emitter.entity.particle_size
     while emitter.next_particle <= emitter.max_particles // 2:
-        emitter.emit_omni(source_radius=5.0 * particle_size)
+        emitter.emit(droplet_shape="omni", droplet_size=10.0 * particle_size)
     box_pos = box.get_particles_pos()
-    emitter.emit_omni(source_radius=10.0 * particle_size)
+    emitter.emit(droplet_shape="omni", droplet_size=20.0 * particle_size)
     assert_equal(box.get_particles_pos(), box_pos)
 
-    for source_radius in (0.0, float("nan"), float("inf")):
+    for droplet_size in (0.0, float("nan"), float("inf")):
         with pytest.raises(gs.GenesisException):
-            emitter.emit_omni(source_radius=source_radius)
+            emitter.emit(droplet_shape="omni", droplet_size=droplet_size)
 
     for i in range(5):
         emitter.emit(droplet_shape="circle", droplet_size=0.25)
