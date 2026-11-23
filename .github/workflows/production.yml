@@ -30,10 +30,6 @@ on:
       benchmark_image_ver:
         description: Container version recorded by the active benchmark configuration.
         type: string
-      benchmark_only:
-        description: Run benchmarks for a manually selected main wheel without repeating unit tests.
-        type: boolean
-        default: false
       unit_tests_markexpr:
         description: Marker expression selecting the unit tests to run, all of them by default.
         type: string
@@ -103,14 +99,9 @@ jobs:
         id: check
         if: github.repository != job.workflow_repository
         uses: actions/github-script@v8
-        env:
-          BENCHMARK_ONLY: ${{ inputs.benchmark_only }}
         with:
           script: |
-            if (process.env.BENCHMARK_ONLY === 'true') {
-              if (context.eventName !== 'workflow_dispatch') {
-                throw new Error('Benchmark-only calls require a manual dispatch.');
-              }
+            if (context.eventName === 'workflow_dispatch') {
               core.setOutput('is_open', true);
               return;
             }
@@ -242,7 +233,7 @@ jobs:
 
     needs: setup
     # See the check of the calling workflow.
-    if: needs.setup.outputs.GENESIS_IMAGE_VER != '' && !inputs.benchmark_only
+    if: needs.setup.outputs.GENESIS_IMAGE_VER != ''
     # See the wait for the runner shared by all calls in the setup job.
     runs-on: [self-hosted, coreweave, genesis-world]
 
@@ -378,9 +369,6 @@ jobs:
     name: production-benchmarks-${{ matrix.GS_ENABLE_NDARRAY == '0' && 'field' || 'ndarray' }}
 
     needs: [setup, unit-tests]
-    if: >-
-      !cancelled() && needs.setup.result == 'success' && needs.setup.outputs.IS_SKIPPED != 'true' &&
-      (needs.unit-tests.result == 'success' || inputs.benchmark_only)
     # See the unit tests job.
     runs-on: [self-hosted, coreweave, genesis-world]
 
