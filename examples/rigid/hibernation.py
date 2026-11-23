@@ -10,8 +10,8 @@ Two scenes exercise the same pipeline:
 
 While a body is awake the full constraint solve runs for its island; once it hibernates that island is skipped by
 forward kinematics, forward dynamics, integration, and the constraint solve. The viewer colors every body by island and
-fades the sleeping ones, and its GUI toggles both. The step rate of the physics alone, read from the scene's timings, is
-streamed to a live plot and, with --record, both the scene and the plot are saved to video.
+fades the sleeping ones. The step rate of the physics alone, read from the scene's timings, is streamed to a live plot
+and, with --record, both the scene and the plot are saved to video.
 """
 
 import argparse
@@ -52,9 +52,6 @@ def main():
                 islands=True,
                 hibernation=True,
             ),
-        ),
-        viewer_options=gs.options.ViewerOptions(
-            enable_gui=True,
         ),
         vis_options=gs.options.VisOptions(
             debug=True,
