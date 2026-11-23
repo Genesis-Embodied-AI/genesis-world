@@ -893,6 +893,7 @@ class GeomConstants(NamedTuple):
     several microseconds of host time, so instead of a chain of elementwise operations, one per term, the outer product
     of the inputs is contracted against a coefficient tensor by a broadcast multiply and a sum. A matmul would do it in
     one kernel, but its TensorFloat-32 (TF32) mode, which users may enable globally, rounds the operands to 10 bits.
+    Rotating a vector is the exception: two cross products take about as many operations as the contraction.
     """
 
     quat_conjugate_signs: torch.Tensor
@@ -1476,9 +1477,16 @@ def _np_transform_by_quat(v, quat, out=None):
 
 
 def _tc_transform_by_quat(v: torch.Tensor, quat: torch.Tensor) -> torch.Tensor:
-    coefficients = _tc_geom_constants(quat.device, quat.dtype).quat_to_R
-    R_and_norm_sqr = (quat[..., None, :, None] * quat[..., None, None, :] * coefficients).sum((-2, -1))
-    return (R_and_norm_sqr[..., :9].unflatten(-1, (3, 3)) * v[..., None, :]).sum(-1) / R_and_norm_sqr[..., 9:]
+    # 'v + 2 * (q_w * t + q_vec x t) / |q|^2' with 't = q_vec x v'. It takes about as many operations as contracting the
+    # rotation matrix of 'GeomConstants.quat_to_R' with 'v', without its temporary of 160 elements per quaternion.
+    if v.ndim != quat.ndim:
+        # 'torch.linalg.cross' broadcasts the shapes of its operands but requires them to have the same rank
+        ndim = max(v.ndim, quat.ndim)
+        v, quat = v[(None,) * (ndim - v.ndim)], quat[(None,) * (ndim - quat.ndim)]
+    q_w, q_vec = quat[..., :1], quat[..., 1:]
+    t = torch.linalg.cross(q_vec, v)
+    twice_inv_norm_sqr = 2.0 / torch.linalg.vecdot(quat, quat)[..., None]
+    return torch.addcmul(v, torch.addcmul(torch.linalg.cross(q_vec, t), q_w, t), twice_inv_norm_sqr)
 
 
 def transform_by_quat(v, quat):
