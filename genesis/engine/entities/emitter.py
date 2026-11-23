@@ -1,3 +1,5 @@
+import numbers
+
 import numpy as np
 import torch
 
@@ -89,7 +91,7 @@ class Emitter(RBC):
         assert self._entity is not None
 
         if droplet_shape in ["circle", "sphere", "square", "omni"]:
-            assert isinstance(droplet_size, (int, float))
+            assert isinstance(droplet_size, numbers.Real)
         elif droplet_shape == "rectangle":
             assert isinstance(droplet_size, (tuple, list)) and len(droplet_size) == 2
         else:
