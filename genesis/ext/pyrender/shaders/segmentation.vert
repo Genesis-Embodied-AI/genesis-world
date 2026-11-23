@@ -16,9 +16,8 @@ uniform float env_offset_scale;
 
 void main()
 {
-    mat4 light_matrix = P * V;
     vec4 world_position = M * inst_m * vec4(position, 1.0);
     world_position.xyz += env_offset_scale * inst_env_offset;
-    gl_Position = light_matrix * world_position;
+    gl_Position = P * V * world_position;
 }
 

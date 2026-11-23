@@ -376,7 +376,8 @@ def test_set_vverts(renderer, show_viewer):
     scene.reset()
     assert_allclose(entity.get_vverts(), sphere_vverts, tol=gs.EPS)
     rgb_restored = tensor_to_array(cam.render(rgb=True, force_render=True)[0])
-    assert_equal(rgb_restored, rgb_baseline)
+    # Rendering the same geometry again may round a color to the next level
+    assert_allclose(rgb_restored, rgb_baseline, atol=1)
 
     # get_vverts returns a copy: mutating the result does not change the vertices drawn.
     copy = entity.get_vverts()

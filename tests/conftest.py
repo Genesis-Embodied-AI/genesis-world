@@ -354,8 +354,8 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
     if not sys.platform.startswith("linux"):
         config.option.forked = False
 
-    # With '--forked', each test runs in a child process, so the main process never sees which snapshots were used and
-    # would report them all as unused
+    # With '--forked', each test runs in a child process, so the main process never sees which snapshots were used. A
+    # session selecting every test would then fail on all of them as unused, so only warn about unused snapshots.
     if config.option.forked:
         config.option.warn_unused_snapshots = True
 

@@ -79,7 +79,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     # FIXME: Remove this cap once pytest-forked becomes compatible with newer versions (pytest-forked#112)
-    "pytest<9.2.0",
+    "pytest>=8.2,<9.2.0",
     "pytest-xdist",
     "pytest-forked",
     "pytest-timeout",
