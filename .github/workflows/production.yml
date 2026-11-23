@@ -30,9 +30,6 @@ on:
       benchmark_image_ver:
         description: Container version recorded by the active benchmark configuration.
         type: string
-      benchmark_constraints:
-        description: Dependency constraints from bootstrap, excluding Genesis and Quadrants.
-        type: string
       benchmark_only:
         description: Run benchmarks for a manually selected main wheel without repeating unit tests.
         type: boolean
@@ -108,19 +105,11 @@ jobs:
         uses: actions/github-script@v8
         env:
           BENCHMARK_ONLY: ${{ inputs.benchmark_only }}
-          QUADRANTS_RUN_ID: ${{ inputs.quadrants_run_id }}
         with:
           script: |
             if (process.env.BENCHMARK_ONLY === 'true') {
               if (context.eventName !== 'workflow_dispatch') {
                 throw new Error('Benchmark-only calls require a manual dispatch.');
-              }
-              const {data: wheelRun} = await github.rest.actions.getWorkflowRun({
-                ...context.repo, run_id: Number(process.env.QUADRANTS_RUN_ID),
-              });
-              if (wheelRun.head_branch !== 'main' || wheelRun.event === 'pull_request'
-                  || wheelRun.conclusion !== 'success') {
-                throw new Error('Bootstrap requires a successful main wheel build.');
               }
               core.setOutput('is_open', true);
               return;
@@ -418,19 +407,6 @@ jobs:
           # tracking thereby making it impossible to detect whether a commit is contained in upstream main.
           fetch-depth: 0
 
-      - name: Checkout maintained benchmark tooling
-        if: inputs.benchmark_sha != ''
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: .benchmark-ci
-      - name: Write benchmark constraints
-        if: inputs.benchmark_sha != ''
-        env:
-          BENCHMARK_CONSTRAINTS: ${{ inputs.benchmark_constraints }}
-        run: printf '%s\n' "$BENCHMARK_CONSTRAINTS" > benchmark-constraints.txt
-
       # See the unit tests job for the mechanism.
       - name: Download the Quadrants wheels
         if: inputs.quadrants_run_id != 0
@@ -471,9 +447,6 @@ jobs:
           SLURM_ENV_VARS="NVIDIA_DRIVER_CAPABILITIES=all,BASH_ENV=/root/.bashrc,HF_TOKEN,GS_ENABLE_NDARRAY=${GS_ENABLE_NDARRAY}"
           # See the caches of the unit tests job.
           SLURM_ENV_VARS="${SLURM_ENV_VARS},GS_CACHE_FILE_PATH=/root/workspace/.cache/genesis,UV_NO_CACHE=1"
-          if ${{ inputs.benchmark_sha != '' }} ; then
-            SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_CONSTRAINT=/root/workspace/benchmark-constraints.txt"
-          fi
           if ${{ inputs.quadrants_run_id != 0 }} ; then
             SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_OVERRIDE=/root/workspace/overrides.txt"
             SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_FIND_LINKS=/root/workspace/quadrants_wheels"
@@ -505,14 +478,7 @@ jobs:
           echo "SLURM_JOB_NAME=${SLURM_JOB_NAME}" >> $GITHUB_ENV
           echo "SRUN_COMMON=${SRUN_COMMON}" >> "$GITHUB_ENV"
       - name: Initialize Python virtual env
-        run: |
-          if ${{ inputs.benchmark_sha != '' }} ; then
-            srun ${SRUN_COMMON} bash .benchmark-ci/.github/workflows/scripts/production_build.sh
-            srun ${SRUN_COMMON} /venv/bin/python .benchmark-ci/.github/workflows/scripts/benchmark_environment.py \
-              "${GS_ENABLE_NDARRAY}" "${GENESIS_IMAGE_VER}"
-          else
-            srun ${SRUN_COMMON} bash .github/workflows/scripts/production_build.sh
-          fi
+        run: srun ${SRUN_COMMON} bash .github/workflows/scripts/production_build.sh
       - name: Run benchmarks
         run: |
           srun ${SRUN_COMMON} bash -s <<'EOF'
@@ -553,20 +519,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: speed-test-${{ matrix.GS_ENABLE_NDARRAY }}
-          overwrite: ${{ inputs.benchmark_sha != '' }}
           path: "/mnt/data/artifacts/speed_test_${{ env.SLURM_JOB_NAME }}.txt"
       - name: Upload benchmark mem stats as artifact
         uses: actions/upload-artifact@v4
         with:
           name: mem-test-${{ matrix.GS_ENABLE_NDARRAY }}
-          overwrite: ${{ inputs.benchmark_sha != '' }}
           path: "/mnt/data/artifacts/mem_test_${{ env.SLURM_JOB_NAME }}.txt"
-
-      - name: Upload benchmark environment
-        if: inputs.benchmark_sha != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-environment-${{ matrix.GS_ENABLE_NDARRAY }}
-          overwrite: true
-          path: benchmark-environment-${{ matrix.GS_ENABLE_NDARRAY }}.json
-          if-no-files-found: error
