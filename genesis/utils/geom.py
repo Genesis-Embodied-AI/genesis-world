@@ -1483,10 +1483,16 @@ def _tc_transform_by_quat(v: torch.Tensor, quat: torch.Tensor) -> torch.Tensor:
         # 'torch.linalg.cross' broadcasts the shapes of its operands but requires them to have the same rank
         ndim = max(v.ndim, quat.ndim)
         v, quat = v[(None,) * (ndim - v.ndim)], quat[(None,) * (ndim - quat.ndim)]
-    q_w, q_vec = quat[..., :1], quat[..., 1:]
+    if v.dtype != quat.dtype:
+        # 'torch.linalg.cross' requires operands of the same dtype
+        dtype = torch.promote_types(v.dtype, quat.dtype)
+        v, quat = v.to(dtype), quat.to(dtype)
+    # The backward of 'split' concatenates the gradients of the parts in one kernel, while that of each slice fills a
+    # zero tensor. Dividing by '|q|^2' last avoids its reciprocal, which overflows when '|q|^2' is subnormal.
+    q_w, q_vec = quat.split((1, 3), dim=-1)
     t = torch.linalg.cross(q_vec, v)
-    twice_inv_norm_sqr = 2.0 / torch.linalg.vecdot(quat, quat)[..., None]
-    return torch.addcmul(v, torch.addcmul(torch.linalg.cross(q_vec, t), q_w, t), twice_inv_norm_sqr)
+    norm_sqr = quat.square().sum(-1, keepdim=True)
+    return torch.addcdiv(v, torch.addcmul(torch.linalg.cross(q_vec, t), q_w, t), norm_sqr, value=2.0)
 
 
 def transform_by_quat(v, quat):
