@@ -92,7 +92,7 @@ jobs:
       # pull request is asked of the API. A pull request closed without merging while its wheel was building has nothing
       # left to validate: the check passes without an image version, the runner jobs, which follow through 'needs', are
       # skipped, and the caller is told so. Merged pull requests still run so their measurements can become a main baseline.
-      # Manual bootstrap calls are also accepted; the caller validates their main wheel.
+      # Manual workflow calls are also accepted.
       - name: Check the calling workflow
         id: check
         if: github.repository != job.workflow_repository
