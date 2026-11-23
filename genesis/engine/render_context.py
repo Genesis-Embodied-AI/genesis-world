@@ -1528,9 +1528,9 @@ class RenderContext:
                 for dst, ref in shape_copies:
                     dst.copy_(ref.view(is_per_env=True))
             scoped_context.changelog.add(StateChange.GEOMETRY, envs_idx=envs_idx)
-        # On Metal, torch may read the zero-copy views of the shapes before the kernels writing them are done, so wait
-        # for them (see 'qd_to_torch')
-        if gs.use_zerocopy and gs.backend == gs.metal:
+        # Quadrants kernels write the arrays of the shapes, and torch reads them. On Metal, torch does not wait for these
+        # kernels to finish, so wait for them here, or the shapes would show the state before the last change.
+        if gs.backend == gs.metal:
             qd.sync()
 
     def _update_markers(self, record: _ScopedRecord, envs_idx: torch.Tensor) -> None:

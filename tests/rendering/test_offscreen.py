@@ -91,10 +91,10 @@ def test_render_api(show_viewer, renderer_type, renderer):
             normal_arrs.append(tensor_to_array(normal_arr).astype(np.float32))
 
     try:
-        assert_allclose(np.diff(rgb_arrs, axis=0), 0.0, tol=gs.EPS)
-        assert_allclose(np.diff(seg_arrs, axis=0), 0.0, tol=gs.EPS)
-        assert_allclose(np.diff(normal_arrs, axis=0), 0.0, tol=gs.EPS)
-        assert_allclose(np.diff(depth_arrs, axis=0), 0.0, tol=gs.EPS)
+        assert_equal(np.diff(rgb_arrs, axis=0), 0.0)
+        assert_equal(np.diff(seg_arrs, axis=0), 0.0)
+        assert_equal(np.diff(normal_arrs, axis=0), 0.0)
+        assert_equal(np.diff(depth_arrs, axis=0), 0.0)
     except AssertionError:
         if sys.platform == "darwin" and scene.visualizer.is_software:
             pytest.xfail("Flaky on MacOS with Apple Software Renderer.")
