@@ -21,7 +21,7 @@ on:
       quadrants_run_id:
         description: Run whose wheel artifacts hold the Quadrants to install in place of the release Genesis pins.
         type: number
-      benchmark_sha:
+      genesis_sha:
         description: Immutable Genesis source revision for external benchmark runs.
         type: string
       unit_tests_markexpr:
@@ -378,7 +378,7 @@ jobs:
         with:
           # See the setup job.
           repository: ${{ job.workflow_repository }}
-          ref: ${{ inputs.benchmark_sha || job.workflow_sha }}
+          ref: ${{ inputs.genesis_sha || job.workflow_sha }}
           # Checkout full history is required to shallow cloning while mark HEAD as "grafted". This breaks remote
           # tracking thereby making it impossible to detect whether a commit is contained in upstream main.
           fetch-depth: 0
