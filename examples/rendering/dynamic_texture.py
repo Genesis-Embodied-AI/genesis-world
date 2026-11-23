@@ -4,8 +4,8 @@ In parallel environments, the duck of environment i starts on variant i. Without
 own. With it, the keyboard sets them in every environment, and the mouse paints in the environment it points at, into
 the batched variant of the texture, which holds one image per environment:
 Left mouse  - Paint on the canvas or the duck
-Right       - Next texture
-Left        - Previous texture
+Right arrow - Next texture
+Left arrow  - Previous texture
 Space       - Draw a random color per environment
 C           - Clear the paint
 Esc         - Quit
@@ -155,7 +155,7 @@ class TexturePainterPlugin(RaycasterViewerPlugin):
             i_env = 0 if env_idx is None else env_idx
             images = canvases_images.setdefault(vgeom.uid, {})
             if i_env not in images:
-                image = vgeom.get_texture(None if env_idx is None else [env_idx])
+                image = vgeom.get_texture(env_idx)
                 images[i_env] = tensor_to_array(image if env_idx is None else image[0])
 
             # A stroke joins its successive points, unless it crosses to another canvas or environment, or across a
@@ -196,7 +196,6 @@ def main():
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.2, 1.5, 0.8),
             camera_lookat=(0.25, 0.25, 0.1),
-            camera_fov=40,
         ),
         show_viewer=args.vis,
     )

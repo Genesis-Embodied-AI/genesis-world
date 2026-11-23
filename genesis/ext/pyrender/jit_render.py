@@ -1,9 +1,9 @@
 import contextlib
 import os
-from typing import TYPE_CHECKING, NamedTuple
+from typing import NamedTuple
 
-import numba as nb
 import numpy as np
+import numba as nb
 
 import OpenGL.GL as GL
 import OpenGL.constant as GL_constant
@@ -13,9 +13,6 @@ from .light import DirectionalLight, PointLight, SpotLight
 from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
 from .numba_gl_wrapper import GLWrapper
 from .scene import CORNER_INDICES
-
-if TYPE_CHECKING:
-    from .primitive import Primitive
 
 
 _DISABLE_OFFSCREEN_MARKERS = "GS_DISABLE_OFFSCREEN_MARKERS" in os.environ
@@ -546,7 +543,7 @@ class JITRenderer:
         is_layered = np.array([primitive.texture_layers is not None for primitive in primitive_list], np.bool_)
         self.texture_layers_idx = np.full(n, -1, np.int32)
         self.texture_layers_idx[is_layered] = np.arange(np.count_nonzero(is_layered))
-        self.texture_layers = np.zeros((np.count_nonzero(is_layered), max(len(self.envs_offset), 1), 2), np.float32)
+        self.texture_layers = np.zeros((np.count_nonzero(is_layered), len(self.envs_offset), 2), np.float32)
         self.pbr_mat = np.zeros((n, 9), np.float32)  # base_color <- 4, metallic <- 1, roughness <- 1, emissive <- 3
         self.spec_mat = np.zeros((n, 11), np.float32)  # diffuse <- 4, specular <- 3, glossiness <- 1, emissive <- 3
         self.render_flags = np.zeros(
@@ -646,9 +643,8 @@ class JITRenderer:
                 self.textures[i, 0] |= 4 << 8
             if tf & 8 and material.baseColorTexture.tex_type == GL_TEXTURE_2D_ARRAY:
                 self.textures[i, 0] |= 8 << 8
-            i_layers = self.texture_layers_idx[i]
-            if i_layers >= 0:
-                self.texture_layers[i_layers, : len(primitive.texture_layers)] = primitive.texture_layers
+            if primitive.texture_layers is not None:
+                self.update_texture_layers(primitive)
 
             if isinstance(material, MetallicRoughnessMaterial):
                 self.pbr_mat[i, :4] = material.baseColorFactor
@@ -938,8 +934,7 @@ class JITRenderer:
                         continue
                     set_uniform_3fv(pid, "color", color_list[id], gl)
 
-                # A texture array is sampled at the layer of the environment drawn, which a pass drawing every
-                # environment sets per instance below.
+                # A texture array is sampled at the layer of the environment drawn
                 i_layers = texture_layers_idx[id]
                 is_layer_set = i_layers >= 0 and is_rgba and not flags & RenderFlags_FLAT
                 if is_layer_set and env_idx >= 0:
@@ -1512,12 +1507,11 @@ class JITRenderer:
                 self.gen_func_ptr()
             return self._update_normal_flat(vertices.reshape((-1, 3, 3)))
 
-    def update_texture_layers(self, primitive: "Primitive") -> None:
-        """Copy the texture array layers each rendered environment of a primitive samples, which its
-        'texture_layers' hold, for the next render pass."""
+    def update_texture_layers(self, primitive) -> None:
+        """Copy the texture array layers each rendered environment of a primitive samples, for the next render pass."""
         i = self._primitive_index.get(primitive)
-        if i is not None and self.texture_layers_idx[i] >= 0:
-            self.texture_layers[self.texture_layers_idx[i], : len(primitive.texture_layers)] = primitive.texture_layers
+        if i is not None:
+            self.texture_layers[self.texture_layers_idx[i]] = primitive.texture_layers
 
     def update_buffer(self, primitives, buffer_name, data):
         """Queue the update of one buffer of several primitives, flushed during the next render pass.

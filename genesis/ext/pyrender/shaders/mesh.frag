@@ -178,7 +178,7 @@ vec4 srgb_to_linear(vec4 srgb)
 }
 
 #ifdef BASE_COLOR_TEX_LINEAR
-// The sRGB encoding of IEC 61966-2-1, inverse of srgb_to_linear: a linear segment near black, then a 1/2.4 power
+// The sRGB encoding of IEC 61966-2-1, inverse of srgb_to_linear
 vec4 linear_to_srgb(vec4 linear)
 {
 #ifndef SRGB_CORRECTED

@@ -78,6 +78,7 @@ class RigidDynamicVVerts(Data):
     vgeoms_batched_vvert_start: qd.Tensor = field(int, shape=(DYNAMIC_VGEOMS,), kind=DataKind.CONSTANT)
     vgeoms_variant_start: qd.Tensor = field(int, shape=(DYNAMIC_VGEOMS,), kind=DataKind.CONSTANT)
     # The variant each environment shows, -1 for the batched variant and ASSET_VARIANT_IDX for the mesh of the asset
+    # (see render_context.py)
     vgeoms_variant_idx: qd.Tensor = field(int, shape=(DYNAMIC_VGEOMS, ENVS), kind=DataKind.DERIVED)
     # The first vertex of each variant among the vertices of the variants, -1 for the mesh of the asset
     variants_vvert_start: qd.Tensor = field(int, shape=(VGEOMS_VARIANTS,), kind=DataKind.CONSTANT)

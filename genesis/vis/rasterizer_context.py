@@ -4,8 +4,8 @@ from typing import Any, NamedTuple
 import numpy as np
 import torch
 
-import trimesh
 from OpenGL.GL import GL_HALF_FLOAT, GL_TEXTURE_2D_ARRAY, GL_UNSIGNED_BYTE
+import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -118,9 +118,8 @@ class TextureBinding(NamedTuple):
     texture_array: "pyrender.Texture"
     """The array holding the image of each variant, then that of the batched variant in each rendered environment."""
     primitives: list["pyrender.Primitive"]
-    column: int
-    """The column of the layers of the primitives the texture fills (see 'Primitive.texture_layers'), 0 for the base
-    color and 1 for the emission."""
+    tracker: Tracker
+    """The writes and resets of the texture since its images and layers were last drawn (see 'TextureVariants')."""
 
 
 @dataclass(eq=False)
@@ -399,16 +398,10 @@ class RasterizerContext(BuildableMixin):
             if shape_nodes.is_refreshed and is_drawn:
                 self._sync_shape_nodes(shape, shape_nodes, arrays_host)
                 shape_nodes.is_refreshed = False
-            # A change of appearance changes the reads holding the parts of the shape, or its dynamic textures in the
-            # environments it reached
-            reads_record = shape_nodes.reads_tracker.pull()
-            if reads_record is not None:
+            if shape_nodes.reads_tracker.pull() is not None:
                 self._set_nodes_views(shape, shape_nodes)
-                if shape_nodes.textures:
-                    is_written = np.ones(len(self.rendered_envs_idx), dtype=np.bool_)
-                    if reads_record.envs is not None:
-                        is_written = tensor_to_array(reads_record.envs[self._rendered_envs_t])
-                    self._update_textures(shape_nodes, is_written)
+            for binding in shape_nodes.textures:
+                self._update_texture(binding)
 
     def _remove_nodes(self, shape_nodes: ShapeNodes) -> None:
         for node in shape_nodes.nodes:
@@ -803,64 +796,58 @@ class RasterizerContext(BuildableMixin):
             self._set_nodes_views(shape, shape_nodes)
 
     def _bind_textures(
-        self,
-        shape_nodes: ShapeNodes,
-        textures: tuple[TextureVariants, ...],
-        primitives: list["pyrender.Primitive"],
+        self, shape_nodes: ShapeNodes, textures: tuple[TextureVariants, ...], primitives: list["pyrender.Primitive"]
     ) -> None:
-        """Bind a texture array to the primitives drawing a mesh per dynamic texture of the mesh, recorded in the nodes
-        of its shape, and draw the images each rendered environment shows."""
-        n_rendered = len(self.rendered_envs_idx)
         for texture in textures:
             # A dynamic texture is the base color of the material when the surface draws it as its color, and its
             # emissive texture otherwise (see 'surface_uvs_to_trimesh_visual').
-            is_diffuse = texture.map_type == TEXTURE_MAP_TYPE.DIFFUSE
-            is_base_color = texture.is_base_color
             images = texture.variants
             if texture.batched is not None:
                 images = torch.cat((images, texture.batched[self._rendered_envs_t]))
             # The arrays hold the images in the format of their map, which the shaders read from the type of the array
             texture_array = pyrender.Texture(
                 source=tensor_to_array(images),
-                source_channels="RGBA" if is_base_color else "RGB",
+                source_channels="RGBA" if texture.is_base_color else "RGB",
                 tex_type=GL_TEXTURE_2D_ARRAY,
-                data_format=GL_UNSIGNED_BYTE if is_diffuse else GL_HALF_FLOAT,
+                data_format=GL_UNSIGNED_BYTE if texture.map_type == TEXTURE_MAP_TYPE.DIFFUSE else GL_HALF_FLOAT,
             )
             for primitive in primitives:
-                if is_base_color:
+                if texture.is_base_color:
                     primitive.material.baseColorTexture = texture_array
                 else:
                     primitive.material.emissiveTexture = texture_array
                 if primitive.texture_layers is None:
-                    primitive.texture_layers = np.zeros((n_rendered, 2), dtype=np.float32)
-            column = 0 if is_base_color else 1
-            shape_nodes.textures.append(TextureBinding(texture, texture_array, primitives, column))
-        self._update_textures(shape_nodes, np.zeros(n_rendered, dtype=np.bool_))
+                    primitive.texture_layers = np.zeros((len(self.rendered_envs_idx), 2), dtype=np.float32)
+            binding = TextureBinding(texture, texture_array, primitives, texture.changelog.track(StateChange.VISUAL))
+            shape_nodes.textures.append(binding)
+            self._update_texture(binding)
 
-    def _update_textures(self, shape_nodes: ShapeNodes, is_written: np.ndarray) -> None:
-        """Set the texture array layer each rendered environment samples for the dynamic textures of a shape.
+    def _update_texture(self, binding: TextureBinding) -> None:
+        """Upload the batched images a write or a reset shows in the rendered environments, and set their layers.
 
-        'is_written' tells whether a change of appearance wrote each rendered environment, whose image of the batched
-        variant is uploaded again where the environment shows it. Showing a variant uploads nothing.
+        A texture just bound counts as written in every environment.
         """
-        for binding in shape_nodes.textures:
-            texture = binding.texture
-            n_variants = len(texture.variants)
-            variants_idx = tensor_to_array(texture.variants_idx[self._rendered_envs_t])
-            is_batched = variants_idx < 0
-            envs_layer = np.where(is_batched, n_variants + np.arange(len(variants_idx)), variants_idx)
-            batched_envs_pos = np.flatnonzero(is_batched & is_written)
-            if len(batched_envs_pos) > 0:
-                images = texture.batched[self._rendered_envs_t[torch.as_tensor(batched_envs_pos, device=gs.device)]]
-                binding.texture_array.set_layers(
-                    layers_idx=n_variants + batched_envs_pos, images=tensor_to_array(images)
-                )
-                self._scene.updated_textures.add(binding.texture_array)
-            for primitive in binding.primitives:
-                # A primitive standing in one environment samples its layer whichever row a pass reads
-                env_idx = primitive.env_idx
-                primitive.texture_layers[:, binding.column] = envs_layer if env_idx is None else envs_layer[env_idx]
-                self.jit.update_texture_layers(primitive)
+        record = binding.tracker.pull()
+        if record is None:
+            return
+        texture = binding.texture
+        n_variants = len(texture.variants)
+        variants_idx = texture.variants_idx[self._rendered_envs_t]
+        is_batched = variants_idx < 0
+        is_written = is_batched if record.envs is None else is_batched & record.envs[self._rendered_envs_t]
+        if is_written.any():
+            layers_idx = n_variants + torch.nonzero(is_written)[:, 0]
+            images = texture.batched[self._rendered_envs_t[is_written]]
+            binding.texture_array.set_layers(tensor_to_array(layers_idx), tensor_to_array(images))
+            self._scene.updated_textures.add(binding.texture_array)
+        envs_pos = torch.arange(len(variants_idx), device=gs.device)
+        envs_layer = tensor_to_array(torch.where(is_batched, n_variants + envs_pos, variants_idx))
+        column = 0 if texture.is_base_color else 1
+        for primitive in binding.primitives:
+            # A primitive standing in one environment samples its layer whichever row a pass reads
+            env_idx = primitive.env_idx
+            primitive.texture_layers[:, column] = envs_layer if env_idx is None else envs_layer[env_idx]
+            self.jit.update_texture_layers(primitive)
 
     def _set_nodes_views(self, shape: Shape, shape_nodes: ShapeNodes) -> None:
         # The debug views draw the markers and the parts of the shapes the debug read holds, the other views the parts

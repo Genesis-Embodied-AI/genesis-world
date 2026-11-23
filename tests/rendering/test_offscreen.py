@@ -17,7 +17,7 @@ from genesis.utils.video_encoder import VideoEncoder
 
 from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_VIEWER
 from ..utils.assertions import assert_allclose, assert_equal, assert_pixel_match, rgb_array_to_png_bytes
-from ..utils.misc import get_masks_mean_color
+from ..utils.misc import get_masks_mean_color, get_masks_shown_color
 from .conftest import RENDERER_TYPE
 
 
@@ -355,10 +355,9 @@ def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewe
     entities = (screen, label, lamp, reference)
     rgb, _, segmentation, _ = camera.render(rgb=True, segmentation=True)
     masks = segmentation[:, None] == np.array([entity.idx + 1 for entity in entities])[:, None, None]
-    assert (masks.sum(axis=(2, 3)) > 100).all()
 
-    # Each check names the color the screen, the label and the lamp show in each environment, whose lit channels exceed
-    # 150 and dark ones stay below 30. The lamp keeps the red of its dark red base under any emission.
+    # Each check names the color the screen, the label and the lamp show in each environment. The lamp keeps the red of
+    # its dark red base under any emission.
     RED, GREEN, BLUE, YELLOW, MAGENTA = (
         (1.0, 0.0, 0.0),
         (0.0, 1.0, 0.0),
@@ -369,9 +368,8 @@ def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewe
 
     # The variants at build: the first color of the screen, the asset texture of the label, which matches the reference
     # plane, and the magenta emission of the lamp.
+    assert_equal(get_masks_shown_color(rgb[:, None], masks)[:, [0, 2]], [[BLUE, MAGENTA]] * 2)
     colors = get_masks_mean_color(rgb[:, None], masks)
-    shown_rgb = np.array([[BLUE, MAGENTA]] * 2)
-    assert (colors[:, [0, 2]][shown_rgb > 0.0] > 150.0).all() and (colors[:, [0, 2]][shown_rgb == 0.0] < 30.0).all()
     assert_allclose(colors[:, 1], colors[:, 3], atol=5.0)
     lamp_initial = colors[:, 2]
     # A variant left to None shows the texture the asset gives, its opacity included
@@ -393,17 +391,14 @@ def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewe
     for frame in rgb_switched:
         assert rgb_array_to_png_bytes(frame) == png_snapshot
     scene.step()
-    shown_rgb = np.array([[BLUE, GREEN, GREEN], [RED, YELLOW, GREEN]])
     for rgb in (rgb_switched, tensor_to_array(sensor.read().rgb)):
+        assert_equal(get_masks_shown_color(rgb[:, None], masks)[:, :2], [[BLUE, GREEN], [RED, YELLOW]])
         colors = get_masks_mean_color(rgb[:, None], masks)
-        assert (colors[:, :2][shown_rgb[:, :2] > 0.0] > 150.0).all()
-        assert (colors[:, :2][shown_rgb[:, :2] == 0.0] < 30.0).all()
         assert (colors[:, 2, 1] > 150.0).all() and (colors[:, 2, 2] < 30.0).all() and (colors[:, 2, 0] > 40.0).all()
 
     # Integer pixels are clamped to the range of a channel, where 8-bit values would wrap around otherwise
     label_vgeom.set_texture(np.array([[[0, 300, -5]]]))
-    colors = get_masks_mean_color(camera.render(rgb=True)[0][:, None], masks)
-    assert (colors[:, 1, 1] > 150.0).all() and (colors[:, 1, [0, 2]] < 30.0).all()
+    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0][:, None], masks)[:, 1], [GREEN] * 2)
     # A color beyond the range of a channel is clamped the same way
     label_vgeom.set_texture(gs.textures.ColorTexture(color=(2.0, 0.0, 0.0)), envs_idx=[1])
     assert_equal(label_vgeom.get_texture(envs_idx=[1])[:, 4, 4], [[255, 0, 0, 255]])
@@ -457,15 +452,16 @@ def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewe
         gltf_camera.set_texture(variant=0)
     with pytest.raises(gs.GenesisException, match="envs_idx. out of range"):
         screen_vgeom.set_texture(variant=0, envs_idx=2)
+    scene_without_asset_emission = gs.Scene()
+    scene_without_asset_emission.add_entity(
+        morph=gs.morphs.Plane(plane_size=(1.0, 1.0)),
+        surface=gs.surfaces.Default(emissive_texture=gs.textures.DynamicTexture(resolution=(4, 4))),
+    )
     with pytest.raises(gs.GenesisException, match="this asset gives none"):
-        scene_without_asset_emission = gs.Scene()
-        scene_without_asset_emission.add_entity(
-            morph=gs.morphs.Plane(plane_size=(1.0, 1.0)),
-            surface=gs.surfaces.Default(emissive_texture=gs.textures.DynamicTexture(resolution=(4, 4))),
-        )
         scene_without_asset_emission.build()
+    scene_without_uvs = gs.Scene()
     with pytest.raises(gs.GenesisException, match="texture coordinates"):
-        gs.Scene().add_entity(
+        scene_without_uvs.add_entity(
             morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)),
             surface=gs.surfaces.Emission(emissive_texture=gs.textures.DynamicTexture(resolution=(4, 4))),
         )
@@ -473,13 +469,14 @@ def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewe
     # A reset of one environment shows the first variants there again, the asset texture of the plane, and a reset of
     # the scene does so in every environment.
     scene.reset(envs_idx=[1])
-    colors = get_masks_mean_color(camera.render(rgb=True)[0][:, None], masks)
-    assert colors[0, 1, 1] > 150.0 and (colors[0, 1, [0, 2]] < 30.0).all()
+    rgb = camera.render(rgb=True)[0]
+    assert_equal(get_masks_shown_color(rgb[:, None], masks)[0, 1], GREEN)
+    colors = get_masks_mean_color(rgb[:, None], masks)
     assert_allclose(colors[1, 1], colors[1, 3], atol=5.0)
     scene.reset()
-    colors = get_masks_mean_color(camera.render(rgb=True)[0][:, None], masks)
-    shown_rgb = np.array([BLUE] * 2)
-    assert (colors[:, 0][shown_rgb > 0.0] > 150.0).all() and (colors[:, 0][shown_rgb == 0.0] < 30.0).all()
+    rgb = camera.render(rgb=True)[0]
+    assert_equal(get_masks_shown_color(rgb[:, None], masks)[:, 0], [BLUE] * 2)
+    colors = get_masks_mean_color(rgb[:, None], masks)
     assert_allclose(colors[:, 1], colors[:, 3], atol=5.0)
     assert_allclose(colors[:, 2], lamp_initial, atol=5.0)
 
@@ -488,16 +485,14 @@ def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewe
     label_vgeom.set_texture(np.array([[RED]]), envs_idx=envs_idx)
     envs_idx[0] = 1
     label_vgeom.set_texture(np.array([[BLUE]]), envs_idx=envs_idx)
-    colors = get_masks_mean_color(camera.render(rgb=True)[0][:, None], masks)
-    shown_rgb = np.array([RED, BLUE])
-    assert (colors[:, 1][shown_rgb > 0.0] > 150.0).all() and (colors[:, 1][shown_rgb == 0.0] < 30.0).all()
+    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0][:, None], masks)[:, 1], [RED, BLUE])
 
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer):
-    # Drawing every environment in one pass needs 'split_envs' off, which 'test_dynamic_texture' needs on for the
-    # images of each environment, and the option holds for a whole scene.
+def test_dynamic_texture_side_by_side_envs(n_envs, translucent_box_obj, show_viewer):
+    # Drawing every environment in one pass needs 'split_envs' off, while the images of each environment apart need it
+    # on, and the option holds for a whole scene.
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, 0.75, 4.0),
@@ -580,7 +575,7 @@ def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer
     )
     block = scene.add_entity(
         morph=gs.morphs.Mesh(
-            file=textured_box_glb,
+            file=translucent_box_obj,
             pos=(5.0, 0.0, 0.3),
         ),
         material=gs.materials.FEM.Elastic(),
@@ -588,7 +583,7 @@ def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer
     )
     cube = scene.add_entity(
         morph=gs.morphs.Mesh(
-            file=textured_box_glb,
+            file=translucent_box_obj,
             pos=(6.0, 0.0, 0.3),
         ),
         material=gs.materials.PBD.Elastic(),
@@ -616,10 +611,8 @@ def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer
     masks = (segmentation == np.array([entity.idx + 1 for entity in (screen, tile, lamp)])[:, None, None, None]) & (
         envs_rows_mask[None, :, :, None]
     )
-    assert (masks.sum(axis=(2, 3)) > 100).all()
 
-    # Each check names the color an entity shows in each environment, whose lit channels exceed 150 and dark ones stay
-    # below 30.
+    # Each check names the color an entity shows in each environment
     RED, GREEN, BLUE, YELLOW, MAGENTA = (
         (1.0, 0.0, 0.0),
         (0.0, 1.0, 0.0),
@@ -628,15 +621,13 @@ def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer
         (1.0, 0.0, 1.0),
     )
 
-    # The batched variant shows its own image in each environment, as the color of the surface, which the emission stands
-    # for over a black base color. Each image is one pixel wide, so its rows are no multiple of 4 bytes.
+    # The batched variant shows its own image in each environment, as the color of the surface, which the emission
+    # stands for over a black base color. Each image is one pixel wide, so its rows are no multiple of 4 bytes.
     tile_rgb = np.array([GREEN, MAGENTA])[:n_envs_]
     lamp_rgb = np.array([GREEN, BLUE])[:n_envs_]
     tile.set_texture(tile_rgb[:, None, None])
     lamp.set_texture(lamp_rgb[:, None, None])
-    colors = get_masks_mean_color(camera.render(rgb=True)[0], masks)
-    assert (colors[1][tile_rgb > 0.0] > 150.0).all() and (colors[1][tile_rgb == 0.0] < 30.0).all()
-    assert (colors[2][lamp_rgb > 0.0] > 150.0).all() and (colors[2][lamp_rgb == 0.0] < 30.0).all()
+    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[1:], [tile_rgb, lamp_rgb])
 
     # A variant per environment, then an image per environment, then a variant beside an image, then an image written
     # in the last environment alone, which leaves the image of the others as it was. A scene without parallel
@@ -647,25 +638,17 @@ def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer
     vgeom.set_texture(variant=[0, 1][:n_envs_])
     variants_color = np.array([[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]])
     assert_equal(vgeom.get_texture()[..., 0, 0, :], variants_color if n_envs > 0 else variants_color[0])
-    colors = get_masks_mean_color(camera.render(rgb=True)[0], masks)
-    screen_rgb = np.array([RED, BLUE])[:n_envs_]
-    assert (colors[0][screen_rgb > 0.0] > 150.0).all() and (colors[0][screen_rgb == 0.0] < 30.0).all()
+    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[0], [RED, BLUE][:n_envs_])
     vgeom.set_texture(np.array([GREEN, YELLOW])[:n_envs_, None, None])
-    colors = get_masks_mean_color(camera.render(rgb=True)[0], masks)
-    screen_rgb = np.array([GREEN, YELLOW])[:n_envs_]
-    assert (colors[0][screen_rgb > 0.0] > 150.0).all() and (colors[0][screen_rgb == 0.0] < 30.0).all()
+    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[0], [GREEN, YELLOW][:n_envs_])
     last_env_idx = [n_envs_ - 1] if n_envs > 0 else None
     if n_envs == 0:
         with pytest.raises(gs.GenesisException, match="non-parallelized"):
             vgeom.set_texture(variant=0, envs_idx=[0])
     vgeom.set_texture(envs_idx=last_env_idx, variant=0)
-    colors = get_masks_mean_color(camera.render(rgb=True)[0], masks)
-    screen_rgb = np.array([GREEN, RED] if n_envs > 0 else [RED])
-    assert (colors[0][screen_rgb > 0.0] > 150.0).all() and (colors[0][screen_rgb == 0.0] < 30.0).all()
+    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[0], [GREEN, RED] if n_envs > 0 else [RED])
     vgeom.set_texture(np.array([[BLUE]]), envs_idx=last_env_idx)
-    colors = get_masks_mean_color(camera.render(rgb=True)[0], masks)
-    screen_rgb = np.array([GREEN, BLUE] if n_envs > 0 else [BLUE])
-    assert (colors[0][screen_rgb > 0.0] > 150.0).all() and (colors[0][screen_rgb == 0.0] < 30.0).all()
+    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[0], [GREEN, BLUE] if n_envs > 0 else [BLUE])
 
     # The deformable entities switch their variant per environment as a rigid one does
     block.set_texture(variant=[1, 0][:n_envs_])
@@ -674,12 +657,8 @@ def test_dynamic_texture_side_by_side_envs(n_envs, textured_box_glb, show_viewer
     deformable_masks = (segmentation == np.array([block.idx + 1, cube.idx + 1])[:, None, None, None]) & (
         envs_rows_mask[None, :, :, None]
     )
-    assert (deformable_masks.sum(axis=(2, 3)) > 100).all()
-    colors = get_masks_mean_color(deformable_camera.render(rgb=True)[0], deformable_masks)
-    deformable_rgb = np.array([BLUE, RED])[:n_envs_]
-    for deformable_colors in colors:
-        assert (deformable_colors[deformable_rgb > 0.0] > 150.0).all()
-        assert (deformable_colors[deformable_rgb == 0.0] < 30.0).all()
+    deformable_rgb = get_masks_shown_color(deformable_camera.render(rgb=True)[0], deformable_masks)
+    assert_equal(deformable_rgb, [[BLUE, RED][:n_envs_]] * 2)
     # The visual geom of the FEM entity reads the variant of each environment as the entity set it
     deformable_color = variants_color[[1, 0][:n_envs_]] if n_envs > 0 else variants_color[1]
     assert_equal(block.vgeoms[0].get_texture()[..., 0, 0, :], deformable_color)

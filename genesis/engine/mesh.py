@@ -608,8 +608,6 @@ class Mesh(RBC, serialization.SerializationMixin):
     ):
         """
         Create a genesis.Mesh from mesh attributes including vertices, faces, and normals.
-
-        'asset_textures' are the textures the asset gives the maps of the mesh (see 'Mesh').
         """
         if surface is None:
             surface = gs.surfaces.Default()
@@ -688,11 +686,9 @@ class Mesh(RBC, serialization.SerializationMixin):
 
         Every other field takes the value of the given surface, its defaults included, so a surface of another type
         renders as that type does. The variants of a dynamic texture of the given surface left to None show the
-        textures the asset gives the mesh. A mesh being made takes the surface as given, and keeps the visual of its
-        asset.
+        textures the asset gives the mesh. A mesh being made takes the surface as given, and keeps its asset visual.
         """
-        is_replaced = self._surface is not None
-        if not is_replaced:
+        if self._surface is None:
             # The meshes of an asset share its surface, so that the images of its textures are held once
             self._surface = surface
         else:
@@ -712,6 +708,7 @@ class Mesh(RBC, serialization.SerializationMixin):
                 ):
                     fields[name] = value
             self._surface = type(surface)(**fields).model_copy(update=shortcuts)
+            self.update_trimesh_visual()
         if self._uvs is None and any(
             isinstance(texture, gs.textures.DynamicTexture)
             for texture in (self._surface.texture, self._surface.emission)
@@ -724,8 +721,6 @@ class Mesh(RBC, serialization.SerializationMixin):
                 )
             else:
                 gs.logger.warning("Texture given but asset missing uv info (or failed to load).")
-        if is_replaced:
-            self.update_trimesh_visual()
 
     def update_trimesh_visual(self):
         """
@@ -873,11 +868,8 @@ class Mesh(RBC, serialization.SerializationMixin):
         A mesh is written this way rather than through its fields because construction convexifies, decimates and
         rescales it: what a file carries is the geometry as it now stands, so reading one back processes nothing.
         """
-        # The textures of the asset are written for a dynamic texture alone, which shows them whatever its variants
         asset_textures = None
-        if self._asset_textures is not None and any(
-            isinstance(texture, gs.textures.DynamicTexture) for texture in (self.surface.texture, self.surface.emission)
-        ):
+        if self._asset_textures is not None:
             asset_textures = [exporting.value(texture, Texture | None) for texture in self._asset_textures]
         return {
             "geometry": exporting.value(self.trimesh, trimesh.Trimesh),
@@ -901,9 +893,8 @@ class Mesh(RBC, serialization.SerializationMixin):
             uvs=None if raw["uvs"] is None else loading.array(raw["uvs"]),
             # The metadata says what was already done to the geometry, so it is handed back rather than acted on again
             metadata=loading.value(raw["metadata"], Any),
-            # A file written before meshes carried the textures of their asset holds none
             asset_textures=None
-            if raw.get("asset_textures") is None
+            if raw["asset_textures"] is None
             else mu.AssetTextures(*(loading.value(texture, Texture | None) for texture in raw["asset_textures"])),
         )
         # Construction derives the visual from the surface and the uvs unless the mesh states vertex colours, which are

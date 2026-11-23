@@ -1354,15 +1354,15 @@ class KinematicSolver(Solver):
 class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
     """The visual meshes of the visual geoms of a kinematic or rigid solver, posed by their link, and its link frames.
 
-    The meshes of the visual geoms whose surface shows a dynamic texture carry it (see DynamicTextures).
-
     'set_vverts', 'get_vverts', 'get_vgeoms_pose' and 'add_propellers_rpm' are the interface of the visual geoms and the
     drones of the solver to the appearance the scoped context holds.
     """
 
     def build(self) -> None:
         solver = self.owner
-        self.dynamic_textures = DynamicTextures([(vgeom.vmesh, vgeom.entity) for vgeom in solver.vgeoms], solver.n_envs)
+        self.dynamic_textures = DynamicTextures(
+            [(vgeom.vmesh, vgeom.entity, vgeom) for vgeom in solver.vgeoms], solver.n_envs
+        )
         vgeoms_invalidated_by = {solver: (StateChange.GEOMETRY,)}
         # The visual geoms take a slot each, those posed by their link first, so that their poses form one contiguous
         # block, the visual geoms of the entities a deprecated 'vis_mode' shows in their debug representation after the
@@ -1642,7 +1642,7 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
         self._shapes = tuple(shapes)
 
     def reset(self, envs_idx: torch.Tensor) -> None:
-        """Show the first variant of the dynamic textures and DynamicVertices again, and stop the propellers."""
+        """Show the first variant of the DynamicVertices of every visual geom again, and stop the propellers."""
         super().reset(envs_idx)
         if self._n_posed_vgeoms < len(self._slots_vgeom):
             kernel_reset_vverts_variant(envs_idx, self._data.dynamic_vverts)
@@ -1731,9 +1731,8 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
             gs.raise_exception("A scene without parallel environments takes no 'envs_idx'.")
         dynamic_vverts = self._data.dynamic_vverts
         i_dg = int(self._vgeoms_slot[vgeom.idx]) - self._n_posed_vgeoms
-        variants = vgeom.desc.dynamic_vertices.variants
         if vverts is None:
-            variants_idx = get_variants_idx(variants, variant)
+            variants_idx = get_variants_idx(vgeom.desc.dynamic_vertices.variants, variant)
             if gs.use_zerocopy:
                 variant_view = qd_to_torch(dynamic_vverts.vgeoms_variant_idx, transpose=True, copy=False)
                 mask = (0, i_dg) if solver.n_envs == 0 else indices_to_mask(envs_idx, i_dg)

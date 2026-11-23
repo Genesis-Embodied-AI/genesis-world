@@ -148,7 +148,7 @@ class Renderer(object):
         if is_first_pass:
             self.jit.update_context(scene, flags)
             for texture in scene.updated_textures:
-                texture.upload_source()
+                texture.upload_layers()
             scene.updated_textures.clear()
             self.jit.update(scene)
             all_ready = self.jit.set_lighting(scene, is_grid)

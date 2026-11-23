@@ -1704,7 +1704,9 @@ class Scene(BuildableMixin, RBC):
         # scene was authored from.
         omitted_kinds.update(
             f"'{entity.name}' {kind.value}"
-            for entity, kinds in self.sim.render_context.get_entities_written().items()
+            for solver in self.sim.solvers
+            if solver.render_context is not None
+            for entity, kinds in solver.render_context.entities_written.items()
             for kind in RuntimeAppearance
             if kind in kinds
         )

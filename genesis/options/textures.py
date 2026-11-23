@@ -310,9 +310,6 @@ class BatchTexture(StaticTexture):
     """
     A batch of textures for batch rendering.
 
-    This class is deprecated, and will give way to ``gs.textures.DynamicTexture`` with one variant per environment once
-    the batch renderer draws it.
-
     Parameters
     ----------
     textures : list[Texture | None]

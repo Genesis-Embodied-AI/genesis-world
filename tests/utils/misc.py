@@ -23,3 +23,13 @@ def get_masks_mean_color(rgb, masks):
     """
     masks_weight = masks / masks.sum(axis=(-2, -1), keepdims=True)
     return np.sum(masks_weight[..., None] * rgb, axis=(-3, -2))
+
+
+def get_masks_shown_color(rgb, masks):
+    """Return the color an image shows over each of some boolean masks, each channel 1 when lit and 0 when dark.
+
+    A channel is lit when its mean exceeds 150 and dark when it stays below 30. A channel in between is NaN, which
+    matches no color.
+    """
+    colors = get_masks_mean_color(rgb, masks)
+    return np.select((colors > 150.0, colors < 30.0), (1.0, 0.0), np.nan)

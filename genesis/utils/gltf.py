@@ -393,14 +393,12 @@ def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
 
         for primitive in mesh_glb.primitives:
             if primitive.material is not None:
-                material, uv_used, material_name, asset_textures = materials.get(
-                    primitive.material, (None, 0, "", None)
-                )
-                if material is None:
+                if primitive.material not in materials:
                     material_images = materials_images.setdefault(primitive.material, {})
-                    material, uv_used, material_name, asset_textures = materials.setdefault(
-                        primitive.material, parse_glb_material(glb, primitive.material, surface, material_images)
+                    materials[primitive.material] = parse_glb_material(
+                        glb, primitive.material, surface, material_images
                     )
+                material, uv_used, material_name, asset_textures = materials[primitive.material]
             else:
                 material, uv_used, material_name, asset_textures = surface.model_copy(), 0, "", None
 

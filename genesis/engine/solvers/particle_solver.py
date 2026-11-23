@@ -244,7 +244,7 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
     The structure of the material of an entity decides how it is drawn (see 'Material.structure'): a deformable or
     tearable entity skins a visual mesh on its particles, an amorphous one is drawn as the surface reconstructed from
     them. A tearable entity whose skinned mesh tore is drawn as a reconstructed surface in that environment until the
-    next reset. The skinned meshes whose surface shows a dynamic texture carry it (see DynamicTextures).
+    next reset.
     """
 
     debug_vis_modes = gs.entities.MPM._debug_vis_modes
@@ -260,7 +260,7 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
             zip(self._skinned_entities, (np.cumsum(entities_n_vverts) - entities_n_vverts).tolist())
         )
         self.dynamic_textures = DynamicTextures(
-            [(entity.vmesh, entity) for entity in self._skinned_entities], solver.n_envs
+            [(entity.vmesh, entity, entity) for entity in self._skinned_entities], solver.n_envs
         )
         self._tearable_entities = [
             entity for entity in self._skinned_entities if entity.material.structure == STRUCTURE.TEARABLE

@@ -1301,9 +1301,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
     """The visual meshes of the FEM entities, the surface of their tetrahedra, and the markers of their constraints.
 
-    Each vertex of a visual mesh stands at the position of the simulated vertex it stands for. The visual meshes whose
-    surface shows a dynamic texture carry it (see DynamicTextures). The surface of the tetrahedra of an entity is its
-    debug representation ('tet' debug_vis_mode).
+    Each vertex of a visual mesh stands at the position of the simulated vertex it stands for. The surface of the
+    tetrahedra of an entity is its debug representation ('tet' debug_vis_mode).
     """
 
     debug_vis_modes = gs.entities.FEM._debug_vis_modes
@@ -1311,7 +1310,7 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
     def build(self) -> None:
         solver = self.owner
         self.dynamic_textures = DynamicTextures(
-            [(vgeom.vmesh, entity) for entity in solver.entities for vgeom in entity.vgeoms], solver.n_envs
+            [(vgeom.vmesh, entity, vgeom) for entity in solver.entities for vgeom in entity.vgeoms], solver.n_envs
         )
         # Every mesh views the simulated vertices of the whole solver, so that a renderer reads them once for all
         verts_pos = ArrayRef(solver.fem_state.vertices.pos)

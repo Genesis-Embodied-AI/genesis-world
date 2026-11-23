@@ -301,9 +301,6 @@ class UsdContext:
     def apply_surface(self, geom_prim: Usd.Prim, surface: gs.surfaces.Surface):
         """
         Apply material properties from USD to a Genesis surface object.
-
-        The textures the material gives the maps a dynamic texture may fill come along, for the mesh to resolve the
-        variants left to None of the dynamic textures of the surface (see 'AssetTextures').
         """
         geom_path = str(geom_prim.GetPath())
         applied_surface = surface.model_copy()

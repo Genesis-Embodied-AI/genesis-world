@@ -182,9 +182,7 @@ class Spec(Options, Generic[EntityT]):
         ):
             gs.raise_exception(
                 f"gs.entities.{type(self).__name__} cannot show a DynamicTexture, since it is drawn as a surface "
-                "reconstructed from its particles, always or once torn, which holds no texture coordinates. Only the "
-                "entities of a rigid or deformable structure (gs.entities.Rigid, gs.entities.Kinematic, "
-                "gs.entities.FEM, and gs.entities.PBD of cloth or elastic material) show one."
+                "reconstructed from its particles, always or once torn, which holds no texture coordinates."
             )
         # The deprecated 'vis_mode' names the representation the material decides, 'visual' for a mesh and 'recon' for a
         # reconstructed surface, or a debug representation of the entity, which then shows it in every view.

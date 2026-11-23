@@ -193,9 +193,8 @@ class Surface(Options):
                     f"surface draws its color or its emission, got '{name}' on {type(self).__name__}."
                 )
         # A dynamic texture fills one map, both maps being drawn from it otherwise
-        if isinstance(fields.get("diffuse_texture"), DynamicTexture) and fields.get("diffuse_texture") is fields.get(
-            "emissive_texture"
-        ):
+        diffuse_texture = fields.get("diffuse_texture")
+        if isinstance(diffuse_texture, DynamicTexture) and diffuse_texture is fields.get("emissive_texture"):
             gs.raise_exception("A dynamic texture fills one map of a surface. Declare one for each map instead.")
         # The image of a dynamic texture drawn as the color, the emission standing for it over a black base color, holds
         # its own opacity.
@@ -226,12 +225,6 @@ class Surface(Options):
         return False
 
     def get_rgba(self, batch: bool = False) -> BatchTexture | Texture:
-        """Return the color and opacity of the surface as one RGBA texture, the one the renderers draw.
-
-        A batch texture gives its first entry, or a ``gs.textures.BatchTexture`` of its entries under 'batch', as the
-        batch renderer draws them. A dynamic texture drawn as the color is returned as is, its images holding their own
-        opacity.
-        """
         return _make_rgba(_resolve_albedo(self.texture, self.emission), None, batch)
 
     def update_texture(

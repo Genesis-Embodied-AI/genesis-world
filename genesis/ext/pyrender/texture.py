@@ -27,8 +27,7 @@ class Texture(object):
     source : (h,w,c) uint8 or (h,w,c) float or :class:`PIL.Image.Image`
         The image used by this texture. If None, the texture is created
         empty and width and height must be specified. A texture array takes
-        its first (n,h,w,c) uint8 or float16 layers, the others being written
-        by 'set_layers'.
+        (n,h,w,c) uint8 or float16 layers, which 'set_layers' rewrites.
     source_channels : str
         Either `D`, `R`, `RG`, `GB`, `RGB`, or `RGBA`. Indicates the
         channels to extract from `source`. Any missing channels will be filled
@@ -157,7 +156,7 @@ class Texture(object):
         if self._is_transparent is None:
             self._is_transparent = False
             if self.source_channels == "RGBA" and self.source is not None:
-                if np.any(self.source[..., 3] < cutoff):
+                if np.any(self.source[:, :, 3] < cutoff):
                     self._is_transparent = True
         return self._is_transparent
 
@@ -172,7 +171,6 @@ class Texture(object):
 
     @property
     def _gl_format(self) -> int:
-        """The OpenGL format of the channels of the texture."""
         if self.source_channels == "R":
             return GL_RED
         if self.source_channels in ("RG", "GB"):
@@ -184,15 +182,12 @@ class Texture(object):
         return GL_DEPTH_COMPONENT
 
     def set_layers(self, layers_idx: np.ndarray, images: np.ndarray) -> None:
-        """Write (len(layers_idx),h,w,c) images into layers of a texture array, uploaded by 'upload_source'."""
+        """Write (len(layers_idx),h,w,c) images into layers of a texture array, uploaded by 'upload_layers'."""
         for layer, image in zip(layers_idx.tolist(), images[..., : len(self.source_channels)]):
             self._pending_layers[layer] = np.ascontiguousarray(image[::-1])
 
-    def upload_source(self) -> None:
-        """Upload the layers of a texture array written since its last upload, then drop them from the host.
-
-        A texture not yet in the OpenGL context uploads them once it is added, so this does nothing then.
-        """
+    def upload_layers(self) -> None:
+        """Upload the layers of a texture array written since its last upload, then drop them from the host."""
         if self._texid is None:
             return
         glBindTexture(self.tex_type, self._texid)
@@ -277,7 +272,7 @@ class Texture(object):
         glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_S, self.sampler.wrapS)
         glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_T, self.sampler.wrapT)
         border_color = np.full((4,), fill_value=255, dtype=np.uint8)
-        if fmt == GL_DEPTH_COMPONENT or self.data_format in (GL_FLOAT, GL_HALF_FLOAT):
+        if fmt == GL_DEPTH_COMPONENT or self.data_format == GL_FLOAT:
             border_color = np.ones((4,), dtype=np.float32)
         glTexParameterfv(self.tex_type, GL_TEXTURE_BORDER_COLOR, border_color)
 
@@ -300,8 +295,6 @@ class Texture(object):
 
         # Unbind texture
         glBindTexture(self.tex_type, 0)
-        if is_array:
-            self.upload_source()
 
     def _remove_from_context(self):
         if self._texid is not None:
