@@ -13,16 +13,19 @@ on:
     branches:
       - main
   # Repositories that Genesis depends on validate their changes by calling this workflow from one started by the
-  # completion of a pull request's workflow. A called workflow sees the event, runners and secrets of its caller, so
-  # 'workflow_run' below always means a call, which the setup job vets. The benchmark upload stays gated on the default
-  # branch of this repository, which keeps the results of a caller out of the history compared against.
+  # completion of a pull request's workflow, or by hand. A called workflow sees the event, runners and secrets of its
+  # caller, so 'workflow_run' and 'workflow_dispatch' below always mean a call, which the setup job vets. The benchmark
+  # upload stays gated on the default branch of this repository, which keeps the results of a caller out of the history
+  # compared against.
   workflow_call:
     inputs:
       quadrants_run_id:
         description: Run whose wheel artifacts hold the Quadrants to install in place of the release Genesis pins.
         type: number
       genesis_sha:
-        description: Full Genesis commit SHA from main history for external benchmark runs.
+        description: >-
+          Full SHA of a commit of the default branch of Genesis to benchmark in place of the commit of this file. The
+          unit tests always run the commit of this file.
         type: string
       unit_tests_markexpr:
         description: Marker expression selecting the unit tests to run, all of them by default.
@@ -32,7 +35,7 @@ on:
         type: string
     outputs:
       is_skipped:
-        description: Whether the pull request was closed before its run, the tests and benchmarks being skipped.
+        description: Whether the pull request was closed unmerged before its run, its tests and benchmarks skipped.
         value: ${{ jobs.setup.outputs.IS_SKIPPED }}
     secrets:
       HF_TOKEN:
@@ -76,7 +79,7 @@ jobs:
 
     outputs:
       GENESIS_IMAGE_VER: ${{ steps.resolve.outputs.ver }}
-      IS_SKIPPED: ${{ steps.check.outputs.is_open == 'false' }}
+      IS_SKIPPED: ${{ steps.check.outputs.is_skipped == 'true' }}
 
     steps:
       - name: Checkout code
@@ -87,9 +90,17 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
 
-      # Only Genesis commits from main history may be selected for execution on the self-hosted runners.
-      - name: Validate selected Genesis commit
-        if: inputs.genesis_sha != ''
+      # Another repository is served for the completion of the workflow of any of its pull requests, whatever their base
+      # branch, a stacked pull request included. The event of a pull request from a fork lists no pull request, so the
+      # pull request is asked of the API. A pull request closed without merging while its wheel was building has nothing
+      # left to validate: the check passes without an image version, the runner jobs, which follow through 'needs', are
+      # skipped, and the caller is told so. A merged pull request is tested, since its wheel holds code now on the
+      # default branch of its repository. A call started by hand is served too, since starting it takes write access to
+      # the calling repository. A commit of Genesis selected for the benchmarks must be on its default branch, so that
+      # its measurements describe a reviewed revision that other calls can compare against.
+      - name: Check the calling workflow
+        id: check
+        if: github.repository != job.workflow_repository
         uses: actions/github-script@v8
         env:
           GENESIS_SHA: ${{ inputs.genesis_sha }}
@@ -97,31 +108,20 @@ jobs:
         with:
           script: |
             const sha = process.env.GENESIS_SHA;
-            if (!/^[0-9a-f]{40}$/i.test(sha)) {
-              throw new Error('genesis_sha must be a full commit SHA.');
+            if (sha) {
+              if (!/^[0-9a-f]{40}$/i.test(sha)) {
+                throw new Error(`Input 'genesis_sha' must be a full commit SHA, where '${sha}' was given.`);
+              }
+              const [owner, repo] = process.env.WORKFLOW_REPOSITORY.split('/');
+              const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
+                owner, repo, basehead: `${sha}...main`, per_page: 1,
+              });
+              if (!['ahead', 'identical'].includes(comparison.status)) {
+                throw new Error(`Commit ${sha} is missing from the history of main (${comparison.status}).`);
+              }
             }
-            const [owner, repo] = process.env.WORKFLOW_REPOSITORY.split('/');
-            const { data } = await github.rest.repos.compareCommitsWithBasehead({
-              owner, repo, basehead: `${sha}...main`,
-            });
-            if (!['ahead', 'identical'].includes(data.status)) {
-              throw new Error('genesis_sha must belong to Genesis main history.');
-            }
-
-      # Another repository is served for the completion of the workflow of any of its pull requests, whatever their base
-      # branch, a stacked pull request included. The event of a pull request from a fork lists no pull request, so the
-      # pull request is asked of the API. A pull request closed without merging while its wheel was building has nothing
-      # left to validate: the check passes without an image version, the runner jobs, which follow through 'needs', are
-      # skipped, and the caller is told so. Merged pull requests still run so their measurements can become a main baseline.
-      # Manual workflow calls are also accepted.
-      - name: Check the calling workflow
-        id: check
-        if: github.repository != job.workflow_repository
-        uses: actions/github-script@v8
-        with:
-          script: |
             if (context.eventName === 'workflow_dispatch') {
-              core.setOutput('is_open', true);
+              core.setOutput('is_skipped', false);
               return;
             }
             const run = context.payload.workflow_run;
@@ -135,23 +135,23 @@ jobs:
               state: 'all',
               head: `${run.head_repository.owner.login}:${run.head_branch}`,
             });
-            // Pull requests of one branch toward distinct bases share its commit. An open one among them asks for the
-            // commit to be tested, whichever of them started the run.
+            // Pull requests of one branch toward distinct bases share its commit. An open or merged one among them asks
+            // for the commit to be tested, whichever of them started the run.
             const pulls = data.filter((pull) => pull.head.sha === run.head_sha);
-            const pull = pulls.find((pull) => pull.state === 'open') ?? pulls[0];
-            if (!pull) {
+            if (pulls.length === 0) {
               throw new Error(`Commit ${run.head_sha} heads no pull request of ${context.repo.repo}.`);
             }
-            if (pull.state !== 'open' && !pull.merged_at) {
-              core.notice(`Pull request #${pull.number} closed without merging. Its wheel is left untested.`);
+            const isSkipped = !pulls.some((pull) => pull.state === 'open' || pull.merged_at);
+            if (isSkipped) {
+              core.notice(`Pull request #${pulls[0].number} is closed unmerged, leaving ${run.head_sha} untested.`);
             }
-            core.setOutput('is_open', pull.state === 'open' || Boolean(pull.merged_at));
+            core.setOutput('is_skipped', isSkipped);
 
       # The pin lives in the tree rather than in this file so that a pull request bumping it is validated by its own
       # run instead of only taking effect once merged.
       - name: Resolve the pinned container image version
         id: resolve
-        if: steps.check.outputs.is_open != 'false'
+        if: steps.check.outputs.is_skipped != 'true'
         run: |
           if [[ ! -f .github/genesis_image_ver ]] ; then
             echo "::error::'.github/genesis_image_ver' is missing. Rebase onto the default branch."
@@ -172,7 +172,7 @@ jobs:
       # 'GENESIS_CI_APP_PRIVATE_KEY', and passes its secrets on through 'secrets: inherit'.
       - name: Create a token of the GitHub App
         id: token
-        if: github.repository != job.workflow_repository && steps.check.outputs.is_open != 'false'
+        if: github.repository != job.workflow_repository && steps.check.outputs.is_skipped != 'true'
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ vars.GENESIS_CI_APP_ID }}
@@ -180,7 +180,7 @@ jobs:
           owner: ${{ github.repository_owner }}
 
       - name: Wait for the runner shared by all calls
-        if: github.repository != job.workflow_repository && steps.check.outputs.is_open != 'false'
+        if: github.repository != job.workflow_repository && steps.check.outputs.is_skipped != 'true'
         uses: actions/github-script@v8
         env:
           RUNNER_GROUP: genesis-world
@@ -267,7 +267,7 @@ jobs:
       GENESIS_IMAGE_VER: ${{ needs.setup.outputs.GENESIS_IMAGE_VER }}
       GS_ENABLE_NDARRAY: ${{ matrix.GS_ENABLE_NDARRAY }}
       # A push to the default branch was validated by its pull request already.
-      HAS_UNIT_TESTS: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_run' }}
+      HAS_UNIT_TESTS: ${{ github.event_name != 'push' }}
 
     steps:
       - name: Checkout code
@@ -395,14 +395,13 @@ jobs:
     env:
       # Note that secrets are not passed to workflows that are triggered by a pull request from a fork
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      GENESIS_IMAGE_VER: ${{ needs.setup.outputs.GENESIS_IMAGE_VER }}
       GS_ENABLE_NDARRAY: ${{ matrix.GS_ENABLE_NDARRAY }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # See the setup job.
+          # See the setup job and the input 'genesis_sha'.
           repository: ${{ job.workflow_repository }}
           ref: ${{ inputs.genesis_sha || job.workflow_sha }}
           # Checkout full history is required to shallow cloning while mark HEAD as "grafted". This breaks remote
@@ -431,6 +430,10 @@ jobs:
 
       - name: Spawn Slurm job
         run: |
+          # The commit under benchmark runs in the container image it pins, which may differ from the one of the unit
+          # tests, its build script being written for that image. The run of that commit validated the pin already.
+          GENESIS_IMAGE_VER=$(tr -d '[:space:]' < .github/genesis_image_ver)
+
           SLURM_JOB_NAME="$(uuidgen)_$(date +%Y%m%d_%H%M%S)"
           CONTAINER_NAME="${SLURM_JOB_NAME}"
           SRUN_CONTAINER_OPTS="\
