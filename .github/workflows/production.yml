@@ -87,8 +87,12 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
 
-      # A merged PR may still be waiting for its wheel or benchmarks. Its measurements can become a main baseline,
-      # so only PRs closed without merging are skipped. Manual bootstrap validates its main wheel separately.
+      # Another repository is served for the completion of the workflow of any of its pull requests, whatever their base
+      # branch, a stacked pull request included. The event of a pull request from a fork lists no pull request, so the
+      # pull request is asked of the API. A pull request closed without merging while its wheel was building has nothing
+      # left to validate: the check passes without an image version, the runner jobs, which follow through 'needs', are
+      # skipped, and the caller is told so. Merged pull requests still run so their measurements can become a main baseline.
+      # Manual bootstrap calls are also accepted; the caller validates their main wheel.
       - name: Check the calling workflow
         id: check
         if: github.repository != job.workflow_repository
