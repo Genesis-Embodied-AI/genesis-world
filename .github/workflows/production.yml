@@ -91,36 +91,44 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
 
+      # A commit of Genesis selected for the benchmarks must be on its default branch, so that its measurements describe
+      # a reviewed revision that other calls can compare against. It is checked against the repository of Genesis by
+      # name, since a call may run a copy of this file from a fork, and before any step uses it, since it goes to git
+      # commands and must therefore be a bare commit SHA.
+      - name: Check the selected commit of Genesis
+        if: inputs.genesis_sha != ''
+        uses: actions/github-script@v8
+        env:
+          GENESIS_SHA: ${{ inputs.genesis_sha }}
+        with:
+          script: |
+            const sha = process.env.GENESIS_SHA;
+            if (!/^[0-9a-f]{40}$/.test(sha)) {
+              throw new Error("Input 'genesis_sha' must be a full commit SHA in lowercase hexadecimal.");
+            }
+            const { data } = await github.rest.repos.compareCommitsWithBasehead({
+              owner: 'Genesis-Embodied-AI',
+              repo: 'genesis-world',
+              basehead: `${sha}...refs/heads/main`,
+              per_page: 1,
+            });
+            if (!['ahead', 'identical'].includes(data.status)) {
+              throw new Error(`Commit ${sha} is missing from the history of the main branch of Genesis.`);
+            }
+
       # Another repository is served for the completion of the workflow of any of its pull requests, whatever their base
       # branch, a stacked pull request included. The event of a pull request from a fork lists no pull request, so the
       # pull request is asked of the API. A pull request closed without merging while its wheel was building has nothing
       # left to validate: the check passes without an image version, the runner jobs, which follow through 'needs', are
       # skipped, and the caller is told so. A merged pull request is tested, since its wheel holds code now on the
       # default branch of its repository. A call started by hand is served too, since starting it takes write access to
-      # the calling repository. A commit of Genesis selected for the benchmarks must be on its default branch, so that
-      # its measurements describe a reviewed revision that other calls can compare against.
+      # the calling repository.
       - name: Check the calling workflow
         id: check
         if: github.repository != job.workflow_repository
         uses: actions/github-script@v8
-        env:
-          GENESIS_SHA: ${{ inputs.genesis_sha }}
-          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
         with:
           script: |
-            const sha = process.env.GENESIS_SHA;
-            if (sha) {
-              if (!/^[0-9a-f]{40}$/i.test(sha)) {
-                throw new Error(`Input 'genesis_sha' must be a full commit SHA, where '${sha}' was given.`);
-              }
-              const [owner, repo] = process.env.WORKFLOW_REPOSITORY.split('/');
-              const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
-                owner, repo, basehead: `${sha}...main`, per_page: 1,
-              });
-              if (!['ahead', 'identical'].includes(comparison.status)) {
-                throw new Error(`Commit ${sha} is missing from the history of main (${comparison.status}).`);
-              }
-            }
             if (context.eventName === 'workflow_dispatch') {
               core.setOutput('is_skipped', false);
               return;
