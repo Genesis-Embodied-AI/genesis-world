@@ -114,36 +114,54 @@ def test_ground_plane_preservation(box_plan):
 
 
 @pytest.mark.required
-def test_cable_mjcf_topology():
+def test_cable_mjcf_topology(tol):
     scene = gs.Scene()
     entity = scene.add_entity(
-        gs.morphs.MJCF(
+        morph=gs.morphs.MJCF(
             file="xml/cable.xml",
-        )
+        ),
     )
-    scene.build()
+    scene.build(n_envs=2)
 
-    cable_links = ["B_first", *(f"B_{i}" for i in range(1, 24)), "B_last"]
-    assert [link.name for link in entity.links] == ["obj", "anchor", *cable_links]
+    cable_links_name = ["B_first", *(f"B_{i}" for i in range(1, 24)), "B_last"]
+    assert [link.name for link in entity.links] == ["obj", "anchor", *cable_links_name]
 
-    cable_joints = {joint.name: joint for joint in entity.joints}
-    assert cable_joints["obj"].type == gs.JOINT_TYPE.FREE
-    assert cable_joints["J_first"].type == gs.JOINT_TYPE.FREE
-    for suffix in (*(str(i) for i in range(1, 24)), "last"):
-        joint = cable_joints[f"J_{suffix}"]
-        assert joint.type == gs.JOINT_TYPE.SPHERICAL
-        assert_allclose(joint.desc.dofs_damping, 0.01, tol=gs.EPS)
-        assert_allclose(joint.desc.dofs_armature, 0.001, tol=gs.EPS)
+    joints_by_name = {joint.name: joint for joint in entity.joints}
+    assert_equal(joints_by_name["obj"].type, gs.JOINT_TYPE.FREE)
+    assert_equal(joints_by_name["J_first"].type, gs.JOINT_TYPE.FREE)
 
-    capsule_geoms = [geom for geom in entity.geoms if geom.type == gs.GEOM_TYPE.CAPSULE]
-    assert len(capsule_geoms) == 25
-    for geom in capsule_geoms:
-        assert_allclose(geom.data[:2], (0.005, 0.04), tol=1e-6)
-        assert geom.contype == 1
-        assert geom.conaffinity == 1
+    ball_suffixes = (*(str(i) for i in range(1, 24)), "last")
+    assert_equal([joints_by_name[f"J_{suffix}"].type for suffix in ball_suffixes], gs.JOINT_TYPE.SPHERICAL)
+    ball_dofs_idx_local = [
+        dof_idx for suffix in ball_suffixes for dof_idx in joints_by_name[f"J_{suffix}"].dofs_idx_local
+    ]
+    assert_allclose(entity.get_dofs_damping(ball_dofs_idx_local), 0.01, atol=gs.EPS)
+    assert_allclose(entity.get_dofs_armature(ball_dofs_idx_local), 0.001, atol=gs.EPS)
+
+    capsule_geoms = [geom for link in entity.links[2:] for geom in link.geoms]
+    assert_equal(len(capsule_geoms), 25)
+    assert_equal([geom.type for geom in capsule_geoms], gs.GEOM_TYPE.CAPSULE)
+    assert_equal([geom.contype for geom in capsule_geoms], 1)
+    assert_equal([geom.conaffinity for geom in capsule_geoms], 1)
+    assert_allclose([geom.data[0] for geom in capsule_geoms], 0.005, atol=gs.EPS)
+
+    geoms_length = [geom.data[1] for geom in capsule_geoms]
+    cable_links_pos = entity.get_links_pos(links_idx_local=range(2, 27))
+    assert_allclose(cable_links_pos[..., :2], (-0.38, -0.26), atol=tol)
+    assert_allclose(cable_links_pos[..., 0, 2], 0.06, atol=tol)
+    segments_span = torch.cat(
+        [cable_links_pos[..., 1:, 2] - cable_links_pos[..., :-1, 2], 1.06 - cable_links_pos[..., -1:, 2]], dim=-1
+    )
+    assert_allclose(geoms_length, segments_span, atol=tol)
+    assert_allclose(sum(geoms_length), 1.0, atol=gs.EPS)
+    # Vertex positions in xml/cable.xml follow float32 curve discretization (worst |L - 0.04| is 3.8e-8, 2.6x margin).
+    assert_allclose(geoms_length, 0.04, atol=1e-7)
 
     weld_pairs = {
-        (entity.solver.links[eq.eq_obj1id].name, entity.solver.links[eq.eq_obj2id].name)
+        (
+            entity.links[eq.eq_obj1id - entity.link_start].name,
+            entity.links[eq.eq_obj2id - entity.link_start].name,
+        )
         for eq in entity.equalities
         if eq.type == gs.EQUALITY_TYPE.WELD
     }
