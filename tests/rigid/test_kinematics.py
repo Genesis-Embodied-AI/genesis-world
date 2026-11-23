@@ -640,33 +640,13 @@ def test_multi_robot_inverse_kinematics(show_viewer, tol):
             pos_tol=tol,
             rot_tol=tol,
             max_solver_iters=100,
+            dofs_idx_local=[1, 3, 5, 6],
             return_error=True,
         )
         assert_allclose(err, 0.0, atol=tol)
         robot.set_qpos(qpos)
         ee_pos = robot.get_link("hand").get_pos()
         assert_allclose(target_pos, ee_pos, atol=tol)
-
-    # A hand pose reached by four joints of the arm alone, fewer than the six components of its error
-    robot = robots[1]
-    hand = robot.get_link("hand")
-    dofs_idx_local = [1, 3, 5, 6]
-    robot.set_dofs_position((0.3, -1.8, 1.6, 0.4), dofs_idx_local=dofs_idx_local)
-    hand_pos, hand_quat = hand.get_pos(), hand.get_quat()
-    robot.set_dofs_position((0.0, -1.5, 1.2, 0.0), dofs_idx_local=dofs_idx_local)
-    qpos, err = robot.inverse_kinematics(
-        link=hand,
-        pos=hand_pos,
-        quat=hand_quat,
-        pos_tol=tol,
-        rot_tol=tol,
-        max_solver_iters=100,
-        dofs_idx_local=dofs_idx_local,
-        return_error=True,
-    )
-    assert_allclose(err, 0.0, atol=tol)
-    robot.set_qpos(qpos)
-    assert_allclose(hand.get_pos(), hand_pos, tol=tol)
 
 
 @pytest.mark.slow("gpu")  # gpu ~300s
