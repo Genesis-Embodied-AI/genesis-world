@@ -145,16 +145,18 @@ def init(
             if not backend_candidates:
                 raise_exception_from(f"Backend ~<{_backend}>~ not available on this machine.", e)
     globals()["backend"] = backend
-    if backend == _gs_backend.metal and _TORCH_VERSION < (2, 12):
-        raise_exception(
-            "'torch<2.12.0' is not supported on Apple Metal. Please upgrade pytorch manually: "
-            "https://pytorch.org/get-started/locally/"
-        )
-    if backend == _gs_backend.amdgpu and _TORCH_VERSION < (2, 11):
-        raise_exception(
-            "'torch<2.11.0' is not supported on AMD GPU. Please upgrade pytorch manually: "
-            "https://pytorch.org/get-started/locally/"
-        )
+    # See the torch requirements at the top of this module.
+    torch_requirements = {
+        _gs_backend.metal: ("Apple Metal", (2, 12)),
+        _gs_backend.amdgpu: ("AMD GPU", (2, 11)),
+    }
+    if backend in torch_requirements:
+        backend_name, (major, minor) = torch_requirements[backend]
+        if _TORCH_VERSION < (major, minor):
+            raise_exception(
+                f"'torch<{major}.{minor}.0' is not supported on {backend_name}. Please upgrade pytorch manually: "
+                "https://pytorch.org/get-started/locally/"
+            )
 
     # Fallback to Torch CPU device if requested
     if backend != _gs_backend.cpu and os.environ.get("GS_TORCH_FORCE_CPU_DEVICE") == "1":
