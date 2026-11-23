@@ -893,6 +893,7 @@ class GeomConstants(NamedTuple):
     several microseconds of host time, so instead of a chain of elementwise operations, one per term, the outer product
     of the inputs is contracted against a coefficient tensor by a broadcast multiply and a sum. A matmul would do it in
     one kernel, but its TensorFloat-32 (TF32) mode, which users may enable globally, rounds the operands to 10 bits.
+    Rotating a vector is the exception, see '_tc_transform_by_quat'.
     """
 
     quat_conjugate_signs: torch.Tensor
@@ -1446,7 +1447,7 @@ def transform_quat_by_quat(v, u):
     elif all(isinstance(e, np.ndarray) for e in (u, v)):
         quat = _np_quat_mul(u, v, out=None)
     else:
-        gs.raise_exception(f"The inputs must all be torch.Tensor or np.ndarray. got: {type(v)=} and {type(quat)=}")
+        gs.raise_exception(f"The inputs must all be torch.Tensor or np.ndarray. got: {type(v)=} and {type(u)=}")
 
     return quat
 
@@ -1476,16 +1477,44 @@ def _np_transform_by_quat(v, quat, out=None):
 
 
 def _tc_transform_by_quat(v: torch.Tensor, quat: torch.Tensor) -> torch.Tensor:
-    coefficients = _tc_geom_constants(quat.device, quat.dtype).quat_to_R
-    R_and_norm_sqr = (quat[..., None, :, None] * quat[..., None, None, :] * coefficients).sum((-2, -1))
-    return (R_and_norm_sqr[..., :9].unflatten(-1, (3, 3)) * v[..., None, :]).sum(-1) / R_and_norm_sqr[..., 9:]
+    """Rotate vectors by quaternions with two cross products.
+
+    The rotated vector is 'v + 2 * (q_w * t + q_vec x t) / |q|^2' with 't = q_vec x v'. Its forward launches as many
+    kernels as contracting the outer product of the quaternion against 'GeomConstants.quat_to_R', while its temporaries
+    hold 3 elements per vector instead of 160.
+    """
+    if v.ndim != quat.ndim:
+        # 'torch.linalg.cross' broadcasts the shapes of its operands but requires them to have the same rank
+        ndim = max(v.ndim, quat.ndim)
+        v, quat = v[(None,) * (ndim - v.ndim)], quat[(None,) * (ndim - quat.ndim)]
+    if v.dtype != quat.dtype:
+        # 'torch.linalg.cross' requires operands of the same dtype
+        dtype = torch.promote_types(v.dtype, quat.dtype)
+        v, quat = v.to(dtype), quat.to(dtype)
+    # The backward of 'split' concatenates the gradients in one kernel, where that of each slice fills a zero tensor
+    q_w, q_vec = quat.split((1, 3), dim=-1)
+    t = torch.linalg.cross(q_vec, v)
+    norm_sqr = quat.square().sum(-1, keepdim=True)
+    # Dividing by '|q|^2' last avoids its reciprocal, which overflows when '|q|^2' is subnormal
+    return torch.addcdiv(v, torch.addcmul(torch.linalg.cross(q_vec, t), q_w, t), norm_sqr, value=2.0)
 
 
 def transform_by_quat(v, quat):
-    """
-    This method transforms quat_v by quat_u.
+    """Rotate 3D vectors by quaternions, supporting both NumPy arrays and PyTorch tensors.
 
-    This is equivalent to quatmul(quat_u, quat_v) or R_u @ R_v
+    A quaternion of any nonzero norm applies the rotation of its normalized form.
+
+    Parameters
+    ----------
+    v : np.ndarray | torch.Tensor
+        The 3D vectors to rotate, their coordinates along the last dimension.
+    quat : np.ndarray | torch.Tensor
+        The quaternions, their components (w, x, y, z) along the last dimension. Must be of the same type as `v`.
+
+    Returns
+    -------
+    np.ndarray | torch.Tensor
+        The rotated vectors.
     """
     assert v.ndim >= 1 and quat.ndim >= 1
 
