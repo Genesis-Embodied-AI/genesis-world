@@ -589,7 +589,7 @@ def func_inverse_kinematics(
                 # In-place Cholesky factorization of the damped Gram matrix, forming each entry when it reaches it.
                 # Each entry carries a rounding error of about n * eps * |J|^2, which damping^2 must dominate near a
                 # singular configuration, so in fp32 a damping below about 1e-3 per metre of reach loses the accuracy
-                # of the step there.
+                # of the step there. Rounding can push a pivot below damping^2, its exact lower bound, so it is floored.
                 for i_row in range(n_rows):
                     for j_row in range(i_row + 1):
                         val = gs.qd_float(0.0)
@@ -605,7 +605,7 @@ def func_inverse_kinematics(
                         for k_row in range(j_row):
                             val = val - ik_state.chol[i_row, k_row, i_b] * ik_state.chol[j_row, k_row, i_b]
                         if i_row == j_row:
-                            ik_state.chol[i_row, i_row, i_b] = qd.sqrt(val + damping**2)
+                            ik_state.chol[i_row, i_row, i_b] = qd.sqrt(qd.max(val + damping**2, damping**2))
                         else:
                             ik_state.chol[i_row, j_row, i_b] = val / ik_state.chol[j_row, j_row, i_b]
 
