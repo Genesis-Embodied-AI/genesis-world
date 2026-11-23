@@ -7,7 +7,10 @@ Author: Matthew Matl
 import copy
 
 import numpy as np
+
 import trimesh
+
+from genesis.utils.mesh import SURFACE_METALLIC_FACTOR, SURFACE_ROUGHNESS_FACTOR, glossiness_to_roughness
 
 from .constants import GLTF, ViewFlags
 from .material import MetallicRoughnessMaterial
@@ -235,7 +238,10 @@ class Mesh(object):
             if primitive_material is None:
                 # Replace material with default if needed
                 primitive_material = MetallicRoughnessMaterial(
-                    alphaMode="BLEND", baseColorFactor=[0.3, 0.3, 0.3, 1.0], metallicFactor=0.2, roughnessFactor=0.8
+                    alphaMode="BLEND",
+                    baseColorFactor=[0.3, 0.3, 0.3, 1.0],
+                    metallicFactor=SURFACE_METALLIC_FACTOR,
+                    roughnessFactor=SURFACE_ROUGHNESS_FACTOR,
                 )
 
             primitive_material.wireframe = wireframe
@@ -286,8 +292,8 @@ class Mesh(object):
                 material = MetallicRoughnessMaterial(
                     alphaMode="OPAQUE" if colors.shape[-1] < 4 or (colors[..., 3] == 255).all() else "BLEND",
                     baseColorFactor=[1.0, 1.0, 1.0, 1.0],
-                    metallicFactor=0.2,
-                    roughnessFactor=0.8,
+                    metallicFactor=SURFACE_METALLIC_FACTOR,
+                    roughnessFactor=SURFACE_ROUGHNESS_FACTOR,
                 )
             # Process face colors
             elif mesh.visual.kind == "face":
@@ -298,8 +304,8 @@ class Mesh(object):
                 material = MetallicRoughnessMaterial(
                     alphaMode="OPAQUE" if colors.shape[-1] < 4 or (colors[..., 3] == 255).all() else "BLEND",
                     baseColorFactor=[1.0, 1.0, 1.0, 1.0],
-                    metallicFactor=0.2,
-                    roughnessFactor=0.8,
+                    metallicFactor=SURFACE_METALLIC_FACTOR,
+                    roughnessFactor=SURFACE_ROUGHNESS_FACTOR,
                 )
 
         # Process texture colors
@@ -332,12 +338,15 @@ class Mesh(object):
                         alphaCutoff=mat.alphaCutoff,
                     )
                 elif isinstance(mat, trimesh.visual.texture.SimpleMaterial):
-                    glossiness = mat.kwargs.get("Ns", 1.0)
-                    if isinstance(glossiness, list):
-                        glossiness = float(glossiness[0])
-                    roughness = (2 / (glossiness + 2)) ** (1.0 / 4.0)
+                    roughness = SURFACE_ROUGHNESS_FACTOR
+                    glossiness = mat.kwargs.get("Ns")
+                    if glossiness is not None:
+                        if isinstance(glossiness, list):
+                            glossiness = float(glossiness[0])
+                        roughness = glossiness_to_roughness(glossiness)
                     material = MetallicRoughnessMaterial(
                         alphaMode="OPAQUE" if (np.asarray(mat.image.convert("RGBA"))[..., 3] == 255).all() else "BLEND",
+                        metallicFactor=SURFACE_METALLIC_FACTOR,
                         roughnessFactor=roughness,
                         # NOTE: most assets seems to have incorrect mat.diffuse when texture image exists, So let's just use white for baseColorFactor
                         # baseColorFactor=np.array([255, 255, 255, 255], dtype=np.uint8) if mat.image is not None else mat.diffuse,

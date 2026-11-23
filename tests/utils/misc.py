@@ -26,11 +26,16 @@ def get_masks_mean_color(rgb, masks):
     return np.sum(masks_weight[..., None] * rgb[..., None, :, :, :], axis=(-3, -2))
 
 
-def get_masks_shown_color(rgb, masks):
-    """Return the color an image shows over each of some boolean masks, each channel 1 when lit and 0 when dark.
+def get_shown_color(colors, colors_black, colors_white):
+    """Return the color shown by some rendered colors, each channel 1 when lit and 0 when dark.
 
-    A channel is lit when its mean exceeds 100 and dark when it stays below 5. A channel in between is NaN, which
-    matches no color.
+    A channel is lit when it matches that of a white surface and dark when it matches that of a black surface, both
+    rendered under the same light, which broadcast against the colors. A channel matching neither is NaN, which matches
+    no color.
     """
-    colors = get_masks_mean_color(rgb, masks)
-    return np.select((colors > 100.0, colors < 5.0), (1.0, 0.0), np.nan)
+    # The specular reflection of a surface varies with the angle it is seen from, so that surfaces of the same color
+    # apart from each other render with some difference.
+    COLOR_ATOL = 20.0
+
+    is_lit, is_dark = np.abs(colors - colors_white) < COLOR_ATOL, np.abs(colors - colors_black) < COLOR_ATOL
+    return np.select((is_lit, is_dark), (1.0, 0.0), np.nan)

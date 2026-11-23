@@ -3,7 +3,7 @@ import inspect
 import math
 import os
 import weakref
-from functools import lru_cache, wraps
+from functools import lru_cache, partial, wraps
 from pathlib import Path
 from typing import NamedTuple
 
@@ -66,6 +66,10 @@ PLANE_MAX_CELL_SIZE = 50.0
 WALL_THICKNESS_N_RAYS = 4096
 # Number of triangles per leaf of the bounding volume hierarchy of 'cast_rays'
 BVH_LEAF_SIZE = 4
+# Metallic and roughness factors of every surface drawn by the rasterizer, whatever its texture. A surface of a given
+# color renders the same whether a vertex color, an image or a dynamic texture holds it.
+SURFACE_METALLIC_FACTOR = 0.2
+SURFACE_ROUGHNESS_FACTOR = 0.8
 
 
 def color_f32_to_u8(color) -> np.ndarray:
@@ -583,12 +587,19 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
             )
         elif isinstance(emission, gs.textures.ColorTexture):
             emissive_kwargs = dict(emissiveFactor=emission.color)
+    # The rasterizer reads a factor left unset as 1.0, as glTF specifies, which renders a fully metallic material
+    pbr_material = partial(
+        trimesh.visual.material.PBRMaterial,
+        metallicFactor=SURFACE_METALLIC_FACTOR,
+        roughnessFactor=SURFACE_ROUGHNESS_FACTOR,
+        **emissive_kwargs,
+    )
 
     if texture_seed is not None:
         if flipped_uvs is not None:
             # The images of a dynamic texture may turn transparent, which the blending of a PBR material follows
-            material = trimesh.visual.material.PBRMaterial(
-                baseColorTexture=Image.fromarray(texture_seed), baseColorFactor=(255, 255, 255, 255), **emissive_kwargs
+            material = pbr_material(
+                baseColorTexture=Image.fromarray(texture_seed), baseColorFactor=(255, 255, 255, 255)
             )
             visual = trimesh.visual.TextureVisuals(uv=flipped_uvs, material=material)
         else:
@@ -604,10 +615,8 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
                 texture,
                 (weakref.ref(texture), get_hashkey(emission) if emissive_kwargs else None),
                 lambda: (
-                    trimesh.visual.material.PBRMaterial(
-                        baseColorTexture=Image.fromarray(texture.image_array),
-                        baseColorFactor=(255, 255, 255, 255),
-                        **emissive_kwargs,
+                    pbr_material(
+                        baseColorTexture=Image.fromarray(texture.image_array), baseColorFactor=(255, 255, 255, 255)
                     )
                     if emissive_kwargs
                     else trimesh.visual.material.SimpleMaterial(
@@ -624,9 +633,7 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
             gs.raise_exception("n_verts is required for color texture.")
         if emissive_kwargs:
             # The flat base color applies through a factor, but an image emissive still samples the UVs, so pass them.
-            material = trimesh.visual.material.PBRMaterial(
-                baseColorFactor=color_f32_to_u8(texture.color), **emissive_kwargs
-            )
+            material = pbr_material(baseColorFactor=color_f32_to_u8(texture.color))
             visual = trimesh.visual.TextureVisuals(uv=flipped_uvs, material=material)
         else:
             visual = trimesh.visual.ColorVisuals(vertex_colors=np.tile(np.array(texture.color), [n_verts, 1]))
