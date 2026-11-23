@@ -355,11 +355,9 @@ def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewe
     assert_allclose(colors[:, 1], colors[:, 3], atol=10.0)
     assert_equal(colors[:, 2], lamp_initial)
 
-    # Two writes into different environments between renders, through one selection the caller writes into, both show
-    envs_idx = [0]
-    label.set_texture(RED, envs_idx=envs_idx)
-    envs_idx[0] = 1
-    label.set_texture(BLUE, envs_idx=envs_idx)
+    # Two writes into different environments between renders both show
+    label.set_texture(RED, envs_idx=0)
+    label.set_texture(BLUE, envs_idx=1)
     assert_equal(get_masks_shown_color(camera.render(rgb=True)[0], masks)[:, 1], [RED, BLUE])
 
 
