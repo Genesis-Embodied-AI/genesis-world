@@ -1,0 +1,21 @@
+genesis/engine/mesh.py
+  s_b583a5dad36b55::t_e25c807fb91ef4 302-303
+genesis/utils/point_cloud.py
+  s_b583a5dad36b55::t_5268a2cfd911ac 104-105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "32187c8efa5d6f382b78ed54a722bc1dd0899f6f",
+  "prompts": {},
+  "sessions": {
+    "s_b583a5dad36b55": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "14746812-520d-43f2-8648-85a5400ae21f",
+        "model": "unknown"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
