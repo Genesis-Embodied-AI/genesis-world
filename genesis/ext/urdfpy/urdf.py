@@ -2524,7 +2524,7 @@ class Link(URDFType):
         The inertial properties of the link.
     visuals : list of :class:`.Visual`, optional
         The visual properties of the link.
-    collsions : list of :class:`.Collision`, optional
+    collisions : list of :class:`.Collision`, optional
         The collision properties of the link.
     """
 

@@ -108,7 +108,7 @@ class UsdContext:
     stage_file : str
         Path to the USD stage file (.usd, .usda, .usdc) or USDZ archive (.usdz).
         If a USDZ file is provided, it will be automatically decompressed.
-    usd_bake_cache : bool, optional
+    use_bake_cache : bool, optional
         If True, enables material baking and uses last time baked assets if available.
         Otherwise, will re-bake materials every time.
         Default is True.

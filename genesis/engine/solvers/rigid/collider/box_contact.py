@@ -36,7 +36,7 @@ def func_sphere_box_contact(
 
     Parameters
     ----------
-    ga_pos, ga_quat : Position and orientation of geom A (may be perturbed for multi-contact).
+    ga_pos : Position of geom A (may be perturbed for multi-contact).
     gb_pos, gb_quat : Position and orientation of geom B (may be perturbed for multi-contact).
     """
     EPS = rigid_info.EPS[None]
