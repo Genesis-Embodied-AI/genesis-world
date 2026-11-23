@@ -1142,6 +1142,15 @@ def all_joints_mjcf():
     ET.SubElement(spherical_box, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
     ET.SubElement(spherical_box, "joint", name="/worldbody/base/spherical_box_joint", type="ball")
 
+    # Revolute and prismatic joint branches whose USD counterparts are generic joints reduced to one DOF
+    for name, joint_type, pos in (
+        ("generic_revolute", "hinge", "0. -0.5 0.2"),
+        ("generic_prismatic", "slide", "-0.5 -0.5 0.2"),
+    ):
+        generic_box = ET.SubElement(base, "body", name=f"/worldbody/base/{name}_box", pos=pos)
+        ET.SubElement(generic_box, "geom", type="box", size="0.2 0.2 0.2")
+        ET.SubElement(generic_box, "joint", name=f"/worldbody/base/{name}_box_joint", type=joint_type, axis="0. 0. 1.")
+
     # Fixed joint branch (no joint element means fixed in MJCF)
     fixed_box = ET.SubElement(base, "body", name="/worldbody/base/fixed_box", pos="-0.5 0.5 0.2")
     ET.SubElement(fixed_box, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
@@ -1183,6 +1192,16 @@ def all_joints_mjcf():
         gainprm="120.0 0 0",
         biasprm="0 -120.0 -12.0",
     )
+    for name in ("generic_revolute", "generic_prismatic"):
+        ET.SubElement(
+            actuator,
+            "general",
+            name=f"/worldbody/base/{name}_box_joint_actuator",
+            joint=f"/worldbody/base/{name}_box_joint",
+            biastype="affine",
+            gainprm="120.0 0 0",
+            biasprm="0 -120.0 -12.0",
+        )
 
     return mjcf
 
@@ -1347,6 +1366,27 @@ def all_joints_usd(asset_tmp_path, all_joints_mjcf: ET.ElementTree, request):
         spherical_drive_api = UsdPhysics.DriveAPI.Apply(spherical_joint_prim.GetPrim(), dof_name)
         spherical_drive_api.CreateStiffnessAttr().Set(np.deg2rad(120.0))
         spherical_drive_api.CreateDampingAttr().Set(np.deg2rad(12.0))
+
+    # Create generic joints whose only configured DOF is driven, which reduces them to revolute and prismatic joints.
+    # Their drives are named after that DOF (rotZ, transZ), with per-degree gains for the rotation.
+    for name, dof_name, kp, kv in (
+        ("generic_revolute", "rotZ", np.deg2rad(120.0), np.deg2rad(12.0)),
+        ("generic_prismatic", "transZ", 120.0, 12.0),
+    ):
+        generic_box_body = base_body.find(f"body[@name='/worldbody/base/{name}_box']")
+        generic_box_pos = to_array(generic_box_body.get("pos"))
+        generic_box_size = to_array(generic_box_body.find("geom[@type='box']").get("size"))
+        generic_box = UsdGeom.Cube.Define(stage, f"/worldbody/base/{name}_box")
+        generic_box.AddTranslateOp().Set(Gf.Vec3d(*generic_box_pos))
+        generic_box.GetSizeAttr().Set(generic_box_size[0] * 2.0)
+        UsdPhysics.RigidBodyAPI.Apply(generic_box.GetPrim())
+        generic_joint_prim = UsdPhysics.Joint.Define(stage, f"/worldbody/base/{name}_box_joint")
+        generic_joint_prim.CreateBody0Rel().SetTargets([base.GetPrim().GetPath()])
+        generic_joint_prim.CreateBody1Rel().SetTargets([generic_box.GetPrim().GetPath()])
+        generic_joint_prim.CreateLocalPos0Attr().Set(Gf.Vec3f(*generic_box_pos))
+        generic_drive_api = UsdPhysics.DriveAPI.Apply(generic_joint_prim.GetPrim(), dof_name)
+        generic_drive_api.CreateStiffnessAttr().Set(kp)
+        generic_drive_api.CreateDampingAttr().Set(kv)
 
     # Create fixed box
     fixed_box = UsdGeom.Cube.Define(stage, "/worldbody/base/fixed_box")
