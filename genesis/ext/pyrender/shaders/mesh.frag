@@ -389,7 +389,8 @@ void main()
 #endif
     // A texel of zero alpha adds no color, while the depth it writes would hide the meshes drawn after it. Discarding it
     // lets a mesh whose texels are either opaque or fully transparent be drawn with the opaque ones (see
-    // 'get_layers_alpha_min' in texture.py).
+    // 'get_layers_alpha_min' in texture.py). The depth, segmentation and shadow passes sample no texture, so they draw
+    // these texels as they draw a surface of translucent color.
     if (base_color_texel.a < 0.5 / 255.0) {
         discard;
     }
