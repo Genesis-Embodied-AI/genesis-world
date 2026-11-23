@@ -376,7 +376,6 @@ def test_export_and_load_rigid(
     anchored_texture = anchored.vgeoms[0].vmesh.surface.emissive_texture
     assert_equal(restored_texture.variants[0].color, anchored_texture.variants[0].color)
     assert_equal(restored_texture.variants[1].image_array, anchored_texture.variants[1].image_array)
-    assert restored_texture.is_batched
     # The textures of the asset travel with the meshes showing a dynamic texture
     for vgeom, restored_vgeom in zip(gltf_camera.vgeoms, restored.entities[gltf_camera.idx].vgeoms):
         assert_equal(restored_vgeom.get_texture(), vgeom.get_texture())

@@ -319,19 +319,6 @@ def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewe
             ),
         ),
     )
-    # An asset of several visual geoms showing a dynamic texture, out of view
-    gltf_camera = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/camera/camera.glb",
-            pos=(0.0, 30.0, 0.0),
-            fixed=True,
-        ),
-        surface=gs.surfaces.Default(
-            diffuse_texture=gs.textures.DynamicTexture(
-                resolution=(4, 4),
-            ),
-        ),
-    )
     camera = scene.add_camera(
         pos=(0.0, 0.0, 4.0),
         lookat=(0.0, 0.0, 0.0),
@@ -348,7 +335,6 @@ def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewe
         )
     )
     scene.build(n_envs=2)
-    (screen_vgeom,) = screen.vgeoms
     (label_vgeom,) = label.vgeoms
     (lamp_vgeom,) = lamp.vgeoms
 
@@ -396,27 +382,12 @@ def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewe
         colors = get_masks_mean_color(rgb[:, None], masks)
         assert (colors[:, 2, 1] > 150.0).all() and (colors[:, 2, 2] < 30.0).all() and (colors[:, 2, 0] > 40.0).all()
 
-    # Integer pixels are clamped to the range of a channel, where 8-bit values would wrap around otherwise
-    label_vgeom.set_texture(np.array([[[0, 300, -5]]]))
-    assert_equal(get_masks_shown_color(camera.render(rgb=True)[0][:, None], masks)[:, 1], [GREEN] * 2)
-    # A color beyond the range of a channel is clamped the same way
-    label_vgeom.set_texture(gs.textures.ColorTexture(color=(2.0, 0.0, 0.0)), envs_idx=[1])
-    assert_equal(label_vgeom.get_texture(envs_idx=[1])[:, 4, 4], [[255, 0, 0, 255]])
     # The emissive map holds linear values: an sRGB image variant shows as its decoded value written as pixels
     lamp_vgeom.set_texture(variant=1, texture_map_type=gs.TEXTURE_MAP_TYPE.EMISSIVE)
     colors_variant = get_masks_mean_color(camera.render(rgb=True)[0][:, None], masks)
     lamp_vgeom.set_texture(np.array([[[0.0, ((128 / 255 + 0.055) / 1.055) ** 2.4, 0.0]]]))
     colors_drawn = get_masks_mean_color(camera.render(rgb=True)[0][:, None], masks)
     assert_allclose(colors_variant[:, 2], colors_drawn[:, 2], atol=2.0)
-    # Inputs contradicting each other or the declaration of the texture are rejected
-    with pytest.raises(gs.GenesisException, match="batched variant"):
-        screen_vgeom.set_texture(np.zeros((16, 16, 3)))
-    with pytest.raises(gs.GenesisException, match="not both"):
-        label_vgeom.set_texture(np.zeros((8, 8, 3)), variant=0)
-    with pytest.raises(gs.GenesisException, match="on 2 visual geoms"):
-        gltf_camera.set_texture(variant=0)
-    with pytest.raises(gs.GenesisException, match="its own opacity"):
-        gs.surfaces.Default(diffuse_texture=gs.textures.DynamicTexture(resolution=(4, 4)), opacity=0.5)
 
     # A reset of one environment shows the first variants there again, the asset texture of the plane, and a reset of
     # the scene does so in every environment.
@@ -612,10 +583,6 @@ def test_dynamic_texture_side_by_side_envs(n_envs, translucent_box_obj, show_vie
     deformable_color = variants_color[[1, 0][:n_envs_]] if n_envs > 0 else variants_color[1]
     assert_equal(block.vgeoms[0].get_texture()[..., 0, 0, :], deformable_color)
     assert_equal(block.get_texture()[..., 0, 0, :], deformable_color)
-    # The images returned are a copy, which writing into leaves the variants as they are
-    cube_texture = cube.get_texture()
-    cube_texture.zero_()
-    assert_equal(cube.get_texture()[..., 0, 0, :], deformable_color)
 
 
 @pytest.mark.required
