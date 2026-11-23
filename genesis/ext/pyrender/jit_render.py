@@ -666,8 +666,8 @@ class JITRenderer:
             self.render_flags[i, 4] = primitive.is_floor and not floor_existed
             self.render_flags[i, 5] = node_list[i].mesh.is_transparent
             self.render_flags[i, 6] = node_list[i].mesh.is_marker
-            # The shadow maps read no texture, so a mesh that the alpha of its texels alone makes transparent casts the
-            # shadow of its whole surface, the texels shown in each environment aside
+            # The shadow maps read no texture, so a mesh made transparent by the alpha of its texels alone casts the
+            # shadow of its whole surface.
             self.render_flags[i, 9] = node_list[i].mesh.has_translucent_color
             self.views[i] = node_list[i].mesh.views
             # A pass drawing one environment draws the instance of that environment of a per-environment instanced
@@ -1089,7 +1089,7 @@ class JITRenderer:
         ):
             last_pid = -1
             for id in range(len(vao_id)):
-                # Do not render shadows for markers and objects of translucent color
+                # Do not render shadows for markers and meshes of translucent color
                 if render_flags[id, 9] or render_flags[id, 6]:
                     continue
 
@@ -1226,7 +1226,7 @@ class JITRenderer:
         ):
             last_pid = -1
             for id in range(len(vao_id)):
-                # Do not render shadows for markers and objects of translucent color
+                # Do not render shadows for markers and meshes of translucent color
                 if render_flags[id, 9] or render_flags[id, 6]:
                     continue
 
@@ -1543,14 +1543,11 @@ class JITRenderer:
             return self._update_normal_flat(vertices.reshape((-1, 3, 3)))
 
     def update_texture_layers(self, primitive) -> None:
-        """Copy the texture array layers each rendered environment of a primitive samples, for the next render pass.
-
-        The layers shown decide whether the mesh of the primitive is transparent, which sets when it is drawn, so its
-        transparency is read again.
-        """
+        """Copy the texture array layers each rendered environment of a primitive samples, for the next render pass."""
         i = self._primitive_index.get(primitive)
         if i is not None:
             self.texture_layers[self.texture_layers_idx[i]] = primitive.texture_layers
+            # The alpha of the layers shown decides whether the mesh is drawn with the transparent ones
             self.render_flags[i, 5] = self.node_list[i].mesh.is_transparent
 
     def update_buffer(self, primitives, buffer_name, data):

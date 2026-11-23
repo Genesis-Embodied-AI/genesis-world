@@ -384,10 +384,16 @@ void main()
     // A texture array holding linear values is encoded to sRGB, the encoding of every other base color
     base_color_texel = linear_to_srgb(base_color_texel);
 #endif
-    base_color = base_color * base_color_texel;
 #else
-    base_color = base_color * texture(material.base_color_texture, uv_0);
+    vec4 base_color_texel = texture(material.base_color_texture, uv_0);
 #endif
+    // A texel of zero alpha adds no color, while the depth it writes would hide the meshes drawn after it. Discarding it
+    // lets a mesh whose texels are either opaque or fully transparent be drawn with the opaque ones (see
+    // 'get_layers_alpha_min' in texture.py).
+    if (base_color_texel.a < 0.5 / 255.0) {
+        discard;
+    }
+    base_color = base_color * base_color_texel;
 #endif
 
 #ifdef COLOR_0_LOC

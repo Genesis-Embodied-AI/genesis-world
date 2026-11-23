@@ -2163,11 +2163,13 @@ def test_video_recording_lifecycle(tmp_path, monkeypatch, renderer, show_viewer)
 @pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
 @pytest.mark.parametrize("alpha_source", ["color", "image_texture", "dynamic_texture"])
-def test_transparent_surfaces_show_what_lies_behind_them(alpha_source, translucent_box_obj, renderer, show_viewer):
-    # The alpha that 8-bit texels store exactly, so that every source gives the same opacity
-    ALPHA = 128 / 255
-    RED = (1.0, 0.0, 0.0)
-    BLUE = (0.0, 0.0, 1.0)
+@pytest.mark.parametrize("red_alpha_u8", [0, 128])
+def test_transparent_surfaces_show_what_lies_behind_them(
+    alpha_source, red_alpha_u8, translucent_box_obj, renderer, show_viewer
+):
+    # Alphas that 8-bit texels store exactly, so that every source gives the same opacity
+    RED = (1.0, 0.0, 0.0, red_alpha_u8 / 255)
+    BLUE = (0.0, 0.0, 1.0, 128 / 255)
     RES = 64
     # Wholly inside the field of view, high enough above the pair to project clear of the patch sampled below. Geometry
     # straddling the frustum boundary is misrasterized by software rendering backends, so it stays clear of the edge.
@@ -2191,12 +2193,12 @@ def test_transparent_surfaces_show_what_lies_behind_them(alpha_source, transluce
         renderer=renderer,
         show_viewer=show_viewer,
     )
-    # The red box of a dynamic texture shows a translucent variant from build, and the blue one an opaque variant until
-    # its translucent image is written between two renders.
+    # The red box of a dynamic texture shows its variant from build, and the blue one an opaque variant until its
+    # translucent image is written between two renders.
     if alpha_source == "color":
         surfaces = [
             gs.surfaces.Default(
-                color=(*color, ALPHA),
+                color=color,
             )
             for color in (RED, BLUE)
         ]
@@ -2204,7 +2206,7 @@ def test_transparent_surfaces_show_what_lies_behind_them(alpha_source, transluce
         surfaces = [
             gs.surfaces.Default(
                 diffuse_texture=gs.textures.ImageTexture(
-                    image_array=np.array([[(*color, ALPHA)]]),
+                    image_array=np.array([[color]]),
                 ),
             )
             for color in (RED, BLUE)
@@ -2218,7 +2220,7 @@ def test_transparent_surfaces_show_what_lies_behind_them(alpha_source, transluce
                     is_batched=is_batched,
                 ),
             )
-            for color, is_batched in (((*RED, ALPHA), False), (BLUE, True))
+            for color, is_batched in ((RED, False), (BLUE[:3], True))
         ]
     # Same size and lined up along the axis the camera sits on, so that the nearer one covers the farther one
     red = scene.add_entity(
@@ -2256,10 +2258,10 @@ def test_transparent_surfaces_show_what_lies_behind_them(alpha_source, transluce
     # afterwards it fails the depth test and vanishes, leaving the near box alone.
     patch_red = centre_patch((0.6, 0.0, 0.5), PARKED)
     if alpha_source == "dynamic_texture":
-        blue.set_texture((*BLUE, ALPHA))
+        blue.set_texture(BLUE)
     patch_blue = centre_patch(PARKED, (-0.6, 0.0, 0.5))
     patch_pair = centre_patch((0.6, 0.0, 0.5), (-0.6, 0.0, 0.5))
-    assert_allclose(patch_pair, patch_red + (1.0 - ALPHA) * patch_blue, atol=1.0)
+    assert_allclose(patch_pair, patch_red + (1.0 - RED[3]) * patch_blue, atol=1.0)
 
     # Rendering the same scene again gives the same image, whichever order two surfaces at the same depth end up in
     rgb, *_ = cam.render()
@@ -2268,11 +2270,11 @@ def test_transparent_surfaces_show_what_lies_behind_them(alpha_source, transluce
     # Bringing the blue box in front of the red one swaps which of the two composites over the other
     patch_blue_ahead = centre_patch(PARKED, (1.2, 0.0, 0.5))
     patch_pair_swapped = centre_patch((0.6, 0.0, 0.5), (1.2, 0.0, 0.5))
-    assert_allclose(patch_pair_swapped, patch_blue_ahead + (1.0 - ALPHA) * patch_red, atol=1.0)
+    assert_allclose(patch_pair_swapped, patch_blue_ahead + (1.0 - BLUE[3]) * patch_red, atol=1.0)
 
     # Crossing the camera over to the other side reverses which one is in front just the same
     cam.set_pose(pos=(-2.5, 0.0, 0.5), lookat=(0.0, 0.0, 0.5))
     patch_red_across = centre_patch((0.6, 0.0, 0.5), PARKED)
     patch_blue_across = centre_patch(PARKED, (-0.6, 0.0, 0.5))
     patch_pair_across = centre_patch((0.6, 0.0, 0.5), (-0.6, 0.0, 0.5))
-    assert_allclose(patch_pair_across, patch_blue_across + (1.0 - ALPHA) * patch_red_across, atol=1.0)
+    assert_allclose(patch_pair_across, patch_blue_across + (1.0 - BLUE[3]) * patch_red_across, atol=1.0)
