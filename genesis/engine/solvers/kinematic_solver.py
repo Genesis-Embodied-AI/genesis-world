@@ -1437,8 +1437,10 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
             invalidated_by={solver: (StateChange.GEOMETRY,)},
         )
         self._is_link_frames_shown = solver.options.vis.link_frames and solver.n_links > 0
-        # The shapes of the visual geoms
+        # The shapes of the visual geoms, and the link of each of their meshes, which a solver coloring its links reads
+        # (see 'RigidVisOptions.islands').
         self._shapes: tuple[Shape, ...] = ()
+        self._shapes_links_idx: dict[Shape, torch.Tensor] = {}
         if not vgeoms:
             return
         data = self._data
@@ -1622,6 +1624,7 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
                         invalidated_by=vgeoms_invalidated_by,
                     )
                 )
+                self._shapes_links_idx[shapes[-1]] = torch.tensor(vgeom.link.idx, dtype=gs.tc_int, device=gs.device)
         if geometries:
             vgeoms_cols = slice(0, self._n_drawn_vgeoms)
             shapes.insert(
@@ -1638,6 +1641,11 @@ class KinematicScopedRenderContext(ScopedRenderContext[KinematicSolver]):
                     ),
                     invalidated_by=vgeoms_invalidated_by,
                 ),
+            )
+            self._shapes_links_idx[shapes[0]] = torch.tensor(
+                [vgeom.link.idx for vgeom in self._slots_vgeom[: self._n_drawn_vgeoms]],
+                dtype=gs.tc_int,
+                device=gs.device,
             )
         self._shapes = tuple(shapes)
 

@@ -9,8 +9,9 @@ Two scenes exercise the same pipeline:
   wave or already fallen behind it. Only the handful of dominoes in the travelling front stay awake.
 
 While a body is awake the full constraint solve runs for its island; once it hibernates that island is skipped by
-forward kinematics, forward dynamics, integration, and the constraint solve. The step rate of the physics alone, read
-from the scene's timings, is streamed to a live plot and, with --record, both the scene and the plot are saved to video.
+forward kinematics, forward dynamics, integration, and the constraint solve. The viewer colors every body by island and
+fades the sleeping ones. The step rate of the physics alone, read from the scene's timings, is streamed to a live plot
+and, with --record, both the scene and the plot are saved to video.
 """
 
 import argparse
@@ -47,6 +48,10 @@ def main():
         rigid_options=gs.options.RigidOptions(
             max_collision_pairs=3000,
             use_hibernation=True,
+            vis=gs.options.RigidVisOptions(
+                islands=True,
+                hibernation=True,
+            ),
         ),
         vis_options=gs.options.VisOptions(
             debug=True,

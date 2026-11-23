@@ -419,6 +419,8 @@ class StaticMesh(Shape):
     """Whether each environment holds the mesh, None when every environment does."""
     scale: torch.Tensor | None = dataclasses.field(default=None, metadata=PER_ENV)
     """The linear map applied to the mesh in the frame of its pose in each environment (see 'StaticMeshBatch.scale')."""
+    tint: torch.Tensor | None = dataclasses.field(default=None, metadata=PER_ENV)
+    """The RGBA tint of the mesh in each environment (see 'StaticMeshBatch.tint')."""
 
 
 @dataclass(frozen=True, eq=False)
@@ -446,6 +448,9 @@ class StaticMeshBatch(Shape):
     scale: torch.Tensor | None = dataclasses.field(default=None, metadata=PER_ENV)
     """The 3x3 linear map applied to each mesh in each environment in the frame of its pose, its scale and its shear.
     None for meshes drawn at the size of their geometry, such as those of the entities."""
+    tint: torch.Tensor | None = dataclasses.field(default=None, metadata=PER_ENV)
+    """The RGBA tint of each mesh in each environment, which the debug views alone draw. The mesh takes the hue of the
+    rgb and keeps its own brightness, and the alpha weighs the tint. None for meshes drawn as they look."""
 
     @functools.cached_property
     def _meshes(self) -> tuple[StaticMesh, ...]:
@@ -456,6 +461,7 @@ class StaticMeshBatch(Shape):
                 self.quat[:, i_m],
                 is_active=None if self.is_active is None else self.is_active[:, i_m],
                 scale=None if self.scale is None else self.scale[:, i_m],
+                tint=None if self.tint is None else self.tint[:, i_m],
                 envs_idx=self.envs_idx,
                 is_shared=self.is_shared,
                 _views=self._views,
@@ -501,6 +507,8 @@ class DynamicMesh(Shape):
     """Whether each environment shows the mesh, None when every environment does."""
     colors: torch.Tensor | None = dataclasses.field(default=None, metadata=PER_ENV)
     """The RGBA color of each vertex of a marker in each environment."""
+    tint: torch.Tensor | None = dataclasses.field(default=None, metadata=PER_ENV)
+    """The RGBA tint of the mesh in each environment (see 'StaticMeshBatch.tint')."""
     is_ray_target: bool = dataclasses.field(default=False, kw_only=True)
     """Whether the ray casting on visual geoms hits the mesh (see 'MeshGeometry.is_ray_target')."""
     textures: tuple[TextureVariants, ...] = dataclasses.field(default=(), kw_only=True)

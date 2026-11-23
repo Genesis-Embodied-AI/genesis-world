@@ -165,6 +165,7 @@ class Mesh(object):
         double_sided=False,
         is_floor=False,
         envs=None,
+        inst_tints=None,
     ):
         """Create a Mesh from a :class:`~trimesh.base.Trimesh`.
 
@@ -192,6 +193,8 @@ class Mesh(object):
         envs : int or (n_envs,) bool, optional
             The environments the instances belong to (see :class:`Primitive`).
             Defaults to every environment.
+        inst_tints : (n,4) float, optional
+            RGBA tint of every instance (see :class:`Primitive`). Defaults to None.
 
         Returns
         -------
@@ -255,6 +258,7 @@ class Mesh(object):
                     double_sided=double_sided,
                     is_floor=is_floor,
                     envs=envs,
+                    inst_tints=inst_tints,
                 )
             )
 

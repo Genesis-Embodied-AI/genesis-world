@@ -412,8 +412,8 @@ def func_build_single_island(
 
     The lists are the identity and the island's inertia the trace of the mass matrix. Reserved for scenes off the CPU
     skyline path, which alone reads the tree labels the full build resolves (see _sort_contacts_and_build_islands in
-    solver.py). Under hibernation the island is awake and its link list, written once at build (see
-    ConstraintSolver.__init__), stands. An env holding a sleeper takes the full build.
+    solver.py). The link labels, and under hibernation the link list of the awake island, are written once at build
+    (see ConstraintSolver.__init__). An env holding a sleeper takes the full build.
     """
     n_dofs = constraint_state.island.dof_id.shape[0]
     constraint_state.island.n_islands[i_b] = 1

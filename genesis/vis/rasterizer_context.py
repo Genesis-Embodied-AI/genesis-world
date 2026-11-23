@@ -76,31 +76,10 @@ class SegmentationColorMap:
         rng = np.random.default_rng(seed=self.seed + n_colored)
         rng.shuffle(hues)
 
-        # Fixed saturation/value
-        s, v = 0.8, 0.95
-
-        # HSV to RGB conversion
-        rgb = np.zeros((num_keys, 3), dtype=np.float32)
-        i = (hues * 6).astype(np.int32)
-        f = hues * 6 - i
-        p = v * (1 - s)
-        q = v * (1 - f * s)
-        t = v * (1 - (1 - f) * s)
+        rgb = mu.hsv_to_rgb(hues, saturation=0.8, value=0.95)
         # The first color of the first generation is the black background
-        for k in range(int(n_colored == 0), num_keys):
-            match i[k] % 6:
-                case 0:
-                    rgb[k] = (v, t[k], p)
-                case 1:
-                    rgb[k] = (q[k], v, p)
-                case 2:
-                    rgb[k] = (p, v, t[k])
-                case 3:
-                    rgb[k] = (p, q[k], v)
-                case 4:
-                    rgb[k] = (t[k], p, v)
-                case 5:
-                    rgb[k] = (v, p, q[k])
+        if n_colored == 0:
+            rgb[0] = 0.0
         rgb = mu.color_f32_to_u8(rgb)
 
         # Store the generated map
@@ -484,6 +463,16 @@ class RasterizerContext(BuildableMixin):
                 is_active = self._read(shape.is_active, shape_nodes, arrays_host, dtype=np.bool_)
                 poses_T[..., :3, 3] = np.where(is_active[..., None], poses_T[..., :3, 3], gu.nowhere())
             poses_T = self._pad_envs(shape_nodes, poses_T)
+            # The tints of the meshes in each rendered environment, none in the environments the shape leaves out
+            tints = None
+            if shape.tint is not None:
+                tints = np.zeros((len(self.rendered_envs_idx), len(shape), 4), dtype=np.float32)
+                tints[selection.envs_pos] = self._read(shape.tint, shape_nodes, arrays_host)
+            # A tint gained or lost makes the nodes anew, since the shaders of the meshes take it as an attribute
+            primitives = shape_nodes.primitives
+            if not is_new and primitives and (tints is None) != (primitives[0].inst_tints is None):
+                self._remove_nodes(shape_nodes)
+                is_new = True
             if is_new:
                 # One node per mesh, holding one instance per rendered environment holding it. A single pyrender
                 # material is reused per genesis surface, and per trimesh material among the textured meshes (see
@@ -510,6 +499,7 @@ class RasterizerContext(BuildableMixin):
                         nodes.append(None)
                         continue
                     pose_T = poses_T[:, i_m]
+                    mesh_tints = None if tints is None else tints[:, i_m]
                     floor = geometry.floor
                     if floor is not None and envs is not None and envs.all():
                         if (
@@ -518,8 +508,10 @@ class RasterizerContext(BuildableMixin):
                             and self.scene.env_spacing[0] < floor.size[0]
                             and self.scene.env_spacing[1] < floor.size[1]
                         ):
+                            # A shared floor stands for every environment, so it is drawn as it looks
                             pose_T = pose_T[:1]
                             envs = None
+                            mesh_tints = None
                     verts = tensor_to_array(geometry.verts)
                     mesh = trimesh.Trimesh(
                         verts,
@@ -563,6 +555,7 @@ class RasterizerContext(BuildableMixin):
                         material=materials[0] if materials else None,
                         is_marker=is_marker,
                         views=0,
+                        inst_tints=mesh_tints,
                     )
                     vis_materials += [
                         (key, mesh_node.primitives[0].material)
@@ -608,6 +601,13 @@ class RasterizerContext(BuildableMixin):
                 self.jit.update_buffer(primitives, "model", np.ascontiguousarray(poses_T.transpose((0, 1, 3, 2))))
                 for i in shape_nodes.floors_idx:
                     self.set_reflection_mat(poses_T[i])
+                if tints is not None:
+                    tints = tints.swapaxes(0, 1)
+                    if len(meshes) < len(shape):
+                        tints = tints[shape_nodes.meshes_posed]
+                    for primitive, mesh_tints in zip(primitives, tints):
+                        primitive.inst_tints = mesh_tints
+                    self.jit.update_buffer(primitives, "inst_tint", tints)
         elif isinstance(shape, DynamicMesh):
             if shape.verts_idx is None:
                 verts = self._read(shape.verts, shape_nodes, arrays_host)
@@ -639,8 +639,12 @@ class RasterizerContext(BuildableMixin):
             rows_shown = np.ones(len(verts), dtype=np.bool_)
             if shape.is_active is not None:
                 rows_shown = self._read(shape.is_active, shape_nodes, arrays_host, dtype=np.bool_)
-            # A row shown or hidden makes the nodes anew
-            if not is_new and (rows_shown != shape_nodes.rows_shown).any():
+            tints = None if shape.tint is None else self._read(shape.tint, shape_nodes, arrays_host)
+            # A row shown or hidden makes the nodes anew, and so does a tint gained or lost (see StaticMeshBatch above)
+            is_tint_changed = any(
+                (tints is None) != (node.mesh.primitives[0].inst_tints is None) for node in nodes if node is not None
+            )
+            if not is_new and ((rows_shown != shape_nodes.rows_shown).any() or is_tint_changed):
                 self._remove_nodes(shape_nodes)
                 is_new = True
             if is_new:
@@ -663,15 +667,19 @@ class RasterizerContext(BuildableMixin):
                         envs=env_i,
                         is_marker=is_marker,
                         views=views,
+                        inst_tints=None if tints is None else tints[i_r, None],
                     )
                     nodes.append(self._add_node_seg(mesh_node, seg_keys=None if is_marker else shape.seg_keys))
                 if shape.textures:
                     primitives = [node.mesh.primitives[0] for node in nodes if node is not None]
                     self._bind_textures(shape_nodes, shape.textures, primitives)
             else:
-                for node, vverts in zip(nodes, verts):
+                for i_r, (node, vverts) in enumerate(zip(nodes, verts)):
                     if node is not None:
                         self._update_vertices(node, vverts)
+                        if tints is not None:
+                            node.mesh.primitives[0].inst_tints = tints[i_r, None]
+                            self.jit.update_buffer(node.mesh.primitives, "inst_tint", (tints[i_r, None],))
         elif isinstance(shape, Points):
             # An inactive point is placed out of sight, so that the nodes keep one instance per point
             poss = self._read(shape.pos, shape_nodes, arrays_host)
