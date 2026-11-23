@@ -9,7 +9,7 @@ import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.render_context import Points
 from genesis.engine.solvers.rigid.rigid_solver import HIBERNATION_TINT
-from genesis.utils.misc import qd_to_numpy, tensor_to_array
+from genesis.utils.misc import qd_to_torch
 
 from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_VIEWER
 from ..utils.assertions import assert_allclose, assert_equal, rgb_array_to_png_bytes
@@ -415,8 +415,8 @@ def test_islands_and_hibernation_colors(n_envs, renderer, show_viewer):
 
     def get_links_color(cam):
         rgb, _, seg, _ = cam.render(rgb=True, segmentation=True, force_render=True)
-        rgb = tensor_to_array(rgb).reshape((max(n_envs, 1), RES[1], RES[0], 3))
-        seg = tensor_to_array(seg).reshape((max(n_envs, 1), RES[1], RES[0]))
+        rgb = rgb.reshape((max(n_envs, 1), RES[1], RES[0], 3))
+        seg = seg.reshape((max(n_envs, 1), RES[1], RES[0]))
         # The median over the pixels of a link leaves its antialiased edges out
         return np.array(
             [
@@ -446,9 +446,9 @@ def test_islands_and_hibernation_colors(n_envs, renderer, show_viewer):
     # Asleep, the links keep the hue of their island, faded toward grey
     for _ in range(100):
         scene.step()
-        if qd_to_numpy(scene.rigid_solver.dyn_state.links.is_hibernated)[1:].all():
+        if qd_to_torch(scene.rigid_solver.dyn_state.links.is_hibernated)[1:].all():
             break
-    assert qd_to_numpy(scene.rigid_solver.dyn_state.links.is_hibernated)[1:].all()
+    assert qd_to_torch(scene.rigid_solver.dyn_state.links.is_hibernated)[1:].all()
     colors_asleep = get_links_color(cam_debug)
     assert_allclose(get_links_color(cam_plain), colors_plain, atol=1.0)
 
@@ -526,8 +526,8 @@ def test_islands_colors_single_tree(renderer, show_viewer):
 
     def get_box_chroma():
         rgb, _, seg, _ = cam.render(rgb=True, segmentation=True, force_render=True)
-        rgb = tensor_to_array(rgb).reshape((2, RES[1], RES[0], 3))
-        seg = tensor_to_array(seg).reshape((2, RES[1], RES[0]))
+        rgb = rgb.reshape((2, RES[1], RES[0], 3))
+        seg = seg.reshape((2, RES[1], RES[0]))
         colors = np.array([np.median(rgb_env[seg_env == box_idxc], axis=0) for rgb_env, seg_env in zip(rgb, seg)])
         return colors / colors.sum(axis=-1, keepdims=True)
 
@@ -537,8 +537,8 @@ def test_islands_colors_single_tree(renderer, show_viewer):
     assert (np.abs(chroma_awake - np.array(BOX_COLOR[:3]) / sum(BOX_COLOR[:3])).max(axis=-1) > 0.2).all()
     for _ in range(50):
         scene.step()
-        if qd_to_numpy(scene.rigid_solver.dyn_state.links.is_hibernated)[1:].all():
+        if qd_to_torch(scene.rigid_solver.dyn_state.links.is_hibernated)[1:].all():
             break
-    assert qd_to_numpy(scene.rigid_solver.dyn_state.links.is_hibernated)[1:].all()
+    assert qd_to_torch(scene.rigid_solver.dyn_state.links.is_hibernated)[1:].all()
     chroma_asleep = get_box_chroma()
     assert (np.abs(chroma_asleep - 1.0 / 3.0).max(axis=-1) < np.abs(chroma_awake - 1.0 / 3.0).max(axis=-1)).all()
