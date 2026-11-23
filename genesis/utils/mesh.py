@@ -66,7 +66,7 @@ PLANE_MAX_CELL_SIZE = 50.0
 WALL_THICKNESS_N_RAYS = 4096
 # Number of triangles per leaf of the bounding volume hierarchy of 'cast_rays'
 BVH_LEAF_SIZE = 4
-# Metallic and roughness factors of every surface drawn by the rasterizer, whatever its texture. A surface of a given
+# Metallic and roughness factors the rasterizer draws the visual of a surface with, whatever its texture, so that a
 # color renders the same whether a vertex color, an image or a dynamic texture holds it.
 SURFACE_METALLIC_FACTOR = 0.2
 SURFACE_ROUGHNESS_FACTOR = 0.8
