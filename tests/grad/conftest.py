@@ -15,7 +15,7 @@ with lazy_imports():
 
     import genesis as gs
     from genesis.grad.bridge import LaunchRecorder
-    from genesis.utils.misc import qd_to_torch
+    from genesis.utils.misc import no_read_guard, qd_to_torch
 
 
 @pytest.fixture(autouse=True)
@@ -32,8 +32,8 @@ def step_overwrites(backend, monkeypatch):
 
     insert, entry, reverse, exit_ = operator.attrgetter("insert", "entry", "reverse", "__exit__")(LaunchRecorder)
     # Per recorder, released with it since a later one may take its identity: the arrays its closed entries used, the
-    # values before its open entry, and the launches of that entry
-    arrays_used, values_before, launches_open = (weakref.WeakKeyDictionary() for _ in range(3))
+    # values before its open entry, the launches of that entry, and the entry itself.
+    arrays_used, values_before, launches_open, entry_open = (weakref.WeakKeyDictionary() for _ in range(4))
     overwrites = set()
     # The copies of the checker are kernel launches of their own without zero-copy views, which it does not record
     is_copying = False
@@ -59,13 +59,15 @@ def step_overwrites(backend, monkeypatch):
         nonlocal is_copying
         values = values_before.pop(recorder, {})
         launches = launches_open.pop(recorder, [])
+        open_entry = entry_open.pop(recorder, None)
         if not launches:
             return
-        arrays_saved = {id(array) for array, _ in recorder.entries[-1].arrays_saved}
+        arrays_saved = {id(array) for array, _ in open_entry.arrays_saved}
         is_copying = True
         for key, (path, array, value) in values.items():
             if key not in arrays_saved:
-                value_after = qd_to_torch(array, copy=True)
+                with no_read_guard():
+                    value_after = qd_to_torch(array, copy=True)
                 # Entries the solver leaves at NaN compare equal to themselves
                 if value.is_floating_point():
                     is_unchanged = torch.allclose(value_after, value, rtol=0.0, atol=0.0, equal_nan=True)
@@ -82,17 +84,22 @@ def step_overwrites(backend, monkeypatch):
         nonlocal is_copying
         if is_copying:
             return
-        if not recorder._is_grouping:
+        # A launch may trigger launches of its own as it is inserted, such as the refresh of a derived array it reads,
+        # which run before it as entries of their own (see 'genesis.engine.state_change'), so the values before it are
+        # taken once they are done, and its entry is the one its insertion leaves last.
+        insert(recorder, kernel, args)
+        if entry_open.get(recorder) is not recorder.entries[-1]:
             close_entry(recorder)
+        entry_open[recorder] = recorder.entries[-1]
         recorder_arrays_used = arrays_used.get(recorder, set())
         values = values_before.setdefault(recorder, {})
         is_copying = True
-        for path, array in iter_arrays_used(kernel, args):
-            if id(array) in recorder_arrays_used and id(array) not in values:
-                values[id(array)] = (".".join(path), array, qd_to_torch(array, copy=True))
+        with no_read_guard():
+            for path, array in iter_arrays_used(kernel, args):
+                if id(array) in recorder_arrays_used and id(array) not in values:
+                    values[id(array)] = (".".join(path), array, qd_to_torch(array, copy=True))
         is_copying = False
         launches_open.setdefault(recorder, []).append((kernel, args))
-        insert(recorder, kernel, args)
 
     def checked_entry(recorder, *args, **kwargs):
         close_entry(recorder)

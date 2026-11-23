@@ -54,14 +54,14 @@ class PBDParticles(Data, kind=DataKind.STATE, shape=(PARTICLES, ENVS)):
     correction, and follows what the user or a rigid link imposes.
     """
 
-    pos: qd.Tensor = field((float, 3))
-    vel: qd.Tensor = field((float, 3))
+    pos: qd.Tensor = field((float, 3), change=StateChange.GEOMETRY)
+    vel: qd.Tensor = field((float, 3), change=StateChange.DYNAMICS)
     # The positions the substep starts from, which it moves afterward
     ipos: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH)
     dpos: qd.Tensor = field((float, 3))
     lam: qd.Tensor = field(float)
-    is_free: qd.Tensor = field(bool)
-    is_active: qd.Tensor = field(bool)
+    is_free: qd.Tensor = field(bool, change=StateChange.DYNAMICS)
+    is_active: qd.Tensor = field(bool, change=StateChange.GEOMETRY)
 
 
 class PBDParticlesInfo(Data, kind=DataKind.CONSTANT, shape=(PARTICLES,)):
@@ -263,6 +263,7 @@ class PBDSolver(ParticleSolver):
         self._build_gravity(self.pbd_info.gravity)
 
         self._is_built = True
+        self.changelog.register_arrays(self.data)
 
     def add_particles(
         self,
@@ -450,7 +451,7 @@ class PBDSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
 
     @gs.assert_built
-    @mutates(StateChange.DYNAMICS, differentiable=False)
+    @mutates(differentiable=False)
     def fix_particles(self, particles_idx=None, envs_idx=None):
         """
         Fix some particles where they are, until they are released (see 'release_particles').
@@ -468,7 +469,7 @@ class PBDSolver(ParticleSolver):
         kernel_set_particles_free(particles_idx, envs_idx, is_free=False, pbd_state=self.pbd_state)
 
     @gs.assert_built
-    @mutates(StateChange.DYNAMICS, differentiable=False)
+    @mutates(differentiable=False)
     def fix_particles_to_link(self, link_idx, particles_idx=None, envs_idx=None):
         """
         Attach some particles to a rigid link, which carries them along until they are released (see
@@ -486,7 +487,7 @@ class PBDSolver(ParticleSolver):
         self._sim.coupler.attach_pbd_particles_to_link(particles_idx, envs_idx, link_idx)
 
     @gs.assert_built
-    @mutates(StateChange.DYNAMICS, differentiable=False)
+    @mutates(differentiable=False)
     def release_particles(self, particles_idx=None, envs_idx=None):
         """Release some particles fixed in place or to a rigid link, which move freely again (see 'fix_particles')."""
         _, particles_idx, envs_idx = self._sanitize_io_variables(
@@ -1093,13 +1094,11 @@ class PBDScopedRenderContext(ParticleScopedRenderContext, ScopedRenderContext[PB
     """The particles of the PBD solver as drawn (see 'ParticleScopedRenderContext'), and the marker of its fixed
     particles, as its visual options ask."""
 
-    # Fixing and releasing particles changes the dynamics of the solver
-    stale_on = frozenset((StateChange.GEOMETRY, StateChange.DYNAMICS))
-
     def build(self) -> None:
         super().build()
         solver = self.owner
-        # The marker of the fixed particles, drawn at every particle and shown at those fixed
+        # The marker of the fixed particles, drawn at every particle and shown at those fixed, which fixing or releasing
+        # a particle changes (see 'fix_particles').
         self._fixed_particles: Points | None = None
         if solver.options.vis.constraints:
             self._fixed_particles = Points(
@@ -1107,6 +1106,7 @@ class PBDScopedRenderContext(ParticleScopedRenderContext, ScopedRenderContext[PB
                 radius=solver.particle_radius * FIXED_PARTICLE_SIZE_SCALE,
                 color=CONSTRAINT_COLOR,
                 is_active=torch.zeros((solver.n_envs_, solver.n_particles), dtype=gs.tc_bool, device=gs.device),
+                invalidated_by={solver: (StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL)},
             )
 
     def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:

@@ -1073,7 +1073,7 @@ def test_derived_quantities_follow_state(show_viewer, tol):
 
 @pytest.mark.required
 def test_host_forward_kinematics(
-    trees_and_slider_mjcf, fixed_base_dual_arm, fixed_base_dual_arm_high_damping, show_viewer, tol
+    trees_and_slider_mjcf, welded_to_world_mjcf, fixed_base_dual_arm, fixed_base_dual_arm_high_damping, show_viewer, tol
 ):
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
@@ -1207,3 +1207,18 @@ def test_host_forward_kinematics(
         assert_allclose(geoms_quat, solver.get_geoms_quat(geoms_idx), tol=tol)
         assert_allclose(joints_xanchor[:, joints_mask], solver.get_joints_anchor_pos(joints_idx), tol=tol)
         assert_allclose(joints_xaxis[:, joints_mask], solver.get_joints_anchor_axis(joints_idx), tol=tol)
+
+    # A scene without dofs runs the forward kinematics once as it builds, the bodies welded to the world included
+    scene_without_dofs = gs.Scene(
+        show_viewer=show_viewer,
+    )
+    scene_without_dofs.add_entity(
+        morph=gs.morphs.MJCF(
+            file=welded_to_world_mjcf,
+        ),
+    )
+    scene_without_dofs.build(n_envs=2)
+    solver = scene_without_dofs.rigid_solver
+    links_pos, links_quat, *_ = compute_forward_kinematics(solver.entities, n_envs=2)
+    assert_allclose(links_pos, solver.get_links_pos(), tol=tol)
+    assert_allclose(links_quat, solver.get_links_quat(), tol=tol)

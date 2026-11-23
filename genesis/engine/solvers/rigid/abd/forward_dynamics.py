@@ -462,6 +462,7 @@ def func_compute_mass_matrix_masked(
     The matrix lacks the terms the integrator adds, and the sleeping trees of these environments are assembled anew by
     the next substep (see is_hibernated_mass_mat_updated in rigid/data.py). See func_compute_mass_matrix_and_link_force.
     """
+    # Unsetting the flag first makes this pass assemble the sleeping trees too
     if qd.static(rigid_config.use_hibernation):
         for i_b_ in range(envs_idx.shape[0]):
             i_b = envs_idx[i_b_]
@@ -1480,8 +1481,6 @@ def func_refresh_links_invweight_and_meaninertia(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
-    force_update: qd.template(),
-    refresh_position: qd.template(),
     refresh_velocity: qd.template(),
 ):
     """Recompute the inverse weights of the kinematic trees the given links belong to, and the mean inertia.
@@ -1520,20 +1519,27 @@ def func_refresh_links_invweight_and_meaninertia(
                 if dyn_info.links.root_idx[I_l] == i_rl:
                     if is_link_pending:
                         func_init_link_invweight(
-                            i_l, i_b, jac_row, solve_out, dyn_state, dyn_info, rigid_info, rigid_config, force_update
+                            i_l,
+                            i_b,
+                            jac_row,
+                            solve_out,
+                            dyn_state,
+                            dyn_info,
+                            rigid_info,
+                            rigid_config,
+                            force_update=True,
                         )
                     if is_dofs_pending:
                         func_init_dofs_invweight(
-                            i_l, i_b, jac_row, solve_out, dyn_info, rigid_info, rigid_config, force_update
+                            i_l, i_b, jac_row, solve_out, dyn_info, rigid_info, rigid_config, force_update=True
                         )
 
     func_init_meaninertia(envs_idx, rigid_info, rigid_config)
 
-    # Weighing moved the poses to the neutral configuration, so bring them back to the live one when the caller had
-    # them up to date, and whenever a velocity is recomputed below, since that reads the live poses. The factored mass
-    # matrix is left at the neutral configuration, the next step assembling it again for the one the scene is in.
-    if qd.static(refresh_position or refresh_velocity):
-        func_exit_neutral_configuration(envs_idx, dyn_state, dyn_info, rigid_info, rigid_config)
+    # Computing the weights moved the poses to the neutral configuration, so they are brought back to the live one,
+    # which the callers hold up to date and a velocity recomputed below reads. The factored mass matrix is left at the
+    # neutral configuration, the next step assembling it again for the one the scene is in.
+    func_exit_neutral_configuration(envs_idx, dyn_state, dyn_info, rigid_info, rigid_config)
 
     # A velocity is quoted about the center of mass this pass moves, so the same motion reads as a different velocity
     # from here. Both readings are brought back where the caller held them current, since this is what moved them.
@@ -1651,8 +1657,8 @@ def kernel_refresh_invweight_and_meaninertia(
 
     func_init_meaninertia(envs_idx, rigid_info, rigid_config)
 
-    # Both passes are the ones func_refresh_links_invweight_and_meaninertia ends on, and are owed for the same
-    # reasons, which are given there.
+    # Both passes are the ones func_refresh_links_invweight_and_meaninertia ends on (see there), run only where the
+    # caller holds the poses or the velocities up to date.
     if qd.static(refresh_position or refresh_velocity):
         func_exit_neutral_configuration(envs_idx, dyn_state, dyn_info, rigid_info, rigid_config)
 

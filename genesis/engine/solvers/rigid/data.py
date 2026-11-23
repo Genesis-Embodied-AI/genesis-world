@@ -8,6 +8,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.solvers.base_solver import ErrorCode
+from genesis.engine.state_change import StateChange
 from genesis.utils.data import ENVS, Config, Data, DataKind, Size, field, is_opted_in
 from genesis.utils.simt import ExactSums
 
@@ -58,16 +59,16 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     # dof-less scene pads its dof buffers to one slot and takes the slow path.
     n_awake_dofs: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
     qpos0: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.INFO)
-    qpos: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.STATE, grad=True)
+    qpos: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.STATE, grad=True, change=StateChange.GEOMETRY)
     qpos_next: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.SCRATCH, grad=True, labels=DYNAMICS)
     geoms_init_AABB: qd.Tensor = field((float, 3), shape=(GEOMS, 8), labels=DYNAMICS)
     # Stored reversed under the cooperative constraint kernels (see RigidData), i_d1 innermost, for their readers
     # striding i_d1 across lanes. The writers striding i_b have cooperative variants under the same flag.
-    mass_mat: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.DERIVED, labels=DYNAMICS, grad=True)
+    mass_mat: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.SCRATCH, labels=DYNAMICS, grad=True)
     # Stored in declared order whatever the kernels: its main reader, a serial back-substitution with lanes varying
     # i_b, would lose more from the reversed order than the tiled factor gains.
-    mass_mat_L: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.DERIVED, labels=DYNAMICS, grad=True)
-    mass_mat_D_inv: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.DERIVED, labels=DYNAMICS, grad=True)
+    mass_mat_L: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.SCRATCH, labels=DYNAMICS, grad=True)
+    mass_mat_D_inv: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.SCRATCH, labels=DYNAMICS, grad=True)
     # Scratch of the register-tiled mass factor, environment-first like the tile operations. The constraint Hessian
     # aliases it (see nt_H in ConstraintState).
     mass_mat_tiled_scratch: qd.Tensor = field(float, shape=(ENVS, DOFS, DOFS), kind=DataKind.SCRATCH, labels=TILED_MASS)
@@ -131,10 +132,12 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     hibernation_thresh_vel: qd.Tensor = field(float, shape=(), labels=DYNAMICS)
     EPS: qd.Tensor = field(float, shape=())
     # Whether the sleeping trees of each env hold the mass matrix and the factor of their last awake substep, which the
-    # substeps leave as they are. A pass writing their mass matrix outside the substeps unsets it, its own matrix
-    # lacking the terms of the integrator (see func_compute_mass_matrix_masked), so that the next substep assembles and
-    # factors them too, and its integration sets it back (see func_integrate).
-    is_hibernated_mass_mat_updated: qd.Tensor = field(bool, shape=(ENVS,), kind=DataKind.DERIVED, labels=DYNAMICS)
+    # substeps leave as they are. A refresh of the mass matrix unsets it to assemble them too, its matrix lacking the
+    # terms of the integrator (see func_compute_mass_matrix_masked), and a substep unsets it where a setter or a restore
+    # wrote the configuration since the last one (see 'RigidSolver.substep'), a restore leaving the mass matrix as the
+    # run before it left it. The substep then assembles and factors them too, and its integration sets it back (see
+    # func_integrate). It describes the mass matrix, which is scratch, so a checkpoint holds neither.
+    is_hibernated_mass_mat_updated: qd.Tensor = field(bool, shape=(ENVS,), kind=DataKind.SCRATCH, labels=DYNAMICS)
 
 
 # The counts of the largest entity of the solver, each taken over every entity
@@ -203,7 +206,7 @@ class DofsState(Data, kind=DataKind.DERIVED, shape=(DOFS, ENVS)):
     qf_passive: qd.Tensor = field(float, grad=True, labels=DYNAMICS)
     qf_applied: qd.Tensor = field(float, grad=True, labels=DYNAMICS)
     pos: qd.Tensor = field(float, grad=True)
-    vel: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
+    vel: qd.Tensor = field(float, kind=DataKind.STATE, grad=True, change=StateChange.DYNAMICS)
     vel_prev: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True, labels=DYNAMICS)
     vel_next: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True, labels=DYNAMICS)
     acc: qd.Tensor = field(float, grad=True, labels=DYNAMICS)
@@ -232,6 +235,12 @@ class LinksInfo(Data, kind=DataKind.INFO, shape=(LINKS, LINKS_INFO_ENVS)):
     """The model parameters of each link, per environment where batched: tree, ranges, pose and inertia."""
 
     parent_idx: qd.Tensor = field(int, kind=DataKind.CONSTANT)
+    # The roots follow MuJoCo: a body hanging from the world roots its own tree while its parent stays the world link,
+    # so that each branch expresses its spatial quantities about its own center of mass, their lever arms staying at
+    # the size of the branch. A root with a parent hangs from a fixed root link, which moves only as the setters write
+    # its pose (see FixedRootsState). The kinematics read that pose as written, since the thread of its own root copies
+    # it to the link meanwhile (see func_forward_kinematics_link), and an attach re-roots everything hanging from the
+    # attached link (see 'RigidEntity.attach').
     root_idx: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     q_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     dof_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
@@ -240,8 +249,8 @@ class LinksInfo(Data, kind=DataKind.INFO, shape=(LINKS, LINKS_INFO_ENVS)):
     dof_end: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     joint_end: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     n_dofs: qd.Tensor = field(int, kind=DataKind.CONSTANT)
-    pos: qd.Tensor = field((float, 3))
-    quat: qd.Tensor = field((float, 4))
+    pos: qd.Tensor = field((float, 3), change=StateChange.GEOMETRY)
+    quat: qd.Tensor = field((float, 4), change=StateChange.GEOMETRY)
     invweight: qd.Tensor = field((float, 2))
     is_fixed: qd.Tensor = field(bool, kind=DataKind.CONSTANT)
     # The slot of a fixed root link in FixedRootsState, -1 for every other link
@@ -323,7 +332,7 @@ class JointsInfo(Data, kind=DataKind.INFO, shape=(JOINTS, JOINTS_INFO_ENVS)):
     q_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     dof_start: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     dof_end: qd.Tensor = field(int, kind=DataKind.CONSTANT)
-    pos: qd.Tensor = field((float, 3))
+    pos: qd.Tensor = field((float, 3), change=StateChange.GEOMETRY)
 
 
 class JointsState(Data, kind=DataKind.DERIVED, shape=(JOINTS, ENVS)):
@@ -336,10 +345,10 @@ class JointsState(Data, kind=DataKind.DERIVED, shape=(JOINTS, ENVS)):
 class GeomsInfo(Data, kind=DataKind.INFO, shape=(GEOMS,)):
     """The model parameters of each collision geom: pose on its link, shape, mesh ranges and contact properties."""
 
-    pos: qd.Tensor = field((float, 3))
-    center: qd.Tensor = field((float, 3))
-    quat: qd.Tensor = field((float, 4))
-    data: qd.Tensor = field((float, 7))
+    pos: qd.Tensor = field((float, 3), change=StateChange.GEOMETRY)
+    center: qd.Tensor = field((float, 3), change=StateChange.GEOMETRY)
+    quat: qd.Tensor = field((float, 4), change=StateChange.GEOMETRY)
+    data: qd.Tensor = field((float, 7), change=StateChange.GEOMETRY)
     link_idx: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     type: qd.Tensor = field(int, kind=DataKind.CONSTANT)
     friction: qd.Tensor = field(float)
@@ -436,8 +445,8 @@ class EntitiesInfo(Data, kind=DataKind.INFO, shape=(ENTITIES,)):
 class FixedRootsState(Data, kind=DataKind.STATE, shape=(FIXED_ROOTS, ENVS)):
     """The pose of each fixed root link in each environment, which forward kinematics copies into its link."""
 
-    pos: qd.Tensor = field((float, 3), grad=True)
-    quat: qd.Tensor = field((float, 4), grad=True)
+    pos: qd.Tensor = field((float, 3), grad=True, change=StateChange.GEOMETRY)
+    quat: qd.Tensor = field((float, 4), grad=True, change=StateChange.GEOMETRY)
 
 
 class EntitiesState(Data, kind=DataKind.STATE, shape=(ENTITIES, ENVS)):

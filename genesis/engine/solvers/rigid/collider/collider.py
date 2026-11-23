@@ -8,7 +8,7 @@ terrain), and contact management.
 
 from collections.abc import Iterator
 from itertools import product
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -23,7 +23,8 @@ from genesis.engine.entities.rigid_entity.description import _balanced_variant_m
 from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
-from genesis.utils.data import ConfigItem, DataItem, iter_data, opt_in
+from genesis.engine.state_change import TrackedCache, scoped_kind
+from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data, opt_in
 from genesis.utils.misc import (
     assign_indexed_tensor,
     get_gpu_core_count,
@@ -63,6 +64,9 @@ from .support_field import SupportFieldInfo
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+
+# The fields of the contacts 'get_contacts' returns that follow the geometry and the model alone
+_CONTACT_POINT_KEYS = ("link_a", "link_b", "geom_a", "geom_b", "penetration", "position", "normal")
 
 
 NEUTRAL_COLLISION_RES_ABS = 0.01
@@ -122,36 +126,26 @@ class Collider:
 
         self._init_collision_fields()
 
-        if gs.use_zerocopy:
-            # Probe every view the zero-copy contact query needs (including the per-call n_contacts and
-            # contact_sort_idx ones, which qd_to_torch caches on their fields). If any field sits past 2**31 bytes
-            # in its SNode tree no zero-copy view exists, and get_contacts falls back to the gather-kernel path.
-            self._contact_data: dict[str, torch.Tensor] | None = {}
-            try:
-                qd_to_torch(self.collider_state.n_contacts, copy=False)
-                qd_to_torch(self.collider_state.contact_sort_idx, transpose=True, copy=False)
-                qd_to_torch(self.collider_state.first_time, copy=False)
-                if self.collider_config.has_non_box_plane_convex_convex:
-                    qd_to_torch(self.collider_state.contact_cache.normal, copy=False)
-                    qd_to_torch(self.collider_state.contact_cache.penetration, copy=False)
-                for key, name in (
-                    ("link_a", "link_a"),
-                    ("link_b", "link_b"),
-                    ("geom_a", "geom_a"),
-                    ("geom_b", "geom_b"),
-                    ("penetration", "penetration"),
-                    ("position", "pos"),
-                    ("normal", "normal"),
-                    ("force", "force"),
-                ):
-                    self._contact_data[key] = qd_to_torch(
-                        getattr(self.collider_state.contact_data, name), transpose=True, copy=False
-                    )
-            except ValueError:
-                self._contact_data = None
-
         # Make sure that the initial state is clean
         self.clear()
+
+        rigid_solver.changelog.register_arrays(self.data)
+        # The views 'get_contacts' reads the contact points and their forces through, the count and the order of the
+        # contacts first.
+        contact_data = self.collider_state.contact_data
+        n_contacts, contact_sort_idx = self.collider_state.n_contacts, self.collider_state.contact_sort_idx
+        self._contact_points_cache = TrackedCache(
+            n_contacts,
+            contact_sort_idx,
+            contact_data.link_a,
+            contact_data.link_b,
+            contact_data.geom_a,
+            contact_data.geom_b,
+            contact_data.penetration,
+            contact_data.pos,
+            contact_data.normal,
+        )
+        self._contact_forces_cache = TrackedCache(n_contacts, contact_sort_idx, contact_data.force)
 
     @property
     def data(self) -> Iterator[DataItem | ConfigItem]:
@@ -412,9 +406,6 @@ class Collider:
             ),
             requires_grad=config.requires_grad,
         )
-
-        # 'contact_data_cache' is not used in Quadrants kernels, so keep it outside of the collider state / info
-        self._contact_data_cache: dict[tuple[bool, bool], dict[str, torch.Tensor | tuple[torch.Tensor]]] = {}
 
         # The warp-per-env cooperative dedup kernel beats the one-env-per-thread fused kernel only while the GPU keeps
         # spare occupancy: past half the cores in envs, the launch oversubscribes the SMs and the fused kernel wins.
@@ -854,8 +845,7 @@ class Collider:
             self.collider_info.terrain_xyz_maxmin.from_numpy(xyz_maxmin)
 
     def reset(self, envs_idx=None, *, cache_only: bool = True) -> None:
-        self._contact_data_cache.clear()
-        if gs.use_zerocopy and self._contact_data is not None:
+        if gs.use_zerocopy:
             envs_mask = indices_to_mask(envs_idx)
             if not cache_only:
                 first_time = qd_to_torch(self.collider_state.first_time, copy=False)
@@ -877,6 +867,8 @@ class Collider:
             envs_idx, self.collider_state, self._solver.rigid_config, self.collider_config, cache_only
         )
 
+    # What it writes is no result, until the next detection or step computes it anew
+    @scoped_kind(DataKind.SCRATCH)
     def clear(self, envs_idx=None, *, reset_warm_start: bool = True):
         """Remove the contacts of the environments 'envs_idx' (None for all of them), with their forces.
 
@@ -887,7 +879,6 @@ class Collider:
         reset of the scene to its initial state asks for it, while the restore of a saved state ('set_state') keeps
         the warm start the state holds, so that the restored environments step on exactly as they did when saved.
         """
-        self._contact_data_cache.clear()
         # A kernel wipes the live contacts alone, while views over the contact buffers would wipe every slot of them
         if not isinstance(envs_idx, torch.Tensor):
             envs_idx = self._solver.sim.sanitize_envs_idx(envs_idx)
@@ -937,16 +928,32 @@ class Collider:
             self._use_coop_dedup,
             self._solver._errno,
         )
-        self._contact_data_cache.clear()
 
     def get_contacts(
         self, as_tensor: bool = True, to_torch: bool = True, keep_batch_dim: bool = False, is_padded: bool = False
     ):
-        # Early return if already pre-computed
-        contact_data = self._contact_data_cache.setdefault((as_tensor, to_torch, is_padded), {})
-        if contact_data:
-            return contact_data.copy()
+        # The points follow the geometry and the model, their forces the dynamics too (see 'invalidated_by' in
+        # collider/data.py), so the forces alone are None after a change of the velocities.
+        layout = (as_tensor, to_torch, keep_batch_dim, is_padded)
+        contact_points = self._get_contacts_fields(self._contact_points_cache, _CONTACT_POINT_KEYS, *layout)
+        if contact_points is None:
+            return None
+        contact_forces = self._get_contacts_fields(self._contact_forces_cache, ("force",), *layout)
+        return contact_points | (contact_forces or {"force": None})
 
+    def _get_contacts_fields(
+        self,
+        cache: TrackedCache,
+        keys: tuple[str, ...],
+        as_tensor: bool,
+        to_torch: bool,
+        keep_batch_dim: bool,
+        is_padded: bool,
+    ) -> dict[str, Any] | None:
+        views = cache.get()
+        if views is None:
+            return None
+        contact_data = {}
         n_envs = self._solver.n_envs
         # When pruning and spatial sort are both statically disabled, contact_sort_idx is guaranteed to stay at the
         # identity permutation, so the physical layout of contact_data already matches the logical order. In that
@@ -957,8 +964,8 @@ class Collider:
         zerocopy_aligned = (
             not self.collider_config.has_prunable_contacts and not self.collider_config.has_non_box_plane_convex_convex
         )
-        if gs.use_zerocopy and self._contact_data is not None:
-            n_contacts = qd_to_torch(self.collider_state.n_contacts, copy=False)
+        if gs.use_zerocopy:
+            n_contacts, sort_idx_view, *fields = views
             # 'is_padded' returns fixed-capacity tensors (plus per-env 'n_contacts'), skipping the
             # 'n_contacts.max().item()' device->host sync that trimming to the live count needs.
             padded = is_padded
@@ -971,7 +978,6 @@ class Collider:
                 # field; per-env trimming to n_contacts[i] happens in the ragged split below.
                 if not (as_tensor or n_envs == 0) and not padded:
                     n_contacts_max = n_contacts.max().item()
-                sort_idx_view = qd_to_torch(self.collider_state.contact_sort_idx, transpose=True, copy=False)
                 if padded:
                     # Gather the full capacity so no host-side trim (sync) is needed. Sort indices past the live
                     # range may be stale; clamp (out-of-place, preserving the zero-copy view) keeps them in-bounds.
@@ -988,7 +994,7 @@ class Collider:
                 if as_tensor and n_envs > 0 and not padded:
                     pad_mask = torch.arange(n_contacts_max, device=sort_idx_view.device)[None, :] >= n_contacts[:, None]
 
-            for key, data in self._contact_data.items():
+            for key, data in zip(keys, fields):
                 if zerocopy_aligned:
                     if n_envs == 0:
                         if padded:
@@ -1027,7 +1033,7 @@ class Collider:
             if padded:
                 contact_data["n_contacts"] = n_contacts if to_torch else tensor_to_array(n_contacts)
 
-            return contact_data.copy()
+            return contact_data
 
         # Find out how much dynamic memory must be allocated
         n_contacts = qd_to_numpy(self.collider_state.n_contacts)
@@ -1117,17 +1123,15 @@ class Collider:
                         fout_chunks = (np.split(out, n_contacts_starts) for out in fout_chunks)
                     values = (*iout_chunks, *fout_chunks)
 
-        # Store contact information in cache
-        contact_data.update(
-            zip(("link_a", "link_b", "geom_a", "geom_b", "penetration", "position", "normal", "force"), values)
-        )
+        names = ("link_a", "link_b", "geom_a", "geom_b", "penetration", "position", "normal", "force")
+        contact_data.update((key, value) for key, value in zip(names, values) if key in keys)
 
         if padded:
             contact_data["n_contacts"] = (
                 torch.as_tensor(n_contacts_arr, device=gs.device) if to_torch else n_contacts_arr
             )
 
-        return contact_data.copy()
+        return contact_data
 
     def backward(self, dL_dposition, dL_dnormal, dL_dpenetration):
         func_set_upstream_grad(dL_dposition, dL_dnormal, dL_dpenetration, self.collider_state)

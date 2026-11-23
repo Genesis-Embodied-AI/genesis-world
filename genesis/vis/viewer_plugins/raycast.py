@@ -57,7 +57,7 @@ class Raycaster:
         hits = RaycastResult(sizes=dict(envs=scene.sim.n_envs_))
         solvers = (scene.sim.rigid_solver, scene.sim.kinematic_solver) if use_visual_geom else (scene.sim.rigid_solver,)
         scoped_contexts = tuple(solver.render_context for solver in solvers)
-        self.targets.extend(get_raycast_targets(scene.sim.render_context, scoped_contexts, use_visual_geom, hits))
+        self.targets.extend(get_raycast_targets(scoped_contexts, use_visual_geom, hits))
 
         if not self.targets:
             what = "visual mesh opting in through use_visual_raycasting" if use_visual_geom else "collision face"

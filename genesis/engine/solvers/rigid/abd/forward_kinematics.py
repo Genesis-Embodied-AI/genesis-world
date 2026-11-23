@@ -419,8 +419,15 @@ def func_forward_kinematics_link(
     quat = W(I_l0, dyn_info.links.quat[I_l], dyn_state.links.quat_bw, BW)
     i_p = dyn_info.links.parent_idx[I_l]
     if i_p != -1:
+        # A root hangs from the fixed root link of another root, whose pose it reads as the setters wrote it while the
+        # thread of that root copies it to the link (see root_idx in rigid/data.py)
         parent_pos = dyn_state.links.pos[i_p, i_b]
         parent_quat = dyn_state.links.quat[i_p, i_b]
+        if dyn_info.links.root_idx[I_l] == i_l:
+            I_p = [i_p, i_b] if qd.static(rigid_config.batch_links_info) else i_p
+            i_fr_p = dyn_info.links.fixed_root_idx[I_p]
+            parent_pos = dyn_state.fixed_roots.pos[i_fr_p, i_b]
+            parent_quat = gu.qd_normalize(dyn_state.fixed_roots.quat[i_fr_p, i_b], rigid_info.EPS[None])
         pos_ = parent_pos + gu.qd_transform_by_quat(dyn_info.links.pos[I_l], parent_quat)
         quat_ = gu.qd_transform_quat_by_quat(dyn_info.links.quat[I_l], parent_quat)
 
@@ -708,8 +715,9 @@ def func_forward_velocity_link(
     cvel_vel = W(I_j0, qd.Vector.zero(gs.qd_float, 3), dyn_state.links.cd_vel_bw, BW)
     cvel_ang = W(I_j0, qd.Vector.zero(gs.qd_float, 3), dyn_state.links.cd_ang_bw, BW)
 
+    # A root starts at rest, its parent never moving (see root_idx in rigid/data.py)
     i_p = dyn_info.links.parent_idx[I_l]
-    if i_p != -1:
+    if i_p != -1 and dyn_info.links.root_idx[I_l] != i_l:
         cvel_vel = W(I_j0, dyn_state.links.cd_vel[i_p, i_b], dyn_state.links.cd_vel_bw, BW)
         cvel_ang = W(I_j0, dyn_state.links.cd_ang[i_p, i_b], dyn_state.links.cd_ang_bw, BW)
 
@@ -803,7 +811,8 @@ def func_update_acc_link(
     I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
     i_p = dyn_info.links.parent_idx[I_l]
 
-    if i_p == -1:
+    # A root accelerates as a link without parent, its parent never moving (see root_idx in rigid/data.py)
+    if i_p == -1 or dyn_info.links.root_idx[I_l] == i_l:
         i_e = dyn_info.links.entity_idx[I_l]
         dyn_state.links.cdd_vel[i_l, i_b] = -rigid_info.gravity[i_b] * (1 - dyn_info.entities.gravity_compensation[i_e])
         dyn_state.links.cdd_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
@@ -1149,12 +1158,12 @@ def func_update_cartesian_space(
     under enable_level_sweep (see func_sweep_links_by_level). The geoms of the step take one thread each, and the
     centers of mass one thread per link and one per root.
 
-    A static link moves only when a setter writes the pose of its fixed root, so the step sweep walks the awake trees
-    alone (see trees_root_idx in rigid/data.py), whose static parents hold still, and a tree sleeps as a unit, so a
-    hibernated tree keeps the poses of its last awake step. The initial placement and the backward replay cover the
-    static links too and walk each root whole (see func_update_kinematics_root): the manual reverse reads the
-    per-joint pose cache of every link of a root. Autodiff takes a kernel made of loops alone, so the loops are the
-    outermost ones of their kernel.
+    A static link moves only when a setter writes the pose of its fixed root, so the sweep ending a substep walks the
+    awake trees alone (see trees_root_idx in rigid/data.py), whose static parents hold still, and a tree sleeps as a
+    unit, so a hibernated tree keeps the poses of its last awake step. The refresh after setters, the initial placement
+    and the backward replay cover the static links too and walk each root whole (see func_update_kinematics_root): the
+    manual reverse reads the per-joint pose cache of every link of a root. Autodiff takes a kernel made of loops alone,
+    so the loops are the outermost ones of their kernel.
     """
     if qd.static(force_update_all_geoms or is_backward):
         qd.loop_config(
