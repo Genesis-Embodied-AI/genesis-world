@@ -1042,12 +1042,12 @@ class DynamicTextures:
                     "Pixels are written into the batched variant of a dynamic texture, which this one lacks. Declare "
                     "it with 'is_batched=True'."
                 )
+            width, height = record.options.resolution
+            envs_shape = texture_variants.variants_idx[mask].shape
+            image = broadcast_tensor(image, image.dtype, (*envs_shape, height, width, -1))
             n_channels = image.shape[-1]
             if n_channels not in (3, 4):
                 gs.raise_exception(f"Pixels are written as RGB or RGBA, got {n_channels} channels.")
-            width, height = record.options.resolution
-            envs_shape = texture_variants.variants_idx[mask].shape
-            image = broadcast_tensor(image, image.dtype, (*envs_shape, height, width, n_channels))
             # The images hold uint8 sRGB values in the diffuse map, and float16 linear values in the emissive map, which
             # may exceed 1, a float array standing for 1.0 where an integer one stands for 255.
             if texture_variants.map_type == TEXTURE_MAP_TYPE.EMISSIVE:
