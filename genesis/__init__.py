@@ -29,6 +29,8 @@ except ImportError as e:
 # * torch 2.8.0: writes in place through integer index tensors into zero-copy views.
 # * torch 2.10.0 on Apple Metal: supports the zero-copy of 'qd.Field'.
 #   See https://github.com/pytorch/pytorch/pull/168193
+# * torch 2.11.0 on AMD GPU: exposes the shared memory per compute unit, which sizes the shared tiles.
+#   See https://github.com/pytorch/pytorch/pull/170572
 # * torch 2.12.0 on Apple Metal: fills uint64 tensors, as deterministic algorithms do on every allocation.
 #   See https://github.com/pytorch/pytorch/pull/179230
 _TORCH_VERSION = tuple(map(int, torch.__version__.split(".")[:2]))
@@ -146,6 +148,11 @@ def init(
     if backend == _gs_backend.metal and _TORCH_VERSION < (2, 12):
         raise_exception(
             "'torch<2.12.0' is not supported on Apple Metal. Please upgrade pytorch manually: "
+            "https://pytorch.org/get-started/locally/"
+        )
+    if backend == _gs_backend.amdgpu and _TORCH_VERSION < (2, 11):
+        raise_exception(
+            "'torch<2.11.0' is not supported on AMD GPU. Please upgrade pytorch manually: "
             "https://pytorch.org/get-started/locally/"
         )
 
