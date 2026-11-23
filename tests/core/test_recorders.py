@@ -1,4 +1,5 @@
 import csv
+import os
 import pathlib
 import subprocess
 import sys
@@ -335,6 +336,39 @@ def test_stop_recording_then_exit(tmp_path):
     assert proc.returncode == RET_SUCCESS
     assert "Exception ignored" not in proc.stderr
     assert npz_file.exists()
+
+
+def _exit_without_stop_recording_child(args: list[str]):
+    """Child process: exit without stopping a recording that a plotter draws through 'pyplot'."""
+    gs.init(backend=gs.constants.backend.cpu)
+
+    scene = gs.Scene(show_viewer=False)
+    scene.add_recorder(
+        data_func=lambda: 1.0,
+        rec_options=gs.recorders.MPLLinePlot(labels=("value",), save_to_filename=args[0], show_window=False),
+    )
+    scene.build()
+    scene.step()
+
+    sys.exit(RET_SUCCESS)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [None])
+def test_exit_without_stop_recording(tmp_path):
+    video_file = tmp_path / "plot.mp4"
+    cmd_line = [sys.executable, "-m", MODULE, _exit_without_stop_recording_child.__name__, str(video_file)]
+
+    # The plotter draws on the backend matplotlib selects, and the runners of the macOS lane have no display
+    env = {**os.environ, "MPLBACKEND": "Agg"}
+    proc = subprocess.run(cmd_line, capture_output=True, text=True, encoding="utf-8", cwd=MODULE_ROOT_DIR, env=env)
+    if proc.returncode != RET_SUCCESS or "Exception ignored" in proc.stderr:
+        print(proc.stdout)
+        print("-" * 100)
+        print(proc.stderr)
+    assert proc.returncode == RET_SUCCESS
+    assert "Exception ignored" not in proc.stderr
+    assert video_file.exists()
 
 
 @pytest.mark.required

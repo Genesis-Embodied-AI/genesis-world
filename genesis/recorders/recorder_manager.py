@@ -1,3 +1,6 @@
+import functools
+import threading
+import weakref
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -77,6 +80,21 @@ class RecorderManager(BuildableMixin):
             raise
         self._is_recording = True
         self._is_built = True
+
+        try:
+            # A run that ends without 'stop_recording' has its recordings stopped here. The hook runs before every
+            # 'atexit' callback, among them the one of 'pyplot', which puts the base canvas back on each figure and
+            # leaves the plotters nothing to draw on, and the one of Genesis, which destroys the scenes. The sample of
+            # the state the stop records stays out of a recording stopped this way, since an encoder closes its file in
+            # a hook of its own, registered at its first frame and therefore ahead of this one.
+            def stop_at_exit(manager_ref):
+                manager = manager_ref()
+                if manager is not None and manager._is_built and manager._is_recording:
+                    manager.stop()
+
+            threading._register_atexit(functools.partial(stop_at_exit, weakref.ref(self)))
+        except AttributeError:
+            pass
 
     @gs.assert_built
     def stop(self):
