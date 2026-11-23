@@ -21,9 +21,6 @@ DYNAMIC_VVERTS = Size("dynamic_vverts")
 BATCHED_VVERTS = Size("batched_vverts")
 VGEOMS_VARIANTS = Size("vgeoms_variants")
 VARIANTS_VVERTS = Size("variants_vverts")
-# The variant an environment shows for the mesh of the asset, whatever the variants a visual geom declares, the batched
-# variant being -1.
-ASSET_VARIANT_IDX = -2
 
 # Whether each environment holds each geom or visual geom, which the heterogeneous variants alone require
 VARIANTS = "variants"
@@ -81,6 +78,7 @@ class RigidDynamicVVerts(Data):
     vgeoms_batched_vvert_start: qd.Tensor = field(int, shape=(DYNAMIC_VGEOMS,), kind=DataKind.CONSTANT)
     vgeoms_variant_start: qd.Tensor = field(int, shape=(DYNAMIC_VGEOMS,), kind=DataKind.CONSTANT)
     # The variant each environment shows, -1 for the batched variant and ASSET_VARIANT_IDX for the mesh of the asset
+    # (see render_context.py)
     vgeoms_variant_idx: qd.Tensor = field(int, shape=(DYNAMIC_VGEOMS, ENVS), kind=DataKind.DERIVED)
     # The first vertex of each variant among the vertices of the variants, -1 for the mesh of the asset
     variants_vvert_start: qd.Tensor = field(int, shape=(VGEOMS_VARIANTS,), kind=DataKind.CONSTANT)

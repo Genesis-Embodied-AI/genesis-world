@@ -163,6 +163,18 @@ def test_export_and_load_rigid(
             diffuse_texture=gs.textures.ImageTexture(
                 image_path="textures/checker.png",
             ),
+            emissive_texture=gs.textures.DynamicTexture(
+                resolution=(4, 2),
+                variants=(
+                    gs.textures.ColorTexture(
+                        color=(0.0, 0.5, 0.0),
+                    ),
+                    gs.textures.ImageTexture(
+                        image_path="textures/checker.png",
+                    ),
+                ),
+                is_batched=True,
+            ),
         ),
     )
     # A height field, coefficients only the asset states, and a variant per environment, none of it held by a link.
@@ -267,12 +279,18 @@ def test_export_and_load_rigid(
             pos=(80.0, 80.0, 1.0),
         ),
     )
-    # A GLTF file is Y-up, so a Z-up claim on it is held as a compensating offset orientation
-    scene.add_entity(
+    # A GLTF file is Y-up, so a Z-up claim on it is held as a compensating offset orientation. Its surface holds a
+    # dynamic texture showing the textures of the asset.
+    gltf_camera = scene.add_entity(
         morph=gs.morphs.Mesh(
             pos=(90.0, 90.0, 1.0),
             file="meshes/camera/camera.glb",
             file_meshes_are_zup=True,
+        ),
+        surface=gs.surfaces.Default(
+            diffuse_texture=gs.textures.DynamicTexture(
+                resolution=(4, 4),
+            ),
         ),
     )
     # The same document given inline rather than as a model built in memory
@@ -306,6 +324,7 @@ def test_export_and_load_rigid(
     anchored_pos = anchored.get_pos()
     anchored_quat = anchored.get_quat()
     stretched.set_vverts(stretched.vgeoms[0].init_vverts + 0.01)
+    anchored.set_texture(variant=1)
     for _ in range(20):
         scene.step()
 
@@ -321,6 +340,7 @@ def test_export_and_load_rigid(
     assert "CSVFileWriter" not in left_out
     assert "pre_step_callback" in left_out
     assert "visual vertices" in left_out
+    assert "dynamic textures" in left_out
     # The manifest records each asset by bare filename, so the archive reads the same on any machine.
     with zipfile.ZipFile(exported) as archive:
         stored = archive.read(MANIFEST_NAME).decode()
@@ -342,8 +362,9 @@ def test_export_and_load_rigid(
     # A texture is drawn from its pixels, which travel, and the name of the image is all that is kept of its path.
     assert_equal(restored.entities[1].surface.diffuse_texture.image_array, box.surface.diffuse_texture.image_array)
     assert restored.entities[1].surface.diffuse_texture.image_path == "checker.png"
-    # A batch holds textures of its own, and each keeps the name of the image it was read from
+    # A batch holds textures of its own, and each keeps the name of the image it was read from, as a variant does
     assert restored.entities[2].surface.diffuse_texture.textures[0].image_path == "indoor_bright.png"
+    assert restored.entities[6].surface.emissive_texture.variants[1].image_path == "checker.png"
     # A texture holding a path rather than pixels stands for nothing, in the surface and in the meshes drawn with it
     assert restored.entities[14].surface.normal_texture is None
     assert restored.entities[14].vgeoms[0].vmesh.surface.normal_texture is None
@@ -351,6 +372,13 @@ def test_export_and_load_rigid(
     restored_visual = restored.entities[6].vgeoms[0].trimesh.visual
     assert restored_visual.kind == "texture"
     assert_equal(restored_visual.uv, anchored.vgeoms[0].trimesh.visual.uv)
+    restored_texture = restored.entities[6].vgeoms[0].vmesh.surface.emissive_texture
+    anchored_texture = anchored.vgeoms[0].vmesh.surface.emissive_texture
+    assert_equal(restored_texture.variants[0].color, anchored_texture.variants[0].color)
+    assert_equal(restored_texture.variants[1].image_array, anchored_texture.variants[1].image_array)
+    # The textures of the asset travel with the meshes showing a dynamic texture
+    for vgeom, restored_vgeom in zip(gltf_camera.vgeoms, restored.entities[gltf_camera.idx].vgeoms):
+        assert_equal(restored_vgeom.get_texture(), vgeom.get_texture())
     # A morph names the asset it was created from, since the description stands for what was parsed out of it
     assert restored.entities[15].morph.file == "two_link.urdf.xacro"
     # A mesh states the asset it was read from by name, wherever that asset stood
@@ -444,6 +472,14 @@ def test_export_and_load_rigid(
         assert first.namelist() == second.namelist()
         assert json.loads(first.read(MANIFEST_NAME)) == json.loads(second.read(MANIFEST_NAME))
         assert first.read(ARRAY_MEMBER) == second.read(ARRAY_MEMBER)
+
+    # A reset of every environment shows the authored appearance again, which a file then carries in full
+    scene.reset()
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        scene.export(tmp_path / f"reset{SCENE_FORMAT}")
+    left_out = " ".join(record.getMessage() for record in caplog.records)
+    assert "visual vertices" not in left_out and "dynamic textures" not in left_out
 
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])

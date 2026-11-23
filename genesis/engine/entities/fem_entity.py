@@ -12,7 +12,7 @@ import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.entities.rigid_entity import RigidLink
-from genesis.engine.render_context import MeshKey, SegmentationKeys
+from genesis.engine.render_context import DynamicTextureMixin, MeshKey, SegmentationKeys
 from genesis.options.patches import resolve_patch_parts
 from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from genesis.engine.solvers.fem_solver import FEMSolver
 
 
-class FEMVisGeom(RBC):
+class FEMVisGeom(DynamicTextureMixin, RBC):
     """A visual geom of a FEM entity, the deformable counterpart of `RigidVisGeom`.
 
     It carries the render mesh drawn by the visualizer, decoupled from the simulation mesh, and 'sim_verts_idx',
@@ -42,6 +42,16 @@ class FEMVisGeom(RBC):
     def get_trimesh(self):
         """The underlying `trimesh.Trimesh` of the render mesh."""
         return self._vmesh.trimesh
+
+    # A visual geom is built with its entity, whose built state guards the texture accessors
+    @property
+    def _is_built(self) -> bool:
+        return self._entity._is_built
+
+    @property
+    def solver(self) -> "FEMSolver":
+        """The solver of the entity of the visual geom."""
+        return self._entity.solver
 
     @property
     def uid(self):
@@ -105,7 +115,7 @@ def assert_muscle(method):
     return wrapper
 
 
-class FEMEntity(Entity):
+class FEMEntity(DynamicTextureMixin, Entity):
     """
     A finite element method (FEM)-based entity for deformable simulation.
 

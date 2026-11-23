@@ -14,3 +14,23 @@ def pprint_oneline(data, delimiter, digits=None):
         msg_item = "=".join((key, str(value)))
         msg_items.append(msg_item)
     return delimiter.join(msg_items)
+
+
+def get_masks_mean_color(rgb, masks):
+    """Return the mean color of an image over each of some boolean masks.
+
+    The masks stack along the axis before their image axes, and broadcast against the image over the axes before it,
+    such as the environments of a camera rendering each one apart. The result holds one color per mask.
+    """
+    masks_weight = masks / masks.sum(axis=(-2, -1), keepdims=True)
+    return np.sum(masks_weight[..., None] * rgb[..., None, :, :, :], axis=(-3, -2))
+
+
+def get_masks_shown_color(rgb, masks):
+    """Return the color an image shows over each of some boolean masks, each channel 1 when lit and 0 when dark.
+
+    A channel is lit when its mean exceeds 100 and dark when it stays below 5. A channel in between is NaN, which
+    matches no color.
+    """
+    colors = get_masks_mean_color(rgb, masks)
+    return np.select((colors > 100.0, colors < 5.0), (1.0, 0.0), np.nan)

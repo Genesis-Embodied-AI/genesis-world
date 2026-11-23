@@ -7,6 +7,7 @@ import torch
 
 import genesis as gs
 from genesis.constants import link_ref_frame
+from genesis.engine.render_context import DynamicTextureMixin
 from genesis.typing import UnitVec4FType, Vec3FType
 from genesis.utils import geom as gu
 from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_to_torch
@@ -187,7 +188,7 @@ def compute_forward_kinematics(entities, n_envs: int, qpos=None):
     return tuple([np.broadcast_to(values, (n_envs, *values.shape[1:])) for values in poses])
 
 
-class KinematicEntity(Entity):
+class KinematicEntity(DynamicTextureMixin, Entity):
     """
     Base entity class for articulated rigid-body systems (morphology, FK, Jacobian, IK).
 
@@ -221,7 +222,6 @@ class KinematicEntity(Entity):
         self._vface_start = solver.n_vfaces
 
         self._is_attached: bool = False
-        self._is_vverts_overridden: bool = False
 
         self._load_model()
 

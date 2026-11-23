@@ -11,6 +11,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.entities.particle_entity import ParticleEntity
+from genesis.engine.render_context import DynamicTextureMixin
 from genesis.options.surfaces import Surface
 from genesis.typing import IndexType
 
@@ -94,7 +95,7 @@ class PBDBaseEntity(ParticleEntity):
 
 
 @qd.data_oriented
-class PBDTetEntity(PBDBaseEntity):
+class PBDTetEntity(DynamicTextureMixin, PBDBaseEntity):
     """
     PBD entity represented by tetrahedral elements.
 

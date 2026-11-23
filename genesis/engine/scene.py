@@ -32,6 +32,7 @@ from genesis.engine.render_context import (
     MeshGeometry,
     Points,
     RenderContext,
+    RuntimeAppearance,
     ScopedRenderContext,
     Shape,
     StaticMeshBatch,
@@ -1699,11 +1700,15 @@ class Scene(BuildableMixin, RBC):
         if isinstance(self.options.renderer, gs.renderers.RayTracer) and self.options.renderer.env_surface is not None:
             surfaces.append(self.options.renderer.env_surface)
         omitted_kinds.update(name for surface in surfaces for name in pixel_less_textures(surface))
-        # Visual vertices written at runtime live in the solver, and a file carries what a scene was authored from.
+        # Visual vertices and dynamic textures set at runtime live in the render context, and a file carries what a
+        # scene was authored from.
         omitted_kinds.update(
-            f"'{entity.name}' visual vertices"
-            for entity in self.entities
-            if isinstance(entity, KinematicEntity) and entity._is_vverts_overridden
+            f"'{entity.name}' {kind.value}"
+            for solver in self.sim.solvers
+            if solver.render_context is not None
+            for entity, kinds in solver.render_context.entities_written.items()
+            for kind in RuntimeAppearance
+            if kind in kinds
         )
         for kinds, report, ending in (
             (omitted_kinds, gs.logger.warning, "is exported without it, so a scene loaded from the file holds none."),

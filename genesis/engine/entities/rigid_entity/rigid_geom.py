@@ -11,7 +11,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.mesh import Mesh
-from genesis.engine.render_context import GeomKey, LinkKey, SegmentationKeys
+from genesis.engine.render_context import DynamicTextureMixin, GeomKey, LinkKey, SegmentationKeys
 from genesis.repr_base import RBC
 from genesis.typing import FArrayType
 from genesis.utils.misc import BuildableMixin, DeprecationError, qd_to_torch, tensor_to_array
@@ -586,7 +586,7 @@ class RigidGeom(BuildableMixin, RBC):
         return f"{self.__repr_name__()}: {self._uid}, idx: {self._idx} (from entity {self._entity.uid}, link {self._link.uid})"
 
 
-class RigidVisGeom(BuildableMixin, RBC):
+class RigidVisGeom(DynamicTextureMixin, RBC):
     """
     A `RigidVisGeom` is a counterpart of `RigidGeom`, but for visualization purposes. This can be accessed via `link.vis_geoms`.
     """
@@ -725,8 +725,6 @@ class RigidVisGeom(BuildableMixin, RBC):
         if vverts is not None and variant is not None:
             gs.raise_exception("'set_vverts' takes either the vertices of the batched variant or a variant, not both.")
         self._solver.render_context.set_vverts(self, vverts, envs_idx, variant)
-        # The scene records the entities whose visual vertices were written, which a file exporting it leaves out
-        self._entity._is_vverts_overridden = True
 
     @gs.assert_built
     def get_vverts(self, envs_idx: "IndexType | None" = None) -> torch.Tensor:

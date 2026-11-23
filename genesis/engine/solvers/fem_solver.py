@@ -39,6 +39,7 @@ from genesis.engine.render_context import (
     CONSTRAINT_LINE_RADIUS,
     CONSTRAINT_POINT_RADIUS,
     DynamicMesh,
+    DynamicTextures,
     Lines,
     MeshKey,
     Points,
@@ -1308,6 +1309,9 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
 
     def build(self) -> None:
         solver = self.owner
+        self.dynamic_textures = DynamicTextures(
+            [(vgeom.vmesh, entity, vgeom) for entity in solver.entities for vgeom in entity.vgeoms], solver.n_envs
+        )
         # Every mesh views the simulated vertices of the whole solver, so that a renderer reads them once for all
         verts_pos = ArrayRef(solver.fem_state.vertices.pos)
         shapes = []
@@ -1316,7 +1320,16 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
             is_pinned = entity.surface.vis_mode is not None
             vgeoms_roles = ShapeRoles.of(entity.idx, is_looks=not is_pinned, is_debug=False)
             meshes = [
-                (vgeom.vmesh.faces, vgeom.surface, vgeom.uvs, vgeom.seg_keys, vgeom.sim_verts_idx, vgeoms_roles, ())
+                (
+                    vgeom.vmesh.faces,
+                    vgeom.surface,
+                    vgeom.uvs,
+                    vgeom.seg_keys,
+                    vgeom.sim_verts_idx,
+                    vgeoms_roles,
+                    (),
+                    self.dynamic_textures.get(vgeom.vmesh),
+                )
                 for vgeom in entity.vgeoms
             ]
             # The surface of the tetrahedra follows the visual geoms in the segmentation keys of the entity
@@ -1324,9 +1337,18 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
             tets_roles = ShapeRoles.of(entity.idx, is_looks=is_pinned, is_debug=True)
             tets_verts_idx = np.arange(entity.n_vertices)
             meshes.append(
-                (entity.surface_triangles, entity.surface, None, tets_seg_keys, tets_verts_idx, tets_roles, ("tet",))
+                (
+                    entity.surface_triangles,
+                    entity.surface,
+                    None,
+                    tets_seg_keys,
+                    tets_verts_idx,
+                    tets_roles,
+                    ("tet",),
+                    (),
+                )
             )
-            for faces, surface, uvs, seg_keys, verts_idx, roles, views in meshes:
+            for faces, surface, uvs, seg_keys, verts_idx, roles, views, textures in meshes:
                 shapes.append(
                     DynamicMesh(
                         faces,
@@ -1335,6 +1357,7 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
                         uvs,
                         seg_keys,
                         verts_idx=entity.v_start + verts_idx,
+                        textures=textures,
                         roles=roles,
                         _views=frozenset(views),
                         invalidated_by={solver: (StateChange.GEOMETRY,)},

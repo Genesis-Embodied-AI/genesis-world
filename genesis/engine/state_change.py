@@ -47,7 +47,7 @@ class StateChange(gs.IntEnum):
     is what changes the future trajectory alone, leaving the world as it stands: the other model parameters (mass,
     inertia, friction, gains, limits, gravity) and the constraints attached to the state (particle and vertex
     constraints). VISUAL is the appearance alone, which the physics never reads, such as the visual vertices of a visual
-    geom: a scoped render context records it, never a solver.
+    geom or the image each environment shows of a dynamic texture, which a scoped render context records.
     """
 
     GEOMETRY = 0
