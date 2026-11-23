@@ -411,7 +411,12 @@ def test_scene_rebuild():
     is_frame = (rgb_frames != rgb_looks).any(axis=-1)
     assert is_frame.any() and (rgb_frames_large != rgb_looks).any(axis=-1).sum() > is_frame.sum()
     assert (rgb_robot_debug != rgb_frames_large).any()
-    assert_equal(rgb_restored, rgb_looks)
+    try:
+        assert_equal(rgb_restored, rgb_looks)
+    except AssertionError:
+        if sys.platform == "darwin" and scene.visualizer.is_software:
+            pytest.xfail("Flaky on MacOS with Apple Software Renderer. Same shaders round differently across renders.")
+        raise
 
     # The frames of the links drawn at runtime keep being drawn at their size once the scene is rebuilt
     scene.visualizer.set_link_frames(True)

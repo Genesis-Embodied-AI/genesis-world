@@ -354,6 +354,11 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
     if not sys.platform.startswith("linux"):
         config.option.forked = False
 
+    # A forked test compares its snapshots in a child process, which the snapshot report of the session never hears of,
+    # so that it would count every snapshot of a module whose tests all ran as unused
+    if config.option.forked:
+        config.option.warn_unused_snapshots = True
+
     # Snapshot regeneration must run serially: syrupy writes updated snapshots at session end in the main process, so
     # it is incompatible with xdist and pytest-forked. Coerce the default '-n auto' to serial like the viewer does,
     # but reject an explicitly parallel or forked run.

@@ -94,10 +94,7 @@ def test_render_api(show_viewer, renderer_type, renderer):
         assert_allclose(np.diff(rgb_arrs, axis=0), 0.0, tol=gs.EPS)
         assert_allclose(np.diff(seg_arrs, axis=0), 0.0, tol=gs.EPS)
         assert_allclose(np.diff(normal_arrs, axis=0), 0.0, tol=gs.EPS)
-
-        # Depth is not matching at machine-precision because of MSAA being disabled for depth-only
-        msaa_mask = [0, 1, 2, 4, 5, 6] if renderer_type == RENDERER_TYPE.RASTERIZER else slice(None)
-        assert_allclose(np.diff(depth_arrs, axis=0)[msaa_mask], 0.0, tol=gs.EPS)
+        assert_allclose(np.diff(depth_arrs, axis=0), 0.0, tol=gs.EPS)
     except AssertionError:
         if sys.platform == "darwin" and scene.visualizer.is_software:
             pytest.xfail("Flaky on MacOS with Apple Software Renderer.")
@@ -508,8 +505,9 @@ def test_dynamic_texture_side_by_side_envs(n_envs, translucent_box_obj, show_vie
 # Debug mode is forced for the batched scene, whose rendered snapshots are sensitive to fast-math
 @pytest.mark.parametrize("n_envs", [0, pytest.param(4, marks=pytest.mark.debug(True))])
 def test_render_api_advanced(tmp_path, n_envs, show_viewer, png_snapshot, renderer_type, renderer):
-    # Small discrepancies between different hardware due the different physics integration
-    png_snapshot.extension._std_err_threshold = 1.2
+    # Coincident triangles, which the meshes of the robot hold, tie in the depth test. Every rasterizer breaks the tie
+    # with its own rounding, so that the surfaces they cover come out speckled differently from one to the next.
+    png_snapshot.extension._std_err_threshold = 2.0
 
     CAM_RES = (256, 256)
     DIFF_TOL = 0.01
@@ -532,12 +530,6 @@ def test_render_api_advanced(tmp_path, n_envs, show_viewer, png_snapshot, render
         renderer=renderer,
         show_viewer=False,
         show_FPS=False,
-    )
-    scene.add_entity(
-        morph=gs.morphs.Plane(),
-        surface=gs.surfaces.Aluminium(
-            ior=10.0,
-        ),
     )
     robot = scene.add_entity(
         gs.morphs.URDF(
@@ -709,14 +701,9 @@ def test_render_api_advanced(tmp_path, n_envs, show_viewer, png_snapshot, render
         # Check that images are changing over time.
         # We expect sufficient difference between two consecutive frames.
         if frames_prev is not None:
-            try:
-                for img_data_prev, img_data in zip(frames_prev, frame_data):
-                    img_diff = np.abs(img_data_prev - img_data)
-                    assert np.sum(img_diff > np.finfo(np.float32).eps) > DIFF_TOL * img_data.size
-            except AssertionError:
-                if sys.platform == "darwin" and scene.visualizer.is_software:
-                    pytest.xfail("Flaky on MacOS with Apple Software Renderer. Successive captures are too close.")
-                raise
+            for img_data_prev, img_data in zip(frames_prev, frame_data):
+                img_diff = np.abs(img_data_prev - img_data)
+                assert np.sum(img_diff > np.finfo(np.float32).eps) > DIFF_TOL * img_data.size
         frames_prev = frame_data
 
         # Add current frame to monitor video
@@ -737,14 +724,9 @@ def test_render_api_advanced(tmp_path, n_envs, show_viewer, png_snapshot, render
         assert sum(1 for _ in container.decode(video=0)) == NUM_STEPS
 
     # Verify that the output is correct pixel-wise over multiple simulation steps
-    try:
-        for image_file in sorted(tmp_path.rglob("*.png")):
-            with open(image_file, "rb") as f:
-                assert f.read() == png_snapshot
-    except AssertionError:
-        if sys.platform == "darwin" and scene.visualizer.is_software:
-            pytest.xfail("Flaky on MacOS with Apple Software Renderer. Pixel-matching failure.")
-        raise
+    for image_file in sorted(tmp_path.rglob("*.png")):
+        with open(image_file, "rb") as f:
+            assert f.read() == png_snapshot
 
 
 @pytest.mark.slow  # ~250s
@@ -1049,10 +1031,6 @@ def test_renders_heterogeneous_entities(n_envs, show_viewer, png_snapshot, rende
 
     scene.build(n_envs=n_envs)
 
-    if sys.platform == "darwin" and scene.visualizer.is_software:
-        # Small discrepancies between different hardware due the different physics integration
-        png_snapshot.extension._std_err_threshold = 3.0
-
     # The sphere variant fills the first environments and the duck the rest, placed on opposite sides so the duck
     # (yellow) occupies a known half of the image. The box (homogeneous) sits at the back of every environment.
     box_pos = np.array([[0.0, 1.4, 0.15], [0.4, 1.4, 0.15], [-0.4, 1.4, 0.15], [0.2, 1.4, 0.15]])
@@ -1292,9 +1270,8 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
     # holds it lower, so that each environment of a split render shows its own copy.
     fem.set_position([[0.0, 0.0, 0.2], [0.0, 0.0, 0.1]])
 
-    # The Apple Software Renderer that macOS CI falls back to differs from hardware on anti-aliased channels, and
-    # RayTracer is non-deterministic across GPUs; relax the pixel match for the color-like outputs in both cases.
-    if scene.visualizer.is_software or renderer_type == RENDERER_TYPE.RAYTRACER:
+    # RayTracer is non-deterministic across GPUs: relax the pixel match for the color-like outputs
+    if renderer_type == RENDERER_TYPE.RAYTRACER:
         png_snapshot.extension._std_err_threshold = 3.0
         png_snapshot.extension._blurred_kernel_size = 3
 
@@ -1738,10 +1715,9 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
     CAM_RES = (256, 256)
     RENDERED_ENVS = (1, 2)
 
-    # One threshold for every frame. Marker lines land on slightly different pixels from one rasterizer to the next,
-    # which the offscreen frames absorb through a blur; the viewer frame holds up without one.
+    # One threshold for every frame, which the marker lines of the viewer frame need: they land on slightly different
+    # pixels from one rasterizer to the next.
     STD_ERR_THR = 1.5
-    BLUR_OFFSCREEN = 3
 
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
@@ -1915,7 +1891,6 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
 
     # The camera without markers shows the robots alone in each environment
     png_snapshot.extension._std_err_threshold = STD_ERR_THR
-    png_snapshot.extension._blurred_kernel_size = BLUR_OFFSCREEN
     for rgb_i in rgb:
         assert rgb_array_to_png_bytes(rgb_i) == png_snapshot
 

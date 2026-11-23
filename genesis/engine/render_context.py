@@ -1528,6 +1528,10 @@ class RenderContext:
                 for dst, ref in shape_copies:
                     dst.copy_(ref.view(is_per_env=True))
             scoped_context.changelog.add(StateChange.GEOMETRY, envs_idx=envs_idx)
+        # The shapes view their arrays with zero-copy, which read them as the last kernel left them once it is done (see
+        # 'qd_to_torch')
+        if gs.use_zerocopy and gs.backend == gs.metal:
+            qd.sync()
 
     def _update_markers(self, record: _ScopedRecord, envs_idx: torch.Tensor) -> None:
         scoped_context = record.scoped_context

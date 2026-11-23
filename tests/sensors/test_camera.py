@@ -265,9 +265,6 @@ def test_rasterizer_batched(show_viewer, png_snapshot):
 
     # Disable shadows systematically for Rasterizer because they are forcibly disabled on CPU backend anyway
     camera._shared_metadata.context.shadow = False
-    # Small discrepancy on apple software renderer
-    if sys.platform == "darwin" and scene.visualizer.is_software:
-        png_snapshot.extension._std_err_threshold = 2.0
 
     sphere.set_pos([[0.0, 0.0, 2.0], [1.0, 0.5, 0.3]])
     scene.step()
@@ -291,8 +288,6 @@ def test_rasterizer_batched(show_viewer, png_snapshot):
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_rasterizer_attached_batched(show_viewer, png_snapshot, tol):
-    png_snapshot.extension._std_err_threshold = 1.1
-
     scene = gs.Scene(show_viewer=show_viewer)
 
     # Add a plane
@@ -756,10 +751,6 @@ def test_raytracer_destroy():
 def test_lookat_entity(show_viewer, png_snapshot):
     scene = gs.Scene(show_viewer=show_viewer)
 
-    scene.add_entity(
-        morph=gs.morphs.Plane(),
-    )
-
     # Colored spheres at distinct locations so each camera sees different content
     attach_sphere = scene.add_entity(
         morph=gs.morphs.Sphere(
@@ -811,12 +802,7 @@ def test_lookat_entity(show_viewer, png_snapshot):
 
     # Snapshot check for every camera
     for camera in cameras:
-        try:
-            assert rgb_array_to_png_bytes(camera.read().rgb) == png_snapshot
-        except AssertionError:
-            if sys.platform == "darwin" and scene.visualizer.is_software:
-                pytest.xfail("Flaky on MacOS with Apple Software Renderer. Nothing but the background was rendered.")
-            raise
+        assert rgb_array_to_png_bytes(camera.read().rgb) == png_snapshot
 
 
 @pytest.mark.required
