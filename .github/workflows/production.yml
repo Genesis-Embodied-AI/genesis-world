@@ -21,9 +21,6 @@ on:
       quadrants_run_id:
         description: Run whose wheel artifacts hold the Quadrants to install in place of the release Genesis pins.
         type: number
-      quadrants_artifact_id:
-        description: Exact wheel artifact validated by the caller.
-        type: number
       benchmark_sha:
         description: Immutable Genesis source revision for external benchmark runs.
         type: string
@@ -260,8 +257,7 @@ jobs:
         if: inputs.quadrants_run_id != 0
         uses: actions/download-artifact@v4
         with:
-          pattern: ${{ inputs.quadrants_artifact_id == 0 && '*wheel*' || '' }}
-          artifact-ids: ${{ inputs.quadrants_artifact_id || '' }}
+          pattern: '*wheel*'
           merge-multiple: true
           run-id: ${{ inputs.quadrants_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -278,11 +274,7 @@ jobs:
             echo "::error::Run ${{ inputs.quadrants_run_id }} holds no wheel."
             exit 1
           fi
-          if ${{ inputs.quadrants_artifact_id != 0 }} ; then
-            echo "quadrants @ file:///root/workspace/quadrants_wheels/$(basename "${WHEELS[0]}")" > overrides.txt
-          else
-            echo "quadrants==$(basename "${WHEELS[0]}" | cut -d- -f2)" > overrides.txt
-          fi
+          echo "quadrants==$(basename "${WHEELS[0]}" | cut -d- -f2)" > overrides.txt
 
       - name: Spawn Slurm job
         if: env.HAS_UNIT_TESTS == 'true'
@@ -401,8 +393,7 @@ jobs:
         if: inputs.quadrants_run_id != 0
         uses: actions/download-artifact@v4
         with:
-          pattern: ${{ inputs.quadrants_artifact_id == 0 && '*wheel*' || '' }}
-          artifact-ids: ${{ inputs.quadrants_artifact_id || '' }}
+          pattern: '*wheel*'
           merge-multiple: true
           run-id: ${{ inputs.quadrants_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -415,11 +406,7 @@ jobs:
             echo "::error::Run ${{ inputs.quadrants_run_id }} holds no wheel."
             exit 1
           fi
-          if ${{ inputs.quadrants_artifact_id != 0 }} ; then
-            echo "quadrants @ file:///root/workspace/quadrants_wheels/$(basename "${WHEELS[0]}")" > overrides.txt
-          else
-            echo "quadrants==$(basename "${WHEELS[0]}" | cut -d- -f2)" > overrides.txt
-          fi
+          echo "quadrants==$(basename "${WHEELS[0]}" | cut -d- -f2)" > overrides.txt
 
       - name: Spawn Slurm job
         run: |
