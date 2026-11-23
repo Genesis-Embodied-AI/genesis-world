@@ -684,21 +684,25 @@ def _add_sphere_link(urdf, link_name, geom_pos, mass=None, inertia=None, inertia
 @pytest.fixture
 def joint_with_partial_dynamics(joint_damping, joint_friction):
     # Inertia is deliberately left undefined: recomputing it from geometry is the path along which an unset
-    # <dynamics> attribute reaches the solver instead of being replaced beforehand.
+    # <dynamics> attribute reaches the solver instead of being replaced beforehand. The <limit> tags author no effort,
+    # a zero effort and a negative effort respectively.
     urdf = ET.Element("robot", name="joint_with_partial_dynamics")
     _add_sphere_link(urdf, "base_link", "0.0 0.0 0.0")
-    _add_sphere_link(urdf, "PendulumArm_0", "0.0 0.0 0.09")
-    joint = ET.SubElement(urdf, "joint", name="PendulumJoint_0", type="continuous")
-    ET.SubElement(joint, "origin", xyz="0.0 0.0 0.0", rpy="0.0 0.0 0.0")
-    ET.SubElement(joint, "axis", xyz="1 0 0")
-    ET.SubElement(joint, "parent", link="base_link")
-    ET.SubElement(joint, "child", link="PendulumArm_0")
-    ET.SubElement(joint, "limit", effort="100.0", velocity="30.0")
-    dynamics = ET.SubElement(joint, "dynamics")
-    if joint_damping is not None:
-        dynamics.set("damping", str(joint_damping))
-    if joint_friction is not None:
-        dynamics.set("friction", str(joint_friction))
+    for i, effort in enumerate((None, "0.0", "-50.0")):
+        _add_sphere_link(urdf, f"PendulumArm_{i}", "0.0 0.0 0.09")
+        joint = ET.SubElement(urdf, "joint", name=f"PendulumJoint_{i}", type="continuous")
+        ET.SubElement(joint, "origin", xyz="0.0 0.0 0.0", rpy="0.0 0.0 0.0")
+        ET.SubElement(joint, "axis", xyz="1 0 0")
+        ET.SubElement(joint, "parent", link="base_link")
+        ET.SubElement(joint, "child", link=f"PendulumArm_{i}")
+        limit = ET.SubElement(joint, "limit", velocity="30.0")
+        if effort is not None:
+            limit.set("effort", effort)
+        dynamics = ET.SubElement(joint, "dynamics")
+        if joint_damping is not None:
+            dynamics.set("damping", str(joint_damping))
+        if joint_friction is not None:
+            dynamics.set("friction", str(joint_friction))
     return urdf
 
 
@@ -1225,6 +1229,21 @@ def trees_and_slider_mjcf():
     side = ET.SubElement(base, "body", name="chain_side", pos="-0.12 0.04 0.02", euler="7 -11 45")
     ET.SubElement(side, "joint", type="slide", axis="0.1 0.6 0.8", pos="0.02 0.01 -0.01", ref="-0.05", armature="0.3")
     ET.SubElement(side, "geom", type="box", size="0.03 0.02 0.01", pos="0.01 0.02 -0.01", euler="12 -9 4")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def welded_to_world_mjcf():
+    """Generate an MJCF model of bodies welded to the world, which stays a link: a body, and a body carrying another."""
+    mjcf = ET.Element("mujoco", model="welded_to_world")
+    ET.SubElement(mjcf, "compiler", angle="degree")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    welded = ET.SubElement(worldbody, "body", name="welded", pos="-1 0.5 0.4", euler="15 -25 40")
+    ET.SubElement(welded, "geom", type="box", size="0.03 0.02 0.04", pos="0.01 -0.02 0.01")
+    base = ET.SubElement(worldbody, "body", name="welded_base", pos="-0.8 0.9 0.3", euler="5 30 -15")
+    ET.SubElement(base, "geom", type="box", size="0.02 0.02 0.02", pos="0.01 0.01 0.01")
+    child = ET.SubElement(base, "body", name="welded_child", pos="0.05 -0.02 0.03", euler="-20 10 35")
+    ET.SubElement(child, "geom", type="capsule", size="0.01 0.03", pos="0.01 0.02 -0.01", euler="90 0 0")
     return ET.tostring(mjcf, encoding="unicode")
 
 

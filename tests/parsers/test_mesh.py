@@ -1,5 +1,7 @@
+import importlib.metadata
 import io
 import os
+import sys
 from contextlib import nullcontext
 
 import numpy as np
@@ -14,6 +16,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.gltf as gltf_utils
 import genesis.utils.mesh as mu
+from genesis.engine.render_context import DynamicMesh
 
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
@@ -967,15 +970,31 @@ def test_surface_reconstruction(recon_backend, show_viewer):
     assert (liquids_n_pixels > 0).all()
     assert_allclose(liquids_n_pixels[1], liquids_n_pixels[0], rtol=0.15)
 
+    # The debug views draw the liquids as particles while in debug, the surfaces being reconstructed only while drawn
+    render_context = scene.sim.render_context
+    for debug in (True, False):
+        render_context.set_debug(debug)
+        liquids_surfaces = [shape for shape in render_context.get_shapes(debug=True) if isinstance(shape, DynamicMesh)]
+        assert len(liquids_surfaces) == (0 if debug else len(liquids))
+
+    # Particles that the boundary clamps onto one of its corners pile up there, and are left out of the surfaces
+    for liquid in liquids:
+        particles_pos = liquid.get_particles_pos()
+        particles_pos[:100] = -1000.0
+        liquid.set_particles_pos(particles_pos)
+    scene.step()
+    for shape in render_context.get_shapes(debug=False):
+        if isinstance(shape, DynamicMesh):
+            assert (shape.verts[..., :2] > -1.0).all()
+
 
 # ==================== Mesh Processing/Caching Tests ====================
 
 
-# FIXME: This test is taking too much time on some platform (~1200s)
-# Counting the decompositions requires a cache that no earlier run has populated.
-@pytest.mark.cache(False)
-# @pytest.mark.required
-def test_convex_decompose_cache(monkeypatch, asset_tmp_path):
+@pytest.mark.required
+def test_convex_decompose_cache(monkeypatch, tmp_path, asset_tmp_path):
+    # Counting the decompositions requires an on-disk cache that no earlier run has populated.
+    monkeypatch.setenv("GS_CACHE_FILE_PATH", str(tmp_path))
     # A single decomposition must serve every mesh describing the same shape, whatever its placement: rescaled copies,
     # and re-exports of the model whose coordinates differ only in their last significant digits.
     n_coacd_runs = 0
@@ -988,12 +1007,13 @@ def test_convex_decompose_cache(monkeypatch, asset_tmp_path):
 
     monkeypatch.setattr(coacd, "run_coacd", counted_run_coacd)
 
-    # Monkeypatch the convex_decompose function to track the convex decomposition result
-    seen_results = []
+    # Monkeypatch the convex_decompose function to track its inputs and the convex decomposition result
+    seen_args, seen_results = [], []
     real_convex_decompose = mu.convex_decompose
 
     def wrapped_convex_decompose(mesh, opts):
         result = real_convex_decompose(mesh, opts)
+        seen_args.append((mesh, opts))
         seen_results.append(result)
         return result
 
@@ -1038,6 +1058,19 @@ def test_convex_decompose_cache(monkeypatch, asset_tmp_path):
         for part, cached_part in zip(parts, cached_parts):
             assert_allclose(part.vertices, cached_part.vertices * (scale / SCALES[0]), rtol=1e-6)
             assert_equal(part.faces, cached_part.faces)
+            # Native code reading a cached array, such as the IPC backend, requires the alignment of any NumPy array.
+            assert part.vertices.ctypes.data % 16 == 0 and part.faces.ctypes.data % 16 == 0
+
+    # A decomposition computed by another coacd release is never reused.
+    real_version = importlib.metadata.version
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.0.0" if name == "coacd" else real_version(name))
+    real_convex_decompose(*seen_args[0])
+    assert n_coacd_runs == 2
+
+    # An entry loads in an environment lacking the ray helper of the one that wrote it, as when the writer has embreex.
+    monkeypatch.setitem(sys.modules, "trimesh.ray.ray_triangle", None)
+    real_convex_decompose(*seen_args[0])
+    assert n_coacd_runs == 2
 
 
 # ==================== Decimation Tests ====================

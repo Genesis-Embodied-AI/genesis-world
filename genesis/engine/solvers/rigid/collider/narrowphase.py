@@ -805,7 +805,7 @@ def func_add_polytope_vertex_contacts_sdf(
                                     errno,
                                 )
                         n_emitted_before = n_emitted_before + qd.cast(qd.math.popcnt(lanes), gs.qd_int)
-                    n_stored = qd.max(qd.min(max_contacts - i_c_base, n_emitted), 0)
+                    n_stored = qd.math.clamp(max_contacts - i_c_base, 0, n_emitted)
                     for i_k in qd.static(range(N_SLOTS)):
                         i_added = i_k * block_dim + tid
                         if i_added >= n_added and i_added < n_added + n_stored:
@@ -2277,7 +2277,7 @@ def func_contact_overlap_axes(
                             edge_y = polygons[j_k1, 1] - polygons[j_k0, 1]
                             edge_length_sqr = edge_x**2 + edge_y**2
                             edge_fraction = -(polygons[j_k0, 0] * edge_x + polygons[j_k0, 1] * edge_y)
-                            edge_fraction = qd.min(qd.max(edge_fraction / qd.max(edge_length_sqr, EPS**2), 0.0), 1.0)
+                            edge_fraction = qd.math.clamp(edge_fraction / qd.max(edge_length_sqr, EPS**2), 0.0, 1.0)
                             distance = (polygons[j_k0, 0] + edge_fraction * edge_x) ** 2
                             distance += (polygons[j_k0, 1] + edge_fraction * edge_y) ** 2
                             span = edge_length_sqr / qd.max(distance, EPS**2)

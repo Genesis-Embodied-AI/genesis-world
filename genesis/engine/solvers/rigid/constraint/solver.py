@@ -141,9 +141,6 @@ if TYPE_CHECKING:
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 
 
-IS_OLD_TORCH = tuple(map(int, torch.__version__.split(".")[:2])) < (2, 8)
-
-
 class ConstraintSolver:
     def __init__(self, rigid_solver: "RigidSolver"):
         self._solver = rigid_solver
@@ -239,7 +236,7 @@ class ConstraintSolver:
             np.full((self._solver.n_envs_,), self._solver.n_equalities, dtype=gs.np_int)
         )
 
-        self._eq_const_info_cache = {}
+        rigid_solver.changelog.register_arrays(self.data)
 
         cs = self.constraint_state
         self.qd_n_equalities = cs.qd_n_equalities
@@ -309,8 +306,6 @@ class ConstraintSolver:
         yield from iter_data(self, "constraint_state")
 
     def reset(self, envs_idx=None):
-        self._eq_const_info_cache.clear()
-
         if gs.use_zerocopy:
             envs_mask = indices_to_mask(envs_idx)
             dofs_mask = (slice(None), *envs_mask)
@@ -327,11 +322,8 @@ class ConstraintSolver:
 
     def clear(self, envs_idx=None):
         """Remove the constraints of the environments 'envs_idx' (None for all of them), their warm start aside."""
-        self._eq_const_info_cache.clear()
 
-        if gs.use_zerocopy and (
-            not isinstance(envs_idx, torch.Tensor) or (not IS_OLD_TORCH or envs_idx.dtype == torch.bool)
-        ):
+        if gs.use_zerocopy:
             n_constraints = qd_to_torch(self.constraint_state.n_constraints, copy=False)
             n_constraints_equality = qd_to_torch(self.constraint_state.n_constraints_equality, copy=False)
             n_constraints_frictionloss = qd_to_torch(self.constraint_state.n_constraints_frictionloss, copy=False)
@@ -370,8 +362,6 @@ class ConstraintSolver:
         fn(envs_idx, self.constraint_state, self._solver.rigid_info, self._solver.rigid_config)
 
     def add_equality_constraints(self):
-        self._eq_const_info_cache.clear()
-
         kernel_add_equality_constraints(
             self._solver.dyn_state,
             self.constraint_state,
@@ -416,11 +406,6 @@ class ConstraintSolver:
         )
 
     def get_equality_constraints(self, as_tensor: bool = True, to_torch: bool = True):
-        # Early return if already pre-computed
-        eq_const_info = self._eq_const_info_cache.get((as_tensor, to_torch))
-        if eq_const_info is not None:
-            return eq_const_info.copy()
-
         n_eqs = tuple(self.constraint_state.qd_n_equalities.to_numpy())
         n_envs = len(n_eqs)
         n_eqs_max = max(n_eqs)
@@ -457,12 +442,7 @@ class ConstraintSolver:
             eq_type, obj_a, obj_b = tuple(zip(*([data[..., i] for i in range(3)] for data in iout_chunks)))
 
         values = (eq_type, obj_a, obj_b, efc_force)
-        eq_const_info = dict(zip(("type", "obj_a", "obj_b", "force"), values))
-
-        # Cache equality constraint information before returning
-        self._eq_const_info_cache[(as_tensor, to_torch)] = eq_const_info
-
-        return eq_const_info.copy()
+        return dict(zip(("type", "obj_a", "obj_b", "force"), values))
 
     def get_weld_constraints(self, as_tensor: bool = True, to_torch: bool = True):
         eq_const_info = self.get_equality_constraints(as_tensor, to_torch)
@@ -530,7 +510,6 @@ class ConstraintSolver:
         anchor_pos = broadcast_tensor(anchor_pos, gs.tc_float, (len(envs_idx), 3)).contiguous()
         eq_data_tail_padded = torch.zeros((len(envs_idx), 8), dtype=gs.tc_float, device=gs.device)
         eq_data_tail_padded[:, : eq_data_tail.shape[-1]] = eq_data_tail
-        self._eq_const_info_cache.clear()
         kernel_add_dynamic_constraint(
             link1_idx,
             link2_idx,
@@ -548,7 +527,6 @@ class ConstraintSolver:
 
     def delete_dynamic_constraint(self, eq_type, link1_idx, link2_idx, envs_idx=None):
         envs_idx = torch.unique(self._solver.sim.sanitize_envs_idx(envs_idx))
-        self._eq_const_info_cache.clear()
         kernel_delete_dynamic_constraint(
             int(link1_idx),
             int(link2_idx),

@@ -125,7 +125,7 @@ class SPHBoundaries(Data, kind=DataKind.SCRATCH):
 
     segments: SPHSegments
     # Rebuilt from the segments every substep
-    hash_grid: SpatialHashGrid = field(kind=DataKind.SCRATCH)
+    hash_grid: SpatialHashGrid
     # The impulse that the SPH particles give each segment over the substep, which its surface takes
     segments_impulse: qd.Tensor = field((float, 3), shape=(PARTICLES, ENVS))
     # The barycentric coordinates and the weights of the points of the quadrature of a segment, Radon's 7-point rule on
@@ -1929,13 +1929,13 @@ def func_boundary_window_row(i_row: int, window: qd.types.vector(7, qd.i32), coo
         det = g_11 * g_22 - g_12 * g_12
         # The offsets of the row along the first coordinate, within the extent of the ellipse along it
         du_max = qd.sqrt(reach_sqr * g_22 / det)
-        du_lo = qd.min(qd.max(i_row / n_rays - u, -du_max), du_max)
-        du_hi = qd.min(qd.max((i_row + 1) / n_rays - u, -du_max), du_max)
+        du_lo = qd.math.clamp(i_row / n_rays - u, -du_max, du_max)
+        du_hi = qd.math.clamp((i_row + 1) / n_rays - u, -du_max, du_max)
         # The ellipse spans the second coordinate between (-g_12 du -+ sqrt(g_22 reach^2 - det du^2)) / g_22 at an
         # offset du along the first, whose extremes over the row lie at its ends or at -+g_12 reach / sqrt(det g_11)
         du_ext = g_12 * qd.sqrt(reach_sqr / (det * g_11))
-        du_top = qd.min(qd.max(-du_ext, du_lo), du_hi)
-        du_bottom = qd.min(qd.max(du_ext, du_lo), du_hi)
+        du_top = qd.math.clamp(-du_ext, du_lo, du_hi)
+        du_bottom = qd.math.clamp(du_ext, du_lo, du_hi)
         dv_top = (-g_12 * du_top + qd.sqrt(qd.max(g_22 * reach_sqr - det * du_top * du_top, 0.0))) / g_22
         dv_bottom = (-g_12 * du_bottom - qd.sqrt(qd.max(g_22 * reach_sqr - det * du_bottom * du_bottom, 0.0))) / g_22
         col_lo = qd.max(qd.floor((v + dv_bottom) * n_rays, qd.i32), 0)
@@ -2310,7 +2310,7 @@ def kernel_place_sph_boundary_segments(
         if volume < -1e-3:
             volume = volume + 1.0
             surface_dist = -surface_dist
-        volume = qd.min(qd.max(volume, 0.0), 1.0)
+        volume = qd.math.clamp(volume, 0.0, 1.0)
         if i_lane == 0:
             sph_state.boundary.volume[i_p, i_b] = volume
             sph_state.boundary.volume_grad[i_p, i_b] = volume_grad

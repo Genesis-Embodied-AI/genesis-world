@@ -19,6 +19,7 @@ import pyglet
 import genesis as gs
 from genesis.utils.cache import get_cache_dir
 from genesis.utils.misc import get_default_screen
+from genesis.utils.video_encoder import VideoEncoder
 from genesis.vis.keybindings import Key, KeyAction, Keybind, Keybindings, KeyMod
 from genesis.vis.viewer_plugins import EVENT_HANDLE_STATE, EVENT_HANDLED, ViewerPlugin
 
@@ -617,6 +618,8 @@ class Viewer(pyglet.window.Window):
             to save the video file.
         """
         self._video_recorder.close()
+        if not self._video_recorder.has_file:
+            return
         if filename is None:
             filename = self._get_save_filename(["mp4"])
         if filename is None:
@@ -630,16 +633,15 @@ class Viewer(pyglet.window.Window):
         Starting opens a fresh video writer and marks the window title; stopping closes it and prompts (via
         save_video) for a destination. Both the 'R' keybind and the overlay record button drive this one path."""
         if self.viewer_flags["record"]:
-            self.save_video()
+            # This runs in event handlers, where a failed encoding must not escape the event loop and leave recording on
+            try:
+                self.save_video()
+            except gs.GenesisException as e:
+                gs.logger.warning(f"{e}")
             self.set_caption(self.viewer_flags["window_title"])
         else:
-            # Importing moviepy is very slow and rarely needed, so defer it to the first recording.
-            from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
-
-            self._video_recorder = FFMPEG_VideoWriter(
-                filename=os.path.join(get_cache_dir(), "tmp_video.mp4"),
-                fps=self.viewer_flags["refresh_rate"],
-                size=self.viewport_size,
+            self._video_recorder = VideoEncoder(
+                os.path.join(get_cache_dir(), "tmp_video.mp4"), fps=self.viewer_flags["refresh_rate"], is_threaded=True
             )
             # Sentinel so the first frame is always captured regardless of the current step counter.
             self._last_recorded_t = -1
@@ -691,8 +693,12 @@ class Viewer(pyglet.window.Window):
 
         # Delete video recorder
         if self.viewer_flags["record"]:
-            self._video_recorder.close()
-            os.remove(self._video_recorder.filename)
+            try:
+                self._video_recorder.close()
+            except gs.GenesisException as e:
+                gs.logger.warning(f"{e}")
+            if self._video_recorder.has_file:
+                os.remove(self._video_recorder.filename)
 
         # Force clean-up of OpenGL context data
         try:
@@ -858,7 +864,7 @@ class Viewer(pyglet.window.Window):
 
         # The frame is encoded once the lock is released, so that a slow encoder does not hold up the simulation.
         if record_frame is not None:
-            self._video_recorder.write_frame(record_frame)
+            self._video_recorder.write(record_frame)
 
         if self.viewer_flags["caption"] is not None:
             for caption in self.viewer_flags["caption"]:
@@ -890,6 +896,11 @@ class Viewer(pyglet.window.Window):
         """Resize the camera and trackball when the window is resized."""
         if self._renderer is None:
             return
+
+        # Every frame of a video has the size of its first one, so a resize ends the recording
+        if self.viewer_flags["record"] and (width, height) != self._viewport_size:
+            gs.logger.warning("Viewer window resized while recording. Stopping the recording.")
+            self.toggle_recording()
 
         self._renderer._delete_shadow_framebuffer()
         self._renderer._delete_floor_framebuffer()

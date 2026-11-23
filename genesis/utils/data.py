@@ -231,6 +231,8 @@ class _FieldSpec(NamedTuple):
     is_ndarray: bool = False
     opt_in: bool = False
     oversize_hint: str = ""
+    change: IntEnum | None = None
+    invalidated_by: tuple[IntEnum, ...] | None = None
 
 
 def field(
@@ -243,22 +245,48 @@ def field(
     ndarray: bool = False,
     opt_in: bool = False,
     oversize_hint: str = "",
+    change: IntEnum | None = None,
+    invalidated_by: tuple[IntEnum, ...] | None = None,
 ):
     """
     Declare a field of a struct (see Data).
 
-    `dtype` is the element type of an array: `float`, `int` or `bool` in the precision of the simulation, a Quadrants
-    type, a function returning one, or such a type paired with an element shape, `(float, 3)` for a vector and
-    `(float, (3, 3))` for a matrix, whose dimensions may be sizes. `shape` lists the sizes of its dimensions (see Size),
-    and a field of shape () and kind CONSTANT or INFO is a constant the constructor fills from its values, a vector
-    constant from any sequence of its length. `kind` and `shape` replace the defaults of the struct, for every array of
-    a member. `labels` select the array, or every array of a member, in the property tables of the constructor. `grad`
-    gives the array gradients when the constructor requires them. `ndarray` allocates an ndarray on every backend. An
-    `opt_in` array or member is unused until another component opts it in (see 'opt_in'). An array too large for a
-    backend to address raises at allocation, its message ending with `oversize_hint`, such as the options shrinking it.
+    `kind`, `shape`, `change` and `invalidated_by` replace the defaults of the struct, for every array of a member.
+
+    Parameters
+    ----------
+    dtype : Any, optional
+        The element type of an array: `float`, `int` or `bool` in the precision of the simulation, a Quadrants type, a
+        function returning one, or such a type paired with an element shape, `(float, 3)` for a vector and
+        `(float, (3, 3))` for a matrix, whose dimensions may be sizes. None for a member struct. Defaults to None.
+    shape : tuple[Size | int, ...] | None, optional
+        The sizes of the dimensions of the array (see Size). A field of shape () and kind CONSTANT or INFO is a constant
+        the constructor fills from its values, a vector constant from any sequence of its length. Defaults to None.
+    kind : DataKind | None, optional
+        The kind of the array. Defaults to None.
+    labels : str | tuple[str, ...], optional
+        The labels selecting the array, or every array of a member, in the property tables of the constructor.
+        Defaults to ().
+    grad : bool, optional
+        Whether the array has gradients when the constructor requires them. Defaults to False.
+    ndarray : bool, optional
+        Whether the array is an ndarray on every backend. Defaults to False.
+    opt_in : bool, optional
+        Whether the array or member is unused until another component opts it in (see 'opt_in'). Defaults to False.
+    oversize_hint : str, optional
+        The end of the message raised when the array is too large for a backend to address, such as the options
+        shrinking it. Defaults to "".
+    change : IntEnum | None, optional
+        The category of change a write of the array records, such as `StateChange.GEOMETRY` (see
+        'genesis.engine.state_change'). None records none for a STATE array, and a change of the model for an INFO
+        array, whose field states `StateChange.GEOMETRY` where it places or shapes the surface. Defaults to None.
+    invalidated_by : tuple[IntEnum, ...] | None, optional
+        The categories of change whose writes end the freshness of the array, such as `(StateChange.GEOMETRY,
+        StateChange.MODEL)` for contact points, a copy of it returning None once it is not fresh (see
+        'ChangeLog.is_fresh'). None for every category. Defaults to None.
     """
     labels = labels if isinstance(labels, tuple) else (labels,)
-    spec = _FieldSpec(dtype, shape, kind, labels, grad, ndarray, opt_in, oversize_hint)
+    spec = _FieldSpec(dtype, shape, kind, labels, grad, ndarray, opt_in, oversize_hint, change, invalidated_by)
     return dataclasses.field(metadata={_SPEC: spec})
 
 
@@ -376,7 +404,7 @@ class Data:
     Base of the structs of solver data, which kernels take as arguments.
 
     A subclass declares its arrays as fields annotated `qd.Tensor` (see 'field'), its members as fields annotated with
-    another struct. The class keywords `kind` and `shape` set the defaults of its fields (see DataKind).
+    another struct. The class keywords `kind`, `shape` and `invalidated_by` set the defaults of its fields.
 
     The constructor allocates every array of the tree. `sizes` maps each size (see Size) to its value and `values` each
     constant to its value, either one also keyed by a field (see FieldRef) for the arrays of that field alone.
@@ -387,16 +415,26 @@ class Data:
     """
 
     kind: ClassVar["DataKind | None"] = None
+    invalidated_by: ClassVar[tuple[IntEnum, ...] | None] = None
+    """The categories of change whose writes end the freshness of the arrays of the struct by default (see 'field')."""
     _shape: ClassVar[tuple | None] = None
     # The pydantic model validating the values of the struct, by the paths of its unused constants
     _values_models: ClassVar[dict[frozenset, type]] = {}
     # The names of the sizes of the struct tree, listed once (see '_size_names')
     _tree_size_names: ClassVar[frozenset[str] | None] = None
 
-    def __init_subclass__(cls, kind: "DataKind | None" = None, shape: tuple | None = None, **kwargs):
+    def __init_subclass__(
+        cls,
+        kind: "DataKind | None" = None,
+        shape: tuple | None = None,
+        invalidated_by: tuple[IntEnum, ...] | None = None,
+        **kwargs,
+    ):
         super().__init_subclass__(**kwargs)
         if kind is not None:
             cls.kind = kind
+        if invalidated_by is not None:
+            cls.invalidated_by = invalidated_by
         if shape is not None:
             cls._shape = shape
         cls._values_models = {}
@@ -767,8 +805,8 @@ class DataKind(IntEnum):
     """A model parameter the setters write, such as mass, friction, gains or limits."""
 
     STATE = 2
-    """What specifies the scene with INFO: the configuration, velocities, accelerations, control inputs and the warm
-    starts of the collision detection and the constraint solve, which change the result of the next step."""
+    """What specifies the scene with INFO: the configuration, velocities, control inputs and the warm starts of the
+    collision detection and the constraint solve, which change the result of the next step."""
 
     DERIVED = 3
     """Recomputed from STATE and INFO by the next step or forward kinematics, such as the link poses, the contacts and
@@ -793,18 +831,28 @@ class ArrayItem(NamedTuple):
     name: str
     kind: DataKind
     array: qd.Tensor | qd.Field | qd.Ndarray | torch.Tensor
+    change: IntEnum | None = None
+    """The category of change a write of the array records (see 'field')."""
+    invalidated_by: tuple[IntEnum, ...] | None = None
+    """The categories of change whose writes end the freshness of the array (see 'field')."""
 
 
 class ScalarItem(NamedTuple):
     """A Python native scalar of a solver, such as a flag, under the name of its attribute (see 'iter_data').
 
-    It is the attribute 'attr' of 'owner', a property with a setter included, which a restore sets back.
+    It is the attribute 'attr' of 'owner', a property with a setter included, which a restore sets back, or the value a
+    function of 'owner' computes, read-only, which its owner restores itself.
     """
 
     name: str
     kind: DataKind
     owner: object
-    attr: str
+    attr: str | Callable[[Any], bool | int | float]
+
+    @property
+    def value(self) -> bool | int | float:
+        """The current value of the scalar."""
+        return getattr(self.owner, self.attr) if isinstance(self.attr, str) else self.attr(self.owner)
 
 
 # What a solver yields among its data, which a checkpoint or a trajectory reads and writes back (see 'iter_data')
@@ -830,10 +878,11 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
     'grad'. A Python native scalar of an object outside any struct, such as a flag, yields an item of the given kind,
     which a restore sets back. A static config yields a ConfigItem. Anything else raises.
     """
-    # The attributes left to walk, depth first in declaration order, each with the kind it inherits and its name
-    pending = [(owner, attr, kind, attr)]
+    # The attributes left to walk, depth first in declaration order, each with the kind and the categories it is
+    # invalidated by that it inherits, its name and the category of its field.
+    pending = [(owner, attr, kind, attr, None, None)]
     while pending:
-        owner, attr, kind, name = pending.pop()
+        owner, attr, kind, name, change, invalidated_by = pending.pop()
         value = getattr(owner, attr)
         is_owner_struct = dataclasses.is_dataclass(owner) or isinstance(owner, tuple)
         if isinstance(value, Config):
@@ -841,7 +890,7 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
         elif isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor)):
             if kind is None:
                 gs.raise_exception(f"'{attr}' holds an array that no struct or annotation gives a kind.")
-            yield ArrayItem(name, kind, value)
+            yield ArrayItem(name, kind, value, change, invalidated_by)
             if not isinstance(value, torch.Tensor) and value.has_grad():
                 yield ArrayItem(f"{name}.grad", kind, value.grad)
         elif dataclasses.is_dataclass(value) or isinstance(value, tuple):
@@ -849,14 +898,20 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
                 members = [(field.name, field.metadata.get(_SPEC, _FieldSpec())) for field in dataclasses.fields(value)]
             else:
                 members = [(member, _FieldSpec()) for member in value._fields]
-            for member, spec in reversed(members):
+            for member, member_spec in reversed(members):
                 member_value = getattr(value, member)
-                stated_kind = spec.kind
+                stated_kind = member_spec.kind
                 is_member_array = isinstance(member_value, (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor))
                 if stated_kind is None and kind is None and is_member_array:
                     stated_kind = type(value).kind
                 member_kind = kind if stated_kind is None else stated_kind
-                pending.append((value, member, member_kind, f"{name}.{member}"))
+                member_change = change if member_spec.change is None else member_spec.change
+                member_invalidated_by = member_spec.invalidated_by
+                if member_invalidated_by is None:
+                    member_invalidated_by = invalidated_by
+                if member_invalidated_by is None and is_member_array and isinstance(value, Data):
+                    member_invalidated_by = type(value).invalidated_by
+                pending.append((value, member, member_kind, f"{name}.{member}", member_change, member_invalidated_by))
         elif isinstance(value, (bool, int, float)) and not is_owner_struct:
             if kind is None:
                 gs.raise_exception(f"'{attr}' holds a {type(value).__name__} that no annotation gives a kind.")
@@ -921,7 +976,7 @@ def check_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torc
             shape, dtype = (*array.shape, *element_shape), array.dtype
             is_item_real = dtype in qd.types.primitive_types.real_types
         else:
-            scalar = getattr(item.owner, item.attr)
+            scalar = item.value
             shape, dtype = (), type(scalar).__name__
             is_item_real = isinstance(scalar, float)
         if tuple(value.shape) != shape:
@@ -945,7 +1000,7 @@ def copy_data(items: Iterable[DataItem], *, to_torch: bool) -> dict[str, np.ndar
     values = {}
     for item in items:
         if isinstance(item, ScalarItem):
-            values[item.name] = np.array(getattr(item.owner, item.attr))
+            values[item.name] = np.array(item.value)
         else:
             values[item.name] = data_to_array(item.array, to_torch=to_torch, copy=True)
     return values
@@ -962,8 +1017,9 @@ def fill_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch
     for item in check_data(items, values):
         value = values[item.name]
         if isinstance(item, ScalarItem):
+            assert isinstance(item.attr, str), f"'{item.name}' is read-only: its owner restores it."
             # 'check_data' admits a boolean record for an integer, so the value takes the native type of the attribute
-            setattr(item.owner, item.attr, type(getattr(item.owner, item.attr))(value.item()))
+            setattr(item.owner, item.attr, type(item.value)(value.item()))
             continue
         view = None
         if isinstance(item.array, torch.Tensor):

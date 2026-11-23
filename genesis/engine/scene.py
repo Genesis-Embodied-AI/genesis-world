@@ -49,6 +49,7 @@ from genesis.options import (
     SceneOptions,
     SimOptions,
     SPHOptions,
+    ThinLens,
     ViewerOptions,
     VisOptions,
 )
@@ -458,7 +459,7 @@ class Scene(BuildableMixin, RBC):
                 surface.vis_mode = None
         if not isinstance(spec, gs.entities.Hybrid) and vis.debug_vis_mode is None and spec._debug_vis_modes:
             vis.debug_vis_mode = spec._debug_vis_modes[0]
-        spec = spec._frozen_copy(update={"vis": vis})
+        spec = spec._held_copy(update={"vis": vis})
 
         return self._sim.add_entity(surface, spec)
 
@@ -728,7 +729,7 @@ class Scene(BuildableMixin, RBC):
         lookat=(0.5, 0.5, 0.5),
         up=(0.0, 0.0, 1.0),
         fov=30,
-        aperture=2.0,
+        aperture=None,
         focus_dist=None,
         GUI=False,
         spp=256,
@@ -737,25 +738,23 @@ class Scene(BuildableMixin, RBC):
         far=20.0,
         env_idx=None,
         debug=False,
+        lens=None,
     ):
         """
         Add a camera to the scene.
 
-        The camera model can be either 'pinhole', 'thinlens' or 'fisheye':
-        - The 'pinhole' model is a simple camera model that captures light rays from a single point in space.
-        - The 'thinlens' model is a more complex camera model that simulates a lens with a finite aperture size,
-          allowing for depth of field effects. It is only supported by the Raytracer.
+        The camera model can be either 'pinhole' or 'fisheye':
+        - The 'pinhole' model is a simple camera model that captures light rays from a single point in space. Given a
+          `lens`, it becomes a thin-lens camera simulating a lens of finite aperture, which blurs what lies away from
+          its focus distance (depth of field). A lens is only supported by the Raytracer.
         - The 'fisheye' model is a camera model that simulates a fisheye lens, allowing for wide-angle views. It is
           only supported by the BatchRenderer.
-
-        Warning
-        -------
-        When 'pinhole' is used, the `aperture` and `focal_len` parameters are ignored.
 
         Parameters
         ----------
         model : str
-            Specifies the camera model. Options are 'pinhole' or 'thinlens'.
+            The projection of the camera: 'pinhole' or 'fisheye'. Deprecated: 'thinlens' stands for a pinhole camera with
+            a `lens`.
         res : tuple of int, shape (2,)
             The resolution of the camera, specified as a tuple (width, height).
         pos : tuple of float, shape (3,)
@@ -766,10 +765,10 @@ class Scene(BuildableMixin, RBC):
             The up vector of the camera, defining its orientation, specified as (x, y, z).
         fov : float
             The vertical field of view of the camera in degrees.
-        aperture : float
-            The aperture size of the camera, controlling depth of field.
+        aperture : float | None
+            Deprecated: use `lens`. The f-number of the lens of a 'thinlens' camera, 2.0 if None.
         focus_dist : float | None
-            The focus distance of the camera. If None, it will be auto-computed using `pos` and `lookat`.
+            Deprecated: use `lens`. The focus distance of the lens of a 'thinlens' camera.
         GUI : bool
             Whether to display the camera's rendered image in a separate GUI window.
         spp : int, optional
@@ -796,16 +795,28 @@ class Scene(BuildableMixin, RBC):
             ``VisOptions.debug``). The Rasterizer renders it whatever the renderer of the scene, so that it records the
             simulation at any resolution and from any pose without interfering with what robots perceive from their
             environment. Defaults to False.
+        lens : gs.options.ThinLens | None
+            The lens of a pinhole camera, which makes it a thin-lens camera, None for a sharp image. Defaults to None.
 
         Returns
         -------
         camera : genesis.Camera
             The created camera object.
         """
+        if model == "thinlens" or aperture is not None or focus_dist is not None:
+            gs.logger.warning(
+                "'model=\"thinlens\"', 'aperture' and 'focus_dist' are deprecated. Use 'lens=gs.options.ThinLens(...)' "
+                "instead."
+            )
+            if model == "thinlens":
+                if lens is not None:
+                    gs.raise_exception("'lens' and the deprecated 'model=\"thinlens\"' cannot be given together.")
+                lens = ThinLens(aperture=2.0 if aperture is None else aperture, focus_dist=focus_dist)
+                model = "pinhole"
         if denoise is None:
             denoise = sys.platform != "darwin"
         return self._visualizer.add_camera(
-            res, pos, lookat, up, model, fov, aperture, focus_dist, GUI, spp, denoise, near, far, env_idx, debug
+            res, pos, lookat, up, model, fov, lens, GUI, spp, denoise, near, far, env_idx, debug
         )
 
     @overload
@@ -2202,10 +2213,6 @@ class SceneScopedRenderContext(ScopedRenderContext[Scene]):
                 rows[:] = value
             values_rows.append(rows)
         return values_rows, is_shared
-
-    @property
-    def sources(self) -> tuple[()]:
-        return ()
 
     def update_markers(self, envs_idx: torch.Tensor) -> tuple[Shape, ...]:
         return tuple(self._markers)

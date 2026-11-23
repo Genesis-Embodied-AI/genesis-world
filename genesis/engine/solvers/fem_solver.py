@@ -34,10 +34,10 @@ from genesis.engine.materials.FEM.muscle import (
     func_muscle_stress,
 )
 from genesis.engine.render_context import (
+    ArrayRef,
     CONSTRAINT_COLOR,
     CONSTRAINT_LINE_RADIUS,
     CONSTRAINT_POINT_RADIUS,
-    ArrayRef,
     DynamicMesh,
     DynamicTextures,
     Lines,
@@ -170,8 +170,8 @@ class FEMVertices(Data, kind=DataKind.STATE, shape=(VERTICES, ENVS)):
     state once over (see 'kernel_copy_next_to_curr').
     """
 
-    pos: qd.Tensor = field((float, 3), grad=True)
-    vel: qd.Tensor = field((float, 3), grad=True)
+    pos: qd.Tensor = field((float, 3), grad=True, change=StateChange.GEOMETRY)
+    vel: qd.Tensor = field((float, 3), grad=True, change=StateChange.DYNAMICS)
     pos_next: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH, grad=True)
     vel_next: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH, grad=True)
 
@@ -200,7 +200,7 @@ class FEMElementsEnergy(Data, kind=DataKind.SCRATCH, shape=(ELEMENTS, ENVS)):
     stress: qd.Tensor = field((float, (3, 3)))
 
 
-class FEMElementsMaterial(Data, kind=DataKind.DERIVED, shape=(ELEMENTS, ENVS)):
+class FEMElementsMaterial(Data, kind=DataKind.SCRATCH, shape=(ELEMENTS, ENVS)):
     """
     The data the materials compute for each element from the deformation at the start of a substep.
 
@@ -405,7 +405,7 @@ class FEMInfo(Data, kind=DataKind.CONSTANT):
     # constrained vertices or a cluster too small to rotate leave without inertia.
     coarse_pivot_rtol: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
     # Whether some element was added with its vertices in the wrong order
-    has_inverted_elements: qd.Tensor = field(bool, shape=(), kind=DataKind.SCRATCH)
+    has_inverted_elements: qd.Tensor = field(bool, shape=(), kind=DataKind.INFO)
     # The vertices of the surface triangles, and the lumped mass of the surface at each one
     surface_vertices: qd.Tensor = field(int, shape=(SURFACE_VERTICES,))
     surface_vert_mass: qd.Tensor = field(float, shape=(SURFACE_VERTICES,))
@@ -525,6 +525,7 @@ class FEMData(Data):
                 vol_scale=solver._vol_scale,
                 rotation_atol=1e-10,
                 fiber_length_eps=1e-12,
+                has_inverted_elements=False,
             )
             if is_implicit:
                 info_values.update(
@@ -833,6 +834,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._build_gravity(self.fem_info.gravity)
 
         self._is_built = True
+        self.changelog.register_arrays(self.data)
 
         # The vertices that the entity spec fixes are held at their initial positions, as vertex constraints
         for entity in self._entities:
@@ -1039,7 +1041,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------------------------------------------------------
 
     @gs.assert_built
-    @mutates(StateChange.GEOMETRY)
+    @mutates
     def set_verts_pos(self, poss, verts_idx=None, envs_idx=None):
         """
         Set the position of some vertices.
@@ -1060,18 +1062,18 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
 
-    def get_verts_pos(self, verts_idx=None, envs_idx=None):
+    def get_verts_pos(self, verts_idx=None, envs_idx=None, *, copy: bool | None = True):
         """Get the position of some vertices, the same in every environment (see 'set_verts_pos')."""
-        tensor = self._read_data(self.fem_state.vertices.pos, envs_idx, verts_idx, copy=True)
+        tensor = self._read_data(self.fem_state.vertices.pos, envs_idx, verts_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_verts_vel(self, verts_idx=None, envs_idx=None):
+    def get_verts_vel(self, verts_idx=None, envs_idx=None, *, copy: bool | None = True):
         """Get the velocity of some vertices, the same in every environment (see 'set_verts_pos')."""
-        tensor = self._read_data(self.fem_state.vertices.vel, envs_idx, verts_idx, copy=True)
+        tensor = self._read_data(self.fem_state.vertices.vel, envs_idx, verts_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
-    @mutates(StateChange.DYNAMICS)
+    @mutates
     def set_verts_vel(self, vels, verts_idx=None, envs_idx=None):
         """Set the velocity of some vertices (see 'set_verts_pos')."""
         self._write_data(
@@ -1081,7 +1083,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             torch.mps.synchronize()
 
     @gs.assert_built
-    @mutates()
+    @mutates
     def set_elements_actu(self, actus, elements_idx=None, envs_idx=None, *, n_groups=1):
         """
         Set the actuation of some elements, each element taking the actuation of its muscle group.
@@ -1104,7 +1106,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             elements_idx, envs_idx, actus, self.fem_info.elements.muscle_group, self.fem_state.elements.actu
         )
 
-    @mutates(StateChange.MODEL)
+    @mutates
     def set_elements_muscle_group(self, muscle_group, elements_idx=None):
         """Set the muscle group of some elements, shared by every environment."""
         self._write_data(
@@ -1119,7 +1121,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
 
-    @mutates(StateChange.MODEL)
+    @mutates
     def set_elements_muscle_direction(self, muscle_direction, elements_idx=None):
         """Set the unit direction of the muscle fibers of some elements, shared by every environment."""
         self._write_data(
@@ -1134,12 +1136,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
 
-    def get_elements_el2v(self, elements_idx=None):
+    def get_elements_el2v(self, elements_idx=None, *, copy: bool | None = True):
         """Get the global index of the four vertices of some elements."""
-        return self._read_data(self.fem_info.elements.el2v, None, elements_idx, copy=True, is_batched=False)
+        return self._read_data(self.fem_info.elements.el2v, None, elements_idx, copy=copy, is_batched=False)
 
     @gs.assert_built
-    @mutates(StateChange.MODEL)
+    @mutates
     def set_vertex_constraints(
         self,
         verts_idx: IndexType | None = None,
@@ -1225,7 +1227,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             is_soft_constraint,
         )
 
-    @mutates(StateChange.MODEL)
+    @mutates
     def update_constraint_targets(self, target_poss, verts_idx=None, envs_idx=None):
         """Update the target position of some constrained vertices (see 'set_vertex_constraints')."""
         if target_poss is None:
@@ -1235,7 +1237,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         )
         kernel_update_constraint_targets(verts_idx, envs_idx, target_poss, self.vertex_constraints)
 
-    @mutates(StateChange.MODEL)
+    @mutates
     def remove_vertex_constraints(self, verts_idx=None, envs_idx=None):
         """Remove the constraints of some vertices (see 'set_vertex_constraints'), of all of them if None."""
         _, verts_idx, envs_idx = self._sanitize_io_variables(
@@ -1305,8 +1307,6 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
     """
 
     debug_vis_modes = gs.entities.FEM._debug_vis_modes
-    # The vertex constraints are part of the model
-    stale_on = frozenset((StateChange.GEOMETRY, StateChange.MODEL))
 
     def build(self) -> None:
         solver = self.owner
@@ -1361,9 +1361,14 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
                         textures=textures,
                         roles=roles,
                         _views=frozenset(views),
+                        invalidated_by={solver: (StateChange.GEOMETRY,)},
                     )
                 )
         self._shapes = tuple(shapes)
+        # The points at the constrained vertices and the lines to their targets, made as they are first drawn
+        self._constraints_markers: tuple[Points, Lines] | None = None
+        # The changes of the solver since the markers were last drawn
+        self._constraints_tracker = solver.changelog.track()
 
     def update_shapes(self, envs_idx: torch.Tensor | None, view: str) -> tuple[Shape, ...]:
         return select_view_shapes(self._shapes, view)
@@ -1373,23 +1378,39 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
         solver = self.owner
         if not solver.options.vis.constraints:
             return ()
-        constraint = solver.get_vertices_constraint(envs_idx)
-        verts_idx = torch.nonzero(constraint.is_constrained.any(dim=0))[:, 0]
-        if len(verts_idx) == 0:
-            return ()
-        verts_pos = qd_to_torch(solver.fem_state.vertices.pos, envs_idx, verts_idx, transpose=True)
-        has_line = (constraint.is_constrained & ~constraint.is_link_target)[:, verts_idx]
-        verts_target_pos = torch.where(has_line[..., None], constraint.target_pos[:, verts_idx], verts_pos)
-        return (
-            Points(
-                verts_pos,
-                CONSTRAINT_POINT_RADIUS,
-                CONSTRAINT_COLOR,
-                is_active=constraint.is_constrained[:, verts_idx],
-                envs_idx=envs_idx,
-            ),
-            Lines(verts_pos, verts_target_pos, CONSTRAINT_LINE_RADIUS, CONSTRAINT_COLOR, envs_idx=envs_idx),
-        )
+        if self._constraints_markers is None:
+            pos = torch.zeros((solver.n_envs_, 0, 3), dtype=gs.tc_float, device=gs.device)
+            is_active = torch.zeros(pos.shape[:-1], dtype=gs.tc_bool, device=gs.device)
+            invalidated_by = {solver: (StateChange.GEOMETRY, StateChange.MODEL)}
+            self._constraints_markers = (
+                Points(
+                    pos, CONSTRAINT_POINT_RADIUS, CONSTRAINT_COLOR, is_active=is_active, invalidated_by=invalidated_by
+                ),
+                Lines(
+                    pos.clone(),
+                    pos.clone(),
+                    CONSTRAINT_LINE_RADIUS,
+                    CONSTRAINT_COLOR,
+                    is_active=is_active.clone(),
+                    invalidated_by=invalidated_by,
+                ),
+            )
+        points_marker, lines_marker = self._constraints_markers
+        # The constraints are drawn anew once the solver changed, for every environment at once
+        if self._constraints_tracker.pull() is not None:
+            constraint = solver.get_vertices_constraint()
+            verts_idx = torch.nonzero(constraint.is_constrained.any(dim=0))[:, 0]
+            points_marker = self.resize_marker(points_marker, len(verts_idx))
+            lines_marker = self.resize_marker(lines_marker, len(verts_idx))
+            self._constraints_markers = (points_marker, lines_marker)
+            if len(verts_idx) > 0:
+                verts_pos = qd_to_torch(solver.fem_state.vertices.pos, None, verts_idx, transpose=True)
+                has_line = (constraint.is_constrained & ~constraint.is_link_target)[:, verts_idx]
+                points_marker.pos[:] = verts_pos
+                points_marker.is_active[:] = constraint.is_constrained[:, verts_idx]
+                lines_marker.start[:] = verts_pos
+                lines_marker.end[:] = torch.where(has_line[..., None], constraint.target_pos[:, verts_idx], verts_pos)
+        return self._constraints_markers
 
 
 # ------------------------------------------------------------------------------------

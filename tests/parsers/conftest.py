@@ -1152,7 +1152,7 @@ def all_joints_mjcf():
     ET.SubElement(free_box, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
     ET.SubElement(free_box, "joint", name="/worldbody/free_box_joint", type="free")
 
-    # Add actuators for PD controllers (prismatic and revolute only)
+    # Add actuators for PD controllers (prismatic, revolute and spherical)
     actuator = ET.SubElement(mjcf, "actuator")
     ET.SubElement(
         actuator,
@@ -1168,6 +1168,17 @@ def all_joints_mjcf():
         "general",
         name="/worldbody/base/revolute_box_joint_actuator",
         joint="/worldbody/base/revolute_box_joint",
+        biastype="affine",
+        gainprm="120.0 0 0",
+        biasprm="0 -120.0 -12.0",
+    )
+    # Genesis reads a ball joint actuator with a unit gear as the same PD gains on each of the three DOFs
+    ET.SubElement(
+        actuator,
+        "general",
+        name="/worldbody/base/spherical_box_joint_actuator",
+        joint="/worldbody/base/spherical_box_joint",
+        gear="1 1 1 0 0 0",
         biastype="affine",
         gainprm="120.0 0 0",
         biasprm="0 -120.0 -12.0",
@@ -1311,11 +1322,12 @@ def all_joints_usd(asset_tmp_path, all_joints_mjcf: ET.ElementTree, request):
     revolute_joint_prim.CreateUpperLimitAttr().Set(revolute_range[1])
     revolute_joint_prim.CreateLocalPos0Attr().Set(Gf.Vec3f(*(revolute_box_pos + revolute_anchor)))
     revolute_joint_prim.CreateLocalPos1Attr().Set(Gf.Vec3f(*revolute_anchor))
-    revolute_joint_prim.GetPrim().CreateAttribute("stiffness", Sdf.ValueTypeNames.Float).Set(50.0)
-    revolute_joint_prim.GetPrim().CreateAttribute("angular:damping", Sdf.ValueTypeNames.Float).Set(5.0)
+    # USD specifies every angular gain per degree, while the MJCF gains are per radian.
+    revolute_joint_prim.GetPrim().CreateAttribute("stiffness", Sdf.ValueTypeNames.Float).Set(np.deg2rad(50.0))
+    revolute_joint_prim.GetPrim().CreateAttribute("angular:damping", Sdf.ValueTypeNames.Float).Set(np.deg2rad(5.0))
     revolute_drive_api = UsdPhysics.DriveAPI.Apply(revolute_joint_prim.GetPrim(), "angular")
-    revolute_drive_api.CreateStiffnessAttr().Set(120.0)
-    revolute_drive_api.CreateDampingAttr().Set(12.0)
+    revolute_drive_api.CreateStiffnessAttr().Set(np.deg2rad(120.0))
+    revolute_drive_api.CreateDampingAttr().Set(np.deg2rad(12.0))
 
     # Create spherical box
     spherical_box = UsdGeom.Cube.Define(stage, "/worldbody/base/spherical_box")
@@ -1330,6 +1342,11 @@ def all_joints_usd(asset_tmp_path, all_joints_mjcf: ET.ElementTree, request):
     spherical_joint_prim.CreateBody1Rel().SetTargets([spherical_box.GetPrim().GetPath()])
     spherical_joint_prim.CreateLocalPos0Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
     spherical_joint_prim.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+    # Per-degree gains, as for the revolute drive, matching the ball joint actuator of the MJCF counterpart
+    for dof_name in ("rotX", "rotY", "rotZ"):
+        spherical_drive_api = UsdPhysics.DriveAPI.Apply(spherical_joint_prim.GetPrim(), dof_name)
+        spherical_drive_api.CreateStiffnessAttr().Set(np.deg2rad(120.0))
+        spherical_drive_api.CreateDampingAttr().Set(np.deg2rad(12.0))
 
     # Create fixed box
     fixed_box = UsdGeom.Cube.Define(stage, "/worldbody/base/fixed_box")

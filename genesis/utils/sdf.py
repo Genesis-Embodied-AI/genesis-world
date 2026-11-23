@@ -602,7 +602,7 @@ def sdf_func_find_closest_vert(geom_idx, i_b, pos_world, dyn_state: DynState, dy
     geom_sdf_res = sdf_info.geoms_info.sdf_res[geom_idx]
     pos_mesh = gu.qd_inv_transform_by_trans_quat(pos_world, g_pos, g_quat)
     pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[geom_idx])
-    nearest_cell = qd.cast(qd.min(qd.max(pos_sdf, 0), geom_sdf_res - 1), gs.qd_int)
+    nearest_cell = qd.cast(qd.math.clamp(pos_sdf, 0, geom_sdf_res - 1), gs.qd_int)
     return (
         sdf_info.geoms_sdf_closest_vert[sdf_func_ravel_cell_idx(nearest_cell, geom_idx, geom_sdf_res, sdf_info)]
         + dyn_info.geoms.vert_start[geom_idx]

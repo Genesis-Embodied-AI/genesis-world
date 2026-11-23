@@ -1,4 +1,3 @@
-import dataclasses
 import itertools
 from typing import TYPE_CHECKING, ClassVar
 
@@ -74,7 +73,7 @@ class SkinnedMeshes(Data):
     edges_entity_idx: qd.Tensor = field(int, shape=(SKINNED_EDGES,), kind=DataKind.CONSTANT)
     # Whether the mesh of each tearable entity holds in each environment, cleared by the refresh it tears at, until a
     # reset of the scene.
-    entities_is_intact: qd.Tensor = field(bool, shape=(SKINNED_ENTITIES, ENVS), kind=DataKind.DERIVED)
+    entities_is_intact: qd.Tensor = field(bool, shape=(SKINNED_ENTITIES, ENVS), kind=DataKind.STATE)
 
 
 class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
@@ -126,7 +125,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         super().build(n_envs)
 
     @gs.assert_built
-    @mutates(StateChange.GEOMETRY)
+    @mutates
     def set_particles_pos(self, poss, particles_idx=None, envs_idx=None) -> None:
         """
         Set the position of some particles, at rest.
@@ -148,13 +147,13 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         # Overwriting the positions of the particles clears the errors their former state flagged
         self.clear_errno(envs_idx)
 
-    def get_particles_pos(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
+    def get_particles_pos(self, particles_idx=None, envs_idx=None, *, copy: bool | None = True) -> torch.Tensor:
         """Get the position of some particles, the same in every environment (see 'set_particles_pos')."""
-        tensor = self._read_data(self._particles_pos, envs_idx, particles_idx, copy=True)
+        tensor = self._read_data(self._particles_pos, envs_idx, particles_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
-    @mutates(StateChange.DYNAMICS)
+    @mutates
     def set_particles_vel(self, vels, particles_idx=None, envs_idx=None) -> None:
         """Set the velocity of some particles (see 'set_particles_pos')."""
         self._write_data(
@@ -163,13 +162,13 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
 
-    def get_particles_vel(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
+    def get_particles_vel(self, particles_idx=None, envs_idx=None, *, copy: bool | None = True) -> torch.Tensor:
         """Get the velocity of some particles, the same in every environment (see 'set_particles_pos')."""
-        tensor = self._read_data(self._particles_vel, envs_idx, particles_idx, copy=True)
+        tensor = self._read_data(self._particles_vel, envs_idx, particles_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
     @gs.assert_built
-    @mutates(StateChange.GEOMETRY, differentiable=False)
+    @mutates(differentiable=False)
     def set_particles_active(self, actives, particles_idx=None, envs_idx=None) -> None:
         """Set whether some particles take part in the simulation (see 'set_particles_pos')."""
         actives, particles_idx, envs_idx = self._sanitize_io_variables(
@@ -178,9 +177,9 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         kernel_set_values(particles_idx, envs_idx, actives, self._particles_is_active)
         self._reset_particles(particles_idx, envs_idx, reset_deformation=False)
 
-    def get_particles_active(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
+    def get_particles_active(self, particles_idx=None, envs_idx=None, *, copy: bool | None = True) -> torch.Tensor:
         """Get whether some particles take part in the simulation (see 'set_particles_pos')."""
-        tensor = self._read_data(self._particles_is_active, envs_idx, particles_idx, copy=True)
+        tensor = self._read_data(self._particles_is_active, envs_idx, particles_idx, copy=copy)
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_particles_mass(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
@@ -352,6 +351,8 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
                 physics=ParticlesPhysics(entity.material.rho, gravity, lower_bound, upper_bound),
                 roles=ShapeRoles.of(entity.idx, is_looks=is_pinned, is_debug=True),
                 _views=frozenset(("particle",)),
+                # The particles are drawn with their velocities
+                invalidated_by={solver: (StateChange.GEOMETRY, StateChange.DYNAMICS)},
             )
             self._entities_points.append(points)
             shapes.append(points)
@@ -377,6 +378,7 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
                         is_active=ArrayRef(self._skinned.entities_is_intact, i_t) if is_tearable else None,
                         textures=self.dynamic_textures.get(entity.vmesh),
                         roles=ShapeRoles.of(entity.idx, is_looks=not is_pinned, is_debug=False),
+                        invalidated_by={solver: (StateChange.GEOMETRY,)},
                     )
                 )
                 i_t += is_tearable
@@ -442,8 +444,8 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
                     arrays = [array.view(is_per_env=True)[envs_shown_idx] for array in arrays]
                 pos, vel, is_active = arrays
                 surfaces_points.append(
-                    dataclasses.replace(
-                        points,
+                    points.fork(
+                        uid=gs.UID(),
                         pos=pos,
                         surface=recon_surface,
                         vel=vel,
@@ -458,14 +460,27 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
         return select_view_shapes((*self._shapes, *self._surfaces_points), view)
 
     def reconstruct(self, points: Points) -> tuple[DynamicMesh, ...]:
-        particles_pos = tensor_to_array(points.pos)
-        particles_is_active = tensor_to_array(points.is_active, dtype=np.bool_)
+        solver = self.owner
+        # The particles the boundary clamps onto one of its edges or corners crowd along a line or onto a single point,
+        # all neighbours of each other, which makes the time and memory of a reconstruction grow with the square of
+        # their number. They are left out, the particles resting against a single wall staying in.
+        boundary = torch.as_tensor(
+            np.stack((solver.boundary_lower, solver.boundary_upper)), dtype=gs.tc_float, device=gs.device
+        )
+        particles_n_clamped_axes = (
+            torch.isclose(points.pos[..., None, :], boundary, rtol=gs.EPS, atol=gs.EPS).any(dim=-2).sum(dim=-1)
+        )
+        particles_is_kept = torch.logical_and(points.is_active, particles_n_clamped_axes < 2)
+        # The particles kept in every environment are selected on the device and copied at once, then split per
+        # environment on the host, which spares a synchronization and a copy per environment.
+        particles_pos = tensor_to_array(points.pos[particles_is_kept])
+        envs_n_kept = tensor_to_array(particles_is_kept.sum(dim=-1))
         meshes = []
-        for i_r in range(len(points.envs_idx)):
+        for i_r, positions in enumerate(np.split(particles_pos, np.cumsum(envs_n_kept)[:-1])):
             mesh = pu.particles_to_mesh(
-                positions=particles_pos[i_r][particles_is_active[i_r]],
-                radius=self.owner.particle_radius,
-                backend=self.owner.options.vis.recon_backend,
+                positions=positions,
+                radius=solver.particle_radius,
+                backend=solver.options.vis.recon_backend,
             )
             env_idx = points.envs_idx[i_r : i_r + 1]
             # The surface is reconstructed on the host, where the renderers drawing it read its vertices, so that its
@@ -477,8 +492,8 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
                     torch.from_numpy(mesh.vertices[None]),
                     seg_keys=points.seg_keys,
                     roles=points.roles,
-                    particles=dataclasses.replace(
-                        points,
+                    particles=points.fork(
+                        uid=gs.UID(),
                         pos=points.pos[i_r : i_r + 1],
                         vel=points.vel[i_r : i_r + 1],
                         is_active=points.is_active[i_r : i_r + 1],

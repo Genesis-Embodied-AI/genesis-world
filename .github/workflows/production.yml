@@ -5,7 +5,11 @@ on:
   push:
     branches:
       - main
+  # A draft pull request runs only when re-run, by hand or by the CI Command workflow, which a '/ci' comment or marking
+  # the pull request ready for review starts (see the setup job). A ready_for_review trigger would start a new run that
+  # cancels a re-run in progress on the same commit. Every workflow gated this way is listed in the CI Command workflow.
   pull_request:
+    types: [opened, synchronize, reopened]
     branches:
       - main
   # Repositories that Genesis depends on validate their changes by calling this workflow from one started by the
@@ -60,6 +64,10 @@ defaults:
 jobs:
   setup:
     name: production-setup
+
+    # Every other job follows this one through 'needs', so a draft pull request skips them all. A re-run keeps the event
+    # of the first attempt, draft included, so its attempt number tells a manual run apart.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft || github.run_attempt > 1
 
     runs-on: ubuntu-24.04
 

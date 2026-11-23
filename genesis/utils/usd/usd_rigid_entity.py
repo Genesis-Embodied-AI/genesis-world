@@ -286,7 +286,8 @@ def _parse_link(
             if joint_type == gs.JOINT_TYPE.REVOLUTE:
                 j_info["dofs_motion_ang"] = joint_axis[None]
                 j_info["dofs_motion_vel"] = np.zeros((1, 3), dtype=gs.np_float)
-                j_info["dofs_stiffness"] = np.array(
+                # USD states angular stiffness and damping per degree, while joint positions are radians.
+                j_info["dofs_stiffness"] = np.rad2deg(
                     [
                         get_attr_value_by_candidates(
                             joint_prim,
@@ -297,7 +298,7 @@ def _parse_link(
                     ],
                     dtype=gs.np_float,
                 )
-                j_info["dofs_damping"] = np.array(
+                j_info["dofs_damping"] = np.rad2deg(
                     [
                         get_attr_value_by_candidates(
                             joint_prim,
@@ -455,6 +456,9 @@ def _parse_link(
             # TODO: Implement target solving in rigid solver. (GetTargetPositionAttr())
             kp = np.asarray(dofs_kp, dtype=gs.np_float)
             kv = np.asarray(dofs_kv, dtype=gs.np_float)
+            if joint_type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.SPHERICAL):
+                # UsdPhysics gives angular drive stiffness and damping per degree, while joint positions are radians.
+                kp, kv = np.rad2deg(kp), np.rad2deg(kv)
             j_info["dofs_act_gain"] = kp
             j_info["dofs_act_bias"] = np.column_stack([np.zeros_like(kp), -kp, -kv])
             j_info["dofs_force_range"] = np.asarray(dofs_force_range, dtype=gs.np_float)

@@ -205,7 +205,7 @@ def test_entity_spec(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_free_
     fixed_box = scene.add_entity(spec=fixed_box_spec)
     fixed_box.attach(box, box.base_link.name, pos=(0.0, 0.0, 0.2))
     box_spec.select(gs.indices.Geom.at(0)).set_friction(3.0)
-    with pytest.raises(gs.GenesisException, match="frozen"):
+    with pytest.raises(gs.GenesisException, match="records no more patches"):
         box.spec.select(gs.indices.Geom.at(0)).set_friction(3.0)
 
     exported = tmp_path / f"selections{SCENE_FORMAT}"
@@ -272,10 +272,6 @@ def test_entity_spec(tmp_path, show_viewer, tol, two_box_free_mjcf, sphere_free_
         box_spec.select(gs.indices.VGeom.at(0)).set(gs.options.Geom(friction=1.0))
     with pytest.raises(gs.GenesisException, match="sets no gs.options.Geom"):
         dense_body_ghost.spec.model_copy().select(gs.indices.Link.named("body")).set_friction(1.0)
-    with pytest.raises(gs.GenesisException, match="frozen"):
-        box.spec.name = "renamed_box"
-    with pytest.raises(gs.GenesisException, match="frozen"):
-        box_spec.patches = ()
     # A copy records again, deep or not
     box.spec.model_copy(deep=True).select(gs.indices.Geom.at(0)).set_friction(3.0)
     with pytest.raises(gs.GenesisException, match="at least 1"):

@@ -490,6 +490,18 @@ def qd_quat_mul_grad_rhs(u, v, out_grad):
 
 
 @qd.func
+def qd_normalize_grad(v, out_grad, eps):
+    """Adjoint of 'qd_normalize(v, eps)' with respect to 'v', given the upstream gradient of its output.
+
+    The output stays on the unit sphere whatever the length of 'v' past 'eps', so the gradient loses its component along
+    'v' and scales with the inverse of its length.
+    """
+    v_norm = qd.max(v.norm(), eps)
+    v_hat = v / v_norm
+    return (out_grad - v_hat * v_hat.dot(out_grad)) / v_norm
+
+
+@qd.func
 def qd_transform_quat_by_quat(v, u):
     """Transforms quat_v by quat_u.
 
@@ -2577,13 +2589,14 @@ def default_dofs_kv(n=6):
     return np.full((n,), fill_value=10.0, dtype=gs.np_float)
 
 
-class SpatialHashGrid(Data, kind=DataKind.DERIVED, shape=(HASH_SLOTS, ENVS)):
+class SpatialHashGrid(Data, kind=DataKind.SCRATCH, shape=(HASH_SLOTS, ENVS)):
     """
     The particles of every environment sorted by the cell of a uniform grid they lie in, for neighbour queries.
 
     A cell of integer coordinates hashes to one of the slots, whose particles take the sorted indices from `slot_start`
     to `slot_start + slot_size` (see func_hash_sort_particles). `particles_idx` is the particle each sorted index holds,
-    and `n_particles` the number of active particles of each environment, which take the first sorted indices.
+    and `n_particles` the number of active particles of each environment, which take the first sorted indices. A
+    substep sorts the particles anew from the positions it starts from, which it moves afterward.
     """
 
     slot_size: qd.Tensor = field(int)
@@ -2592,16 +2605,16 @@ class SpatialHashGrid(Data, kind=DataKind.DERIVED, shape=(HASH_SLOTS, ENVS)):
     n_particles: qd.Tensor = field(int, shape=(ENVS,))
     # The particle count and the first sorted index of each chunk of consecutive slots, and of each group of consecutive
     # chunks (see hash_grid_sizes)
-    chunks_size: qd.Tensor = field(int, shape=(HASH_CHUNKS, ENVS), kind=DataKind.SCRATCH)
-    chunks_start: qd.Tensor = field(int, shape=(HASH_CHUNKS, ENVS), kind=DataKind.SCRATCH)
-    groups_size: qd.Tensor = field(int, shape=(HASH_GROUPS, ENVS), kind=DataKind.SCRATCH)
-    groups_start: qd.Tensor = field(int, shape=(HASH_GROUPS, ENVS), kind=DataKind.SCRATCH)
+    chunks_size: qd.Tensor = field(int, shape=(HASH_CHUNKS, ENVS))
+    chunks_start: qd.Tensor = field(int, shape=(HASH_CHUNKS, ENVS))
+    groups_size: qd.Tensor = field(int, shape=(HASH_GROUPS, ENVS))
+    groups_start: qd.Tensor = field(int, shape=(HASH_GROUPS, ENVS))
     # The particle each sorted index holds before the particles of each slot are put in ascending order of index
-    slots_particles_idx: qd.Tensor = field(int, shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH)
+    slots_particles_idx: qd.Tensor = field(int, shape=(PARTICLES, ENVS))
     cell_size: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT)
     grid_res: qd.Tensor = field((int, 3), shape=(), kind=DataKind.CONSTANT)
     # The slot of each particle, -1 for an inactive one (see func_sort_particles_by_slot)
-    particles_slot: qd.Tensor = field(int, shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH)
+    particles_slot: qd.Tensor = field(int, shape=(PARTICLES, ENVS))
 
 
 def hash_grid_sizes(n_slots: int) -> dict[str, int]:

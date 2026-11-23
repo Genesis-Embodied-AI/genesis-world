@@ -12,6 +12,7 @@ import io
 import json
 import os
 import pathlib
+import struct
 import types
 import typing
 import xml.etree.ElementTree as ET
@@ -19,10 +20,11 @@ import zipfile
 from collections.abc import Iterable, Mapping, Sequence, Set
 from enum import IntEnum, StrEnum
 from functools import lru_cache, partial
-from typing import Callable, NamedTuple
+from typing import BinaryIO, Callable, NamedTuple
 
 import numpy as np
 
+import trimesh
 from frozendict import frozendict
 from pydantic import AfterValidator, TypeAdapter, ValidationError, ValidationInfo
 
@@ -680,6 +682,77 @@ def load(path: str | os.PathLike, expect: dict) -> dict:
         gs.raise_exception_from(f"'{path}' holds values a Genesis scene is not made of.", e)
 
 
+def export_record(file: BinaryIO, value, expect=typing.Any) -> None:
+    """Write one value to a binary file as a record that 'load_record' loads back, without pickling it.
+
+    A record is the size of a JSON header, the header, then the raw bytes of the arrays the value holds. The header
+    holds the value as a field declared 'expect' exports it in a Genesis file (see 'export'), and the type and shape of
+    each array, which is the minimum needed to rebuild the value exactly. A value declared 'Any' may nest dicts, lists,
+    tuples, numbers, strings, None, NumPy arrays and every class that says how it travels in a file, such as
+    'trimesh.Trimesh', and loads back with its tuples as lists and its NumPy scalars as Python ones. Records follow one
+    another in a file, so a reader may stop after the ones it needs.
+
+    Parameters
+    ----------
+    file : BinaryIO
+        The binary file to write to, opened for writing. The record starts at its current position.
+    value : Any
+        The value to write. Its arrays must hold numbers, since an array of Python objects has no raw bytes to store.
+    expect : type, optional
+        The type the value is declared to be, which 'load_record' must be given to load it back. Declaring the exact
+        type saves the header from naming it. Default is 'typing.Any'.
+    """
+    exported = Exported(values=[], slots={}, stored=[], classes=set())
+    held = _export_value(value, expect, exported)
+    arrays_spec = [(array.dtype.str, array.shape) for array in exported.values]
+    header = json.dumps({"arrays": arrays_spec, "value": held}).encode()
+    file.write(struct.pack("<I", len(header)))
+    file.write(header)
+    # The arrays follow by decreasing item size, the order in which 'load_record' reads them back.
+    for array in sorted(exported.values, key=lambda array: -array.itemsize):
+        # An object array holds references, which have no raw bytes to store.
+        assert not array.dtype.hasobject
+        file.write(array.data)
+
+
+def load_record(file: BinaryIO, expect=typing.Any):
+    """Read back the value of the next record of a binary file, as the type 'export_record' was given.
+
+    Parameters
+    ----------
+    file : BinaryIO
+        The binary file to read from, opened for reading at the start of a record. It is left at the end of the record.
+    expect : type, optional
+        The type the value was declared to be when it was written. Default is 'typing.Any'.
+
+    Returns
+    -------
+    value : Any
+        The value of the record, as an instance of 'expect'. Its arrays are writable.
+
+    Raises
+    ------
+    ValueError
+        If the file holds no such record at its current position, as when it is truncated, was written another way, or
+        holds a value its declared type no longer admits.
+    """
+    try:
+        (header_size,) = struct.unpack("<I", file.read(4))
+        header = json.loads(file.read(header_size))
+        arrays_spec = [(np.dtype(dtype), shape) for dtype, shape in header["arrays"]]
+        # Each array gets its own allocation, since an array packed right after another one is misaligned for the
+        # vectorized loads of native code, which then crashes.
+        arrays = [None] * len(arrays_spec)
+        for i in sorted(range(len(arrays_spec)), key=lambda i: -arrays_spec[i][0].itemsize):
+            dtype, shape = arrays_spec[i]
+            arrays[i] = np.empty(shape, dtype=dtype)
+            if file.readinto(arrays[i].data) != arrays[i].nbytes:
+                raise ValueError("The record is truncated.")
+        return _load_value(header["value"], expect, arrays)
+    except (struct.error, KeyError, IndexError, TypeError, OverflowError, gs.GenesisException) as e:
+        raise ValueError("The file holds no record written by 'export_record' here.") from e
+
+
 def _exported_array(value: np.ndarray, exporting: Exporting) -> int:
     """Store the array in the file's array member and return its index, which the values carry in its place."""
     return exporting.array(value)
@@ -691,3 +764,34 @@ def _loaded_array(raw: int, loading: Loading) -> np.ndarray:
 
 
 register(np.ndarray, _exported_array, _loaded_array)
+
+
+def _exported_geometry(mesh: trimesh.Trimesh, exporting: Exporting) -> dict:
+    """Export the geometry of a trimesh: its vertices, the faces joining them, their normals and their colours.
+
+    Only colours the mesh states are exported. Asking a mesh coloured by anything else for its vertex colours makes
+    trimesh invent a default one per vertex, which a file would then carry as if the author had chosen it.
+    """
+    colours = mesh.visual.vertex_colors if mesh.visual.kind == "vertex" else None
+    return {
+        "verts": exporting.array(mesh.vertices),
+        "faces": exporting.array(mesh.faces),
+        "normals": exporting.array(mesh.vertex_normals),
+        "colours": None if colours is None else exporting.array(colours),
+    }
+
+
+def _loaded_geometry(raw: dict, loading: Loading) -> trimesh.Trimesh:
+    """Recreate the trimesh as it was exported, with the vertices, faces and normals the file holds."""
+    mesh = trimesh.Trimesh(
+        vertices=loading.array(raw["verts"]),
+        faces=loading.array(raw["faces"]),
+        vertex_normals=loading.array(raw["normals"]),
+        process=False,
+    )
+    if raw["colours"] is not None:
+        mesh.visual.vertex_colors = loading.array(raw["colours"])
+    return mesh
+
+
+register(trimesh.Trimesh, _exported_geometry, _loaded_geometry)

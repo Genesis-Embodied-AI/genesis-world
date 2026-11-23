@@ -1,7 +1,7 @@
+import dataclasses
 import functools
 import math
 import os
-import pickle
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
@@ -23,7 +23,7 @@ from genesis.options.textures import Texture
 from genesis.repr_base import RBC
 from genesis.typing import Matrix3x3Type, Vec3FType
 from genesis.utils import serialization
-from genesis.utils.cache import OwnedCache, get_gsd_path, get_hashkey, get_remesh_cache
+from genesis.utils.cache import OwnedCache, get_gsd_path, get_hashkey
 from genesis.utils.misc import redirect_libc_stderr
 
 if TYPE_CHECKING:
@@ -38,19 +38,20 @@ class InertialProperties(NamedTuple):
     i: Matrix3x3Type
 
 
-class SDFGrid(NamedTuple):
-    """Signed distance field (SDF) of a geometry sampled at the nodes of a regular grid.
-
-    'value' and 'grad' hold the signed distance and its gradient at each node, 'closest_verts_idx' the index of the
-    vertex of the geometry closest to each node, 'max_value' the largest signed distance of the grid, and
-    'T_mesh_to_sdf' the transform from the mesh frame to the grid frame, in which the nodes sit at integer coordinates.
-    """
+@dataclasses.dataclass(frozen=True)
+class SDFGrid:
+    """Signed distance field (SDF) of a geometry sampled at the nodes of a regular grid."""
 
     value: np.ndarray
+    """Signed distance at each node."""
     grad: np.ndarray
+    """Gradient of the signed distance at each node."""
     closest_verts_idx: np.ndarray
+    """Index of the vertex of the geometry closest to each node."""
     max_value: float
+    """Largest signed distance of the grid."""
     T_mesh_to_sdf: np.ndarray
+    """Transform from the mesh frame to the grid frame, in which the nodes sit at integer coordinates."""
 
 
 class SupportTable(NamedTuple):
@@ -247,7 +248,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         """
         Remesh for tetrahedralization.
         """
-        cache = get_remesh_cache(self.verts, self.faces, edge_len_abs, edge_len_ratio, fix)
+        cache = mu.get_remesh_cache(self.verts, self.faces, edge_len_abs, edge_len_ratio, fix)
 
         remeshed = cache.load()
         if remeshed is not None:
@@ -879,7 +880,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         ):
             asset_textures = [exporting.value(texture, Texture | None) for texture in self._asset_textures]
         return {
-            "geometry": _exported_geometry(self.trimesh, exporting),
+            "geometry": exporting.value(self.trimesh, trimesh.Trimesh),
             "uvs": None if self.uvs is None else exporting.array(self.uvs),
             "surface": exporting.value(self.surface, Surface),
             "metadata": exporting.value(self.metadata, Any),
@@ -895,7 +896,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         the geometry.
         """
         mesh = cls(
-            mesh=_loaded_geometry(raw["geometry"], loading),
+            mesh=loading.value(raw["geometry"], trimesh.Trimesh),
             surface=loading.value(raw["surface"], Surface),
             uvs=None if raw["uvs"] is None else loading.array(raw["uvs"]),
             # The metadata says what was already done to the geometry, so it is handed back rather than acted on again
@@ -931,8 +932,8 @@ def _get_sdf_grid(
         gs.logger.debug(f"Preprocessed file (`.gsd`) found in cache: {gsd_path}.")
         try:
             with open(gsd_path, "rb") as file:
-                sdf_grid = pickle.load(file)
-        except (EOFError, ModuleNotFoundError, pickle.UnpicklingError, TypeError, MemoryError):
+                sdf_grid = serialization.load_record(file, SDFGrid)
+        except (ValueError, MemoryError):
             gs.logger.info("Ignoring corrupted cache.")
 
     if sdf_grid is None:
@@ -1001,7 +1002,7 @@ def _get_sdf_grid(
         )
         os.makedirs(os.path.dirname(gsd_path), exist_ok=True)
         with open(gsd_path, "wb") as file:
-            pickle.dump(sdf_grid, file)
+            serialization.export_record(file, sdf_grid, SDFGrid)
 
     return sdf_grid
 
@@ -1188,34 +1189,3 @@ def _get_support_table(verts: np.ndarray, support_res: int) -> SupportTable:
     is_slot = candidates_rank < 2
     slots_vid[cells_idx[is_slot], candidates_rank[is_slot]] = verts_idx[is_slot]
     return SupportTable(slots_vid, verts_idx[~is_slot], np.bincount(cells_idx[~is_slot], minlength=n_geom_cells))
-
-
-def _exported_geometry(mesh: trimesh.Trimesh, exporting: serialization.Exporting) -> dict:
-    """Export the geometry of a trimesh: its vertices, the faces joining them, their normals and their colours.
-
-    Only colours the mesh states are exported. Asking a mesh coloured by anything else for its vertex colours makes
-    trimesh invent a default one per vertex, which a file would then carry as if the author had chosen it.
-    """
-    colours = mesh.visual.vertex_colors if mesh.visual.kind == "vertex" else None
-    return {
-        "verts": exporting.array(mesh.vertices),
-        "faces": exporting.array(mesh.faces),
-        "normals": exporting.array(mesh.vertex_normals),
-        "colours": None if colours is None else exporting.array(colours),
-    }
-
-
-def _loaded_geometry(raw: dict, loading: serialization.Loading) -> trimesh.Trimesh:
-    """Recreate the trimesh as it was exported, with the vertices, faces and normals the file holds."""
-    mesh = trimesh.Trimesh(
-        vertices=loading.array(raw["verts"]),
-        faces=loading.array(raw["faces"]),
-        vertex_normals=loading.array(raw["normals"]),
-        process=False,
-    )
-    if raw["colours"] is not None:
-        mesh.visual.vertex_colors = loading.array(raw["colours"])
-    return mesh
-
-
-serialization.register(trimesh.Trimesh, _exported_geometry, _loaded_geometry)

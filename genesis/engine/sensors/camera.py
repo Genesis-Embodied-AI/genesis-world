@@ -8,8 +8,11 @@ from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 import numpy as np
 import torch
 
+import trimesh
+
 import genesis as gs
-from genesis.engine.render_context import Shape
+from genesis.engine.render_context import ArrayRef, MeshGeometry, Shape, StaticMeshBatch
+from genesis.engine.state_change import StateChange
 from genesis.options.renderers import BatchRenderer as BatchRendererOptions
 from genesis.options.sensors import (
     BatchRendererCameraOptions,
@@ -17,7 +20,7 @@ from genesis.options.sensors import (
     RaytracerCameraOptions,
     SensorOptions,
 )
-from genesis.options.vis import VisOptions
+from genesis.options.vis import ThinLens, VisOptions
 from genesis.utils.geom import (
     T_to_quat,
     T_to_trans,
@@ -25,6 +28,7 @@ from genesis.utils.geom import (
     trans_quat_to_T,
     transform_by_quat,
     transform_by_trans_quat,
+    transform_quat_by_quat,
 )
 from genesis.utils.misc import tensor_to_array
 from genesis.vis.batch_renderer import BatchRenderer
@@ -50,6 +54,20 @@ class CameraReturnType(NamedTuple):
     """Camera sensor return data."""
 
     rgb: torch.Tensor
+
+
+class CameraView(NamedTuple):
+    """The volume a camera sees: its rays between two depths."""
+
+    depths: tuple[float, float]
+    """The depths bounding the view, the near one zero for a view reaching the center of projection."""
+    is_fisheye: bool
+    """Whether the camera is an equidistant fisheye, a pinhole otherwise: a ray makes an angle with the line of sight
+    proportional to its distance to the center of the image, the shorter half side spanning half the field of view."""
+    is_disk: bool
+    """Whether the image holds its inscribed disk alone, the image as a whole otherwise."""
+    is_radial: bool
+    """Whether the depths are distances along each ray, planes orthogonal to the line of sight otherwise."""
 
 
 class MinimalVisualizerWrapper:
@@ -271,9 +289,138 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
         # every environment. Extend the caching mechanism to be env-aware so envs_idx only refreshes the reset envs.
         shared_metadata.last_render_timestep = -1
 
-    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[Shape, ...]:
-        """No debug drawing for cameras."""
-        return ()
+    def _update_markers(self, markers: tuple[Shape, ...], envs_idx: torch.Tensor | None) -> tuple[StaticMeshBatch]:
+        if not markers:
+            # A solid sphere at the center of projection
+            center = trimesh.creation.icosphere(subdivisions=2, radius=0.01)
+            center.visual.vertex_colors = (190, 190, 190, 255)
+            meshes = [center]
+            # The view, translucent, apart so that it blends over the scene: the rays of the camera between two depths,
+            # through a grid of rings of the image, its outer ring sampling the boundary of the image.
+            view = self._get_view()
+            if view is not None:
+                N_SIDE, N_RINGS = 16, 8
+                aspect_ratio = self._options.res[0] / self._options.res[1]
+                half_fov = np.deg2rad(self._options.fov / 2.0)
+                # The image boundary, in a frame of the image whose vertical half side spans one
+                rho_scale = min(aspect_ratio, 1.0)
+                if view.is_disk:
+                    angles = np.linspace(0.0, 2.0 * np.pi, 4 * N_SIDE, endpoint=False)
+                    image_boundary = rho_scale * np.stack((np.cos(angles), np.sin(angles)), axis=-1)
+                else:
+                    sides_pos = np.linspace(-1.0, 1.0, N_SIDE, endpoint=False)
+                    sides_end = np.ones_like(sides_pos)
+                    image_boundary = np.concatenate(
+                        (
+                            np.stack((aspect_ratio * sides_pos, -sides_end), axis=-1),
+                            np.stack((aspect_ratio * sides_end, sides_pos), axis=-1),
+                            np.stack((-aspect_ratio * sides_pos, sides_end), axis=-1),
+                            np.stack((-aspect_ratio * sides_end, -sides_pos), axis=-1),
+                        )
+                    )
+                n_boundary = len(image_boundary)
+                rings_pos = np.arange(1, N_RINGS + 1)[:, None, None] / N_RINGS * image_boundary
+                image_pos = np.concatenate((np.zeros((1, 2)), rings_pos.reshape((-1, 2))))
+                if view.is_fisheye:
+                    image_rho = np.linalg.norm(image_pos, axis=-1, keepdims=True)
+                    rays_angle = image_rho / rho_scale * half_fov
+                    rays_radial = np.divide(image_pos, image_rho, out=np.zeros_like(image_pos), where=image_rho > 0.0)
+                    rays_dir = np.concatenate((rays_radial * np.sin(rays_angle), -np.cos(rays_angle)), axis=-1)
+                else:
+                    rays_dir = np.concatenate((np.tan(half_fov) * image_pos, -np.ones((len(image_pos), 1))), axis=-1)
+                rays_dir /= np.linalg.norm(rays_dir, axis=-1, keepdims=True) if view.is_radial else -rays_dir[:, 2:]
+                # A cap at each depth, a fan around the line of sight then a strip between consecutive rings, and the
+                # strip between the outer rings of the caps.
+                i_v = np.arange(n_boundary)
+                i_v_next = (i_v + 1) % n_boundary
+                cap_faces = [np.stack((np.zeros_like(i_v), 1 + i_v, 1 + i_v_next), axis=-1)]
+                for ring_start in range(1, 1 + (N_RINGS - 1) * n_boundary, n_boundary):
+                    ring_v, ring_v_next = ring_start + i_v, ring_start + i_v_next
+                    cap_faces.append(np.stack((ring_v, ring_v + n_boundary, ring_v_next), axis=-1))
+                    cap_faces.append(np.stack((ring_v_next, ring_v + n_boundary, ring_v_next + n_boundary), axis=-1))
+                cap_faces = np.concatenate(cap_faces)
+                n_cap = len(image_pos)
+                outer_v, outer_v_next = n_cap - n_boundary + i_v, n_cap - n_boundary + i_v_next
+                side_faces = np.concatenate(
+                    (
+                        np.stack((outer_v, outer_v + n_cap, outer_v_next), axis=-1),
+                        np.stack((outer_v_next, outer_v + n_cap, outer_v_next + n_cap), axis=-1),
+                    )
+                )
+                # The winding is made outward for the renderers culling back faces once validation has merged the near
+                # cap into the center of projection, for a depth of zero.
+                view_mesh = trimesh.Trimesh(
+                    np.concatenate([depth * rays_dir for depth in view.depths]),
+                    np.concatenate((cap_faces[:, ::-1], cap_faces + n_cap, side_faces)),
+                    validate=True,
+                )
+                view_mesh.fix_normals()
+                view_mesh.visual.vertex_colors = (255, 255, 255, 38)
+                meshes.append(view_mesh)
+            n_envs_ = self._manager.n_envs_
+            markers = (
+                StaticMeshBatch(
+                    geometries=tuple(
+                        MeshGeometry(
+                            surface=None,
+                            visual=mesh.visual,
+                            verts_ref=ArrayRef(mesh.vertices),
+                            normals_ref=ArrayRef(mesh.vertex_normals),
+                            faces_ref=ArrayRef(mesh.faces),
+                        )
+                        for mesh in meshes
+                    ),
+                    pos=torch.zeros((n_envs_, len(meshes), 3), dtype=gs.tc_float, device=gs.device),
+                    quat=torch.zeros((n_envs_, len(meshes), 4), dtype=gs.tc_float, device=gs.device),
+                    is_active=torch.ones((n_envs_, len(meshes)), dtype=gs.tc_bool, device=gs.device),
+                    # The camera follows its link, if any
+                    invalidated_by={self: (StateChange.MODEL,)}
+                    if self._link is None
+                    else {self._link.entity.solver: (StateChange.GEOMETRY,), self: (StateChange.MODEL,)},
+                ),
+            )
+        pos, quat = markers[0].pos, markers[0].quat
+        pos[envs_idx] = self.get_pos(envs_idx)[..., None, :]
+        quat[envs_idx] = self.get_quat(envs_idx)[..., None, :]
+        return markers
+
+    def _get_view(self) -> CameraView | None:
+        """Return the volume the camera sees, None for a camera whose view its options do not state, such as one whose
+        lens a profile defines, which then draws itself alone."""
+        return None
+
+    @gs.assert_built
+    def get_pos(self, envs_idx=None) -> torch.Tensor:
+        """Return the position of the camera in the world.
+
+        `envs_idx` selects the environments, all of them if None. A camera attached to a link follows it at the offset
+        its options state, and a fixed one stands at `pos`.
+        """
+        if self._link is None:
+            return torch.tensor(self._options.pos, dtype=gs.tc_float, device=gs.device)
+        if self._options.offset_T is None:
+            offset_pos = torch.tensor(self._options.pos, dtype=gs.tc_float, device=gs.device)
+        else:
+            offset_pos = torch.tensor(self._options.offset_T, dtype=gs.tc_float, device=gs.device)[:3, 3]
+        link_pos = self._link.get_pos(envs_idx, relative=False)
+        link_quat = self._link.get_quat(envs_idx, relative=False)
+        return transform_by_trans_quat(offset_pos.expand(link_pos.shape), link_pos, link_quat)
+
+    @gs.assert_built
+    def get_quat(self, envs_idx=None) -> torch.Tensor:
+        """Return the orientation of the camera in the world, the camera looking down its -z axis (see 'get_pos')."""
+        if self._link is None or self._options.offset_T is None:
+            pos, lookat, up = (
+                torch.tensor(value, dtype=gs.tc_float, device=gs.device)
+                for value in (self._options.pos, self._options.lookat, self._options.up)
+            )
+            offset_quat = T_to_quat(pos_lookat_up_to_T(pos, lookat, up))
+        else:
+            offset_quat = T_to_quat(torch.tensor(self._options.offset_T, dtype=gs.tc_float, device=gs.device))
+        if self._link is None:
+            return offset_quat
+        link_quat = self._link.get_quat(envs_idx, relative=False)
+        return transform_quat_by_quat(offset_quat.expand(link_quat.shape), link_quat)
 
     # ========================== Attachment handling ==========================
 
@@ -286,22 +433,7 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
         """
         if self._link is None:
             gs.raise_exception("Camera not attached to any rigid link.")
-
-        if self._options.offset_T is not None:
-            offset_T = torch.tensor(self._options.offset_T, dtype=gs.tc_float, device=gs.device)
-        else:
-            pos = torch.tensor(self._options.pos, dtype=gs.tc_float, device=gs.device)
-            lookat = torch.tensor(self._options.lookat, dtype=gs.tc_float, device=gs.device)
-            up = torch.tensor(self._options.up, dtype=gs.tc_float, device=gs.device)
-            offset_T = pos_lookat_up_to_T(pos, lookat, up)
-
-        link_pos = self._link.get_pos(relative=False)
-        link_quat = self._link.get_quat(relative=False)
-
-        link_T = trans_quat_to_T(link_pos, link_quat)
-        camera_T = torch.matmul(link_T, offset_T)
-
-        self._apply_camera_transform(camera_T)
+        self._apply_camera_transform(trans_quat_to_T(self.get_pos(), self.get_quat()))
 
     # ========================== Hooks for subclasses ==========================
 
@@ -532,6 +664,12 @@ class RasterizerCameraSensor(
         self._camera_wrapper.transform = tensor_to_array(transform)
         self._shared_metadata.renderer.update_camera(self._camera_wrapper)
 
+    def _get_view(self) -> CameraView:
+        """Return the view of the camera between its clipping planes (see 'BaseCameraSensor._get_view')."""
+        return CameraView(
+            depths=(self._options.near, self._options.far), is_fisheye=False, is_disk=False, is_radial=False
+        )
+
     def _apply_camera_transform(self, camera_T: torch.Tensor):
         """Update rasterizer camera wrapper from a world transform."""
         self._ensure_camera_registered()
@@ -575,6 +713,10 @@ class RaytracerCameraSensor(
         super().__init__(options, idx, shared_context, shared_metadata, manager)
         self._options: RaytracerCameraOptions
         self._camera_obj = None
+
+    def _get_view(self) -> CameraView:
+        """Return the view of the camera up to its plane in focus (see 'BaseCameraSensor._get_view')."""
+        return CameraView(depths=(0.0, self._options.focus_dist), is_fisheye=False, is_disk=False, is_radial=False)
 
     @gs.assert_unbuilt
     def build(self) -> None:
@@ -628,15 +770,21 @@ class RaytracerCameraSensor(
             lookat = transform_by_trans_quat(lookat, link_pos, link_quat)
             up = transform_by_quat(up, link_quat)
 
+        lens = None
+        if self._options.model == "thinlens":
+            lens = ThinLens(
+                aperture=self._options.aperture,
+                focal_len=self._options.focal_len,
+                focus_dist=self._options.focus_dist,
+            )
         self._camera_obj = visualizer.add_camera(
             res=self._options.res,
             pos=pos,
             lookat=lookat,
             up=up,
-            model=self._options.model,
+            model="pinhole",
             fov=self._options.fov,
-            aperture=self._options.aperture,
-            focus_dist=self._options.focus_dist,
+            lens=lens,
             GUI=False,
             spp=self._options.spp,
             denoise=self._options.denoise,
@@ -811,6 +959,20 @@ class BatchRendererCameraSensor(
             sensor._stale = False
 
         self._shared_metadata.last_render_timestep = self._manager.sim.cur_step_global
+
+    def _get_view(self) -> CameraView:
+        """Return the view of the camera between its near and far depths (see 'BaseCameraSensor._get_view').
+
+        The rasterizer clips the rays at planes and draws a fisheye by resampling a pinhole image, which holds its
+        inscribed disk alone. The ray tracer clips each ray at distances from the center of projection.
+        """
+        is_fisheye = self._options.model == "fisheye"
+        return CameraView(
+            depths=(self._options.near, self._options.far),
+            is_fisheye=is_fisheye,
+            is_disk=is_fisheye and self._options.use_rasterizer,
+            is_radial=not self._options.use_rasterizer,
+        )
 
     def _apply_camera_transform(self, camera_T: torch.Tensor):
         """Update batch renderer camera from a world transform."""

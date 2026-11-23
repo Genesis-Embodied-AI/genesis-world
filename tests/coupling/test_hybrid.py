@@ -968,7 +968,7 @@ def test_sap_rigid_floor_contact(xml_path, asset_tmp_path, show_viewer):
         assert_allclose(entity_depths, entity_rest_depths, rtol=5e-3)
 
 
-@pytest.mark.required("sparse")
+@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["long_chain"])
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_sap_long_kinematic_chain(xml_path, show_viewer):
@@ -1135,8 +1135,10 @@ def test_sap_coupler_implicit_damping(integrator, show_viewer):
     for _ in range(N_STEPS):
         scene.step()
         # The implicit damping of a free cube spinning about a principal axis decouples its dofs: (M + hD) v' = M v
-        vel = vel * mass_diag / (mass_diag + DT * np.array(dofs_damping))
+        vel_prev, vel = vel, vel * mass_diag / (mass_diag + DT * np.array(dofs_damping))
     # Each SAP solve leaves the velocities within its relative tolerance of the velocities of the scene, which the
     # spinning cube dominates, an error the steps add up. Single precision stops that solve at its round-off.
     tol = N_STEPS * SAP_RTOL * np.abs(vel).max() if gs.np_float == np.float64 else 2e-7
     assert_allclose(cube.get_dofs_velocity(), vel, tol=tol)
+    # The acceleration of the step is the change of velocity it made, each velocity within the tolerance above
+    assert_allclose(cube.get_dofs_acc(), (vel - vel_prev) / DT, atol=2.0 * tol / DT)
