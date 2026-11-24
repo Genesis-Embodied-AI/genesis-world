@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, NamedTuple
 import numpy as np
 import torch
 
-import networkx as nx
 import trimesh
 
 import genesis as gs
@@ -493,7 +492,6 @@ def default_func_instantiate_rigid_from_soft(
 
     # convert to nxgraph
     graph_nx = gel_graph_to_nx_graph(graph_gel)
-    assert nx.is_connected(graph_nx)
 
     # compute graph attribute
     graph_pos = graph_gel.positions()
@@ -501,7 +499,6 @@ def default_func_instantiate_rigid_from_soft(
 
     # reduce nxgraph
     graph_nx_reduced = reduce_graph(graph_nx, straight_thresh=60)
-    assert nx.is_connected(graph_nx_reduced)
 
     # to URDF
     G = graph_nx_reduced

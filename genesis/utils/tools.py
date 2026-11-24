@@ -7,8 +7,6 @@ import time
 import numpy as np
 from PIL import Image
 
-import quadrants as qd
-
 import genesis as gs
 from genesis.utils.misc import get_entry_point_name
 from genesis.utils.video_encoder import VideoEncoder

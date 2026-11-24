@@ -95,13 +95,15 @@ def reduce_graph(G, straight_thresh=10):
 
 
 def compute_graph_attribute(G: nx.Graph, G_pos: np.ndarray) -> None:
+    # Keyed by node set, since an edge keeps the direction it was stored with whichever end it is read from
+    edges_unit_vec = {}
     for n1, n2 in G.edges():
         vec = G_pos[n2] - G_pos[n1]
-        G.edges[n1, n2]["unit_vec"] = vec / np.linalg.norm(vec)
+        edges_unit_vec[frozenset((n1, n2))] = vec / np.linalg.norm(vec)
 
     for node in G.nodes():
         G.nodes[node]["pos"] = G_pos[node]
-        edge_unit_vecs = [G.edges[edge]["unit_vec"] for edge in G.edges(node)]
+        edge_unit_vecs = [edges_unit_vec[frozenset(edge)] for edge in G.edges(node)]
         G.nodes[node]["angles"] = [
             np.arccos(np.clip(np.dot(vec_1, vec_2), -1.0, 1.0)) for vec_1, vec_2 in combinations(edge_unit_vecs, r=2)
         ]
