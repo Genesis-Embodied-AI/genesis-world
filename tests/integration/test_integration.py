@@ -184,7 +184,7 @@ def test_pick_and_place(mode, show_viewer):
 @pytest.mark.slow("gpu")  # gpu ~250s
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-def test_hanging_rigid_cable(show_viewer, tol):
+def test_hanging_rigid_cable(hanging_cable, show_viewer, tol):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.002,
@@ -194,7 +194,7 @@ def test_hanging_rigid_cable(show_viewer, tol):
     )
     robot = scene.add_entity(
         gs.morphs.MJCF(
-            file="xml/cable.xml",
+            file=hanging_cable,
         ),
     )
     scene.build()
