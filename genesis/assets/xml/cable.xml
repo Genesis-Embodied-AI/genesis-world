@@ -21,11 +21,136 @@
             <geom type="sphere" size="0.01" rgba="1 0 0 1" contype="0" conaffinity="0" />
         </body>
 
-        <composite type="cable" count="26 1 1" curve="0 0 s" offset="-0.38 -0.26 0.06" initial="free">
-            <joint kind="main" damping="0.01" armature="0.001"/>
-            <geom type="capsule" size=".005 .007" rgba="0.8 0.6 0.4 1" mass="0.001"/>
-        </composite>
+        <body name="B_first" pos="-0.38 -0.26 0.06" quat="0 0.707107 0 0.707107">
+            <joint name="J_first" type="free" group="3"/>
+            <geom name="G0" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+            <site name="S_first" group="3"/>
+            <body name="B_1" pos=".04 0 0">
+                <joint name="J_1" type="ball" group="3" armature="0.001" damping="0.01"/>
+                <geom name="G1" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                <body name="B_2" pos=".04 0 0">
+                    <joint name="J_2" type="ball" group="3" armature="0.001" damping="0.01"/>
+                    <geom name="G2" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                    <body name="B_3" pos=".04 0 0">
+                        <joint name="J_3" type="ball" group="3" armature="0.001" damping="0.01"/>
+                        <geom name="G3" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                        <body name="B_4" pos=".04 0 0">
+                            <joint name="J_4" type="ball" group="3" armature="0.001" damping="0.01"/>
+                            <geom name="G4" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                            <body name="B_5" pos=".04 0 0">
+                                <joint name="J_5" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                <geom name="G5" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                <body name="B_6" pos=".04 0 0">
+                                    <joint name="J_6" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                    <geom name="G6" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                    <body name="B_7" pos=".04 0 0">
+                                        <joint name="J_7" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                        <geom name="G7" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                        <body name="B_8" pos=".04 0 0">
+                                            <joint name="J_8" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                            <geom name="G8" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                            <body name="B_9" pos=".04 0 0">
+                                                <joint name="J_9" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                <geom name="G9" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                <body name="B_10" pos=".04 0 0">
+                                                    <joint name="J_10" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                    <geom name="G10" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                    <body name="B_11" pos=".04 0 0">
+                                                        <joint name="J_11" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                        <geom name="G11" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                        <body name="B_12" pos=".04 0 0">
+                                                            <joint name="J_12" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                            <geom name="G12" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                            <body name="B_13" pos=".04 0 0">
+                                                                <joint name="J_13" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                                <geom name="G13" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                                <body name="B_14" pos=".04 0 0">
+                                                                    <joint name="J_14" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                                    <geom name="G14" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                                    <body name="B_15" pos=".04 0 0">
+                                                                        <joint name="J_15" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                                        <geom name="G15" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                                        <body name="B_16" pos=".04 0 0">
+                                                                            <joint name="J_16" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                                            <geom name="G16" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                                            <body name="B_17" pos=".04 0 0">
+                                                                                <joint name="J_17" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                                                <geom name="G17" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                                                <body name="B_18" pos=".04 0 0">
+                                                                                    <joint name="J_18" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                                                    <geom name="G18" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                                                    <body name="B_19" pos=".04 0 0">
+                                                                                        <joint name="J_19" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                                                        <geom name="G19" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                                                        <body name="B_20" pos=".04 0 0">
+                                                                                            <joint name="J_20" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                                                            <geom name="G20" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                                                            <body name="B_21" pos=".04 0 0">
+                                                                                                <joint name="J_21" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                                                                <geom name="G21" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                                                                <body name="B_22" pos=".04 0 0">
+                                                                                                    <joint name="J_22" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                                                                    <geom name="G22" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                                                                    <body name="B_23" pos=".04 0 0">
+                                                                                                        <joint name="J_23" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                                                                        <geom name="G23" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                                                                        <body name="B_last" pos=".04 0 0">
+                                                                                                            <joint name="J_last" type="ball" group="3" armature="0.001" damping="0.01"/>
+                                                                                                            <geom name="G24" size=".005 .02" pos=".02 0 0" quat="0.707107 0 -0.707107 0" type="capsule" contype="1" conaffinity="1" mass="0.001" rgba="0.8 0.6 0.4 1"/>
+                                                                                                            <site name="S_last" pos=".04 0 0" group="3"/>
+                                                                                                        </body>
+                                                                                                    </body>
+                                                                                                </body>
+                                                                                            </body>
+                                                                                        </body>
+                                                                                    </body>
+                                                                                </body>
+                                                                            </body>
+                                                                        </body>
+                                                                    </body>
+                                                                </body>
+                                                            </body>
+                                                        </body>
+                                                    </body>
+                                                </body>
+                                            </body>
+                                        </body>
+                                    </body>
+                                </body>
+                            </body>
+                        </body>
+                    </body>
+                </body>
+            </body>
+        </body>
     </worldbody>
+
+    <contact>
+        <exclude body1="B_first" body2="B_1"/>
+        <exclude body1="B_1" body2="B_2"/>
+        <exclude body1="B_2" body2="B_3"/>
+        <exclude body1="B_3" body2="B_4"/>
+        <exclude body1="B_4" body2="B_5"/>
+        <exclude body1="B_5" body2="B_6"/>
+        <exclude body1="B_6" body2="B_7"/>
+        <exclude body1="B_7" body2="B_8"/>
+        <exclude body1="B_8" body2="B_9"/>
+        <exclude body1="B_9" body2="B_10"/>
+        <exclude body1="B_10" body2="B_11"/>
+        <exclude body1="B_11" body2="B_12"/>
+        <exclude body1="B_12" body2="B_13"/>
+        <exclude body1="B_13" body2="B_14"/>
+        <exclude body1="B_14" body2="B_15"/>
+        <exclude body1="B_15" body2="B_16"/>
+        <exclude body1="B_16" body2="B_17"/>
+        <exclude body1="B_17" body2="B_18"/>
+        <exclude body1="B_18" body2="B_19"/>
+        <exclude body1="B_19" body2="B_20"/>
+        <exclude body1="B_20" body2="B_21"/>
+        <exclude body1="B_21" body2="B_22"/>
+        <exclude body1="B_22" body2="B_23"/>
+        <exclude body1="B_23" body2="B_last"/>
+    </contact>
 
     <equality>
         <weld body1="B_last" body2="anchor"/>
