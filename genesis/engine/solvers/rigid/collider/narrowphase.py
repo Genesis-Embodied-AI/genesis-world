@@ -1506,6 +1506,146 @@ def func_terrain_cell_shape(r: int, c: int, EPS: float, collider_info: ColliderI
 
 
 @qd.func
+def func_terrain_cell_range(xyz_max_min: qd.types.vector(6), collider_info: ColliderInfo):
+    """Return whether bounds miss the terrain, then the range of samples of the height field they span.
+
+    The bounds are in the frame of the terrain, their upper corner first. The samples span rows r_min to r_max and
+    columns c_min to c_max, both included, which leaves no cell when the bounds reach past the last sample.
+    """
+    is_outside = False
+    for i in qd.static(range(3)):
+        if (
+            collider_info.terrain_xyz_maxmin[i] < xyz_max_min[i + 3]
+            or collider_info.terrain_xyz_maxmin[i + 3] > xyz_max_min[i]
+        ):
+            is_outside = True
+
+    sh = collider_info.terrain_scale[0]
+    r_min = gs.qd_int(qd.floor((xyz_max_min[3] - collider_info.terrain_xyz_maxmin[3]) / sh))
+    r_max = gs.qd_int(qd.ceil((xyz_max_min[0] - collider_info.terrain_xyz_maxmin[3]) / sh))
+    c_min = gs.qd_int(qd.floor((xyz_max_min[4] - collider_info.terrain_xyz_maxmin[4]) / sh))
+    c_max = gs.qd_int(qd.ceil((xyz_max_min[1] - collider_info.terrain_xyz_maxmin[4]) / sh))
+
+    # The bounds of the terrain reach one cell past its last sample
+    r_max = qd.min(collider_info.terrain_rc[0] - 1, r_max)
+    c_max = qd.min(collider_info.terrain_rc[1] - 1, c_max)
+    r_min = qd.min(qd.max(0, r_min), r_max)
+    c_min = qd.min(qd.max(0, c_min), c_max)
+    return is_outside, r_min, r_max, c_min, c_max
+
+
+@qd.func
+def func_contact_flat_terrain(
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    collider_config: qd.template(),
+    errno: qd.Tensor,
+):
+    """Detect in closed form the contacts of a sphere, a capsule or a box with the terrain under a flat area.
+
+    Under bounds over samples of a single height, the terrain meets the geom as the half-space under that height,
+    whose contacts are exact: the deepest point of a sphere or of either end cap of a capsule, and every corner of a box
+    under that height. A geom whose bounds miss the terrain has no contact.
+
+    Returns whether the contacts are found, which leaves any other geom, and one over uneven samples, to the detection
+    of func_contact_mpr_terrain.
+    """
+    geom_type = dyn_info.geoms.type[i_ga]
+    is_found = False
+    if geom_type == gs.GEOM_TYPE.SPHERE or geom_type == gs.GEOM_TYPE.CAPSULE or geom_type == gs.GEOM_TYPE.BOX:
+        EPS = rigid_info.EPS[None]
+        geom_data = dyn_info.geoms.data[i_ga]
+        gb_pos, gb_quat = dyn_state.geoms.pos[i_gb, i_b], dyn_state.geoms.quat[i_gb, i_b]
+        pos, quat = gu.qd_transform_pos_quat_by_trans_quat(
+            dyn_state.geoms.pos[i_ga, i_b] - gb_pos,
+            dyn_state.geoms.quat[i_ga, i_b],
+            qd.Vector.zero(gs.qd_float, 3),
+            gu.qd_inv_quat(gb_quat),
+        )
+        R = gu.qd_quat_to_R(quat, EPS)
+
+        # The half extents of the bounds of the geom in the frame of the terrain
+        extent = qd.Vector([geom_data[0], geom_data[0], geom_data[0]], dt=gs.qd_float)
+        if geom_type == gs.GEOM_TYPE.CAPSULE:
+            extent = extent + 0.5 * geom_data[1] * qd.abs(R[:, 2])
+        elif geom_type == gs.GEOM_TYPE.BOX:
+            extent = qd.abs(R) @ (0.5 * qd.Vector([geom_data[0], geom_data[1], geom_data[2]], dt=gs.qd_float))
+        xyz_max_min = qd.Vector.zero(gs.qd_float, 6)
+        for k in qd.static(range(3)):
+            xyz_max_min[k] = pos[k] + extent[k]
+            xyz_max_min[k + 3] = pos[k] - extent[k]
+        is_outside, r_min, r_max, c_min, c_max = func_terrain_cell_range(xyz_max_min, collider_info)
+
+        # The corners of the bounds reject most uneven areas before the scan of every sample
+        is_flat = not is_outside and r_min < r_max and c_min < c_max
+        h_flat = gs.qd_float(0.0)
+        if is_flat:
+            h_flat = collider_info.terrain_hf[r_min, c_min]
+            is_flat = (
+                qd.abs(collider_info.terrain_hf[r_max, c_min] - h_flat) <= EPS
+                and qd.abs(collider_info.terrain_hf[r_min, c_max] - h_flat) <= EPS
+                and qd.abs(collider_info.terrain_hf[r_max, c_max] - h_flat) <= EPS
+            )
+        if is_flat:
+            for r in range(r_min, r_max + 1):
+                for c in range(c_min, c_max + 1):
+                    if qd.abs(collider_info.terrain_hf[r, c] - h_flat) > EPS:
+                        is_flat = False
+        is_found = is_outside or is_flat
+
+        if is_flat:
+            normal = gu.qd_transform_by_quat(qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float), gb_quat)
+            i_pair = collider_info.collision_pair_idx[i_ga, i_gb]
+            n_points = 1
+            if geom_type == gs.GEOM_TYPE.CAPSULE:
+                n_points = 2
+            elif geom_type == gs.GEOM_TYPE.BOX:
+                n_points = 8
+            n_con = 0
+            for i_point in range(n_points):
+                # Point i_point of the geom, and the radius around it
+                point_local = qd.Vector.zero(gs.qd_float, 3)
+                radius = gs.qd_float(0.0)
+                if geom_type == gs.GEOM_TYPE.BOX:
+                    for k in qd.static(range(3)):
+                        point_local[k] = (((i_point >> k) & 1) - 0.5) * geom_data[k]
+                else:
+                    radius = geom_data[0]
+                    if geom_type == gs.GEOM_TYPE.CAPSULE:
+                        point_local[2] = (i_point - 0.5) * geom_data[1]
+                point = R @ point_local + pos
+                penetration = h_flat - (point[2] - radius)
+                if penetration > 0.0 and n_con < collider_config.n_contacts_per_convex_pair:
+                    # The point midway between the deepest point of the geom and the face
+                    contact_pos = point + qd.Vector([0.0, 0.0, 0.5 * penetration - radius], dt=gs.qd_float)
+                    contact_pos = gu.qd_transform_by_trans_quat(contact_pos, gb_pos, gb_quat)
+                    func_add_contact(
+                        i_ga,
+                        i_gb,
+                        i_b,
+                        i_pair,
+                        normal,
+                        contact_pos,
+                        penetration,
+                        dyn_state,
+                        collider_state,
+                        dyn_info,
+                        rigid_info,
+                        collider_info,
+                        use_atomic=True,
+                        errno=errno,
+                    )
+                    n_con = n_con + 1
+    return is_found
+
+
+@qd.func
 def func_contact_mpr_terrain(
     i_ga: int,
     i_gb: int,
@@ -1583,25 +1723,9 @@ def func_contact_mpr_terrain(
         else:
             xyz_max_min[i_dir] = extent
 
-    for i in qd.static(range(3)):
-        if (
-            collider_info.terrain_xyz_maxmin[i] < xyz_max_min[i + 3] - margin
-            or collider_info.terrain_xyz_maxmin[i + 3] > xyz_max_min[i] + margin
-        ):
-            is_return = True
-
+    is_return, r_min, r_max, c_min, c_max = func_terrain_cell_range(xyz_max_min, collider_info)
     if not is_return:
         sh = collider_info.terrain_scale[0]
-        r_min = gs.qd_int(qd.floor((xyz_max_min[3] - collider_info.terrain_xyz_maxmin[3]) / sh))
-        r_max = gs.qd_int(qd.ceil((xyz_max_min[0] - collider_info.terrain_xyz_maxmin[3]) / sh))
-        c_min = gs.qd_int(qd.floor((xyz_max_min[4] - collider_info.terrain_xyz_maxmin[4]) / sh))
-        c_max = gs.qd_int(qd.ceil((xyz_max_min[1] - collider_info.terrain_xyz_maxmin[4]) / sh))
-
-        # The bounds of the terrain reach one cell past its last sample, so that a geom there spans no cell
-        r_max = qd.min(collider_info.terrain_rc[0] - 1, r_max)
-        c_max = qd.min(collider_info.terrain_rc[1] - 1, c_max)
-        r_min = qd.min(qd.max(0, r_min), r_max)
-        c_min = qd.min(qd.max(0, c_min), c_max)
 
         # A cell whose heights differ by more than the step height stands as four flat columns, one per corner, and as
         # two triangles cut along the diagonal of the visual mesh otherwise (see genesis/utils/terrain.py). The columns
@@ -1650,6 +1774,8 @@ def func_contact_mpr_terrain(
         # fewer solids leaving their last slots empty
         log2_cell_solids = 2 if has_columns else 1
         n_solids = 1 if is_flat else n_cells << log2_cell_solids
+        geom_type_a = dyn_info.geoms.type[i_ga]
+        geom_data_a = dyn_info.geoms.data[i_ga]
 
         # The perturbed detections rotate geom A by a small angle about an axis orthogonal to the normal of the first
         # contact, which tips a box face onto another corner of the contact patch. They only run when the first contact
@@ -1699,6 +1825,7 @@ def func_contact_mpr_terrain(
                     contact_pos = qd.Vector.zero(gs.qd_float, 3)
                     penetration = gs.qd_float(0.0)
                     is_rectangle = False
+                    top_normal = qd.Vector.zero(gs.qd_float, 3)
                     if i_item < n_items:
                         # The corners of the cross-section of the solid, in the frame of the height field: the
                         # rectangle under the bounds, the column of corner i_sub of a step cell, or the triangle of the
@@ -1779,6 +1906,29 @@ def func_contact_mpr_terrain(
                                 center_b = (center_b + corners[3, :]) / 8.0
                             else:
                                 center_b = center_b / 6.0
+                            top_normal = (
+                                (corners[1, :] - corners[0, :]).cross(corners[2, :] - corners[0, :]).normalized()
+                            )
+                            if top_normal[2] < 0.0:
+                                top_normal = -top_normal
+                        if is_reachable:
+                            # Every corner of the solid lies on or under the plane of its top face, so a sphere, a
+                            # capsule or a box whose lowest point along the face normal stands above that plane cannot
+                            # touch it. Their lowest point has a closed form, cheaper than the detection it saves.
+                            depth_lowest = top_normal.dot(ga_pos_tf)
+                            if geom_type_a == gs.GEOM_TYPE.SPHERE:
+                                depth_lowest = depth_lowest - geom_data_a[0]
+                            elif geom_type_a == gs.GEOM_TYPE.CAPSULE:
+                                axis = gu.qd_transform_by_quat(qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float), ga_quat_tf)
+                                depth_lowest = depth_lowest - 0.5 * geom_data_a[1] * qd.abs(top_normal.dot(axis))
+                                depth_lowest = depth_lowest - geom_data_a[0]
+                            elif geom_type_a == gs.GEOM_TYPE.BOX:
+                                normal_local = gu.qd_inv_transform_by_quat(top_normal, ga_quat_tf)
+                                for k in qd.static(range(3)):
+                                    depth_lowest = depth_lowest - 0.5 * geom_data_a[k] * qd.abs(normal_local[k])
+                            else:
+                                depth_lowest = -qd.math.inf
+                            is_reachable = depth_lowest <= top_normal.dot(corners[0, :])
                         if is_reachable:
                             is_col, normal, penetration, contact_pos = mpr.func_mpr_contact_from_centers(
                                 i_ga,
@@ -1807,11 +1957,7 @@ def func_contact_mpr_terrain(
                         # the exact face normal. Only snap when the bias is small (dot > 0.95) so that contacts on real
                         # cliff edges, where MPR's normal is genuinely far from any single cell's top face normal, keep
                         # MPR's result.
-                        e1 = collider_state.prism[5, i_scratch] - collider_state.prism[4, i_scratch]
-                        e2 = collider_state.prism[6, i_scratch] - collider_state.prism[4, i_scratch]
-                        top_face_normal = e1.cross(e2).normalized()
-                        if top_face_normal[2] < 0.0:
-                            top_face_normal = -top_face_normal
+                        top_face_normal = top_normal
                         if top_face_normal.dot(normal) > 0.95:
                             normal = top_face_normal
                             snap_fired = True
@@ -5019,10 +5165,23 @@ def func_narrow_phase_any_vs_terrain(
                     # The terrain is detected against the convex hull of the other geom, which would fill the cavities
                     # of a non-convex geom
                     if dyn_info.geoms.is_convex[i_ga]:
-                        i_work = qd.atomic_add(collider_state.work_queue.n_pairs[0], 1)
-                        collider_state.work_queue.i_b[i_work] = i_b
-                        collider_state.work_queue.i_ga[i_work] = i_ga
-                        collider_state.work_queue.i_gb[i_work] = i_gb
+                        # The pairs over flat areas whose contacts have a closed form are done, the others queued
+                        if not func_contact_flat_terrain(
+                            i_ga,
+                            i_gb,
+                            i_b,
+                            dyn_state,
+                            collider_state,
+                            dyn_info,
+                            rigid_info,
+                            collider_info,
+                            collider_config,
+                            errno=errno,
+                        ):
+                            i_work = qd.atomic_add(collider_state.work_queue.n_pairs[0], 1)
+                            collider_state.work_queue.i_b[i_work] = i_b
+                            collider_state.work_queue.i_ga[i_work] = i_ga
+                            collider_state.work_queue.i_gb[i_work] = i_gb
                     else:
                         errno[i_b] = errno[i_b] | RigidErrorCode.UNSUPPORTED_COLLISION_PAIR
 
