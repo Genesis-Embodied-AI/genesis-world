@@ -1,0 +1,23 @@
+genesis/utils/urdf.py
+  s_2ab0d54cbae1cb::t_6c3c63c95e8090 652-655,657-662
+genesis/ext/urdfpy/urdf.py
+  s_2ab0d54cbae1cb::t_eb3f4d05896846 1263,1268,1293,1306,2631
+genesis/utils/usd/usd_geometry.py
+  s_2ab0d54cbae1cb::t_ab157833077cd0 9,373,376,403
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d494d22ada7c1ffdca98d4f7d3b0fef73b3bd114",
+  "prompts": {},
+  "sessions": {
+    "s_2ab0d54cbae1cb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8909e35b-e16b-4c8a-8b7f-82a1d10a48d8",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
