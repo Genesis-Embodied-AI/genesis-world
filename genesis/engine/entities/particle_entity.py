@@ -124,10 +124,10 @@ class ParticleEntity(Entity):
     def init_sampler(self):
         """Resolve the particle sampler of the material, a bare 'pbs' taking a resolution of 32."""
         # The material validates its sampler on construction alone, which an assignment or a copy bypasses
-        if not SAMPLER_PATTERN.fullmatch(self.material.sampler):
+        if not isinstance(self.material.sampler, str) or not SAMPLER_PATTERN.fullmatch(self.material.sampler):
             gs.raise_exception(
-                "Only one of the following samplers is supported: [`regular`, `random`, `pbs`, `pbs-sdf_res`]. "
-                f"Got: {self.material.sampler}."
+                "The sampler should be 'pbs', 'pbs-<res>' with a positive resolution, 'random', or 'regular'. "
+                f"Got: {self.material.sampler!r}."
             )
         self.sampler = "pbs-32" if self.material.sampler == "pbs" else self.material.sampler
 
