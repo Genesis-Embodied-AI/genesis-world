@@ -1289,9 +1289,11 @@ class KinematicSolver(Solver):
         n_tgts = self._options.IK_max_targets
         if n_links > n_tgts:
             gs.raise_exception(f"Cannot solve for {n_links} targets. Raise 'IK_max_targets' above {n_tgts}.")
-        # Masked axes and targets leave zero rows in the Jacobian, so the normal matrix is singular without damping
-        if damping < gs.EPS:
-            gs.raise_exception(f"'damping' must be strictly positive, got {damping}.")
+        # A damping of 1e-5 already gives Gauss-Newton steps to 1e-10 relative, |J| being of order 1 through its
+        # rotation rows, so a smaller one converges no faster and only loses stability near singular configurations.
+        # The measurements behind the bound are in genesis-world#3857.
+        if damping < 1e-5:
+            gs.raise_exception(f"'damping' must be at least 1e-5, got {damping}.")
 
         # The scratch of inverse kinematics grows with RigidOptions.IK_max_targets, so it is allocated by the first solve
         # and a scene that never solves inverse kinematics allocates none of it
