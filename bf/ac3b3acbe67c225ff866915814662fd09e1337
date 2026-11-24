@@ -1,0 +1,28 @@
+genesis/engine/solvers/mpm_solver.py
+  s_8e3e09cbc07082::t_ed383a67ce5daa 780
+genesis/engine/scene.py
+  s_8e3e09cbc07082::t_1d88e5ba75150e 1736-1740
+tests/particles/test_sph.py
+  s_8e3e09cbc07082::t_1d88e5ba75150e 299,303
+tests/rigid/test_serialization.py
+  s_8e3e09cbc07082::t_1d88e5ba75150e 644,646
+  s_8e3e09cbc07082::t_71d749ee2c9f57 657-671,775-789,858,892,937-938,949-950
+tests/particles/test_mpm.py
+  s_8e3e09cbc07082::t_1852f9303323b7 12,96-104
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bfac3b3acbe67c225ff866915814662fd09e1337",
+  "prompts": {},
+  "sessions": {
+    "s_8e3e09cbc07082": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a8f0475a-f9de-4602-9bce-61f4c50730a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

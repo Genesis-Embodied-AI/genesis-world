@@ -1,0 +1,22 @@
+genesis/engine/entities/fem_entity.py
+  s_8e3e09cbc07082::t_f64997c095efe1 32,41,79,81-89,122,147
+  s_8e3e09cbc07082::t_a1522c4d1177f2 172
+tests/deformable/test_fem.py
+  s_8e3e09cbc07082::t_f64997c095efe1 22,89,94,119,122
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f4393a124866895cbd6b03588e1dad35177a863c",
+  "prompts": {},
+  "sessions": {
+    "s_8e3e09cbc07082": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a8f0475a-f9de-4602-9bce-61f4c50730a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
