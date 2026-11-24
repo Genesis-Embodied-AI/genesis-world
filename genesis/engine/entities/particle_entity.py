@@ -13,6 +13,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
+from genesis.engine.materials.base import SAMPLER_PATTERN
 from genesis.options.surfaces import Surface
 from genesis.utils.misc import broadcast_tensor
 
@@ -122,6 +123,12 @@ class ParticleEntity(Entity):
 
     def init_sampler(self):
         """Resolve the particle sampler of the material, a bare 'pbs' taking a resolution of 32."""
+        # The material validates its sampler on construction alone, which an assignment or a copy bypasses
+        if not SAMPLER_PATTERN.fullmatch(self.material.sampler):
+            gs.raise_exception(
+                "Only one of the following samplers is supported: [`regular`, `random`, `pbs`, `pbs-sdf_res`]. "
+                f"Got: {self.material.sampler}."
+            )
         self.sampler = "pbs-32" if self.material.sampler == "pbs" else self.material.sampler
 
     def _add_to_solver(self):
