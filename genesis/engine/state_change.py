@@ -1196,6 +1196,7 @@ class _LaunchTracker:
 
     # The autograd tape of Quadrants also stands for a gradient checker, which this tracker is not
     grad_checker = None
+    validation = False
 
     def __init__(self) -> None:
         # The positions of the struct arguments of each kernel, and the effect of each set of structs it took, the
