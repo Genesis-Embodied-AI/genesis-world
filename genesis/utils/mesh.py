@@ -1260,7 +1260,7 @@ def create_frame(
     return trimesh.util.concatenate([origin, *axes])
 
 
-def create_camera_frustum(camera: "Camera", color: Sequence[float]) -> trimesh.Trimesh:
+def create_camera_frustum(camera: "Camera", color: np.ndarray | Sequence[float]) -> trimesh.Trimesh:
     # camera
     camera_mesh = load_trimesh(os.path.join(get_assets_dir(), "meshes", "camera", "camera.glb"), force="mesh")
     camera_mesh.visual = camera_mesh.visual.to_color()
