@@ -148,7 +148,8 @@ class ParticleEntityDescription(EntityDescription):
             vmesh, pos, quat = load_morph_vmesh(morph, surface)
             surface = vmesh.surface
             # Sample before posing the mesh, so the lattice and the sampling cache depend on the shape alone
-            particles = vmesh.particlize(particle_size, sampler)
+            # Posed in the simulation precision, which rounds the particles of a primitive as its earlier sampling did
+            particles = vmesh.particlize(particle_size, sampler).astype(gs.np_float, order="C", copy=False)
             vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
             particles = gu.transform_by_trans_quat(particles, pos, quat)
             origin = pos
