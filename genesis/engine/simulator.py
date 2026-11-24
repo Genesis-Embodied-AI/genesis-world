@@ -1,3 +1,4 @@
+import contextlib
 import os
 import weakref
 from collections.abc import Iterable, Iterator
@@ -8,7 +9,7 @@ import torch
 
 import genesis as gs
 from genesis.engine.solvers.base_solver import BackwardErrorCode
-from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
+from genesis.grad.bridge import LaunchRecorder, Operation, ReplayRecord, RolloutGraph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
 from genesis.typing import IndexType
@@ -534,22 +535,25 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         with self._step_timer.phase("sensors"), torch.no_grad():
             self._sensor_manager.step()
 
-    def _step(self):
-        """Run the substeps of a step."""
+    def _step(self, record: ReplayRecord | None = None):
+        """Run the substeps of a step, saving in `record` the outputs its replays read (see 'ReplayRecord')."""
         self._steps += 1
         # The solvers record what their substeps write at once (see 'ChangeLog.commit'), the couplers and the
         # solvers reading the derived arrays of another one refreshing them first as the step starts.
         with untracked_launches(refresh=True):
-            for _ in range(self._substeps):
-                self.substep()
+            for i_substep in range(self._substeps):
+                with record.saving(i_substep) if record is not None else contextlib.nullcontext():
+                    self.substep()
                 self._cur_substep_global += 1
             if self.rigid_solver.is_active:
                 self.rigid_solver.clear_external_force()
 
-    def _reverse(self, substep_start: int, steps_start: torch.Tensor, checkpoints: list[SolverCheckpoint]) -> None:
+    def _reverse(
+        self, substep_start: int, steps_start: torch.Tensor, checkpoints: list[SolverCheckpoint], record: ReplayRecord
+    ) -> None:
         """
         Run the backward pass of the step starting at the given global substep, from the boundary checkpoints of the
-        differentiable solvers.
+        differentiable solvers and the outputs the step saved for its replays (see 'ReplayRecord').
 
         Each substep, last first, is replayed from its start while its kernels are recorded, and the recorded kernels
         reversed (see LaunchRecorder), the end of the step with the last one. The substeps before the last are replayed
@@ -565,8 +569,9 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         self._steps.copy_(steps_start)
         self._steps += 1
         restore_checkpoints(boundary_checkpoints)
-        for _ in range(self._substeps - 1):
-            self.substep()
+        for i_substep in range(self._substeps - 1):
+            with record.replaying(i_substep):
+                self.substep()
             self._cur_substep_global += 1
             substeps_checkpoints.append(
                 [(solver, solver.save_checkpoint(boundary_only=True)) for solver in differentiable_solvers]
@@ -576,7 +581,7 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
             is_last_substep = i_substep == self._substeps - 1
             if not is_last_substep:
                 restore_checkpoints(substeps_checkpoints[i_substep])
-            with LaunchRecorder() as recorder:
+            with record.replaying(i_substep), LaunchRecorder() as recorder:
                 self.substep()
                 if is_last_substep and self.rigid_solver.is_active:
                     self.rigid_solver.clear_external_force()
@@ -828,18 +833,20 @@ class StepOperation(Operation):
         self._sim = weakref.proxy(sim)
         self._substep_start = sim.cur_substep_global
         self._steps_start = sim.steps.clone()
-        # The state each differentiable solver holds at the start of the step, from which its backward pass replays it
+        # The state each differentiable solver holds at the start of the step, from which its backward pass replays it,
+        # and the outputs the replays read
         self._checkpoints = None
+        self._record = ReplayRecord(sim.substeps)
 
     def forward(self) -> tuple[torch.Tensor, ...]:
         self._checkpoints = [
             solver.save_checkpoint(boundary_only=True) for solver in self._sim._active_solvers if solver.requires_grad
         ]
-        self._sim._step()
+        self._sim._step(self._record)
         return ()
 
     def backward(self) -> tuple[torch.Tensor | None, ...]:
-        self._sim._reverse(self._substep_start, self._steps_start, self._checkpoints)
+        self._sim._reverse(self._substep_start, self._steps_start, self._checkpoints, self._record)
         # The adjoint of every earlier step derives from this one, so an adjoint that is not finite raises during the
         # pass, naming the step a shorter horizon would have to stop before. It is read from every array of the state
         # that carries one, so every differentiable solver is covered. The arrays are those the boundary checkpoint of

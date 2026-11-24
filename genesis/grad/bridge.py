@@ -20,7 +20,9 @@ the gradients it receives, which is then the thread issuing the torch operations
 """
 
 import contextlib
+import contextvars
 import dataclasses
+import functools
 import inspect
 import warnings
 import weakref
@@ -383,14 +385,21 @@ class LaunchRecorder:
             for struct in structs:
                 _LAUNCH_ARRAYS_CACHE.own(struct, launch_key, launch_arrays)
         arrays_used, arrays_written = launch_arrays
-        self._is_saving = True
         # The values saved are those the launch overwrites, as they stand (see 'no_read_guard')
-        with no_read_guard():
+        with self.paused(), no_read_guard():
             for array in arrays_written:
                 if id(array) in self._arrays_used and all([array is not saved for saved, _ in entry.arrays_saved]):
                     entry.arrays_saved.append((array, qd_to_torch(array, copy=True)))
-        self._is_saving = False
         self._arrays_used_by_entry |= arrays_used
+
+    @contextlib.contextmanager
+    def paused(self) -> Iterator[None]:
+        """Leave the kernels launched in the block out of the recording, such as the copies of arrays it makes."""
+        self._is_saving = True
+        try:
+            yield
+        finally:
+            self._is_saving = False
 
     @contextlib.contextmanager
     def entry(self, backward: Callable[..., None] | None, *args) -> Iterator[None]:
@@ -487,6 +496,114 @@ def is_recording_launches() -> bool:
     through a zero-copy view.
     """
     return isinstance(impl.get_runtime().target_tape, LaunchRecorder)
+
+
+# The record of the step being recorded or replayed, None outside of them (see 'ReplayRecord')
+_REPLAY_RECORD: contextvars.ContextVar["ReplayRecord | None"] = contextvars.ContextVar("replay_record", default=None)
+
+
+class ReplayRecord:
+    """
+    The outputs of the calls of the functions declared 'replayed_by' during a step, substep by substep, in call order.
+
+    The step saves them as it runs (see 'saving'), and its backward pass writes them back as it replays the step, each
+    call of such a function running its shortcut instead (see 'replaying').
+    """
+
+    def __init__(self, n_substeps: int):
+        self._substeps_outputs: list[list[list[torch.Tensor]]] = [[] for _ in range(n_substeps)]
+        # The outputs of the calls of the substep being run, and the index of the next call while it is replayed
+        self._outputs: list[list[torch.Tensor]] = []
+        self._i_call: int | None = None
+
+    @contextlib.contextmanager
+    def saving(self, i_substep: int) -> Iterator[None]:
+        """Save the outputs of every call of a function declared 'replayed_by' in the block, the given substep."""
+        self._outputs = self._substeps_outputs[i_substep]
+        self._outputs.clear()
+        self._i_call = None
+        token = _REPLAY_RECORD.set(self)
+        try:
+            yield
+        finally:
+            _REPLAY_RECORD.reset(token)
+
+    @contextlib.contextmanager
+    def replaying(self, i_substep: int) -> Iterator[None]:
+        """Replay the given substep in the block, from the outputs 'saving' saved for it."""
+        self._outputs = self._substeps_outputs[i_substep]
+        self._i_call = 0
+        token = _REPLAY_RECORD.set(self)
+        try:
+            yield
+        finally:
+            _REPLAY_RECORD.reset(token)
+
+    @property
+    def is_replaying(self) -> bool:
+        """Whether the substep being run is replayed."""
+        return self._i_call is not None
+
+    def save_outputs(self, arrays: list) -> None:
+        """Copy the outputs of a call, as it left them, on the device."""
+        self._outputs.append([qd_to_torch(array, copy=True) for array in arrays])
+
+    def load_outputs(self, arrays: list) -> None:
+        """Write back the outputs the next call of the substep left, as its replay starts."""
+        values = self._outputs[self._i_call]
+        self._i_call += 1
+        # A write is a kernel launch without zero-copy views, which the replay of the step reverses nothing of
+        recorder = impl.get_runtime().target_tape
+        with recorder.paused() if isinstance(recorder, LaunchRecorder) else contextlib.nullcontext():
+            for array, value in zip(arrays, values):
+                qd_from_torch(array, value)
+        if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+            torch.mps.synchronize()
+
+
+class ReplayedFunction:
+    """
+    A function declared 'replayed_by', which it stands for: every attribute other than the call is the function's own,
+    such as the registration of the arms of a dispatcher.
+    """
+
+    def __init__(self, func: Callable, shortcut: Callable, outputs: tuple[str, ...]):
+        # The attributes of the function are read through it rather than copied, which would leave the copies of those
+        # it reassigns stale
+        functools.update_wrapper(self, func, updated=())
+        # The shortcut takes the arguments of the function, whose own signature a dispatcher hides behind its call
+        self._signature = inspect.signature(shortcut)
+        self._shortcut = shortcut
+        self._paths = [path.split(".") for path in outputs]
+
+    def __call__(self, *args, **kwargs):
+        record = _REPLAY_RECORD.get()
+        if record is None:
+            return self.__wrapped__(*args, **kwargs)
+        arguments = self._signature.bind(*args, **kwargs).arguments
+        arrays = [functools.reduce(getattr, path[1:], arguments[path[0]]) for path in self._paths]
+        if record.is_replaying:
+            record.load_outputs(arrays)
+            return self._shortcut(*args, **kwargs)
+        result = self.__wrapped__(*args, **kwargs)
+        record.save_outputs(arrays)
+        return result
+
+    def __getattr__(self, name: str):
+        return getattr(self.__wrapped__, name)
+
+
+def replayed_by(shortcut: Callable, *, outputs: tuple[str, ...]) -> Callable[[Callable], ReplayedFunction]:
+    """
+    Declare the shortcut replaying a function in the backward pass of a step, from the outputs the function left.
+
+    While a step is recorded, the arrays `outputs` names are saved as each call of the function leaves them. As the
+    backward pass replays the step, each call writes them back and runs the shortcut instead, which takes the same
+    arguments and recomputes from them whatever else of the function the step reads (see 'ReplayRecord'). Each output
+    is named by its path from an argument, such as 'constraint_state.qacc'. The tag goes above the other tags of the
+    function.
+    """
+    return functools.partial(ReplayedFunction, shortcut=shortcut, outputs=outputs)
 
 
 class SegmentOperation(Operation):
