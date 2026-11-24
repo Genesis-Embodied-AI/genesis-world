@@ -1777,6 +1777,11 @@ class RigidEntityDescription(KinematicEntityDescription):
                 parts_repr=f"collision geom of {morph}",
             )
             patches_values = [patch.options.model_dump() for patch in patches]
+            default_coefficients = {
+                "friction": DEFAULT_FRICTION,
+                "friction_torsional": DEFAULT_FRICTION_TORSIONAL,
+                "friction_rolling": DEFAULT_FRICTION_ROLLING,
+            }
             for name, geoms_patch_idx in fields_patch_idx.items():
                 for i_g in np.flatnonzero(geoms_patch_idx >= 0):
                     value = patches_values[geoms_patch_idx[i_g]][name]
@@ -1795,14 +1800,7 @@ class RigidEntityDescription(KinematicEntityDescription):
                     else:
                         # The coefficient of the asset, or the solver default when it states none
                         asset_value = geoms_asset_values[i_g][name]
-                        if asset_value is not None:
-                            g_info[name] = asset_value
-                        elif name == "friction":
-                            g_info[name] = DEFAULT_FRICTION
-                        elif name == "friction_torsional":
-                            g_info[name] = DEFAULT_FRICTION_TORSIONAL
-                        else:
-                            g_info[name] = DEFAULT_FRICTION_ROLLING
+                        g_info[name] = default_coefficients[name] if asset_value is None else asset_value
         super()._resolve_geoms_values(morph, links_path, links_g_infos, resolution)
 
     def _resolve_inertial(
