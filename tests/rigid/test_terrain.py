@@ -436,7 +436,9 @@ def test_vertical_steps(show_viewer, tol):
     assert_allclose(sphere.get_dofs_velocity(), 0.0, tol=5e-5)
     contacts = sphere.get_contacts(with_entity=terrain)
     normals = tensor_to_array(contacts["normal"])[tensor_to_array(contacts["valid_mask"])]
-    assert_allclose(normals[np.abs(normals[:, 0]) > 0.5], (-1.0, 0.0, 0.0), tol=tol)
+    riser_normals = normals[np.abs(normals[:, 0]) > 0.5]
+    assert len(riser_normals) >= scene.n_envs
+    assert_allclose(riser_normals, (-1.0, 0.0, 0.0), tol=tol)
 
     # The height query follows the flat columns of the surface the mesh of the terrain shows
     positions = (

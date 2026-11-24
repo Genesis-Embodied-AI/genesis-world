@@ -1367,8 +1367,8 @@ class Terrain(Morph):
         Steepness, as rise over run, beyond which the terrain stands vertical. A grid cell whose heights differ by more
         than `slope_threshold * horizontal_scale` is made of four flat columns, each at the height of its nearest
         corner, with vertical walls between them. Stair risers, walls and box edges then stand vertical with flat tops,
-        instead of turning into slopes one cell wide, while slopes steeper than the threshold turn into steps. Defaults
-        to None, which keeps the whole terrain smooth.
+        instead of turning into slopes one cell wide, while slopes steeper than the threshold turn into steps. It applies
+        to a given `height_field` as well. Defaults to None, which keeps the whole terrain smooth.
     subterrain_types : str or 2D list of str, optional
         The types of subterrains to generate. If a string, it will be repeated for all subterrains.
         If a 2D list, it should have the same shape as `n_subterrains`.

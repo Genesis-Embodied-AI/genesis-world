@@ -1582,8 +1582,19 @@ def func_contact_flat_terrain(
             xyz_max_min[k + 3] = pos[k] - extent[k]
         is_outside, r_min, r_max, c_min, c_max = func_terrain_cell_range(xyz_max_min, collider_info)
 
-        # The corners of the bounds reject most uneven areas before the scan of every sample
-        is_flat = not is_outside and r_min < r_max and c_min < c_max
+        # The half-space stands for the terrain only where samples lie, so bounds reaching past the last row or column of
+        # samples are left to the detection, which sees the edge of the terrain. The corners of the bounds then reject
+        # most uneven areas before the scan of every sample.
+        sh = collider_info.terrain_scale[0]
+        is_flat = (
+            not is_outside
+            and r_min < r_max
+            and c_min < c_max
+            and xyz_max_min[3] >= collider_info.terrain_xyz_maxmin[3]
+            and xyz_max_min[4] >= collider_info.terrain_xyz_maxmin[4]
+            and xyz_max_min[0] <= collider_info.terrain_xyz_maxmin[3] + sh * (collider_info.terrain_rc[0] - 1)
+            and xyz_max_min[1] <= collider_info.terrain_xyz_maxmin[4] + sh * (collider_info.terrain_rc[1] - 1)
+        )
         h_flat = gs.qd_float(0.0)
         if is_flat:
             h_flat = collider_info.terrain_hf[r_min, c_min]
