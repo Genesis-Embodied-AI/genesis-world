@@ -243,7 +243,8 @@ class MPMEntity(ParticleEntity):
         """
         Attach some particles to a rigid link with critically damped springs.
 
-        Each particle is pulled toward the position it holds now, expressed in the frame of the link.
+        Each particle is pulled toward the position it holds now, expressed in the frame of the link. The scene must
+        enable it with ``MPMOptions(enable_particle_constraints=True)``.
 
         Parameters
         ----------

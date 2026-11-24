@@ -375,6 +375,7 @@ class MPMSolver(ParticleSolver):
 
         self._grid_density = options.grid_density
         self._enable_CPIC = options.enable_CPIC
+        self._enable_particle_constraints = options.enable_particle_constraints
         # The rigid geoms separate the particles from the cells by their SDF (see MPMParticlesCPIC)
         opt_in(SDFInfo, cond=lambda: self.is_active and self._enable_CPIC)
         # The grid and the particles sum their forces on the rigid links exactly when the order of the sums is fixed
@@ -415,7 +416,6 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         self.particle_constraints: MPMParticleConstraints | None = None
         self.data_manager: MPMData | None = None
         self._mpm_materials: MPMMaterials | None = None
-        self._is_constrained = False
 
     @gs.assert_unbuilt
     def build(self, n_envs: int) -> None:
@@ -440,7 +440,12 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         self.data_manager = MPMData(self)
         self.mpm_state = self.data_manager.mpm_state
         self.mpm_info = self.data_manager.mpm_info
-        self.particle_constraints = MPMParticleConstraints(unused=True)
+        has_constraints = self.is_active and self._enable_particle_constraints
+        self.particle_constraints = MPMParticleConstraints(
+            sizes=dict(particles=self._n_particles, envs=self.n_envs_), env_first=False, unused=not has_constraints
+        )
+        if has_constraints:
+            kernel_clear_particle_constraints(self.particle_constraints)
         # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
         self.register_errors(
             self.data_manager.errno,
@@ -582,7 +587,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
             )
 
         # The particle constraints apply once the particles left the grid
-        if self._is_constrained:
+        if self._enable_particle_constraints:
             kernel_apply_particle_constraints(
                 self.mpm_state, rigid_solver.dyn_state.links, self.particle_constraints, self.mpm_info
             )
@@ -722,7 +727,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
 
         Each particle is pulled toward the position it holds now, expressed in the frame of the link. A spring applies the
         force -k (x - x_t) - 2 sqrt(k m) (v - v_t) to a particle of mass m, x_t and v_t being the position and velocity
-        of its target.
+        of its target. The scene must enable it with ``MPMOptions(enable_particle_constraints=True)``.
 
         Parameters
         ----------
@@ -737,8 +742,8 @@ Please decrease the simulation timestep or adjust the material parameters."""
         """
         if not isinstance(link_idx, int):
             gs.raise_exception("link_idx must be an integer.")
-        if not self._is_constrained:
-            self._init_particle_constraints()
+        if not self._enable_particle_constraints:
+            gs.raise_exception("Particles can be attached only with 'enable_particle_constraints=True' in MPMOptions.")
         particles_mask = self._broadcast_particles_mask(particles_mask, particles_start)
         rigid_solver = self._sim.rigid_solver
         # The attachment is a configuration of the constraint, which carries no gradient
@@ -771,33 +776,6 @@ Please decrease the simulation timestep or adjust the material parameters."""
             gs.raise_exception("The particle mask overruns the particles of the solver.")
         return particles_mask
 
-    def _init_particle_constraints(self) -> None:
-        # Allocated once some particles are constrained, which most scenes never do
-        self.particle_constraints = MPMParticleConstraints(
-            sizes=dict(particles=self._n_particles, envs=self.n_envs_), env_first=False
-        )
-        # Allocated after the build, which registered the arrays of the solver (see 'ChangeLog.register_arrays')
-        self.changelog.register_arrays(iter_data(self, "particle_constraints"))
-        kernel_clear_particle_constraints(self.particle_constraints)
-        self._is_constrained = True
-
-    def load_checkpoint(
-        self,
-        checkpoint: SolverCheckpoint,
-        *,
-        boundary_only: bool = False,
-        envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
-    ) -> list[DataItem]:
-        # The constraints are allocated on first use, so a record holds them only if they existed when it was made: a
-        # record holding them allocates them before they are written back, and one without them leaves none.
-        is_constrained_record = checkpoint.arrays.get("particle_constraints.is_constrained")
-        if is_constrained_record is not None and is_constrained_record.ndim > 0 and not self._is_constrained:
-            self._init_particle_constraints()
-        items = super().load_checkpoint(checkpoint, boundary_only=boundary_only, envs_idx=envs_idx)
-        if is_constrained_record is not None and is_constrained_record.ndim == 0 and self._is_constrained:
-            kernel_clear_particle_constraints(self.particle_constraints)
-        return items
-
     @gs.assert_built
     @mutates
     def remove_particle_constraints(self, particles_mask=None, *, particles_start: int = 0) -> None:
@@ -812,8 +790,8 @@ Please decrease the simulation timestep or adjust the material parameters."""
         particles_start : int, optional
             Global index of the particle the mask starts at. Defaults to 0.
         """
-        if not self._is_constrained:
-            return
+        if not self._enable_particle_constraints:
+            gs.raise_exception("Particles can be attached only with 'enable_particle_constraints=True' in MPMOptions.")
         particles_mask = self._broadcast_particles_mask(particles_mask, particles_start)
         kernel_remove_particle_constraints(particles_start, particles_mask, self.particle_constraints)
 

@@ -804,6 +804,10 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
         Number of grid cells per meter. Defaults to 64.
     enable_CPIC : bool, optional
         Whether to enable CPIC (Compatible Particle-in-Cell) to support coupling with thin objects. Defaults to False.
+    enable_particle_constraints : bool, optional
+        Whether particles can be attached to rigid links (see ``MPMEntity.set_particle_constraints``). Enabling it
+        stores a constraint for every particle in every environment, which adds to the memory of the scene and to the
+        size of each of its checkpoints, so enable it only in scenes that attach particles. Defaults to False.
     lower_bound : tuple, shape (3,), optional
         Lower bound of the simulation domain. Defaults to (-1.0, -1.0, 0.0).
     upper_bound : tuple, shape (3,), optional
@@ -819,6 +823,7 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
     particle_size: PositiveFloat | None = None  # in meters. Will be computed automatically if it's None.
     grid_density: PositiveFloat = 64
     enable_CPIC: StrictBool = False
+    enable_particle_constraints: StrictBool = False
 
     # These will later be converted to discrete grid bound. The actual grid boundary could be slightly tighter.
     lower_bound: Vec3FType = (-1.0, -1.0, 0.0)

@@ -27,6 +27,7 @@ def main():
         ),
         mpm_options=gs.options.MPMOptions(
             grid_density=64,
+            enable_particle_constraints=True,
             lower_bound=(-1.0, -1.0, 0.0),
             upper_bound=(1.0, 1.0, 1.5),
         ),
