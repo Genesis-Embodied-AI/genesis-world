@@ -766,7 +766,7 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
     for desc_cls_name, swapped_cls_name, refusal in (
         ("SPHEntityDescription", "MPMEntityDescription", "SPHSolver simulates no entity described by MPM"),
         ("MPMEntityDescription", "SPHEntityDescription", "MPMSolver simulates no entity described by SPH"),
-        ("PBDEntityDescription", "SPHEntityDescription", "PBDSolver simulates no Liquid entity described by SPH"),
+        ("PBDEntityDescription", "SPHEntityDescription", "PBDParticleEntity cannot be described by SPH"),
         ("FEMEntityDescription", "RigidEntityDescription", "FEMSolver simulates no entity described by Rigid"),
         ("HybridEntityDescription", "RigidEntityDescription", "hybrid entity cannot be described by Rigid"),
     ):

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, ClassVar, Self
 
 import numpy as np
 
@@ -129,6 +129,23 @@ class PBDBaseEntity(ParticleEntity):
     """
     Base class for PBD entity.
     """
+
+    _description_cls: ClassVar[type[PBDEntityDescription]]
+
+    def __init__(
+        self,
+        scene: "Scene",
+        solver: "PBDSolver",
+        desc: PBDEntityDescription,
+        particle_size: float,
+        idx: int,
+        particle_start: int,
+        need_skinning: bool = True,
+    ) -> None:
+        # A description read from a file can carry any class whose fields match
+        if type(desc) is not self._description_cls:
+            gs.raise_exception(f"{type(self).__name__} cannot be described by {type(desc).__name__}.")
+        super().__init__(scene, solver, desc, particle_size, idx, particle_start, need_skinning)
 
     @gs.assert_built
     def fix_particles_to_link(self, link_idx, particles_idx_local=None, envs_idx=None):

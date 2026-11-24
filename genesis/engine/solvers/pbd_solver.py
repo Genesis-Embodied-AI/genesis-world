@@ -11,7 +11,12 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
-from genesis.engine.entities.pbd_entity import PBDEntityDescription, PBDMeshDescription, PBDTetEntity
+from genesis.engine.entities.pbd_entity import (
+    PBDClothDescription,
+    PBDElasticDescription,
+    PBDEntityDescription,
+    PBDTetEntity,
+)
 from genesis.engine.materials import PBD
 from genesis.engine.render_context import CONSTRAINT_COLOR, ArrayRef, Points, ScopedRenderContext, Shape
 from genesis.engine.state_change import StateChange, mutates
@@ -176,14 +181,6 @@ class PBDSolver(ParticleSolver):
 
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
-
-    # The kind of entity each material is simulated as
-    _entity_classes = (
-        (PBD.Cloth, PBD2DEntity),
-        (PBD.Elastic, PBD3DEntity),
-        (PBD.Liquid, PBDParticleEntity),
-        (PBD.Particle, PBDFreeParticleEntity),
-    )
 
     class MATERIAL(gs.IntEnum):
         CLOTH = 0
@@ -365,24 +362,13 @@ class PBDSolver(ParticleSolver):
     ) -> PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity:
         """Create an entity from its description, resolved from the entity spec and its surface when none is given.
 
-        The material decides the kind of entity ('_entity_classes'), and the kind the class of its description: a cloth
-        or an elastic entity is described by its remeshed mesh, a liquid or a particle entity by its sampled particles.
+        The material decides the kind of entity: a cloth or an elastic entity is described by its remeshed mesh, a
+        liquid or a particle entity by its sampled particles.
         """
         material = spec.material if desc is None else desc.spec.material
-        entity_cls = next(cls for material_cls, cls in self._entity_classes if isinstance(material, material_cls))
-        if desc is None:
-            if issubclass(entity_cls._description_cls, PBDMeshDescription):
-                desc = entity_cls._description_cls.resolve(spec, surface, self._particle_size)
-            else:
-                desc = PBDEntityDescription.resolve(
-                    spec, surface, self._particle_size, self.boundary_lower, self.boundary_upper
-                )
-        elif type(desc) is not entity_cls._description_cls:
-            gs.raise_exception(
-                f"{type(self).__name__} simulates no {type(material).__name__} entity described by "
-                f"{type(desc).__name__}."
-            )
-        if entity_cls is PBD2DEntity:
+        if isinstance(material, PBD.Cloth):
+            if desc is None:
+                desc = PBDClothDescription.resolve(spec, surface, self._particle_size)
             entity = PBD2DEntity(
                 scene=self._sim.scene,
                 solver=self,
@@ -393,7 +379,9 @@ class PBDSolver(ParticleSolver):
                 edge_start=self.n_edges,
                 inner_edge_start=self.n_inner_edges,
             )
-        elif entity_cls is PBD3DEntity:
+        elif isinstance(material, PBD.Elastic):
+            if desc is None:
+                desc = PBDElasticDescription.resolve(spec, surface, self._particle_size)
             entity = PBD3DEntity(
                 scene=self._sim.scene,
                 solver=self,
@@ -405,6 +393,11 @@ class PBDSolver(ParticleSolver):
                 elem_start=self.n_elems,
             )
         else:
+            if desc is None:
+                desc = PBDEntityDescription.resolve(
+                    spec, surface, self._particle_size, self.boundary_lower, self.boundary_upper
+                )
+            entity_cls = PBDParticleEntity if isinstance(material, PBD.Liquid) else PBDFreeParticleEntity
             entity = entity_cls(
                 scene=self._sim.scene,
                 solver=self,
