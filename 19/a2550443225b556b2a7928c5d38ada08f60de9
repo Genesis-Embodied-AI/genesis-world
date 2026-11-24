@@ -3,6 +3,7 @@ genesis/engine/entities/particle_entity.py
 genesis/engine/materials/base.py
   s_8e3e09cbc07082::t_6b8f4f1e9d614e 41-43,60
   s_8e3e09cbc07082::t_9294861431caf5 1,6,9,39-40,44-59,61-79
+  s_c34d43a6c0ec3d::t_97bdaf255ca1d8 2,4
 genesis/engine/materials/MPM/snow.py
   s_8e3e09cbc07082::t_6b8f4f1e9d614e 9,31,41
 genesis/engine/materials/SPH/liquid.py
@@ -15,6 +16,7 @@ genesis/engine/mesh.py
   s_8e3e09cbc07082::t_f2c06daed8ebc4 285,288-290,292-293
 genesis/engine/entities/emitter.py
   s_8e3e09cbc07082::t_f2c06daed8ebc4 141-142,148-149,155-156,162-163
+  s_c34d43a6c0ec3d::t_b2e41f8c2d38dd 115-116
 genesis/engine/materials/PBD/liquid.py
   s_8e3e09cbc07082::t_6b8f4f1e9d614e 6,13
 genesis/engine/materials/SPH/base.py
@@ -29,6 +31,8 @@ genesis/utils/particle.py
   s_8e3e09cbc07082::t_f2c06daed8ebc4 68,72-73,75-76,90,95,302,306,308,324,327,329,348,351,353,374,377,379
   s_8e3e09cbc07082::t_1438f88c7566ab 301,347
   s_1eb4103db5e662::t_13f9e078572eb4 91-93,321-323,371-373
+examples/coupling/cut_dragon.py
+  s_c34d43a6c0ec3d::t_97bdaf255ca1d8 62-63
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -48,6 +52,14 @@ genesis/utils/particle.py
       "agent_id": {
         "tool": "claude",
         "id": "a8f0475a-f9de-4602-9bce-61f4c50730a1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_c34d43a6c0ec3d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "85865c8a-2aec-4623-a453-81a3917c1600",
         "model": "claude-opus-5-5"
       },
       "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
