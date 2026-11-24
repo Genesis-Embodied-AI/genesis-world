@@ -6,6 +6,7 @@ including broad-phase (sweep-and-prune), narrow-phase (convex-convex, SDF-based,
 terrain), and contact management.
 """
 
+import math
 from collections.abc import Iterator
 from itertools import product
 from typing import TYPE_CHECKING, Any
@@ -321,10 +322,10 @@ class Collider:
         else:
             options.max_contacts = min(options.max_contacts, max_candidate_contacts)
 
-        terrain_hf_shape = (1, 1)
+        terrain_hf_shape, terrain_step_height = (1, 1), math.inf
         for geom in self._solver.geoms:
             if geom.type == gs.GEOM_TYPE.TERRAIN:
-                terrain_hf_shape = geom.entity.terrain_hf.shape
+                terrain_hf_shape, terrain_step_height = geom.entity.terrain_hf.shape, geom.entity.terrain_step_height
                 break
 
         # Initialize [info], which stores every data that must be considered mutable from Quadrants's perspective,
@@ -356,6 +357,8 @@ class Collider:
                 diff_contact_eps_affine=1e-2,
                 contact_pruning_tolerance=self._solver._options.contact_pruning_tolerance or 0.0,
                 prune_deep_penetration_ratio=self._prune_deep_penetration_ratio,
+                # The largest finite float stands for the infinite step height of a smooth terrain, which no cell reaches
+                terrain_step_height=min(terrain_step_height, float(np.finfo(gs.np_float).max)),
             ),
         )
         self._init_collision_pair_idx(self._collision_pair_idx)

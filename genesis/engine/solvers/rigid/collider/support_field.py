@@ -390,13 +390,15 @@ def _func_support_cylinder(
 
 @qd.func
 def _func_support_prism(i_b: int, d: qd.types.vector(3), collider_state: ColliderState):
-    istart = 3
+    # Every top corner of a terrain solid stands above its bottom corner, so the support lies among the top corners
+    # along a direction pointing up and among the bottom ones otherwise
+    istart = 4
     if d[2] < 0:
         istart = 0
 
     ibest = istart
     best = collider_state.prism[istart, i_b].dot(d)
-    for i in range(istart + 1, istart + 3):
+    for i in range(istart + 1, istart + 4):
         dot = collider_state.prism[i, i_b].dot(d)
         if dot > best:
             ibest = i

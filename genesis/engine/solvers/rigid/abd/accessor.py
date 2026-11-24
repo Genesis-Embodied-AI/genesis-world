@@ -917,6 +917,7 @@ def kernel_get_terrain_height(
     envs_idx: qd.types.ndarray(),
     link_idx: qd.i32,
     horizontal_scale: float,
+    step_height: float,
     positions: qd.types.ndarray(),
     height_field: qd.types.ndarray(),
     heights: qd.types.ndarray(),
@@ -960,7 +961,13 @@ def kernel_get_terrain_height(
             h10 = height_field[i_row + 1, i_col]
             h01 = height_field[i_row, i_col + 1]
             h11 = height_field[i_row + 1, i_col + 1]
-            if frac_row + frac_col <= 1.0:
+            h_range = qd.max(qd.max(h00, h10), qd.max(h01, h11)) - qd.min(qd.min(h00, h10), qd.min(h01, h11))
+            if h_range > step_height:
+                # A step cell is made of flat columns, each at the height of the corner nearest to it
+                i_corner_row = i_row + qd.cast(frac_row >= 0.5, gs.qd_int)
+                i_corner_col = i_col + qd.cast(frac_col >= 0.5, gs.qd_int)
+                heights[i_b_, i_p] = height_field[i_corner_row, i_corner_col] + link_pos[2]
+            elif frac_row + frac_col <= 1.0:
                 heights[i_b_, i_p] = h00 + frac_row * (h10 - h00) + frac_col * (h01 - h00) + link_pos[2]
             else:
                 heights[i_b_, i_p] = h11 + (1.0 - frac_col) * (h10 - h11) + (1.0 - frac_row) * (h01 - h11) + link_pos[2]

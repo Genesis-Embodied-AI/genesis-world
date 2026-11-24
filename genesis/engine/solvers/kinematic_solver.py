@@ -970,6 +970,7 @@ class KinematicSolver(Solver):
             envs_idx,
             link_idx,
             terrain._morph.horizontal_scale,
+            terrain.terrain_step_height,
             positions.contiguous(),
             terrain._terrain_height_field,
             heights,
