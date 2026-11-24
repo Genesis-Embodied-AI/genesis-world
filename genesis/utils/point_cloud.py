@@ -101,8 +101,7 @@ def sample_mesh_point_cloud(
     n_candidates : int, optional
         Number of area-weighted surface samples to draw before FPS.
     seed : int, optional
-        The random seed for `trimesh.sample.sample_surface` and the first FPS pick. If given, the result is cached.
-        If None, a random seed is generated.
+        The random seed for `trimesh.sample.sample_surface` and the first FPS pick. If None, a random seed is generated.
     return_normals : bool
         If True, also return triangle face normals aligned with each FPS sample (same candidate face as the point).
 
