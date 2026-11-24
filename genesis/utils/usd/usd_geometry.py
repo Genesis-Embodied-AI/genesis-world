@@ -6,7 +6,7 @@ import trimesh
 from pxr import Usd, UsdGeom, UsdPhysics
 
 import genesis as gs
-from genesis.engine.entities.rigid_entity.description import DEFAULT_FRICTION_COEFFICIENTS
+from genesis.engine.entities.rigid_entity.description import DEFAULT_FRICTION
 from genesis.utils import geom as gu
 
 from .usd_context import UsdContext
@@ -373,7 +373,7 @@ def parse_prim_geoms(
             # A bound UsdPhysicsMaterialAPI overrides the default friction. Prefer dynamic friction,
             # falling back to static; restitution has no rigid-rigid equivalent in the solver and is
             # dropped (with a one-time warning).
-            geom_friction = DEFAULT_FRICTION_COEFFICIENTS["friction"]
+            geom_friction = DEFAULT_FRICTION
             physics_material = context.get_physics_material(prim)
             if physics_material is not None:
                 # PhysicsMaterial fields are None when unauthored, so an explicitly authored 0 (a
