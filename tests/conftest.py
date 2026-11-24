@@ -174,7 +174,7 @@ def long_chain():
 
 @pytest.fixture(scope="session")
 def hanging_cable():
-    # A chain of capsules on ball joints, welded to a fixed anchor at its upper end and to a small sphere at its lower end
+    # A chain of capsules on ball joints, welded to a fixed anchor at its top and to a small sphere at its bottom
     mjcf = ET.Element("mujoco", model="hanging_cable")
     worldbody = ET.SubElement(mjcf, "worldbody")
     anchor = ET.SubElement(worldbody, "body", name="anchor", pos="-0.38 -0.26 1.07")
