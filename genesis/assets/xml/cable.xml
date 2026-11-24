@@ -125,33 +125,6 @@
         </body>
     </worldbody>
 
-    <contact>
-        <exclude body1="B_first" body2="B_1"/>
-        <exclude body1="B_1" body2="B_2"/>
-        <exclude body1="B_2" body2="B_3"/>
-        <exclude body1="B_3" body2="B_4"/>
-        <exclude body1="B_4" body2="B_5"/>
-        <exclude body1="B_5" body2="B_6"/>
-        <exclude body1="B_6" body2="B_7"/>
-        <exclude body1="B_7" body2="B_8"/>
-        <exclude body1="B_8" body2="B_9"/>
-        <exclude body1="B_9" body2="B_10"/>
-        <exclude body1="B_10" body2="B_11"/>
-        <exclude body1="B_11" body2="B_12"/>
-        <exclude body1="B_12" body2="B_13"/>
-        <exclude body1="B_13" body2="B_14"/>
-        <exclude body1="B_14" body2="B_15"/>
-        <exclude body1="B_15" body2="B_16"/>
-        <exclude body1="B_16" body2="B_17"/>
-        <exclude body1="B_17" body2="B_18"/>
-        <exclude body1="B_18" body2="B_19"/>
-        <exclude body1="B_19" body2="B_20"/>
-        <exclude body1="B_20" body2="B_21"/>
-        <exclude body1="B_21" body2="B_22"/>
-        <exclude body1="B_22" body2="B_23"/>
-        <exclude body1="B_23" body2="B_last"/>
-    </contact>
-
     <equality>
         <weld body1="B_last" body2="anchor"/>
         <weld body1="B_first" body2="obj"/>
