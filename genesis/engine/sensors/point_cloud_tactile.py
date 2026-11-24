@@ -209,9 +209,7 @@ def _sample_track_links_point_cloud_tensors(
                 # Fixed seed: the cache key already discriminates between meshes (vertices+faces hashed), so the same
                 # mesh always resolves to the same sample, which keeps tactile readings reproducible across
                 # build/reset cycles.
-                pts_np, nrm_np = sample_mesh_point_cloud(
-                    verts, faces, n_geom_pts, seed=0, use_cache=True, return_normals=True
-                )
+                pts_np, nrm_np = sample_mesh_point_cloud(verts, faces, n_geom_pts, seed=0, return_normals=True)
 
                 li = torch.full((pts_np.shape[0],), link_idx, dtype=gs.tc_int, device=gs.device)
                 link_idx_chunks.append(li)

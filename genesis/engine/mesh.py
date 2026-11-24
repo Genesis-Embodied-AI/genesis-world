@@ -300,7 +300,6 @@ class Mesh(RBC, serialization.SerializationMixin):
         *,
         n_candidates: int | None = None,
         seed: int | None = None,
-        use_cache: bool = True,
         return_normals: bool = False,
     ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
         """
@@ -314,7 +313,6 @@ class Mesh(RBC, serialization.SerializationMixin):
             n_points,
             n_candidates=n_candidates,
             seed=seed,
-            use_cache=use_cache,
             return_normals=return_normals,
         )
 
