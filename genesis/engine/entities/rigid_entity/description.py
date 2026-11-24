@@ -1825,7 +1825,7 @@ class RigidEntityDescription(KinematicEntityDescription):
         ]
         return inertial_info._replace(hint=compose_inertial_from_g_infos(dynamics_g_infos, rho))
 
-    def _describe_geoms(self, cg_infos):
+    def _describe_geoms(self, cg_infos: list[dict]) -> list[RigidGeomDescription]:
         """Resolve what a parse stated about each collision geom into the description the geom is built from.
 
         A coefficient comes from the parsed geom (see '_resolve_geoms_values'), else the material, else the default.

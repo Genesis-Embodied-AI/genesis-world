@@ -1,6 +1,7 @@
 import hashlib
 import os
 from itertools import combinations
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -9,6 +10,9 @@ import networkx as nx
 import genesis as gs
 
 from .cache import get_gel_cache_dir
+
+if TYPE_CHECKING:
+    from pygel3d import graph, hmesh
 
 IS_MATPLOTLIB_AVAILABLE = False
 try:
@@ -31,7 +35,7 @@ def trimesh_to_gelmesh(tmesh):
     return hmesh.Manifold.from_triangles(vertices=tmesh.vertices, faces=tmesh.faces)
 
 
-def skeletonization(mesh, sampling=True):
+def skeletonization(mesh: "hmesh.Manifold", sampling: bool = True) -> "graph.Graph":
     from pygel3d import hmesh, graph
 
     assert isinstance(mesh, hmesh.Manifold), "The input mesh of skeletonization should be pygel3d.hmesh.Manifold"
@@ -104,7 +108,7 @@ def reduce_graph(G, straight_thresh=10):
     return G_reduced
 
 
-def compute_graph_attribute(G, G_pos):
+def compute_graph_attribute(G: nx.Graph, G_pos: np.ndarray) -> None:
     for n1, n2 in G.edges():
         vec = G_pos[n2] - G_pos[n1]
         G.edges[n1, n2]["unit_vec"] = vec / np.linalg.norm(vec)

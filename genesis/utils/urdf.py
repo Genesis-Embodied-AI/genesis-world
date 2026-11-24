@@ -132,7 +132,9 @@ def order_links_depth_first(l_infos, j_infos, links_g_infos=None):
     return new_l_infos, new_j_infos, links_g_infos, ordered_links_idx
 
 
-def parse_urdf(morph, surface):
+def parse_urdf(
+    morph: "gs.morphs.URDF | gs.morphs.Drone", surface: "gs.surfaces.Surface"
+) -> tuple[list[dict], list[list[dict]], list[list[dict]], list[dict]]:
     if morph.is_format(XACRO_FORMAT):
         # Expanded by the parser reading it, so the morph keeps the file provided by the user (see 'parse_xml' in mjcf.py)
         parent_dir = os.getcwd()
@@ -630,7 +632,7 @@ def compose_inertial_properties(mass1, com1, inertia1, mass2, com2, inertia2):
     return combined_mass, combined_com, combined_inertia
 
 
-def merge_inertia(link1, link2):
+def merge_inertia(link1: urdfpy.Link, link2: urdfpy.Link) -> None:
     """Combine two links with fixed joint."""
     if link2.inertial is None:
         return

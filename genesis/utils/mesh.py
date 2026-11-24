@@ -3,9 +3,10 @@ import inspect
 import math
 import os
 import weakref
+from collections.abc import Sequence
 from functools import lru_cache, wraps
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 
@@ -38,6 +39,9 @@ from .cache import (
     register_cache_clear,
 )
 from .misc import get_assets_dir, get_src_dir, unique_rows
+
+if TYPE_CHECKING:
+    from genesis.vis.camera import Camera
 
 # Largest coordinate discrepancy, as a fraction of the bounding-box diagonal, under which two meshes are considered
 # identical by the on-disk caches. Orders of magnitude below the spacing of genuinely distinct geometry, and orders of
@@ -1225,8 +1229,13 @@ def apply_transform(transform, positions, normals=None):
 
 
 def create_frame(
-    origin_radius=0.012, axis_radius=0.005, axis_length=1.0, head_radius=0.01, head_length=0.03, sections=12
-):
+    origin_radius: float = 0.012,
+    axis_radius: float = 0.005,
+    axis_length: float = 1.0,
+    head_radius: float = 0.01,
+    head_length: float = 0.03,
+    sections: int = 12,
+) -> trimesh.Trimesh:
     origin = create_sphere(radius=origin_radius, subdivisions=2)
 
     # The arrows point along z, then rotate onto x and y
@@ -1251,7 +1260,7 @@ def create_frame(
     return trimesh.util.concatenate([origin, *axes])
 
 
-def create_camera_frustum(camera, color):
+def create_camera_frustum(camera: "Camera", color: Sequence[float]) -> trimesh.Trimesh:
     # camera
     camera_mesh = load_trimesh(os.path.join(get_assets_dir(), "meshes", "camera", "camera.glb"), force="mesh")
     camera_mesh.visual = camera_mesh.visual.to_color()

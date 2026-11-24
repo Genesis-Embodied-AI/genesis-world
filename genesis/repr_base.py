@@ -1,4 +1,5 @@
 import inspect
+from typing import Any
 
 import numpy as np
 import torch
@@ -120,7 +121,7 @@ class RBC:
         return self.__repr_name__()
 
 
-def brief(x):
+def brief(x: Any) -> str:
     """Describe a value briefly, for the repr of genesis objects."""
     if isinstance(x, RBC):
         return x._repr_brief()
