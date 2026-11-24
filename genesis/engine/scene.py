@@ -1732,11 +1732,20 @@ class Scene(BuildableMixin, RBC):
         simulation had run to, so the simulated state has to be reproduced by stepping it again. Adding an entity
         resolves its description, so a scene is exported before it is built as readily as after.
 
-        The file holds the description of each entity, sampled particles and tetrahedral meshes included. A scene
-        holding an emitter or a force field raises, naming it. What a description leaves out is written without, with
-        a warning naming it: a camera, a sensor, a callback Genesis calls at every step, a texture read from an HDR or
-        EXR file, and the visual vertices an entity was given at runtime. A recorder neither simulates nor draws, so it
-        is left out without a word.
+        Not supported, raising on export:
+
+        - an emitter
+        - a force field
+
+        Left out of the file, with a warning naming each one:
+
+        - a camera
+        - a sensor
+        - a callback Genesis calls at every step
+        - a texture read from an HDR or EXR file
+        - the visual vertices an entity was given at runtime
+
+        A recorder neither simulates nor draws, so it is left out without a warning.
 
         Parameters
         ----------
