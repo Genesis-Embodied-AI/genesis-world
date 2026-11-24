@@ -858,7 +858,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         spec: "gs.entities.FEM | None",
         desc: FEMEntityDescription | None = None,
     ) -> FEMEntity:
-        """Create an entity from its description, resolving one from the entity spec and its surface if none is given."""
+        """Create an entity from its description, resolved from the entity spec and its surface when none is given."""
         if desc is None:
             desc = FEMEntityDescription.resolve(spec, surface)
         entity = FEMEntity(

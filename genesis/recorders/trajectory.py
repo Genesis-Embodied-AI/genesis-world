@@ -220,8 +220,8 @@ def _frame_arrays(frame: np.ndarray, fields: list[FrameField], kinds: frozenset[
 def _arrays_fields(sim: "Simulator", kinds: frozenset[DataKind], drop_unused: bool) -> list[FrameField]:
     """Lay out the arrays of the given kinds back to back, from the start of a frame.
 
-    With 'drop_unused', an unused array is listed 0-d and empty. Where zero-copy views exist, an array keeps the memory order
-    of its view, a permutation of its canonical axes. Otherwise it is canonical.
+    With 'drop_unused', an unused array is listed 0-d and empty. Where zero-copy views exist, an array keeps the memory
+    order of its view, a permutation of its canonical axes. Otherwise it is canonical.
     """
     fields = []
     offset = 0

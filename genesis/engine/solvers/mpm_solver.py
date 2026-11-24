@@ -504,7 +504,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
         spec: "gs.entities.MPM | None",
         desc: MPMEntityDescription | None = None,
     ) -> MPMEntity:
-        """Create an entity from its description, resolving one from the entity spec and its surface if none is given."""
+        """Create an entity from its description, resolved from the entity spec and its surface when none is given."""
         if desc is None:
             desc = MPMEntityDescription.resolve(
                 spec, surface, self._particle_size, self.boundary_lower, self.boundary_upper

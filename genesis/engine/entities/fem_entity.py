@@ -1,5 +1,5 @@
-from functools import wraps
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
