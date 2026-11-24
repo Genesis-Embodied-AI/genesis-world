@@ -304,6 +304,8 @@ class LaunchRecorder:
     autodiff, consuming the adjoint of the values a launch wrote and clearing it.
     """
 
+    validation = False
+
     def __init__(self):
         self.entries: list[RecordedEntry] = []
         self._previous_tape = None
