@@ -1737,7 +1737,7 @@ class Scene(BuildableMixin, RBC):
         - an emitter
         - a force field
 
-        Left out of the file, with a warning naming each one:
+        Left out of the file, with a warning:
 
         - a camera
         - a sensor
