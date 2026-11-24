@@ -1,14 +1,13 @@
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar
 
 from genesis.constants import STRUCTURE
 from genesis.typing import PositiveFloat
 
+from ..base import SamplerType
 from .base import Base
 
 if TYPE_CHECKING:
     from genesis.engine.entities.pbd_entity import PBDFreeParticleEntity
-
-SamplerType = Literal["pbs", "random", "regular"]
 
 
 class Particle(Base["PBDFreeParticleEntity"]):

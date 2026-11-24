@@ -654,10 +654,11 @@ def _advect_foams(
 ):
     """Classify each foam particle by the fluid particles around it, then advect it over one time step in place.
 
-    A foam particle with fewer than 6 fluid neighbors is spray, falling under gravity and air damping. One with more
-    than 20 is an air bubble, rising by buoyancy and dragged by the fluid. Any other one is foam, moving with the fluid,
-    whose velocity is the average of that of its neighbors weighted by the SPH kernel. Near a wall, the neighbors
-    missing beyond it are added back in proportion to the volume of the support sphere it cuts off.
+    Sec. 3.2 of the paper cited by 'FoamGenerator'. A foam particle with fewer than 6 fluid neighbors is spray,
+    falling under gravity and air damping. One with more than 20 is an air bubble, rising by buoyancy and dragged by the
+    fluid. Any other one is foam, moving with the fluid, whose velocity is the average of that of its neighbors weighted
+    by the SPH kernel. Near a wall, the neighbors missing beyond it are added back in proportion to the volume of the
+    support sphere it cuts off.
 
     Return the positions, velocities and lifetimes of the foam particles still alive: inside the domain of the fluid,
     before the end of their lifetime, and with at least 2 fluid neighbors.
@@ -703,10 +704,12 @@ def _advect_foams(
                 if is_corrected and cap > 0.0:
                     n_neighbors += int(np.ceil(n_neighbors * cap * cap * (np.pi / 3.0) * (3.0 - cap)))
 
+        # 3.2: spray moves ballistically. The damping by a factor 0.9 per time step stands for air drag.
         if n_neighbors < 6:
             for k in range(3):
                 foams_vel[i_f, k] = 0.9 * (foams_vel[i_f, k] + time_step * gravity[k])
             foams_lifetime[i_f] -= time_step * spray_decay
+        # 3.2: bubble update with the buoyancy k_b = 2 and the drag k_d = 0.8, user-defined constants there
         elif n_neighbors > 20:
             foams_vel[i_f, 0] += -2.0 * time_step * gravity[0] + 0.8 * (fluid_vel_x - foams_vel[i_f, 0])
             foams_vel[i_f, 1] += -2.0 * time_step * gravity[1] + 0.8 * (fluid_vel_y - foams_vel[i_f, 1])
@@ -736,11 +739,11 @@ def _advect_foams(
 
 @nb.jit(nopython=True, cache=True, parallel=True)
 def _compute_emission_potentials(positions, velocities, support_radius, particle_mass, eps):
-    """Compute the potentials of each fluid particle to trap air and to form a wave crest (Ihmsen et al. 2012).
+    """Compute the potentials of each fluid particle to trap air and to form a wave crest (see 'FoamGenerator').
 
     Return the number of neighbors of each particle, its surface normal, zero away from the free surface, its
-    trapped-air potential (Eq. 2) and its wave-crest curvature (Eq. 4). Distances and normals smaller than 'eps' have
-    no direction and contribute nothing.
+    trapped-air potential (Eq. 2) and its wave-crest curvature (Eq. 4 to 6). Distances and normals smaller than 'eps'
+    have no direction and contribute nothing.
     """
     neighbors_start, neighbors_idx = _find_neighbors(positions, positions, support_radius)
     n_points = len(positions)
@@ -816,7 +819,8 @@ def _compute_emission_potentials(positions, velocities, support_radius, particle
 class FoamGenerator:
     """Generate the spray, foam and air bubble particles of a fluid.
 
-    The model follows Ihmsen et al., "Unified spray, foam and air bubbles for particle-based fluids", 2012. Fluid
+    The model follows Ihmsen et al., "Unified spray, foam and air bubbles for particle-based fluids", The Visual
+    Computer, 2012 (doi:10.1007/s00371-012-0697-9): Sec. 3.1 for the emission and Sec. 3.2 for the advection. Fluid
     particles trapping air, at a wave crest, or moving fast emit foam particles at each step. A foam particle surrounded
     by few fluid particles is spray, falling under gravity and air damping. One surrounded by many is an air bubble,
     rising by buoyancy and dragged by the fluid. Any other one is foam, carried along by the fluid. Every foam particle
@@ -835,7 +839,8 @@ class FoamGenerator:
     spray_decay, foam_decay, bubble_decay : float
         The rate at which the lifetime of each kind of foam particle decreases.
     k_foam : float
-        The number of foam particles a fluid particle emits per unit time at most.
+        The scale of the emission rate. A fluid particle emits up to 20 * k_foam foam particles per unit time, rounded
+        to a whole number at each step.
     foam_density : float
         The density of the fluid.
     """
@@ -876,22 +881,25 @@ class FoamGenerator:
         """
         h, m, dt = self.support_radius, self.particle_mass, self.time_step
 
-        # Potentials of each fluid particle to trap air, form a wave crest, and its kinetic energy (Eq. 2, 4 and 7)
+        # Sec. 3.1 of the paper cited by the class.
+        # Eq. 2 and 4-6: trapped-air and wave-crest potentials, with neighbors weighted by their SPH volume.
         n_neighbors, normals, trapped_air, curvature = _compute_emission_potentials(positions, velocities, h, m, gs.EPS)
         speeds = np.linalg.norm(velocities, axis=-1)
         velocities_dir = np.divide(
             velocities, speeds[:, None], out=np.zeros_like(velocities), where=speeds[:, None] > gs.EPS
         )
-        is_crest = (velocities_dir * normals).sum(axis=-1) >= 0.6
-        kinetic_energy = 0.5 * m * speeds**2
-        ke_min = 0.1 * (self.particle_radius**3 * 6400) * 2.5**2
+        # Eq. 1: thresholds tuned to these weighted means, an approach speed of 0.05 to 0.5 m/s and 18 to 60 degrees.
         i_ta = np.clip((trapped_air - 0.05) / (0.5 - 0.05), 0.0, 1.0)
+        # Eq. 7: velocity within 53 degrees of the normal.
+        is_crest = (velocities_dir * normals).sum(axis=-1) >= 0.6
         i_wc = np.clip((is_crest * curvature - 0.05) / (0.5 - 0.05), 0.0, 1.0)
-        i_ke = np.clip((kinetic_energy - ke_min) / (49.0 * ke_min), 0.0, 1.0)
+        # 3.1: kinetic energy, with tau_k scaled by the mass so that it maps speeds of 1.1 to 7.9 m/s at every density.
+        i_ke = np.clip((speeds**2 - 1.25) / (62.5 - 1.25), 0.0, 1.0)
+        # Eq. 8: k_ta = k_wc = 10 * k_foam, and no emission from fluid particles with fewer than 5 neighbors.
         n_emitted = np.floor(10.0 * (i_ta + i_wc) * self.k_foam * i_ke * dt + 0.5).astype(gs.np_int)
         n_emitted[n_neighbors < 5] = 0
 
-        # New foam particles are spread uniformly in a cylinder around their fluid particle, along its velocity
+        # Fig. 3: cylinder along the velocity, centered on the fluid particle.
         emitters_i = np.repeat(np.arange(len(positions)), n_emitted)
         emitters_dir = velocities_dir[emitters_i]
         axis_ref = np.where((np.abs(emitters_dir[:, :1]) > 0.999), np.array([0.0, 1.0, 0.0]), np.array([1.0, 0.0, 0.0]))
@@ -905,6 +913,7 @@ class FoamGenerator:
         axial = ((samples[:, 2] - 0.5) * dt * speeds[emitters_i])[:, None] * emitters_dir
         foams_pos = np.concatenate((self.foams_pos, positions[emitters_i] + radial + axial))
         foams_vel = np.concatenate((self.foams_vel, velocities[emitters_i] + radial))
+        # 3.2: lifetime from 2 to 5 s, growing with the kinetic energy.
         foams_lifetime = np.concatenate((self.foams_lifetime, 2.0 + 3.0 * i_ke[emitters_i] * samples[:, 3]))
 
         self.foams_pos, self.foams_vel, self.foams_lifetime = _advect_foams(

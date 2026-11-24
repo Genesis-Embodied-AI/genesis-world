@@ -1,33 +1,16 @@
-import re
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 import quadrants as qd
-from pydantic import BeforeValidator, Field, PrivateAttr
-from pydantic_core import PydanticCustomError
+from pydantic import Field, PrivateAttr
 
 import genesis as gs
 from genesis.constants import STRUCTURE
 from genesis.typing import PositiveFloat, StrictInt, ValidFloat
 
-from ..base import Material
+from ..base import Material, SamplerType
 
 if TYPE_CHECKING:
     from genesis.engine.entities.mpm_entity import MPMEntity
-
-_SAMPLER_PATTERN = re.compile(r"^pbs(-\d+)?$|^random$|^regular$")
-
-
-def _validate_sampler(v: str) -> str:
-    if not isinstance(v, str) or not _SAMPLER_PATTERN.match(v):
-        raise PydanticCustomError(
-            "invalid_sampler",
-            "Input should be 'pbs', 'pbs-<res>', 'random', or 'regular'",
-            {"value": v},
-        )
-    return v
-
-
-SamplerType = Annotated[str, BeforeValidator(_validate_sampler)]
 
 
 @qd.data_oriented
