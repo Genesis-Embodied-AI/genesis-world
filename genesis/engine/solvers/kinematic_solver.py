@@ -1291,7 +1291,7 @@ class KinematicSolver(Solver):
             gs.raise_exception(f"Cannot solve for {n_links} targets. Raise 'IK_max_targets' above {n_tgts}.")
         # A damping of 1e-5 already gives Gauss-Newton steps to 1e-10 relative, |J| being of order 1 through its
         # rotation rows, so a smaller one converges no faster and only loses stability near singular configurations.
-        # The measurements behind the bound are in genesis-world#3857.
+        # See PR genesis-world#3857 for measurements and details.
         if damping < 1e-5:
             gs.raise_exception(f"'damping' must be at least 1e-5, got {damping}.")
 
