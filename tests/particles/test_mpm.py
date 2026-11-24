@@ -176,7 +176,6 @@ def test_particle_constraints(show_viewer, tol):
     assert_allclose(mpm_follower.get_particles_vel()[..., 2], -GRAVITY * N_STEPS * scene.dt, tol=1e-3)
 
 
-
 @pytest.mark.required
 @pytest.mark.parametrize("variant", ["svd", "no_svd"])
 def test_perf_dispatch(variant, show_viewer):
