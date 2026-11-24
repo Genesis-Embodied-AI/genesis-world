@@ -178,6 +178,7 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
     ) -> "Entity":
         if desc is not None:
             spec = desc.spec
+        # FIXME: Kill this please >:( need to rework how we define HybridEntity.
         if isinstance(spec, gs.entities.Hybrid):
             # A hybrid entity adds its parts to the scene as entities of their own, before itself
             if desc is None:
