@@ -123,7 +123,7 @@ def main():
         obj1.set_velocity(v_obj1_init)
 
         # forward pass
-        gs.logger.info("Forward pass...")
+        print("forward")
         loss = 0.0
         for i, v_i in enumerate(v_list):
             stick.set_dofs_velocity(v_i, dofs_idx_local=slice(0, 3))
@@ -143,13 +143,13 @@ def main():
                 loss += torch.pow(obj1.get_particles_pos() - goal, 2).sum()
 
         # backward pass
-        gs.logger.info("Backward pass...")
+        print("backward")
         loss.backward()  # this lets gradient flow all the way back to tensor input
         for v_i in v_list:
-            gs.logger.info(f"Gradient of the stick velocity: {v_i.grad}")
+            print(v_i.grad)
             v_i.grad = None
         init_pos.grad = None
-        gs.logger.info(f"Loss: {loss.item()}")
+        print(loss.item())
 
 
 if __name__ == "__main__":
