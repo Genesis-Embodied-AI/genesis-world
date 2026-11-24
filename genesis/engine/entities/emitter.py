@@ -187,18 +187,6 @@ class Emitter(RBC):
 
         gs.logger.debug(f"Emitted {n_particles} particles. Next particle index: {self._next_particle}.")
 
-    def emit_omni(self, source_radius=0.1, pos=(0.5, 0.5, 1.0), speed=1.0, particle_size=None):
-        """
-        Use a sphere-shaped source to emit particles in all directions.
-
-        Deprecated: use `emit(droplet_shape="omni", droplet_size=2 * source_radius, ...)` instead.
-        """
-        gs.logger.warning(
-            "'emit_omni' is deprecated and will be removed in a future release. Use "
-            "'emit(droplet_shape=\"omni\", droplet_size=2 * source_radius, ...)' instead."
-        )
-        self.emit(droplet_shape="omni", droplet_size=2 * source_radius, pos=pos, speed=speed, p_size=particle_size)
-
     @property
     def uid(self):
         """The unique identifier of the emitter."""
