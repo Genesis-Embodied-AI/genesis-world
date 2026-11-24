@@ -53,8 +53,6 @@ class HybridEntity(Entity):
 
     Parameters
     ----------
-    idx : int
-        The index of the entity within the scene.
     scene : genesis.Scene
         The simulation scene where the entity is added.
     spec : gs.entities.Hybrid
@@ -65,17 +63,15 @@ class HybridEntity(Entity):
 
     def __init__(
         self,
-        idx: int,
         scene: "Scene",
         surface: Surface,
         spec: "gs.entities.Hybrid",
     ) -> None:
-        super().__init__(idx, scene, None, surface, spec)
-
         morph = spec.morph
         material = spec.material
-        material_rigid = material.material_rigid
-        material_soft = material.material_soft
+        # Each part takes a copy of its material, which the coupling and the muscle groups of this entity complete
+        material_rigid = material.material_rigid.model_copy(update={"needs_coup": material.use_default_coupling})
+        material_soft = material.material_soft.model_copy()
 
         surface_rigid = gs.surfaces.Smooth(roughness=0.4)  # HACK hardcoded
         # The soft part following the rigid links of its muscle groups, held without the default coupling alone
@@ -84,14 +80,6 @@ class HybridEntity(Entity):
         assert isinstance(material_soft, gs.materials.MPM.Base)  # TODO: need FEM and PBD
 
         if isinstance(morph, gs.morphs.URDF):
-            # set up rigid part
-            if material.use_default_coupling:
-                gs.logger.info("Use default coupling in hybrid. Overwrite `needs_coup` in rigid material to True")
-                material_rigid.needs_coup = True
-            else:
-                gs.logger.info("Use default coupling in hybrid. Overwrite `needs_coup` in rigid material to False")
-                material_rigid.needs_coup = False
-
             part_rigid = scene.add_entity(material=material_rigid, morph=morph, surface=surface_rigid)
 
             # get rigid part in world coords
@@ -166,6 +154,9 @@ class HybridEntity(Entity):
                 )
             else:
                 raise ValueError(f"Cannot handle soft material {material_soft}")
+
+        # The parts are added to the scene before this entity, which comes after them
+        super().__init__(len(scene.entities), scene, None, surface, spec)
 
         # set members
         self._material_rigid = material_rigid
