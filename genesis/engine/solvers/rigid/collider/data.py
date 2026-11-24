@@ -416,9 +416,11 @@ class GJKConfig(Config):
 
 
 VERT_NEIGHBORS = Size("vert_neighbors")
-# The samples of the height field of the terrain
-TERRAIN_ROWS = Size("terrain_rows")
-TERRAIN_COLS = Size("terrain_cols")
+# The collision terrains and the samples of their height fields, all terrains together
+TERRAINS = Size("terrains")
+TERRAIN_SAMPLES = Size("terrain_samples")
+# The height fields and bounds of the collision terrains, read by the terrain pass alone
+TERRAIN = "terrain"
 
 
 class ColliderInfo(Data, kind=DataKind.CONSTANT):
@@ -445,10 +447,14 @@ class ColliderInfo(Data, kind=DataKind.CONSTANT):
     # Link pairs holding at least one valid geom pair, the link carrying most geoms first (see func_broad_phase_geoms)
     n_valid_link_pairs: qd.Tensor = field(int, shape=())
     valid_link_pairs: qd.Tensor = field((int, 2), shape=(VALID_LINK_PAIRS,))
-    terrain_hf: qd.Tensor = field(float, shape=(TERRAIN_ROWS, TERRAIN_COLS))
-    terrain_rc: qd.Tensor = field(int, shape=(2,))
-    terrain_scale: qd.Tensor = field(float, shape=(2,))
-    terrain_xyz_maxmin: qd.Tensor = field(float, shape=(6,))
+    # Index of each terrain geom in the terrain arrays, -1 for every other geom
+    terrain_idx: qd.Tensor = field(int, shape=(GEOMS,), labels=TERRAIN)
+    # Concatenated height fields of the collision terrains, row-major per terrain, and first sample of each
+    terrain_hf: qd.Tensor = field(float, shape=(TERRAIN_SAMPLES,), labels=TERRAIN)
+    terrain_hf_start: qd.Tensor = field(int, shape=(TERRAINS,), labels=TERRAIN)
+    terrain_rc: qd.Tensor = field((int, 2), shape=(TERRAINS,), labels=TERRAIN)
+    terrain_scale: qd.Tensor = field((float, 2), shape=(TERRAINS,), labels=TERRAIN)
+    terrain_xyz_maxmin: qd.Tensor = field((float, 6), shape=(TERRAINS,), labels=TERRAIN)
     # Perturbation and tolerance of the multi-contact detection
     mc_perturbation: qd.Tensor = field(float, shape=())
     mc_tolerance: qd.Tensor = field(float, shape=())

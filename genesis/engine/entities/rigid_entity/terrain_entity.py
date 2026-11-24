@@ -17,8 +17,8 @@ class TerrainEntity(RigidEntity):
 
     def _load_model(self):
         super()._load_model()
-        # Collider storage covers only the first collision terrain, while height queries support every terrain
-        # entity, kinematic ones included. Assigned after the model loads, so it covers a morph and a description.
+        # The collider only stores terrains that take part in collision, whereas height queries also run on visual-only
+        # and kinematic terrains. Assigned after the model loads, so it covers both a morph and a description.
         self._terrain_height_field = torch.as_tensor(self.terrain_hf, dtype=gs.tc_float, device=gs.device)
 
     @property

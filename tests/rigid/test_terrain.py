@@ -445,3 +445,80 @@ def test_multicontact_sphere_vs_terrain(show_viewer, tol):
 
     vel_final = sphere.get_dofs_velocity()
     assert_allclose(vel_final, 0.0, tol=1e-5)
+
+
+@pytest.mark.required
+def test_multiple_heightfields_collision(show_viewer):
+    BOX_SIZE = (0.2, 0.2, 0.2)
+
+    height_field_stepped = np.full((9, 11), 3.0)
+    height_field_stepped[6:, :] = 6.0
+
+    scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            debug=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(3.5, -7.5, 6.5),
+            camera_lookat=(3.5, 3.0, 0.2),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Terrain(
+            pos=(4.0, 5.0, 0.0),
+            collision=False,
+            height_field=np.zeros((4, 4)),
+        ),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Terrain(
+            horizontal_scale=0.5,
+            height_field=np.zeros((5, 5)),
+        ),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Terrain(
+            pos=(4.0, 0.0, 0.0),
+            horizontal_scale=0.4,
+            vertical_scale=0.1,
+            height_field=height_field_stepped,
+        ),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Terrain(
+            pos=(0.0, 5.0, 0.0),
+            horizontal_scale=0.3,
+            vertical_scale=0.05,
+            height_field=np.full((7, 7), -5.0),
+        ),
+    )
+    box_first = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(1.0, 1.0, 0.15),
+            size=BOX_SIZE,
+        ),
+    )
+    box_second = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=BOX_SIZE,
+        ),
+    )
+    box_third = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.9, 5.9, -0.10),
+            size=BOX_SIZE,
+        ),
+    )
+    scene.build(n_envs=2)
+
+    box_second.set_pos(((4.8, 2.8, 0.45), (6.8, 2.8, 0.75)))
+    for _ in range(50):
+        scene.step()
+
+    assert_allclose(box_first.get_pos(), ((1.0, 1.0, 0.10), (1.0, 1.0, 0.10)), atol=5e-4)
+    assert_allclose(box_second.get_pos(), ((4.8, 2.8, 0.40), (6.8, 2.8, 0.70)), atol=5e-4)
+    assert_allclose(box_third.get_pos(), ((0.9, 5.9, -0.15), (0.9, 5.9, -0.15)), atol=5e-4)
+    assert_allclose(box_first.get_vel(), 0.0, atol=2e-2)
+    assert_allclose(box_second.get_vel(), 0.0, atol=2e-2)
+    assert_allclose(box_third.get_vel(), 0.0, atol=2e-2)

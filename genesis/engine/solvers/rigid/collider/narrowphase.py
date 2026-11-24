@@ -1562,24 +1562,25 @@ def func_contact_mpr_terrain(
         else:
             xyz_max_min[i_dir] = extent
 
+    i_t = collider_info.terrain_idx[i_gb]
+    terrain_xyz_maxmin = collider_info.terrain_xyz_maxmin[i_t]
     for i in qd.static(range(3)):
-        if (
-            collider_info.terrain_xyz_maxmin[i] < xyz_max_min[i + 3] - margin
-            or collider_info.terrain_xyz_maxmin[i + 3] > xyz_max_min[i] + margin
-        ):
+        if terrain_xyz_maxmin[i] < xyz_max_min[i + 3] - margin or terrain_xyz_maxmin[i + 3] > xyz_max_min[i] + margin:
             is_return = True
 
     if not is_return:
-        sh = collider_info.terrain_scale[0]
-        r_min = gs.qd_int(qd.floor((xyz_max_min[3] - collider_info.terrain_xyz_maxmin[3]) / sh))
-        r_max = gs.qd_int(qd.ceil((xyz_max_min[0] - collider_info.terrain_xyz_maxmin[3]) / sh))
-        c_min = gs.qd_int(qd.floor((xyz_max_min[4] - collider_info.terrain_xyz_maxmin[4]) / sh))
-        c_max = gs.qd_int(qd.ceil((xyz_max_min[1] - collider_info.terrain_xyz_maxmin[4]) / sh))
+        terrain_rc = collider_info.terrain_rc[i_t]
+        terrain_hf_start = collider_info.terrain_hf_start[i_t]
+        sh = collider_info.terrain_scale[i_t][0]
+        r_min = gs.qd_int(qd.floor((xyz_max_min[3] - terrain_xyz_maxmin[3]) / sh))
+        r_max = gs.qd_int(qd.ceil((xyz_max_min[0] - terrain_xyz_maxmin[3]) / sh))
+        c_min = gs.qd_int(qd.floor((xyz_max_min[4] - terrain_xyz_maxmin[4]) / sh))
+        c_max = gs.qd_int(qd.ceil((xyz_max_min[1] - terrain_xyz_maxmin[4]) / sh))
 
         r_min = qd.max(0, r_min)
         c_min = qd.max(0, c_min)
-        r_max = qd.min(collider_info.terrain_rc[0] - 1, r_max)
-        c_max = qd.min(collider_info.terrain_rc[1] - 1, c_max)
+        r_max = qd.min(terrain_rc[0] - 1, r_max)
+        c_max = qd.min(terrain_rc[1] - 1, c_max)
 
         # Row r lists its verts (r, c_min), (r + 1, c_min), (r, c_min + 1), ..., every three consecutive verts making a
         # triangle, which cuts every cell along the diagonal of the visual mesh (see genesis/utils/terrain.py)
@@ -1640,11 +1641,12 @@ def func_contact_mpr_terrain(
                         for i_p in qd.static(range(3)):
                             r_v = r + (i_v_end - 2 + i_p) % 2
                             c_v = c_min + (i_v_end - 2 + i_p) // 2
-                            x = sh * r_v + collider_info.terrain_xyz_maxmin[3]
-                            y = sh * c_v + collider_info.terrain_xyz_maxmin[4]
-                            z = collider_info.terrain_hf[r_v, c_v] + margin
+                            x = sh * r_v + terrain_xyz_maxmin[3]
+                            y = sh * c_v + terrain_xyz_maxmin[4]
+                            i_hf = terrain_hf_start + r_v * terrain_rc[1] + c_v
+                            z = collider_info.terrain_hf[i_hf] + margin
                             collider_state.prism[i_p, i_scratch] = qd.Vector(
-                                [x, y, collider_info.terrain_xyz_maxmin[5]], dt=gs.qd_float
+                                [x, y, terrain_xyz_maxmin[5]], dt=gs.qd_float
                             )
                             collider_state.prism[i_p + 3, i_scratch] = qd.Vector([x, y, z], dt=gs.qd_float)
                             if z >= xyz_max_min[5]:
@@ -4870,8 +4872,8 @@ def func_narrow_phase_any_vs_terrain(
                 i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
                 if dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.TERRAIN:
                     # The terrain is detected against the convex hull of the other geom, which would fill the cavities
-                    # of a non-convex geom
-                    if dyn_info.geoms.is_convex[i_ga]:
+                    # of a non-convex geom, and two terrains have no prism on geom A
+                    if dyn_info.geoms.is_convex[i_ga] and dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.TERRAIN:
                         i_work = qd.atomic_add(collider_state.work_queue.n_pairs[0], 1)
                         collider_state.work_queue.i_b[i_work] = i_b
                         collider_state.work_queue.i_ga[i_work] = i_ga

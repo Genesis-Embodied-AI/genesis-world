@@ -321,11 +321,11 @@ class Collider:
         else:
             options.max_contacts = min(options.max_contacts, max_candidate_contacts)
 
-        terrain_hf_shape = (1, 1)
-        for geom in self._solver.geoms:
-            if geom.type == gs.GEOM_TYPE.TERRAIN:
-                terrain_hf_shape = geom.entity.terrain_hf.shape
-                break
+        terrain_geoms = (
+            [geom for geom in self._solver.geoms if geom.type == gs.GEOM_TYPE.TERRAIN]
+            if self.collider_config.has_terrain
+            else []
+        )
 
         # Initialize [info], which stores every data that must be considered mutable from Quadrants's perspective,
         # i.e. unknown at compile time, but IMMUTABLE from Genesis scene's perspective after build.
@@ -336,8 +336,8 @@ class Collider:
                 verts=self._solver.n_verts,
                 vert_neighbors=n_vert_neighbors,
                 valid_link_pairs=n_valid_link_pairs,
-                terrain_rows=terrain_hf_shape[0],
-                terrain_cols=terrain_hf_shape[1],
+                terrains=len(terrain_geoms),
+                terrain_samples=sum([geom.entity.terrain_hf.size for geom in terrain_geoms]),
             ),
             values=dict(
                 max_possible_pairs=self._n_possible_pairs,
@@ -357,6 +357,7 @@ class Collider:
                 contact_pruning_tolerance=self._solver._options.contact_pruning_tolerance or 0.0,
                 prune_deep_penetration_ratio=self._prune_deep_penetration_ratio,
             ),
+            unused=dict(terrain=not self.collider_config.has_terrain),
         )
         self._init_collision_pair_idx(self._collision_pair_idx)
         self.collider_info.link_pair_idx.from_numpy(link_pair_idx)
@@ -378,7 +379,7 @@ class Collider:
             self.collider_info.valid_link_pairs.from_numpy(valid_link_pairs)
         self._init_verts_connectivity(vert_neighbors, vert_neighbor_start, vert_n_neighbors)
         self._init_verts_spatial_grid()
-        self._init_terrain_state()
+        self._init_terrain_state(terrain_geoms)
 
         # Initialize [state], which stores every data that are may be updated at every single simulation step
         config = self._solver.rigid_config
@@ -815,34 +816,43 @@ class Collider:
             self.collider_info.vert_neighbor_start.from_numpy(vert_neighbor_start)
             self.collider_info.vert_n_neighbors.from_numpy(vert_n_neighbors)
 
-    def _init_terrain_state(self):
-        if self.collider_config.has_terrain:
-            solver = self._solver
-            links_idx = solver.dyn_info.geoms.link_idx.to_numpy()[
-                solver.dyn_info.geoms.type.to_numpy() == gs.GEOM_TYPE.TERRAIN
-            ]
-            entity_idx = solver.dyn_info.links.entity_idx.to_numpy()[links_idx[0]]
-            if isinstance(entity_idx, np.ndarray):
-                entity_idx = entity_idx[0]
-            entity = solver._entities[entity_idx]
+    def _init_terrain_state(self, terrain_geoms):
+        if not self.collider_config.has_terrain:
+            return
 
-            rc = np.array(entity.terrain_hf.shape, dtype=gs.np_int)
-            xyz_maxmin = np.array(
-                [
-                    rc[0] * entity.terrain_scale[0],
-                    rc[1] * entity.terrain_scale[0],
-                    entity.terrain_hf.max(),
-                    0,
-                    0,
-                    entity.terrain_hf.min() - 1.0,
-                ],
-                dtype=gs.np_float,
+        n_terrains = len(terrain_geoms)
+        terrain_idx = np.full((self._solver.n_geoms,), fill_value=-1, dtype=gs.np_int)
+        terrain_hf_start = np.empty((n_terrains,), dtype=gs.np_int)
+        terrain_rc = np.empty((n_terrains, 2), dtype=gs.np_int)
+        terrain_scale = np.empty((n_terrains, 2), dtype=gs.np_float)
+        terrain_xyz_maxmin = np.empty((n_terrains, 6), dtype=gs.np_float)
+        height_fields = []
+        sample_start = 0
+        for i_t, geom in enumerate(terrain_geoms):
+            height_field = geom.entity.terrain_hf
+            scale = geom.entity.terrain_scale
+            n_rows, n_cols = height_field.shape
+            terrain_idx[geom.idx] = i_t
+            terrain_hf_start[i_t] = sample_start
+            terrain_rc[i_t] = (n_rows, n_cols)
+            terrain_scale[i_t] = scale
+            terrain_xyz_maxmin[i_t] = (
+                n_rows * scale[0],
+                n_cols * scale[0],
+                height_field.max(),
+                0.0,
+                0.0,
+                height_field.min() - 1.0,
             )
+            height_fields.append(height_field.ravel())
+            sample_start += height_field.size
 
-            self.collider_info.terrain_hf.from_numpy(entity.terrain_hf)
-            self.collider_info.terrain_rc.from_numpy(rc)
-            self.collider_info.terrain_scale.from_numpy(entity.terrain_scale)
-            self.collider_info.terrain_xyz_maxmin.from_numpy(xyz_maxmin)
+        self.collider_info.terrain_idx.from_numpy(terrain_idx)
+        self.collider_info.terrain_hf.from_numpy(np.concatenate(height_fields))
+        self.collider_info.terrain_hf_start.from_numpy(terrain_hf_start)
+        self.collider_info.terrain_rc.from_numpy(terrain_rc)
+        self.collider_info.terrain_scale.from_numpy(terrain_scale)
+        self.collider_info.terrain_xyz_maxmin.from_numpy(terrain_xyz_maxmin)
 
     def reset(self, envs_idx=None, *, cache_only: bool = True) -> None:
         if gs.use_zerocopy:
