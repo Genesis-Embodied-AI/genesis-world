@@ -2969,10 +2969,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
         return -bias[..., 2]
 
-    def get_dofs_ki(self, dofs_idx=None, envs_idx=None):
+    def get_dofs_ki(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
         if not self._options.batch_dofs_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
-        tensor = qd_to_torch(self.dyn_info.dofs.act_ki, envs_idx, dofs_idx, transpose=True, copy=True)
+        tensor = qd_to_torch(self.dyn_info.dofs.act_ki, envs_idx, dofs_idx, transpose=True, copy=copy)
         return tensor[0] if self.n_envs == 0 and self._options.batch_dofs_info else tensor
 
     def get_dofs_act_gain(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
