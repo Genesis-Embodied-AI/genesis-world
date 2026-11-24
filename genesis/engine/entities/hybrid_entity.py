@@ -1,4 +1,6 @@
+import inspect
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, Self
@@ -23,6 +25,7 @@ from genesis.utils.hybrid import (
     trimesh_to_gelmesh,
 )
 from genesis.utils.mesh import load_mesh
+from genesis.utils.warnings import warn_once
 
 from .base_entity import Entity, EntityDescription
 
@@ -72,10 +75,14 @@ class HybridEntityDescription(EntityDescription):
     muscle_groups: HybridMuscleGroupsDescription | None = None
 
     @classmethod
-    def resolve(cls, scene: "Scene", spec: "gs.entities.Hybrid", surface: Surface) -> Self:
+    def resolve(
+        cls, spec: "gs.entities.Hybrid", surface: Surface, add_part: Callable[..., Entity], scene: "Scene"
+    ) -> Self:
         """Add the rigid and the soft parts of an entity spec to the scene, and associate the soft part with the links.
 
-        'surface' is the one resolved from the spec, which the soft part takes.
+        'surface' is the one resolved from the spec, which the soft part takes. 'add_part' adds the entity spec of a
+        part to the scene and returns the entity. 'scene' is handed to an instantiation function of the hybrid material
+        that still adds its part itself, a deprecated form.
         """
         morph = spec.morph
         material = spec.material
@@ -87,7 +94,7 @@ class HybridEntityDescription(EntityDescription):
         if isinstance(morph, gs.morphs.URDF):
             # The links of a robot description couple with the soft part through the default coupling alone
             material_rigid = material_rigid.model_copy(update={"needs_coup": material.use_default_coupling})
-            part_rigid = scene.add_entity(material=material_rigid, morph=morph, surface=surface_rigid)
+            part_rigid = add_part(spec=gs.entities.Rigid(morph=morph, material=material_rigid, surface=surface_rigid))
 
             # get rigid part in world coords
             augment_link_world_coords(part_rigid)
@@ -96,8 +103,10 @@ class HybridEntityDescription(EntityDescription):
             func_instantiate_soft_from_rigid = (
                 material.func_instantiate_soft_from_rigid or default_func_instantiate_soft_from_rigid
             )
-            part_soft = func_instantiate_soft_from_rigid(
-                scene=scene,
+            part_soft = instantiate_part(
+                func_instantiate_soft_from_rigid,
+                add_part,
+                scene,
                 part_rigid=part_rigid,
                 material_soft=material_soft,
                 material_hybrid=material,
@@ -106,7 +115,7 @@ class HybridEntityDescription(EntityDescription):
 
         elif isinstance(morph, gs.morphs.Mesh):
             # instantiate soft part
-            part_soft = scene.add_entity(material=material_soft, morph=morph, surface=surface)
+            part_soft = add_part(spec=gs.entities.MPM(morph=morph, material=material_soft, surface=surface))
 
             # load mesh in the same way as the soft entity
             mesh = load_mesh(morph.file)
@@ -115,8 +124,10 @@ class HybridEntityDescription(EntityDescription):
             func_instantiate_rigid_from_soft = (
                 material.func_instantiate_rigid_from_soft or default_func_instantiate_rigid_from_soft
             )
-            part_rigid = func_instantiate_rigid_from_soft(
-                scene=scene,
+            part_rigid = instantiate_part(
+                func_instantiate_rigid_from_soft,
+                add_part,
+                scene,
                 mesh=mesh,
                 morph=morph,
                 material_rigid=material_rigid,
@@ -164,16 +175,22 @@ class HybridEntity(Entity):
     idx : int
         The index of the entity within the scene.
     scene : genesis.Scene
-        The simulation scene where the entity is added, which holds its two parts already.
+        The simulation scene where the entity is added.
     desc : HybridEntityDescription
         The description the entity is created from, naming its parts and associating them.
+    part_rigid : RigidEntity
+        The rigid part, an entity of the scene the description names.
+    part_soft : MPMEntity
+        The soft part, an entity of the scene the description names.
     """
 
-    def __init__(self, idx: int, scene: "Scene", desc: HybridEntityDescription) -> None:
+    def __init__(
+        self, idx: int, scene: "Scene", desc: HybridEntityDescription, part_rigid: Entity, part_soft: Entity
+    ) -> None:
         super().__init__(idx, scene, None, desc)
 
-        self._part_rigid = scene.get_entity(desc.part_rigid_name)
-        self._part_soft = scene.get_entity(desc.part_soft_name)
+        self._part_rigid = part_rigid
+        self._part_soft = part_soft
         if not isinstance(self._part_soft.material, gs.materials.MPM.Base):
             gs.raise_exception(f"Cannot handle soft material {self._part_soft.material}")
 
@@ -455,7 +472,23 @@ def augment_link_world_coords(part_rigid):
 # ------------------------------------------------------------------------------------
 
 
-def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, material_hybrid, surface):
+def instantiate_part(func: Callable, add_part: Callable[..., Entity], scene: "Scene", **kwargs) -> Entity:
+    """Add the part of a hybrid entity that an instantiation function of the hybrid material states.
+
+    The function returns the entity spec of the part, which 'add_part' adds. A function taking a 'scene' argument
+    adds its part to the scene itself and returns the entity, a deprecated form.
+    """
+    if "scene" in inspect.signature(func).parameters:
+        warn_once(
+            func,
+            f"The hybrid instantiation function '{func.__name__}' adds its part to the scene it is given, which is "
+            "deprecated. Return the entity spec of the part instead, and drop its 'scene' argument.",
+        )
+        return func(scene=scene, **kwargs)
+    return add_part(spec=func(**kwargs))
+
+
+def default_func_instantiate_soft_from_rigid(part_rigid, material_soft, material_hybrid, surface):
     meshes = []
     trans_local_to_global = []
     euler_local_to_global = []
@@ -485,28 +518,25 @@ def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, m
         trans_local_to_global.append(trans)
         euler_local_to_global.append(euler)
 
-    part_soft = scene.add_entity(
-        material=material_soft,
+    return gs.entities.MPM(
         morph=gs.morphs.MeshSet(
             files=meshes,
             poss=trans_local_to_global,
             eulers=euler_local_to_global,
             scale=1,  # scale is already handled in geom.init_verts
         ),
+        material=material_soft,
         surface=surface,
     )
 
-    return part_soft
-
 
 def default_func_instantiate_rigid_from_soft(
-    scene: "Scene",
     mesh: trimesh.Trimesh,
     morph: gs.morphs.Mesh,
     material_rigid: Material,
     material_hybrid: gs.materials.Hybrid,
     surface: Surface,
-) -> Entity:
+) -> "gs.entities.Rigid":
     # skeletonization
     gelmesh = trimesh_to_gelmesh(mesh)
     graph_gel = skeletonization(gelmesh)
@@ -533,9 +563,7 @@ def default_func_instantiate_rigid_from_soft(
     quat_rigid = morph.quat
     scale_rigid = morph.scale
     morph_rigid = gs.morphs.URDF(file=urdf, pos=pos_rigid, quat=quat_rigid, scale=scale_rigid, fixed=morph.fixed)
-    part_rigid = scene.add_entity(material=material_rigid, morph=morph_rigid, surface=surface)
-
-    return part_rigid
+    return gs.entities.Rigid(morph=morph_rigid, material=material_rigid, surface=surface)
 
 
 def default_func_instantiate_rigid_soft_association_from_rigid(part_rigid, part_soft):

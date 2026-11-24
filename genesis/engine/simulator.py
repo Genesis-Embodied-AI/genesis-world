@@ -181,10 +181,12 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
         if isinstance(spec, gs.entities.Hybrid):
             # A hybrid entity adds its parts to the scene as entities of their own, before itself
             if desc is None:
-                desc = HybridEntityDescription.resolve(self.scene, spec, surface)
+                desc = HybridEntityDescription.resolve(spec, surface, self.scene.add_entity, self.scene)
             elif type(desc) is not HybridEntityDescription:
                 gs.raise_exception(f"A hybrid entity cannot be described by {type(desc).__name__}.")
-            entity = HybridEntity(self.n_entities, self.scene, desc)
+            part_rigid = self.get_entity(desc.part_rigid_name)
+            part_soft = self.get_entity(desc.part_soft_name)
+            entity = HybridEntity(self.n_entities, self.scene, desc, part_rigid, part_soft)
         else:
             solver = next(
                 (
