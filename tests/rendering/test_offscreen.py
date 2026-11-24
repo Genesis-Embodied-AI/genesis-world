@@ -429,6 +429,21 @@ def test_dynamic_texture_side_by_side_envs(n_envs, translucent_box_obj, show_vie
         split_envs=False,
         show_viewer=show_viewer,
     )
+    # The black and white boxes beside the deformable entities are the references of the colors they show. They come
+    # before the deformable entities, whose segmentation indices follow those of every rigid link.
+    box_black, box_white = (
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(box_x, 0.0, 0.3),
+                size=(0.4, 0.4, 0.4),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Rough(
+                color=box_color,
+            ),
+        )
+        for box_x, box_color in ((4.5, (0.0, 0.0, 0.0)), (6.5, (1.0, 1.0, 1.0)))
+    )
     # The deformable entities show a dynamic texture too, out of the view of the first camera
     deformable_surface = gs.surfaces.Emission(
         emissive_texture=gs.textures.DynamicTexture(
@@ -510,11 +525,10 @@ def test_dynamic_texture_side_by_side_envs(n_envs, translucent_box_obj, show_vie
     block.set_texture(variant=[1, 0][:n_envs_])
     cube.set_texture(variant=[1, 0][:n_envs_])
     _, _, segmentation, _ = deformable_camera.render(rgb=False, segmentation=True)
-    deformables_seg_idx = np.array([block.idx + 1, cube.idx + 1])
-    deformable_masks = (segmentation == deformables_seg_idx[:, None, None, None]) & envs_rows_mask[:, :, None]
-    # The faces of the deformable entities in view are lit as the planes are, whose black and white references hold
-    deformable_colors = get_masks_mean_color(deformable_camera.render(rgb=True)[0], deformable_masks)
-    assert_equal(get_shown_color(deformable_colors, colors[:, 3], colors[:, 4]), [BLUE, RED][:n_envs_])
+    boxes_seg_idx = np.array([entity.idx + 1 for entity in (block, cube, box_black, box_white)])
+    boxes_masks = (segmentation == boxes_seg_idx[:, None, None, None]) & envs_rows_mask[:, :, None]
+    boxes_colors = get_masks_mean_color(deformable_camera.render(rgb=True)[0], boxes_masks)
+    assert_equal(get_shown_color(boxes_colors[:2], boxes_colors[2], boxes_colors[3]), [BLUE, RED][:n_envs_])
     assert_equal(block.vgeoms[0].get_texture()[..., 0, 0, :], [(*BLUE, 1.0), (*RED, 1.0)][:n_envs_])
     assert_equal(block.get_texture()[..., 0, 0, :], [(*BLUE, 1.0), (*RED, 1.0)][:n_envs_])
 
