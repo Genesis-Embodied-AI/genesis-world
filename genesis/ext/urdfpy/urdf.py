@@ -1260,12 +1260,12 @@ class Inertial(URDFType):
         self.origin = origin
 
     @property
-    def mass(self) -> float | None:
+    def mass(self):
         """float : The mass of the link in kilograms."""
         return self._mass
 
     @mass.setter
-    def mass(self, value: float | None) -> None:
+    def mass(self, value):
         self._mass = float(value) if value is not None else None
 
     @property
@@ -1290,7 +1290,7 @@ class Inertial(URDFType):
         self._origin = configure_origin(value, default=False)
 
     @classmethod
-    def _from_xml(cls, node: ET.Element, root: ET.Element, path: str) -> "Inertial":
+    def _from_xml(cls, node, root, path):
         origin = parse_origin(node, default=False)
         mass = float(n.attrib["value"]) if (n := node.find("mass")) is not None else None
         n = node.find("inertia")
@@ -1303,7 +1303,7 @@ class Inertial(URDFType):
         inertia = np.array([[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]], dtype=np.float64)
         return Inertial(mass=mass, inertia=inertia, origin=origin)
 
-    def _to_xml(self, parent: ET.Element) -> ET.Element:
+    def _to_xml(self, parent):
         node = ET.Element("inertial")
         if self.origin is not None:
             node.append(unparse_origin(self.origin))
@@ -2628,7 +2628,7 @@ class Link(URDFType):
             self._collision_mesh = meshes[0] + meshes[1:]
         return self._collision_mesh
 
-    def copy(self, prefix: str = "", scale: float | np.ndarray | None = None, collision_only: bool = False) -> "Link":
+    def copy(self, prefix="", scale=None, collision_only=False):
         """Create a deep copy of the link.
 
         Parameters
