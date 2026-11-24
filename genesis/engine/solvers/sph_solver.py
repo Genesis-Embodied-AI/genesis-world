@@ -10,7 +10,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import SPHEntity
-from genesis.engine.entities.particle_entity import ParticleEntityDescription
+from genesis.engine.entities.sph_entity import SPHEntityDescription
 from genesis.engine.materials import SPH
 from genesis.engine.state_change import StateChange
 from genesis.options.solvers import SPHOptions
@@ -363,13 +363,15 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
         idx: int,
         surface: Surface | None,
         spec: "gs.entities.SPH | None",
-        desc: ParticleEntityDescription | None = None,
+        desc: SPHEntityDescription | None = None,
     ) -> SPHEntity:
         """Create an entity from its description, resolved from the entity spec and its surface when none is given."""
         if desc is None:
-            desc = ParticleEntityDescription.resolve(
+            desc = SPHEntityDescription.resolve(
                 spec, surface, self._particle_size, self.boundary_lower, self.boundary_upper
             )
+        elif type(desc) is not SPHEntityDescription:
+            gs.raise_exception(f"{type(self).__name__} simulates no entity described by {type(desc).__name__}.")
         entity = SPHEntity(
             scene=self._sim.scene,
             solver=self,

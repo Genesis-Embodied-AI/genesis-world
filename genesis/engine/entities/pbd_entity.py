@@ -20,8 +20,12 @@ if TYPE_CHECKING:
     from genesis.engine.solvers.pbd_solver import PBDSolver
 
 
+class PBDEntityDescription(ParticleEntityDescription):
+    """Describe one PBD liquid or particle entity as its resolution left it: its sampled particles."""
+
+
 @dataclass(kw_only=True)
-class PBDMeshDescription(ParticleEntityDescription):
+class PBDMeshDescription(PBDEntityDescription):
     """Describe one PBD entity simulated on a remeshed mesh as its resolution left it: the mesh and its edges.
 
     The rest lengths of the edges are taken on the particles, so an entity created from this remeshes nothing and reads
@@ -422,7 +426,7 @@ class PBDParticleEntity(PBDBaseEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    desc : ParticleEntityDescription
+    desc : PBDEntityDescription
         The description the entity is created from, holding its spec, its surface and its particles.
     particle_size : float
         Target size for particle spacing.
@@ -432,13 +436,13 @@ class PBDParticleEntity(PBDBaseEntity):
         Starting index of this entity's particles in the global particle buffer.
     """
 
-    _description_cls = ParticleEntityDescription
+    _description_cls = PBDEntityDescription
 
     def __init__(
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        desc: ParticleEntityDescription,
+        desc: PBDEntityDescription,
         particle_size: float,
         idx: int,
         particle_start: int,
@@ -477,7 +481,7 @@ class PBDFreeParticleEntity(PBDBaseEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    desc : ParticleEntityDescription
+    desc : PBDEntityDescription
         The description the entity is created from, holding its spec, its surface and its particles.
     particle_size : float
         Target size for particle spacing.
@@ -487,13 +491,13 @@ class PBDFreeParticleEntity(PBDBaseEntity):
         Starting index of this entity's particles in the global particle buffer.
     """
 
-    _description_cls = ParticleEntityDescription
+    _description_cls = PBDEntityDescription
 
     def __init__(
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        desc: ParticleEntityDescription,
+        desc: PBDEntityDescription,
         particle_size: float,
         idx: int,
         particle_start: int,

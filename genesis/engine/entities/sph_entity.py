@@ -9,6 +9,10 @@ if TYPE_CHECKING:
     from genesis.engine.solvers.sph_solver import SPHSolver
 
 
+class SPHEntityDescription(ParticleEntityDescription):
+    """Describe one SPH entity as its resolution left it: its sampled particles."""
+
+
 @qd.data_oriented
 class SPHEntity(ParticleEntity):
     """
@@ -20,7 +24,7 @@ class SPHEntity(ParticleEntity):
         The simulation scene.
     solver : Solver
         The solver handling the simulation logic.
-    desc : ParticleEntityDescription
+    desc : SPHEntityDescription
         The description the entity is created from, holding its spec, its surface and its sampled particles.
     particle_size : float
         The size of each particle.
@@ -34,7 +38,7 @@ class SPHEntity(ParticleEntity):
         self,
         scene: "Scene",
         solver: "SPHSolver",
-        desc: ParticleEntityDescription,
+        desc: SPHEntityDescription,
         particle_size: float,
         idx: int,
         particle_start: int,

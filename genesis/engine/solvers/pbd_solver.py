@@ -11,8 +11,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
-from genesis.engine.entities.particle_entity import ParticleEntityDescription
-from genesis.engine.entities.pbd_entity import PBDMeshDescription, PBDTetEntity
+from genesis.engine.entities.pbd_entity import PBDEntityDescription, PBDMeshDescription, PBDTetEntity
 from genesis.engine.materials import PBD
 from genesis.engine.render_context import CONSTRAINT_COLOR, ArrayRef, Points, ScopedRenderContext, Shape
 from genesis.engine.state_change import StateChange, mutates
@@ -362,9 +361,9 @@ class PBDSolver(ParticleSolver):
         idx: int,
         surface: Surface | None,
         spec: "gs.entities.PBD | None",
-        desc: ParticleEntityDescription | None = None,
+        desc: PBDEntityDescription | None = None,
     ) -> PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity:
-        """Create an entity from its description, resolving one from the entity spec and its surface if none is given.
+        """Create an entity from its description, resolved from the entity spec and its surface when none is given.
 
         The material decides the kind of entity ('_entity_classes'), and the kind the class of its description: a cloth
         or an elastic entity is described by its remeshed mesh, a liquid or a particle entity by its sampled particles.
@@ -375,7 +374,7 @@ class PBDSolver(ParticleSolver):
             if issubclass(entity_cls._description_cls, PBDMeshDescription):
                 desc = entity_cls._description_cls.resolve(spec, surface, self._particle_size)
             else:
-                desc = ParticleEntityDescription.resolve(
+                desc = PBDEntityDescription.resolve(
                     spec, surface, self._particle_size, self.boundary_lower, self.boundary_upper
                 )
         elif type(desc) is not entity_cls._description_cls:

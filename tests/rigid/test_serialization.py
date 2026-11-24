@@ -734,6 +734,52 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
     with pytest.raises(gs.GenesisException, match="holds a str where a float was declared"):
         gs.Scene.load(exported)
 
+    # An entity stands for its solver by the class of its description, so a description another solver writes is
+    # rejected by the solver of its spec, even where the fields of both classes agree.
+    deformable_scene = gs.Scene()
+    for i_e, material in enumerate(
+        (gs.materials.SPH.Liquid(), gs.materials.MPM.Elastic(), gs.materials.PBD.Liquid(), gs.materials.FEM.Elastic())
+    ):
+        deformable_scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.3 * i_e, 0.0, 0.2),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=material,
+        )
+    deformable_scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file="meshes/duck.obj",
+            scale=0.1,
+            pos=(-0.3, 0.0, 0.3),
+        ),
+        material=gs.materials.Hybrid(
+            material_rigid=gs.materials.Rigid(),
+            material_soft=gs.materials.MPM.Muscle(),
+        ),
+    )
+    exported = tmp_path / f"deformable{SCENE_FORMAT}"
+    deformable_scene.export(exported)
+    with zipfile.ZipFile(exported) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    original = json.loads(members[MANIFEST_NAME])
+    for desc_cls_name, swapped_cls_name, refusal in (
+        ("SPHEntityDescription", "MPMEntityDescription", "SPHSolver simulates no entity described by MPM"),
+        ("MPMEntityDescription", "SPHEntityDescription", "MPMSolver simulates no entity described by SPH"),
+        ("PBDEntityDescription", "SPHEntityDescription", "PBDSolver simulates no Liquid entity described by SPH"),
+        ("FEMEntityDescription", "RigidEntityDescription", "FEMSolver simulates no entity described by Rigid"),
+        ("HybridEntityDescription", "RigidEntityDescription", "hybrid entity cannot be described by Rigid"),
+    ):
+        manifest = deepcopy(original)
+        entities = manifest["held"]["scene"]["entities"]
+        next(entity for entity in entities if entity["@"] == desc_cls_name)["@"] = swapped_cls_name
+        members[MANIFEST_NAME] = json.dumps(manifest).encode()
+        with zipfile.ZipFile(exported, "w") as archive:
+            for name, content in members.items():
+                archive.writestr(name, content)
+        with pytest.raises(gs.GenesisException, match=refusal):
+            gs.Scene.load(exported)
+
 
 @pytest.mark.required
 def test_export_rejects_unsupported_physics(checkpoint_scene, tmp_path):

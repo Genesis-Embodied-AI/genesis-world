@@ -182,6 +182,8 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
             # A hybrid entity adds its parts to the scene as entities of their own, before itself
             if desc is None:
                 desc = HybridEntityDescription.resolve(self.scene, spec, surface)
+            elif type(desc) is not HybridEntityDescription:
+                gs.raise_exception(f"A hybrid entity cannot be described by {type(desc).__name__}.")
             entity = HybridEntity(self.n_entities, self.scene, desc)
         else:
             solver = next(
