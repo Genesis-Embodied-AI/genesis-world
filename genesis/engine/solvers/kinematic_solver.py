@@ -1293,7 +1293,10 @@ class KinematicSolver(Solver):
         # rotation rows, so a smaller one converges no faster and only loses stability near singular configurations.
         # See PR genesis-world#3857 for measurements and details.
         if damping < 1e-5:
-            gs.raise_exception(f"'damping' must be at least 1e-5, got {damping}.")
+            gs.raise_exception(
+                f"'damping' must be at least 1e-5, got {damping}. A smaller damping converges no faster and makes the "
+                "steps unstable near singular configurations."
+            )
 
         # The scratch of inverse kinematics grows with RigidOptions.IK_max_targets, so it is allocated by the first solve
         # and a scene that never solves inverse kinematics allocates none of it
