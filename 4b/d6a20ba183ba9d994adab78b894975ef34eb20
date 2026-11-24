@@ -1,0 +1,19 @@
+genesis/utils/usd/usd_geometry.py
+  s_2ab0d54cbae1cb::t_31b6cfeb0fd129 372,375,404-405
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4bd6a20ba183ba9d994adab78b894975ef34eb20",
+  "prompts": {},
+  "sessions": {
+    "s_2ab0d54cbae1cb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8909e35b-e16b-4c8a-8b7f-82a1d10a48d8",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
