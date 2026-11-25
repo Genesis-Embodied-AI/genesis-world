@@ -1,4 +1,5 @@
 import functools
+import logging
 import threading
 import weakref
 from collections.abc import Callable
@@ -11,6 +12,8 @@ from genesis.utils.misc import BuildableMixin
 
 if TYPE_CHECKING:
     from .base_recorder import Recorder, RecorderOptions
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RecorderManager(BuildableMixin):
@@ -90,7 +93,12 @@ class RecorderManager(BuildableMixin):
             def stop_at_exit(manager_ref):
                 manager = manager_ref()
                 if manager is not None and manager._is_built and manager._is_recording:
-                    manager.stop()
+                    try:
+                        manager.stop()
+                    except Exception as error:
+                        # 'threading' runs its exit hooks without catching anything, so a failure raised here would
+                        # skip the hooks left and the join of the threads of the run
+                        (gs.logger or LOGGER).error(f"[DataRecorder] Stopping the recordings at exit failed: {error}")
 
             threading._register_atexit(functools.partial(stop_at_exit, weakref.ref(self)))
         except AttributeError:
