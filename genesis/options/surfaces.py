@@ -312,12 +312,17 @@ _RGBA_CACHE = OwnedCache()
 
 
 def _get_texture_mean_value(texture: Texture | None, default: float) -> float:
+    # The rasterizer draws the first texture of a batch, as it does for the color (see '_make_rgba')
+    if isinstance(texture, BatchTexture):
+        texture = texture.textures[0]
     # A texture holding one value per point, such as a roughness map, holds it in its first channel
     if isinstance(texture, ColorTexture):
         return texture.color[0]
     if isinstance(texture, ImageTexture):
         # The mean color of a single-channel image is a scalar
         return float(np.atleast_1d(texture.mean_color)[0] * texture.image_color[0])
+    # A surface refuses a dynamic texture for its roughness and metallic maps (see '_check_dynamic_textures')
+    assert texture is None
     return default
 
 

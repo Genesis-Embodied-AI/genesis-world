@@ -539,18 +539,27 @@ def test_dynamic_texture_side_by_side_envs(n_envs, translucent_box_obj, show_vie
 def test_surface_metallic_roughness(glossy_quad_obj, show_viewer):
     GRAY = (0.5, 0.5, 0.5)
 
-    # A dielectric, a smooth metal and a rough metal of the same gray, beside an asset drawn as a metal whose material
-    # sets its shininess
+    # A dielectric, a smooth metal, a rough metal and a metal whose roughness is a batch texture, all of the same gray,
+    # beside an asset drawn as a metal whose material sets its shininess. The dielectric and the smooth metal share one
+    # image texture.
+    gray_texture = gs.textures.ImageTexture(
+        image_array=np.full((4, 4, 3), 128, dtype=np.uint8),
+    )
     scene, planes, camera = build_planes_scene(
         (
             gs.surfaces.Rough(
-                color=GRAY,
+                diffuse_texture=gray_texture,
             ),
             gs.surfaces.Iron(
-                color=GRAY,
+                diffuse_texture=gray_texture,
             ),
             gs.surfaces.Default(
                 color=GRAY,
+                metallic=1.0,
+            ),
+            gs.surfaces.Default(
+                color=GRAY,
+                roughness_texture=gs.textures.BatchTexture.from_colors(((0.1,), (1.0,))),
                 metallic=1.0,
             ),
         ),
@@ -563,7 +572,7 @@ def test_surface_metallic_roughness(glossy_quad_obj, show_viewer):
     quad = scene.add_entity(
         morph=gs.morphs.Mesh(
             file=glossy_quad_obj,
-            pos=(2.5, 0.0, 0.0),
+            pos=(3.25, 0.0, 0.0),
             fixed=True,
         ),
         surface=gs.surfaces.Default(
@@ -574,11 +583,15 @@ def test_surface_metallic_roughness(glossy_quad_obj, show_viewer):
 
     rgb, _, segmentation, _ = camera.render(rgb=True, segmentation=True)
     masks = segmentation == np.array([entity.idx + 1 for entity in (*planes, quad)])[:, None, None]
-    color_dielectric, color_metal_smooth, color_metal_rough, color_quad = get_masks_mean_color(rgb, masks)
+    color_dielectric, color_metal_smooth, color_metal_rough, color_metal_batch, color_quad = get_masks_mean_color(
+        rgb, masks
+    )
     # A metal diffuses no light. A smooth one shows its base color under the ambient light alone, the highlight of the
     # light leaving the view, while a rough one scatters part of the light into the camera.
     assert_allclose(color_metal_smooth, 0.5 * 255.0, atol=1.0)
     assert (color_metal_rough > color_metal_smooth + 10.0).all() and (color_dielectric > color_metal_rough + 10.0).all()
+    # The rasterizer draws the first texture of a batch, which makes the metal smooth
+    assert_allclose(color_metal_batch, 0.5 * 255.0, atol=1.0)
     # The shininess of the asset sets the roughness of its surface, which draws it as a smooth metal
     assert_allclose(color_quad, 128.0, atol=2.0)
 
