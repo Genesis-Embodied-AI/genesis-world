@@ -727,7 +727,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
 
         Each particle is pulled toward the position it holds now, expressed in the frame of the link. A spring applies the
         force -k (x - x_t) - 2 sqrt(k m) (v - v_t) to a particle of mass m, x_t and v_t being the position and velocity
-        of its target. The scene must enable it with ``MPMOptions(enable_particle_constraints=True)``.
+        of its target. A scene disabling ``MPMOptions.enable_particle_constraints`` refuses it.
 
         Parameters
         ----------

@@ -261,7 +261,6 @@ def test_coupling_wrench_grad_matches_fd(use_implicit_solver, precision, show_vi
             lower_bound=(-0.5, -0.5, -0.5),
             upper_bound=(0.5, 0.5, 0.5),
             grid_density=16,
-            enable_particle_constraints=True,
         ),
         # The collisions of the FEM solver carry no gradient (see 'LegacyCoupler.is_differentiable')
         coupler_options=gs.options.LegacyCouplerOptions(
