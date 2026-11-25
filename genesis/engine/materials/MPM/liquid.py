@@ -35,7 +35,7 @@ class Liquid(Base):
     @classmethod
     def _zero_mu_if_inviscid(cls, data: dict[str, Any]) -> dict[str, Any]:
         if not data.get("viscous", False):
-            data["mu"] = 0.0
+            data = {**data, "mu": 0.0}
         return data
 
     @property
