@@ -66,10 +66,6 @@ PLANE_MAX_CELL_SIZE = 50.0
 WALL_THICKNESS_N_RAYS = 4096
 # Number of triangles per leaf of the bounding volume hierarchy of 'cast_rays'
 BVH_LEAF_SIZE = 4
-# Metallic and roughness factors the rasterizer draws the visual of a surface with, whatever its texture, so that a
-# color renders the same whether a vertex color, an image or a dynamic texture holds it.
-SURFACE_METALLIC_FACTOR = 0.2
-SURFACE_ROUGHNESS_FACTOR = 0.8
 
 
 def color_f32_to_u8(color) -> np.ndarray:
@@ -480,9 +476,10 @@ def compute_sdf_data(mesh, res):
     return sdf_data
 
 
-# Trimesh materials drawing the image textures, by texture and content of their emission, which the rasterizer shares
-# (see 'RasterizerContext.on_rigid'). A weak reference keys the texture, which never matches a later texture reusing
-# the id of a collected one, even while the release of the owned entries is disabled.
+# Trimesh materials drawing the image textures, which the rasterizer shares (see 'RasterizerContext._sync_shape_nodes'),
+# keyed by texture, then by the content of the emission and the factors of the surface for a material drawing an
+# emission. A weak reference keys the texture, which never matches a later texture reusing the id of a collected one,
+# even while the release of the owned entries is disabled.
 _TEXTURE_MATERIALS_CACHE = OwnedCache()
 
 
@@ -590,8 +587,8 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     # The rasterizer reads a factor left unset as 1.0, as glTF specifies, which renders a fully metallic material
     pbr_material = partial(
         trimesh.visual.material.PBRMaterial,
-        metallicFactor=SURFACE_METALLIC_FACTOR,
-        roughnessFactor=SURFACE_ROUGHNESS_FACTOR,
+        metallicFactor=surface.metallic_factor,
+        roughnessFactor=surface.roughness_factor,
         **emissive_kwargs,
     )
 
@@ -613,7 +610,12 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
             assert texture.image_array.dtype == np.uint8
             material = _TEXTURE_MATERIALS_CACHE.get(
                 texture,
-                (weakref.ref(texture), get_hashkey(emission) if emissive_kwargs else None),
+                (
+                    weakref.ref(texture),
+                    (get_hashkey(emission), surface.metallic_factor, surface.roughness_factor)
+                    if emissive_kwargs
+                    else None,
+                ),
                 lambda: (
                     pbr_material(
                         baseColorTexture=Image.fromarray(texture.image_array), baseColorFactor=(255, 255, 255, 255)

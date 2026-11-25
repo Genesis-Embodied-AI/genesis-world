@@ -227,6 +227,17 @@ class Surface(Options):
     def requires_uv(self) -> bool:
         return False
 
+    @property
+    def roughness_factor(self) -> float:
+        """Roughness the rasterizer draws the surface with, the mean value of its roughness texture or its default."""
+        # A surface type without a roughness texture lacks the field altogether
+        return _get_texture_mean_value(dict(self).get("roughness_texture"), self.default_roughness)
+
+    @property
+    def metallic_factor(self) -> float:
+        """Metalness the rasterizer draws the surface with, the mean value of its metallic texture or 0.0."""
+        return _get_texture_mean_value(dict(self).get("metallic_texture"), 0.0)
+
     def get_rgba(self, batch: bool = False) -> BatchTexture | Texture:
         return _make_rgba(_resolve_albedo(self.texture, self.emission), None, batch)
 
@@ -298,6 +309,16 @@ class Surface(Options):
 # loaded from one asset) share a single merged array, and a texture update swaps in a new instance, which releases the
 # entry along with the last instance holding the former content.
 _RGBA_CACHE = OwnedCache()
+
+
+def _get_texture_mean_value(texture: Texture | None, default: float) -> float:
+    # A texture holding one value per point, such as a roughness map, holds it in its first channel
+    if isinstance(texture, ColorTexture):
+        return texture.color[0]
+    if isinstance(texture, ImageTexture):
+        # The mean color of a single-channel image is a scalar
+        return float(np.atleast_1d(texture.mean_color)[0] * texture.image_color[0])
+    return default
 
 
 def _resolve_albedo(base_texture: Texture | None, emissive_texture: Texture | None) -> Texture | None:
@@ -539,6 +560,11 @@ class Metal(Surface):
     roughness_texture: Texture | None = None
     normal_texture: Texture | None = None
     emissive_texture: Texture | None = None
+
+    @property
+    def metallic_factor(self) -> float:
+        """Metalness the rasterizer draws the surface with, the full metalness of a metal."""
+        return 1.0
 
     @property
     def texture(self) -> Texture | None:

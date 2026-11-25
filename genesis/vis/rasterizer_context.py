@@ -563,6 +563,8 @@ class RasterizerContext(BuildableMixin):
                         material=materials[0] if materials else None,
                         is_marker=is_marker,
                         views=0,
+                        metallic_factor=0.0 if geometry.surface is None else geometry.surface.metallic_factor,
+                        roughness_factor=1.0 if geometry.surface is None else geometry.surface.roughness_factor,
                     )
                     vis_materials += [
                         (key, mesh_node.primitives[0].material)
@@ -663,6 +665,8 @@ class RasterizerContext(BuildableMixin):
                         envs=env_i,
                         is_marker=is_marker,
                         views=views,
+                        metallic_factor=0.0 if shape.surface is None else shape.surface.metallic_factor,
+                        roughness_factor=1.0 if shape.surface is None else shape.surface.roughness_factor,
                     )
                     nodes.append(self._add_node_seg(mesh_node, seg_keys=None if is_marker else shape.seg_keys))
                 if shape.textures:
@@ -703,6 +707,8 @@ class RasterizerContext(BuildableMixin):
                         shape.surface, n_verts=len(shape_nodes.tets_mesh.vertices)
                     )
                     vels = self._read(shape.vel, shape_nodes, arrays_host)
+                metallic_factor = 0.0 if shape.surface is None else shape.surface.metallic_factor
+                roughness_factor = 1.0 if shape.surface is None else shape.surface.roughness_factor
                 for i_r, (env_i, pos) in enumerate(zip(nodes_env, poss)):
                     if sphere is None:
                         mesh_node = pyrender.Mesh.from_points(
@@ -713,10 +719,24 @@ class RasterizerContext(BuildableMixin):
                         tets_mesh.vertices = mu.transform_tets_mesh_verts(
                             tets_mesh.vertices, positions=pos, zs=vels[i_r]
                         )
-                        mesh_node = pyrender.Mesh.from_trimesh(tets_mesh, smooth=False, envs=env_i, views=views)
+                        mesh_node = pyrender.Mesh.from_trimesh(
+                            tets_mesh,
+                            smooth=False,
+                            envs=env_i,
+                            views=views,
+                            metallic_factor=metallic_factor,
+                            roughness_factor=roughness_factor,
+                        )
                     else:
                         mesh_node = pyrender.Mesh.from_trimesh(
-                            sphere, smooth=True, poses=gu.trans_to_T(pos), envs=env_i, is_marker=is_marker, views=views
+                            sphere,
+                            smooth=True,
+                            poses=gu.trans_to_T(pos),
+                            envs=env_i,
+                            is_marker=is_marker,
+                            views=views,
+                            metallic_factor=metallic_factor,
+                            roughness_factor=roughness_factor,
                         )
                     nodes.append(self._add_node_seg(mesh_node, seg_keys=None if is_marker else shape.seg_keys))
             elif shape_nodes.tets_mesh is not None:
