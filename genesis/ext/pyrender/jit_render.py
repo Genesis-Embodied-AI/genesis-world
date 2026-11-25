@@ -13,6 +13,7 @@ from .light import DirectionalLight, PointLight, SpotLight
 from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
 from .numba_gl_wrapper import GLWrapper
 from .scene import CORNER_INDICES
+from .utils import transform_box
 
 
 _DISABLE_OFFSCREEN_MARKERS = "GS_DISABLE_OFFSCREEN_MARKERS" in os.environ
@@ -291,9 +292,9 @@ class JITRenderer:
     def _set_instance_bounds(self, idx, poses):
         """Record the bounds the instances of some primitives cover in the frame of their node.
 
-        The bounds are recorded both where the instances stand and on the environment grid, where the instances of one
-        environment move by its offset and instance k of an environment-instanced primitive by the offset of
-        environment k.
+        The range of the offsets the grid pass moves the instances by is recorded as well. An instance placed in one
+        environment moves by the offset of that environment, and instance k of an environment-instanced primitive by
+        the offset of environment k.
 
         Parameters
         ----------
@@ -302,22 +303,14 @@ class JITRenderer:
         poses : np.ndarray
             The transforms of the instances of each primitive, one row per primitive.
         """
-        # The rotated box of the bare geometry (see 'Primitive.bounds')
-        rotations = poses[..., :3, :3]
-        centre = 0.5 * (self.bounds_geom[idx, 0] + self.bounds_geom[idx, 1])
-        half = 0.5 * (self.bounds_geom[idx, 1] - self.bounds_geom[idx, 0])
-        centres = np.einsum("kenj,kj->ken", rotations, centre) + poses[..., :3, 3]
-        halves = np.einsum("kenj,kj->ken", np.abs(rotations), half)
-        self.instance_bounds[idx, 0] = (centres - halves).min(axis=1)
-        self.instance_bounds[idx, 1] = (centres + halves).max(axis=1)
-        offsets = np.zeros_like(centres)
+        self.instance_bounds[idx] = transform_box(self.bounds_geom[idx], poses)
+        offsets = np.zeros((*poses.shape[:-2], 3), dtype=np.float32)
         is_env_placed = self.env_row[idx] >= 0
         offsets[is_env_placed] = self.envs_offset[self.env_row[idx][is_env_placed], np.newaxis]
         if self.is_env_instanced[idx].any():
             offsets[self.is_env_instanced[idx]] = self.envs_offset
-        centres = centres + offsets
-        self.instance_bounds_grid[idx, 0] = (centres - halves).min(axis=1)
-        self.instance_bounds_grid[idx, 1] = (centres + halves).max(axis=1)
+        self.grid_offset_bounds[idx, 0] = offsets.min(axis=1)
+        self.grid_offset_bounds[idx, 1] = offsets.max(axis=1)
 
     def update(self, scene):
         if scene.meshes_updated:
@@ -338,11 +331,15 @@ class JITRenderer:
             # Instances move with the simulation, so where they place their primitive has to be refreshed as well
             self._update_instances()
         if self._scene_revision != scene.revision:
-            for is_grid, bounds in ((False, self.instance_bounds), (True, self.instance_bounds_grid)):
-                corners = bounds.reshape((-1, 6))[:, CORNER_INDICES]
-                self.corners[is_grid] = (
-                    np.einsum("nij,ncj->nci", self.pose[:, :3, :3], corners) + self.pose[:, np.newaxis, :3, 3]
-                )
+            corners = self.instance_bounds.reshape((-1, 6))[:, CORNER_INDICES]
+            corners = np.einsum("nij,ncj->nci", self.pose[:, :3, :3], corners) + self.pose[:, np.newaxis, :3, 3]
+            self.corners[False] = corners
+            # The grid pass moves an instance by its offset after the node pose (see 'mesh.vert'), so its bounds widen
+            # the world bounds by the range of the offsets
+            grid_bounds_min = corners.min(axis=1) + self.grid_offset_bounds[:, 0]
+            grid_bounds_max = corners.max(axis=1) + self.grid_offset_bounds[:, 1]
+            grid_bounds = np.stack((grid_bounds_min, grid_bounds_max), axis=1)
+            self.corners[True] = grid_bounds.reshape((-1, 6))[:, CORNER_INDICES]
             # The scene bounds as 'Scene.bounds' defines them, over every primitive at once. A floor counts by its
             # centre alone. A marker counts for nothing, so a scene of markers keeps the bounds of 'Scene.bounds'.
             is_bounded = self.render_flags[:, 6] == 0
@@ -589,11 +586,12 @@ class JITRenderer:
         # Centre of the bare geometry, which the instance transforms are applied to whenever they move
         self.centroid_geom = np.zeros((n, 3), np.float32)
         self.is_instance_placed = np.zeros(n, np.bool_)
-        # Per primitive: the bounds of the bare geometry, the bounds its instances cover, and whether it is a floor,
-        # which the scene bounds count by its centre alone (see 'update')
+        # Per primitive: the bounds of the bare geometry, the bounds its instances cover, the range of the offsets the
+        # grid pass moves them by, and whether it is a floor. The scene bounds count a floor by its centre alone
+        # (see 'update').
         self.bounds_geom = np.zeros((n, 2, 3), np.float32)
         self.instance_bounds = np.zeros((n, 2, 3), np.float32)
-        self.instance_bounds_grid = np.zeros((n, 2, 3), np.float32)
+        self.grid_offset_bounds = np.zeros((n, 2, 3), np.float32)
         self.is_floor = np.zeros(n, np.bool_)
         self.is_env_instanced = np.zeros(n, np.bool_)
         # Index among the rendered environments of the one a primitive is placed in, -1 for none (see Primitive.env_idx)
@@ -602,7 +600,7 @@ class JITRenderer:
         # grid pass (True), None until a bounded primitive exists (see 'update')
         self.scene_bounds = {False: None, True: None}
         # World corners of the bounds of each primitive, for a pass rendering one environment at a time (False) and for
-        # the grid pass (True), which spreads the environment-instanced primitives by their offsets (see 'update')
+        # the grid pass (True) (see 'update')
         self.corners = {False: None, True: None}
         self._primitive_index = {primitive: i for i, primitive in enumerate(primitive_list)}
 

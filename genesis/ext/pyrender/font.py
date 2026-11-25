@@ -66,10 +66,10 @@ class Font(object):
         self.font_pt = int(font_pt)
         self._face = freetype.Face(font_file)
         self._face.set_pixel_sizes(0, font_pt)
-        # The glyphs of the 128 ASCII characters are packed side by side into one texture, so that a string is drawn
-        # in a single call whatever its length. Each glyph is bottom-aligned in the atlas, which the texture flips
-        # upright (see 'Texture'), so that the bottom of a glyph lies at v = 0. A blank column separates two glyphs,
-        # which keeps linear filtering within each glyph.
+        # The glyphs of the 128 ASCII characters are packed into one texture, so that a string is drawn in a single
+        # call whatever its length. Each glyph takes one cell of a grid of 16 columns, which keeps the texture small
+        # enough for OpenGL at any font size. A glyph is framed by a copy of its own border, so that linear filtering
+        # past its edge reads the edge, as a texture of its own clamped to its edge would.
         bitmaps = []
         self._glyph_size = np.zeros((128, 2), dtype=np.int32)
         self._glyph_bearing = np.zeros((128, 2), dtype=np.int32)
@@ -100,17 +100,23 @@ class Font(object):
             self._glyph_size[i] = (bitmap.width, bitmap.rows)
             self._glyph_bearing[i] = (face.glyph.bitmap_left, face.glyph.bitmap_top)
             self._glyph_advance[i] = face.glyph.advance.x >> 6
-        atlas_height = max(max(bitmap.shape[0] for bitmap in bitmaps), 1)
-        atlas_width = sum(bitmap.shape[1] + 1 for bitmap in bitmaps)
+        n_columns = 16
+        cell_height = max(bitmap.shape[0] for bitmap in bitmaps) + 2
+        cell_width = max(bitmap.shape[1] for bitmap in bitmaps) + 2
+        atlas_height = (len(bitmaps) // n_columns) * cell_height
+        atlas_width = n_columns * cell_width
         atlas = np.zeros((atlas_height, atlas_width), dtype=np.float32)
-        # The texture coordinates of each glyph in the atlas: left, bottom, right and top
+        # The texture coordinates of each glyph in the atlas: left, bottom, right and top. The texture flips the atlas
+        # upright (see 'Texture'), so that its row r lies at v = 1 - r / atlas_height.
         self._glyph_uv = np.zeros((128, 4), dtype=np.float32)
-        x = 0
         for i, bitmap in enumerate(bitmaps):
             rows, width = bitmap.shape
-            atlas[atlas_height - rows :, x : x + width] = bitmap
-            self._glyph_uv[i] = (x / atlas_width, 0.0, (x + width) / atlas_width, rows / atlas_height)
-            x += width + 1
+            top = (i // n_columns) * cell_height + 1
+            left = (i % n_columns) * cell_width + 1
+            if bitmap.size:
+                atlas[top - 1 : top + rows + 1, left - 1 : left + width + 1] = np.pad(bitmap, 1, mode="edge")
+            bottom_v = 1.0 - (top + rows) / atlas_height
+            self._glyph_uv[i] = (left / atlas_width, bottom_v, (left + width) / atlas_width, 1.0 - top / atlas_height)
         filter_mode = GL_NEAREST if "PYTEST_VERSION" in os.environ else GL_LINEAR
         sampler = Sampler(magFilter=filter_mode, minFilter=filter_mode, wrapS=GL_CLAMP_TO_EDGE, wrapT=GL_CLAMP_TO_EDGE)
         self._atlas = Texture(sampler=sampler, source=atlas, source_channels="R")

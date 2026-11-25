@@ -10,7 +10,7 @@ from OpenGL.GL import *
 
 from .constants import FLOAT_SZ, GLTF, UINT_SZ, BufFlags
 from .material import Material, MetallicRoughnessMaterial
-from .utils import format_color_array
+from .utils import format_color_array, transform_box
 
 
 @nb.jit(nopython=True, cache=True)
@@ -312,12 +312,7 @@ class Primitive(object):
             if self._bounds_0 is None:
                 self._bounds_0 = _compute_bounds(self.positions)
             if self.poses is not None:
-                # The box of the bare geometry goes through each instance transform: its centre is transformed, and
-                # its half-extents go through the absolute rotation, which bounds the rotated box.
-                rotations = self.poses[:, :3, :3]
-                centres = rotations @ self._bounds_0.mean(axis=0) + self.poses[:, :3, 3]
-                halves = np.abs(rotations) @ (0.5 * (self._bounds_0[1] - self._bounds_0[0]))
-                self._bounds = np.stack(((centres - halves).min(axis=0), (centres + halves).max(axis=0)), axis=0)
+                self._bounds = transform_box(self._bounds_0, self.poses)
             else:
                 self._bounds = self._bounds_0
         return self._bounds

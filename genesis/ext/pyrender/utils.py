@@ -113,3 +113,29 @@ def format_texture_source(texture, target_channels="RGB"):
         raise TypeError("Invalid type {} for texture".format(type(texture)))
 
     return texture
+
+
+def transform_box(box, poses):
+    """Bound an axis-aligned box once moved by each of several transforms.
+
+    The box moved by a transform is bounded by the box centred on its transformed centre, whose half-extents go through
+    the absolute value of the rotation. The bounds of all the moved boxes are then merged.
+
+    Parameters
+    ----------
+    box : np.ndarray
+        The lower and upper corners of the box, along the last but one axis.
+    poses : np.ndarray
+        The transforms, along the last but two axis, the leading axes broadcasting against those of the box.
+
+    Returns
+    -------
+    bounds : np.ndarray
+        The lower and upper corners of the box bounding every moved box, along the last but one axis.
+    """
+    centre = 0.5 * (box[..., np.newaxis, 0, :] + box[..., np.newaxis, 1, :])
+    half = 0.5 * (box[..., np.newaxis, 1, :] - box[..., np.newaxis, 0, :])
+    rotations = poses[..., :3, :3]
+    centres = np.einsum("...ij,...j->...i", rotations, centre) + poses[..., :3, 3]
+    halves = np.einsum("...ij,...j->...i", np.abs(rotations), half)
+    return np.stack(((centres - halves).min(axis=-2), (centres + halves).max(axis=-2)), axis=-2)
