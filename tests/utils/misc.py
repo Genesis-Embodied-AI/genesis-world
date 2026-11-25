@@ -30,8 +30,16 @@ def get_shown_color(colors, colors_black, colors_white):
     """Return the color shown by some rendered colors, each channel 1 when lit and 0 when dark.
 
     A channel is lit when it matches that of a white surface and dark when it matches that of a black surface, both
-    rendered under the same light, which broadcast against the colors. A channel matching neither is NaN, which matches
-    no color.
+    rendered under the same light. A channel matching neither is NaN, which matches no color.
+
+    Parameters
+    ----------
+    colors : np.ndarray
+        The rendered colors, the channels along the last axis.
+    colors_black : np.ndarray
+        The rendered color of a black surface, which broadcasts against the colors.
+    colors_white : np.ndarray
+        The rendered color of a white surface, which broadcasts against the colors.
     """
     # The specular reflection of a surface varies with the angle it is seen from, so that surfaces of the same color
     # apart from each other render with some difference.

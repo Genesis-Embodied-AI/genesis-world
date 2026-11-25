@@ -341,6 +341,8 @@ def test_dynamic_texture(base_plus_emissive_glb, translucent_box_obj, show_viewe
         colors_shown = get_shown_color(colors[:, :2], colors[:, None, 5], colors[:, None, 6])
         assert_equal(colors_shown, [[BLUE, GREEN], [RED, YELLOW]])
         assert_allclose(colors[:, 2], colors[:, 4], atol=10.0)
+        # The lamp keeps the red of its dark red base under the green emission, which lights it as much as white
+        assert (colors[:, 2, 0] > colors[:, 5, 0] + 20.0).all() and (colors[:, 2, 1] > colors[:, 6, 1] - 20.0).all()
 
     # The emissive map holds linear values: an sRGB image variant shows as its decoded value written as pixels
     lamp.set_texture(variant=1)
