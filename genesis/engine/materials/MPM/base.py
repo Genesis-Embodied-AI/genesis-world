@@ -62,6 +62,10 @@ class Base(Material["MPMEntity"]):
     # Internal solver state - does not belong in an options class, kept pending larger refactor.
     _default_Jp: float = PrivateAttr(default=1.0)
 
+    def __eq__(self, other: object) -> bool:
+        # The options alone, since the dispatch functions are bound to each instance and 'idx' is set at registration
+        return type(self) is type(other) and self.model_dump() == other.model_dump()
+
     def model_post_init(self, context: Any) -> None:
         # Resolve Lame parameters
         if self.mu is None:
