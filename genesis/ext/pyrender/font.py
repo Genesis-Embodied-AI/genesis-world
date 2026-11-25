@@ -50,16 +50,6 @@ class FontCache(object):
         self._font_cache.clear()
 
 
-class Character(object):
-    """A single character, with its texture and attributes."""
-
-    def __init__(self, texture, size, bearing, advance):
-        self.texture = texture
-        self.size = size
-        self.bearing = bearing
-        self.advance = advance
-
-
 class Font(object):
     """A font object.
 
@@ -76,11 +66,16 @@ class Font(object):
         self.font_pt = int(font_pt)
         self._face = freetype.Face(font_file)
         self._face.set_pixel_sizes(0, font_pt)
-        self._character_map = {}
-
+        # The glyphs of the 128 ASCII characters are packed side by side into one texture, so that a string is drawn
+        # in a single call whatever its length. Each glyph is bottom-aligned in the atlas, which the texture flips
+        # upright (see 'Texture'), so that the bottom of a glyph lies at v = 0. A blank column separates two glyphs, so
+        # that linear filtering never blends one into its neighbour.
+        bitmaps = []
+        self._glyph_size = np.zeros((128, 2), dtype=np.int32)
+        self._glyph_bearing = np.zeros((128, 2), dtype=np.int32)
+        self._glyph_advance = np.zeros(128, dtype=np.int32)
         for i in range(0, 128):
             face = self._face
-
             if "PYTEST_VERSION" in os.environ:
                 # Bit-exact, ugly but deterministic
                 face.load_char(
@@ -90,50 +85,35 @@ class Font(object):
                     | freetype.FT_LOAD_NO_HINTING
                     | freetype.FT_LOAD_NO_AUTOHINT,
                 )
-
                 # FreeType mono bitmaps are 1 bit per pixel, packed
                 bitmap = face.glyph.bitmap
                 buf = np.asarray(bitmap.buffer, dtype=np.uint8)
                 bits = np.unpackbits(buf).reshape(bitmap.rows, bitmap.pitch * 8)
                 src = bits[:, : bitmap.width].astype(np.float32)
-                if src.size == 1:
-                    src = np.zeros((0, 0), dtype=np.float32)
-
-                sampler = Sampler(
-                    magFilter=GL_NEAREST,
-                    minFilter=GL_NEAREST,
-                    wrapS=GL_CLAMP_TO_EDGE,
-                    wrapT=GL_CLAMP_TO_EDGE,
-                )
             else:
                 # Normal, pretty rendering
                 face.load_char(chr(i))
-
                 bitmap = face.glyph.bitmap
                 src = np.asarray(bitmap.buffer, dtype=np.float32) / 255.0
                 src = src.reshape((bitmap.rows, bitmap.width))
-
-                sampler = Sampler(
-                    magFilter=GL_LINEAR,
-                    minFilter=GL_LINEAR,
-                    wrapS=GL_CLAMP_TO_EDGE,
-                    wrapT=GL_CLAMP_TO_EDGE,
-                )
-
-            tex = Texture(
-                sampler=sampler,
-                source=src,
-                source_channels="R",
-            )
-
-            character = Character(
-                texture=tex,
-                size=np.array([bitmap.width, bitmap.rows], dtype=np.int32),
-                bearing=np.array([face.glyph.bitmap_left, face.glyph.bitmap_top], dtype=np.int32),
-                advance=face.glyph.advance.x,
-            )
-
-            self._character_map[chr(i)] = character
+            bitmaps.append(src)
+            self._glyph_size[i] = (bitmap.width, bitmap.rows)
+            self._glyph_bearing[i] = (face.glyph.bitmap_left, face.glyph.bitmap_top)
+            self._glyph_advance[i] = face.glyph.advance.x >> 6
+        atlas_height = max(max(bitmap.shape[0] for bitmap in bitmaps), 1)
+        atlas_width = sum(bitmap.shape[1] + 1 for bitmap in bitmaps)
+        atlas = np.zeros((atlas_height, atlas_width), dtype=np.float32)
+        # The texture coordinates of each glyph in the atlas: left, bottom, right and top
+        self._glyph_uv = np.zeros((128, 4), dtype=np.float32)
+        x = 0
+        for i, bitmap in enumerate(bitmaps):
+            rows, width = bitmap.shape
+            atlas[atlas_height - rows :, x : x + width] = bitmap
+            self._glyph_uv[i] = (x / atlas_width, 0.0, (x + width) / atlas_width, rows / atlas_height)
+            x += width + 1
+        filter_mode = GL_NEAREST if "PYTEST_VERSION" in os.environ else GL_LINEAR
+        sampler = Sampler(magFilter=filter_mode, minFilter=filter_mode, wrapS=GL_CLAMP_TO_EDGE, wrapT=GL_CLAMP_TO_EDGE)
+        self._atlas = Texture(sampler=sampler, source=atlas, source_channels="R")
 
         self._vbo = None
         self._vao = None
@@ -167,15 +147,11 @@ class Font(object):
         glBindVertexArray(0)
 
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
-        for c in self._character_map:
-            ch = self._character_map[c]
-            if not ch.texture._in_context():
-                ch.texture._add_to_context()
+        if not self._atlas._in_context():
+            self._atlas._add_to_context()
 
     def _remove_from_context(self):
-        for c in self._character_map:
-            ch = self._character_map[c]
-            ch.texture.delete()
+        self._atlas.delete()
         if self._vao is not None:
             glDeleteVertexArrays(1, [self._vao])
             glDeleteBuffers(1, [self._vbo])
@@ -225,13 +201,17 @@ class Font(object):
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
         self._bind()
 
+        codes = np.frombuffer(text.encode("ascii"), dtype=np.uint8)
+        if not len(codes):
+            self._unbind()
+            return
+        size = self._glyph_size[codes] * scale
+        bearing = self._glyph_bearing[codes] * scale
+        advance = self._glyph_advance[codes] * scale
+
         # Determine width and height of text relative to x, y
-        width = 0.0
-        height = 0.0
-        for c in text:
-            ch = self._character_map[c]
-            height = max(height, ch.bearing[1] * scale)
-            width += (ch.advance >> 6) * scale
+        width = advance.sum()
+        height = max(bearing[:, 1].max(), 0.0)
 
         # Determine offsets based on alignments
         xoff = 0
@@ -260,38 +240,27 @@ class Font(object):
         x += xoff
         y += yoff
 
-        ch = None
-        for c in text:
-            ch = self._character_map[c]
-            xpos = x + ch.bearing[0] * scale
-            ypos = y - (ch.size[1] - ch.bearing[1]) * scale
-            w = ch.size[0] * scale
-            h = ch.size[1] * scale
+        # Two triangles per glyph, each vertex holding its position and its texture coordinates in the atlas
+        xpos = x + np.concatenate(((0.0,), np.cumsum(advance[:-1]))) + bearing[:, 0]
+        ypos = y - (size[:, 1] - bearing[:, 1])
+        u_left, v_bottom, u_right, v_top = self._glyph_uv[codes].T
+        left, right, bottom, top = xpos, xpos + size[:, 0], ypos, ypos + size[:, 1]
+        vertices = np.stack(
+            (
+                np.stack((left, bottom, u_left, v_bottom), axis=-1),
+                np.stack((right, bottom, u_right, v_bottom), axis=-1),
+                np.stack((right, top, u_right, v_top), axis=-1),
+                np.stack((right, top, u_right, v_top), axis=-1),
+                np.stack((left, top, u_left, v_top), axis=-1),
+                np.stack((left, bottom, u_left, v_bottom), axis=-1),
+            ),
+            axis=1,
+        ).astype(np.float32)
 
-            vertices = np.array(
-                [
-                    [xpos, ypos, 0.0, 0.0],
-                    [xpos + w, ypos, 1.0, 0.0],
-                    [xpos + w, ypos + h, 1.0, 1.0],
-                    [xpos + w, ypos + h, 1.0, 1.0],
-                    [xpos, ypos + h, 0.0, 1.0],
-                    [xpos, ypos, 0.0, 0.0],
-                ],
-                dtype=np.float32,
-            )
-
-            ch.texture._bind()
-
-            glBindBuffer(GL_ARRAY_BUFFER, self._vbo)
-            glBufferData(GL_ARRAY_BUFFER, FLOAT_SZ * 6 * 4, vertices, GL_DYNAMIC_DRAW)
-            # TODO MAKE THIS MORE EFFICIENT, glBufferSubData is broken
-            # glBufferSubData(
-            #     GL_ARRAY_BUFFER, 0, 6 * 4 * FLOAT_SZ,
-            #     np.ascontiguousarray(vertices.flatten)
-            # )
-            glDrawArrays(GL_TRIANGLES, 0, 6)
-            x += (ch.advance >> 6) * scale
+        self._atlas._bind()
+        glBindBuffer(GL_ARRAY_BUFFER, self._vbo)
+        glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_DYNAMIC_DRAW)
+        glDrawArrays(GL_TRIANGLES, 0, 6 * len(codes))
 
         self._unbind()
-        if ch:
-            ch.texture._unbind()
+        self._atlas._unbind()

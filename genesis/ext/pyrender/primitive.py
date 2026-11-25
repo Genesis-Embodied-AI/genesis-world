@@ -312,12 +312,12 @@ class Primitive(object):
             if self._bounds_0 is None:
                 self._bounds_0 = _compute_bounds(self.positions)
             if self.poses is not None:
-                if len(self.poses) == 1:
-                    self._bounds = self._bounds_0 + self.poses[:, :3, 3]
-                else:
-                    self._bounds = self._bounds_0 + np.stack(
-                        (np.min(self.poses[:, :3, 3], axis=0), np.max(self.poses[:, :3, 3], axis=0)), axis=0
-                    )
+                # The box of the bare geometry goes through each instance transform: its centre is transformed, and
+                # its half-extents go through the absolute rotation, which bounds the rotated box.
+                rotations = self.poses[:, :3, :3]
+                centres = rotations @ self._bounds_0.mean(axis=0) + self.poses[:, :3, 3]
+                halves = np.abs(rotations) @ (0.5 * (self._bounds_0[1] - self._bounds_0[0]))
+                self._bounds = np.stack(((centres - halves).min(axis=0), (centres + halves).max(axis=0)), axis=0)
             else:
                 self._bounds = self._bounds_0
         return self._bounds

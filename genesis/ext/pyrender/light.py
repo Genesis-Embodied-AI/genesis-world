@@ -13,7 +13,7 @@ from OpenGL.GL import *
 
 from .utils import format_color_vector
 from .texture import Texture, CubeMapTexture
-from .constants import SHADOW_TEX_SZ
+from .constants import DIRECTIONAL_SHADOW_TEX_SZ, SHADOW_TEX_SZ
 from .camera import OrthographicCamera, PerspectiveCamera
 
 
@@ -148,7 +148,7 @@ class DirectionalLight(Light):
             Size of texture map. Must be a positive power of two.
         """
         if size is None:
-            size = SHADOW_TEX_SZ
+            size = DIRECTIONAL_SHADOW_TEX_SZ
         self.shadow_texture = Texture(width=size, height=size, source_channels="D", data_format=GL_UNSIGNED_SHORT)
 
     def _get_shadow_camera(self, scene_scale):
@@ -166,7 +166,10 @@ class DirectionalLight(Light):
         """
         if scene_scale < 1e-6:
             scene_scale = 1.0
-        return OrthographicCamera(znear=0.01 * scene_scale, zfar=10 * scene_scale, xmag=scene_scale, ymag=scene_scale)
+        # The map spans the bounding sphere of the scene, whose radius is half the diagonal. Every shadow lies inside it,
+        # since a shadow falls where the light meets a caster first, and every caster lies inside the sphere.
+        radius = 0.5 * scene_scale
+        return OrthographicCamera(znear=0.01 * scene_scale, zfar=10 * scene_scale, xmag=radius, ymag=radius)
 
 
 class PointLight(Light):

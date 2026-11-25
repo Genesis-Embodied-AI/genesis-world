@@ -2054,6 +2054,41 @@ def test_rasterizer_sensor_env_spacing_invariance(renderer, context_mode):
 
 @pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_rasterizer_draws_turned_geometry_at_view_edge(renderer, n_envs, offset_box_obj):
+    scene = gs.Scene(
+        renderer=renderer,
+        show_viewer=False,
+    )
+    # A box standing away from the origin of its mesh, turned a quarter turn about the vertical axis of that origin,
+    # lies along y. The camera frames it alone, away from where it would stand unturned.
+    scene.add_entity(
+        gs.morphs.Mesh(
+            file=offset_box_obj,
+            euler=(0.0, 0.0, 90.0),
+            fixed=True,
+        ),
+        surface=gs.surfaces.Default(
+            color=(1.0, 0.0, 0.0),
+        ),
+    )
+    sensor = scene.add_sensor(
+        RasterizerCameraOptions(
+            res=(64, 64),
+            pos=(0.6, 1.0, 0.8),
+            lookat=(0.0, 1.0, 0.0),
+            fov=40.0,
+        )
+    )
+    scene.build(n_envs=n_envs)
+
+    rgb = tensor_to_array(sensor.read().rgb).astype(np.int32)
+    red, green, _ = np.moveaxis(rgb, -1, 0)
+    assert (red[..., 28:36, 28:36] > green[..., 28:36, 28:36] + 50).all()
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
 def test_video_recording_lifecycle(tmp_path, monkeypatch, renderer, show_viewer):
     DT = 0.01
     # One frame every other step, so that a span of N_STEPS resolves 2 frames and the paused span below skips 2

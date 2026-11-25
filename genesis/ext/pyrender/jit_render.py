@@ -277,7 +277,7 @@ class JITRenderer:
 
     def _update_instances(self):
         """Refresh what follows the instance transforms: the centre of each placed primitive per environment (see
-        'set_primitive') and the range its instances span, which the scene bounds widen the local bounds by."""
+        'set_primitive') and the bounds its instances cover."""
         for idx, n_instances in self._placed_groups:
             poses = np.stack([self.primitive_list[i].poses for i in idx])
             centres = np.einsum("kenj,kj->ken", poses[:, :, :3, :3], self.centroid_geom[idx]) + poses[:, :, :3, 3]
@@ -286,22 +286,30 @@ class JITRenderer:
                 self.centroid_local[idx] = centres
             else:
                 self.centroid_local[idx, :n_instances] = centres
-            self._set_translation_bounds(idx, poses[:, :, :3, 3])
+            self._set_instance_bounds(idx, poses)
 
-    def _set_translation_bounds(self, idx, translations):
-        """Record the range the instance translations of the primitives 'idx' span, given as (k, n_instances, 3), both
-        where the instances stand and on the environment grid, where the instances of one environment move by its
-        offset and instance k of an environment-instanced primitive by the offset of environment k."""
-        self.translation_bounds[idx, 0] = translations.min(axis=1)
-        self.translation_bounds[idx, 1] = translations.max(axis=1)
-        offsets = np.zeros_like(translations)
+    def _set_instance_bounds(self, idx, poses):
+        """Record the bounds the instances of the primitives 'idx' cover in the frame of their node, given their
+        transforms as (k, n_instances, 4, 4), both where the instances stand and on the environment grid, where the
+        instances of one environment move by its offset and instance k of an environment-instanced primitive by the
+        offset of environment k."""
+        # The box of the bare geometry goes through each instance transform: its centre is transformed, and its
+        # half-extents go through the absolute rotation, which bounds the rotated box.
+        rotations = poses[..., :3, :3]
+        centre = 0.5 * (self.bounds_geom[idx, 0] + self.bounds_geom[idx, 1])
+        half = 0.5 * (self.bounds_geom[idx, 1] - self.bounds_geom[idx, 0])
+        centres = np.einsum("kenj,kj->ken", rotations, centre) + poses[..., :3, 3]
+        halves = np.einsum("kenj,kj->ken", np.abs(rotations), half)
+        self.instance_bounds[idx, 0] = (centres - halves).min(axis=1)
+        self.instance_bounds[idx, 1] = (centres + halves).max(axis=1)
+        offsets = np.zeros_like(centres)
         is_env_placed = self.env_row[idx] >= 0
         offsets[is_env_placed] = self.envs_offset[self.env_row[idx][is_env_placed], np.newaxis]
         if self.is_env_instanced[idx].any():
             offsets[self.is_env_instanced[idx]] = self.envs_offset
-        translations = translations + offsets
-        self.translation_bounds_grid[idx, 0] = translations.min(axis=1)
-        self.translation_bounds_grid[idx, 1] = translations.max(axis=1)
+        centres = centres + offsets
+        self.instance_bounds_grid[idx, 0] = (centres - halves).min(axis=1)
+        self.instance_bounds_grid[idx, 1] = (centres + halves).max(axis=1)
 
     def update(self, scene):
         if scene.meshes_updated:
@@ -322,21 +330,22 @@ class JITRenderer:
             # Instances move with the simulation, so where they place their primitive has to be refreshed as well
             self._update_instances()
         if self._scene_revision != scene.revision:
-            # The scene bounds as 'Scene.bounds' defines them, over every primitive at once: the local bounds widened
-            # by the range the instances span, whose corners go through the node pose. A floor counts by its centre
-            # alone and a marker counts for nothing, so a scene of markers keeps the bounds the scene computes itself.
-            # The grid pass spreads the environment-instanced primitives by their environment offsets, so it has bounds
+            # The corners of the bounds the instances of each primitive cover, through the node pose, in the world. The
+            # grid pass spreads the environment-instanced primitives by their environment offsets, so it has corners
             # of its own.
+            for is_grid, bounds in ((False, self.instance_bounds), (True, self.instance_bounds_grid)):
+                corners = bounds.reshape((-1, 6))[:, CORNER_INDICES]
+                self.corners[is_grid] = (
+                    np.einsum("nij,ncj->nci", self.pose[:, :3, :3], corners) + self.pose[:, np.newaxis, :3, 3]
+                )
+            # The scene bounds as 'Scene.bounds' defines them, over every primitive at once. A floor counts by its
+            # centre alone and a marker counts for nothing, so a scene of markers keeps the bounds the scene computes
+            # itself.
             is_bounded = self.render_flags[:, 6] == 0
             if is_bounded.any():
-                for is_grid, translation_bounds in (
-                    (False, self.translation_bounds),
-                    (True, self.translation_bounds_grid),
-                ):
-                    bounds = self.bounds_geom + translation_bounds
-                    corners = bounds.reshape((-1, 6))[:, CORNER_INDICES]
-                    corners[self.is_floor] = bounds[self.is_floor].mean(axis=1)[:, np.newaxis]
-                    corners = np.einsum("nij,ncj->nci", self.pose[:, :3, :3], corners) + self.pose[:, np.newaxis, :3, 3]
+                for is_grid, corners in self.corners.items():
+                    corners = corners.copy()
+                    corners[self.is_floor] = corners[self.is_floor].mean(axis=1, keepdims=True)
                     corners = corners[is_bounded].reshape((-1, 3))
                     self.scene_bounds[is_grid] = np.stack((corners.min(axis=0), corners.max(axis=0)), axis=0)
         self._scene_revision = scene.revision
@@ -576,11 +585,11 @@ class JITRenderer:
         # Centre of the bare geometry, which the instance transforms are applied to whenever they move
         self.centroid_geom = np.zeros((n, 3), np.float32)
         self.is_instance_placed = np.zeros(n, np.bool_)
-        # Per primitive: the bounds of the bare geometry, the range of the instance translations, and whether it is a
-        # floor, which the scene bounds count by its centre alone (see 'update')
+        # Per primitive: the bounds of the bare geometry, the bounds its instances cover, and whether it is a floor,
+        # which the scene bounds count by its centre alone (see 'update')
         self.bounds_geom = np.zeros((n, 2, 3), np.float32)
-        self.translation_bounds = np.zeros((n, 2, 3), np.float32)
-        self.translation_bounds_grid = np.zeros((n, 2, 3), np.float32)
+        self.instance_bounds = np.zeros((n, 2, 3), np.float32)
+        self.instance_bounds_grid = np.zeros((n, 2, 3), np.float32)
         self.is_floor = np.zeros(n, np.bool_)
         self.is_env_instanced = np.zeros(n, np.bool_)
         # Index among the rendered environments of the one a primitive is placed in, -1 for none (see Primitive.env_idx)
@@ -588,6 +597,9 @@ class JITRenderer:
         # Axis-aligned bounds of what is drawn, for a pass rendering one environment at a time (False) and for the
         # grid pass (True), None until a bounded primitive exists (see 'update')
         self.scene_bounds = {False: None, True: None}
+        # World corners of the bounds of each primitive, for a pass rendering one environment at a time (False) and for
+        # the grid pass (True), (n, 8, 3) (see 'update')
+        self.corners = {False: None, True: None}
         self._primitive_index = {primitive: i for i, primitive in enumerate(primitive_list)}
 
         floor_existed = False
@@ -617,12 +629,12 @@ class JITRenderer:
                 self.env_row[i] = primitive.env_idx
             if not self.is_instance_placed[i]:
                 self.centroid_local[i] = primitive.centroid
-            # The range the instances span, refreshed with the instance transforms afterwards (see 'update_buffer')
+            # The bounds the instances cover, refreshed with the instance transforms afterwards (see 'update_buffer')
             if primitive.poses is not None and len(primitive.poses):
-                translations = primitive.poses[:, :3, 3]
+                poses = primitive.poses
             else:
-                translations = np.zeros((1, 3), np.float32)
-            self._set_translation_bounds(np.array([i]), translations[np.newaxis])
+                poses = np.eye(4, dtype=np.float32)[np.newaxis]
+            self._set_instance_bounds(np.array([i]), poses[np.newaxis])
 
             material = primitive.material
             tf = material.tex_flags
@@ -703,11 +715,19 @@ class JITRenderer:
         self._update_instances()
 
     @contextlib.contextmanager
-    def _env_filtered_culling(self, env_idx):
+    def _env_filtered_culling(self, env_idx, view_proj=None, is_grid=False):
         # Temporarily zero the index count of the primitives absent from env_idx (heterogeneous variants, and those
-        # standing in another environment), and of those the kind of view drawn leaves out (see 'view'), so their draw
+        # standing in another environment), of those the kind of view drawn leaves out (see 'view'), and, given the
+        # view-projection matrix of a camera, of those whose bounds lie entirely outside its view volume, so their draw
         # renders nothing. Mirrors the SKIP_MARKERS approach used in forward_pass.
         inactive = (self.views & self.view) == 0
+        corners = self.corners[is_grid]
+        if view_proj is not None and corners is not None:
+            # A box lies outside the view volume when its 8 corners lie outside one of its planes, the clip coordinates
+            # of a point inside satisfying -w <= x, y, z <= w
+            clip = corners @ view_proj[:, :3].T + view_proj[:, 3]
+            coords, w = clip[..., :3], clip[..., 3:]
+            inactive |= ((coords > w).all(axis=1) | (coords < -w).all(axis=1)).any(axis=-1)
         if env_idx >= 0 and self._has_env_filtered:
             inactive |= (self.env_row >= 0) & (self.env_row != env_idx)
             # Only the env filtered primitives carry one visibility per environment. Primitives standing in a single
@@ -829,10 +849,15 @@ class JITRenderer:
             lighting_texture = 0
 
             for id in draw_order:
-                # Only render markers on the main graphical window, while skipping plane-reflection
-                if ((render_flags[id, 4] or render_flags[id, 6]) and flags & RenderFlags_SKIP_FLOOR) or (
-                    render_flags[id, 6]
-                    and (not is_rgba or (flags & RenderFlags_OFFSCREEN and _DISABLE_OFFSCREEN_MARKERS))
+                # Only render markers on the main graphical window, while skipping plane-reflection. A primitive this
+                # pass hides has no index to draw, so its state is left alone too (see 'forward_pass').
+                if (
+                    n_indices[id] == 0
+                    or ((render_flags[id, 4] or render_flags[id, 6]) and flags & RenderFlags_SKIP_FLOOR)
+                    or (
+                        render_flags[id, 6]
+                        and (not is_rgba or (flags & RenderFlags_OFFSCREEN and _DISABLE_OFFSCREEN_MARKERS))
+                    )
                 ):
                     continue
 
@@ -1435,7 +1460,7 @@ class JITRenderer:
         # Depth along the view axis grows towards the viewer, so ascending depth is farthest first
         draw_order = np.lexsort((np.where(is_transparent, depths, -depths), is_transparent)).astype(np.int32)
 
-        with self._env_filtered_culling(env_idx):
+        with self._env_filtered_culling(env_idx, P @ V, not is_env_pass(flags)):
             self._forward_pass(
                 self.vao_id,
                 self.program_id[(flags, program_flags)],
@@ -1568,8 +1593,8 @@ class JITRenderer:
     def update_buffer(self, primitives, buffer_name, data):
         """Queue the update of one buffer of several primitives, flushed during the next render pass.
 
-        New vertex positions move the bounds of the bare geometry along, and new instance transforms the range the
-        instances span, a placed primitive getting that from its poses in bulk instead (see '_update_instances').
+        New vertex positions move the bounds of the bare geometry along, and new instance transforms the bounds the
+        instances cover, a placed primitive getting that from its poses in bulk instead (see '_update_instances').
 
         The GL buffer id is resolved at flush time rather than here: a primitive is only added to the GL context during
         its first render pass, so an id resolved at enqueue time would be -1 for any update queued before that pass and
@@ -1585,7 +1610,7 @@ class JITRenderer:
         data : Sequence[np.ndarray]
             The new content of the buffer of each primitive.
         """
-        primitives_idx, translations = [], []
+        primitives_idx, poses = [], []
         for primitive, primitive_data in zip(primitives, data):
             self._buffer[(primitive, buffer_name)] = primitive_data
             i = self._primitive_index.get(primitive)
@@ -1593,11 +1618,17 @@ class JITRenderer:
                 if buffer_name == "pos":
                     self.bounds_geom[i, 0] = primitive_data.min(axis=0)
                     self.bounds_geom[i, 1] = primitive_data.max(axis=0)
+                    # The instances carry the new box along, the placed primitives refreshing theirs in bulk
+                    if not self.is_instance_placed[i]:
+                        instance_poses = primitive.poses
+                        if instance_poses is None or not len(instance_poses):
+                            instance_poses = np.eye(4, dtype=np.float32)[np.newaxis]
+                        self._set_instance_bounds(np.array([i]), instance_poses[np.newaxis])
                 elif buffer_name == "model" and not self.is_instance_placed[i]:
                     primitives_idx.append(i)
-                    translations.append(primitive_data[:, 3, :3])
+                    poses.append(primitive_data.swapaxes(-1, -2))
         if primitives_idx:
-            self._set_translation_bounds(np.array(primitives_idx), np.stack(translations))
+            self._set_instance_bounds(np.array(primitives_idx), np.stack(poses))
         self._scene.bump_revision()
 
     def flush_buffer(self):
