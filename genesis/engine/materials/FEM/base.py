@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, ClassVar
 
 from pydantic import Field
 
@@ -45,10 +45,12 @@ class Base(Material["FEMEntity"]):
     friction_mu: NonNegativeFloat = 0.1
     contact_resistance: PositiveFloat | None = None
 
-    # Auto-generated fields, computed in model_post_init and never set by the user.
-    mu: ValidFloat = Field(default=0.0, exclude=True)
-    lam: ValidFloat = Field(default=0.0, exclude=True)
+    @property
+    def mu(self) -> float:
+        """The second Lame parameter, derived from the Young's modulus and the Poisson ratio."""
+        return self.E / (2.0 * (1.0 + self.nu))
 
-    def model_post_init(self, context: Any) -> None:
-        self.mu = self.E / (2.0 * (1.0 + self.nu))
-        self.lam = self.E * self.nu / ((1.0 + self.nu) * (1.0 - 2.0 * self.nu))
+    @property
+    def lam(self) -> float:
+        """The first Lame parameter, derived from the Young's modulus and the Poisson ratio."""
+        return self.E * self.nu / ((1.0 + self.nu) * (1.0 - 2.0 * self.nu))

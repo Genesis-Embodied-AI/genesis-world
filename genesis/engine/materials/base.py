@@ -1,7 +1,7 @@
 import re
 from typing import TYPE_CHECKING, Annotated, ClassVar
 
-from pydantic import BeforeValidator, StrictBool, field_validator
+from pydantic import BeforeValidator, ConfigDict, StrictBool, field_validator
 from pydantic_core import PydanticCustomError
 
 import genesis as gs
@@ -36,6 +36,10 @@ class Material[EntityT: "Entity"](Options):
     ----
     This class should *not* be instantiated directly.
     """
+
+    # Frozen, so that a material is configuration the entities holding it share, and materials of equal options compare
+    # and hash equal (see 'MPMSolver', which compiles one branch of its kernels per distinct material)
+    model_config = ConfigDict(frozen=True)
 
     structure: ClassVar[STRUCTURE]
     """How the shape and the connectivity of the entities of the material change, which decides how they are drawn and

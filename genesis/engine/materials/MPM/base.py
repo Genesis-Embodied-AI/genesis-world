@@ -42,9 +42,8 @@ class Base(Material["MPMEntity"]):
         the surface stair-stepped. 'random' draws them uniformly, which leaves local density fluctuations.
     """
 
-    # Frozen, so that materials of equal options compare and hash equal and share one branch of the material kernels.
-    # The kernel functions of a material are methods, which pydantic would otherwise take for fields.
-    model_config = ConfigDict(frozen=True, ignored_types=(QuadrantsCallable,))
+    # The kernel functions of a material are methods, which pydantic would otherwise take for fields
+    model_config = ConfigDict(ignored_types=(QuadrantsCallable,))
 
     structure: ClassVar[STRUCTURE] = STRUCTURE.TEARABLE
 
