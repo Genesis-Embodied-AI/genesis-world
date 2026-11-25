@@ -37,7 +37,7 @@ class Liquid(Base):
         if not data.get("viscous", False):
             # The options exported from an inviscid liquid hold mu=0 exactly, which the liquid accepts back
             mu = data.get("mu")
-            if isinstance(mu, float) and abs(mu) > 0.0:
+            if mu is not None and abs(mu) > 0.0:
                 gs.raise_exception("An inviscid liquid takes mu=0. Set 'viscous=True' to give it a viscosity.")
             data = {**data, "mu": 0.0}
         return data
