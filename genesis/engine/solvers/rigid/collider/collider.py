@@ -214,6 +214,13 @@ class Collider:
         if self._solver._options.box_box_detection and sum(g.type == gs.GEOM_TYPE.BOX for g in self._solver.geoms) > 1:
             n_contacts_per_nonconvex_pair = max(n_contacts_per_nonconvex_pair, self._box_MAXCONPAIR)
 
+        # A geom against a terrain with vertical steps holds a contact patch on the ground and another one on a riser
+        has_step_terrain = any(
+            geom.type == gs.GEOM_TYPE.TERRAIN and math.isfinite(geom.entity.terrain_step_height)
+            for geom in self._solver.geoms
+        )
+        n_contacts_per_terrain_pair = (2 if has_step_terrain else 1) * n_contacts_per_convex_pair
+
         # Compute collision pairs and algorithm flags in a single pass
         (
             self._n_possible_pairs,
@@ -251,6 +258,7 @@ class Collider:
         self.collider_config = ColliderConfig(
             gpu_cores=get_gpu_core_count(),
             has_terrain=has_terrain,
+            has_step_terrain=has_step_terrain,
             # Outside performance mode the convex narrowphase and the contact sort it gates are always compiled in, the
             # narrowphase finding nothing in a scene whose convex pairs all take a box specialization.
             has_non_box_plane_convex_convex=has_non_box_plane_convex_convex or gs.use_ndarray,
@@ -261,6 +269,7 @@ class Collider:
             has_prunable_contacts=has_prunable_contacts,
             n_contacts_per_convex_pair=n_contacts_per_convex_pair,
             n_contacts_per_nonconvex_pair=n_contacts_per_nonconvex_pair,
+            n_contacts_per_terrain_pair=n_contacts_per_terrain_pair,
             ccd_algorithm=ccd_algorithm,
         )
 
@@ -279,26 +288,34 @@ class Collider:
         link_pair_idx[valid_link_pairs[:, 0], valid_link_pairs[:, 1]] = np.arange(n_valid_link_pairs, dtype=gs.np_int)
         link_pair_idx[valid_link_pairs[:, 1], valid_link_pairs[:, 0]] = np.arange(n_valid_link_pairs, dtype=gs.np_int)
 
-        n_possible_nonconvex_pairs = int(np.count_nonzero(self._large_contact_pair_mask))
         max_collision_pairs = min(self._solver.max_collision_pairs, self._n_possible_pairs)
-        # The worst case fills the pair budget with as many nonconvex pairs as exist, then with convex and terrain
-        # pairs, each at its cap. The two vertex scans of a nonconvex pair share its cap: the second one only displaces
-        # the least-penetrating contact once the pair is full.
-        cap_nonconvex = self.collider_config.n_contacts_per_nonconvex_pair
-        cap_convex = self.collider_config.n_contacts_per_convex_pair
-        n_nonconvex = min(n_possible_nonconvex_pairs, max_collision_pairs)
-        n_convex = min(self._n_possible_pairs - n_possible_nonconvex_pairs, max_collision_pairs - n_nonconvex)
-        max_candidate_contacts = n_nonconvex * cap_nonconvex + n_convex * cap_convex
+        # The worst case fills the pair budget with the pairs of largest cap, nonconvex pairs first, then terrain pairs,
+        # then convex pairs. The two vertex scans of a nonconvex pair share its cap: the second one only displaces the
+        # least-penetrating contact once the pair is full.
+        geoms_type = np.array([geom.type for geom in self._solver.geoms])
+        is_terrain_pair = (geoms_type[self._valid_collision_pairs] == gs.GEOM_TYPE.TERRAIN).any(axis=1)
+        pairs_n_contacts = np.select(
+            (self._large_contact_pair_mask, is_terrain_pair),
+            (self.collider_config.n_contacts_per_nonconvex_pair, self.collider_config.n_contacts_per_terrain_pair),
+            self.collider_config.n_contacts_per_convex_pair,
+        )
+        max_candidate_contacts = int(np.sort(pairs_n_contacts)[::-1][:max_collision_pairs].sum())
         # The broad phase reports each possible pair at most once per environment
         max_collision_pairs_broad = min(
             max_collision_pairs * self._solver._options.multiplier_collision_broad_phase, self._n_possible_pairs
         )
 
+        # The constraint solver counts a terrain pair at the convex cap. The larger cap of the pair holds a patch on a
+        # riser on top of the one on the ground, which only the few geoms against a riser fill, well within the budget
+        # the other terrain pairs of the env leave unused. Counting it in full would grow the solver of every env.
+        pairs_n_contacts_solved = np.where(
+            is_terrain_pair, self.collider_config.n_contacts_per_convex_pair, pairs_n_contacts
+        )
+        max_contacts = int(np.sort(pairs_n_contacts_solved)[::-1][:max_collision_pairs].sum())
         # The constraint solver only sees the contacts surviving link-pair pruning, roughly the support polygon of each
         # link pair, so its budget caps a link pair at _prune_max_contacts_per_link_pair points. A conforming patch is
         # left unpruned and can exceed it, which halts the simulation with a request to increase 'max_contacts'. The
         # floor keeps that risk away from small scenes, where the cap would save no meaningful memory.
-        max_contacts = max_candidate_contacts
         if (
             self.collider_config.has_prunable_contacts
             and not self._solver._requires_grad
@@ -308,8 +325,7 @@ class Collider:
             pairs_link_idx = geoms_link_idx[self._valid_collision_pairs]
             pairs_key = self._solver.n_links * pairs_link_idx.min(axis=1) + pairs_link_idx.max(axis=1)
             _, pairs_group_idx = np.unique(pairs_key, return_inverse=True)
-            pairs_n_contacts = np.where(self._large_contact_pair_mask, cap_nonconvex, cap_convex)
-            link_pairs_n_contacts = np.bincount(pairs_group_idx, weights=pairs_n_contacts)
+            link_pairs_n_contacts = np.bincount(pairs_group_idx, weights=pairs_n_contacts_solved)
             max_contacts_pruned = np.minimum(link_pairs_n_contacts, self._prune_max_contacts_per_link_pair)
             max_contacts_pruned_total = max(int(max_contacts_pruned.sum()), self._prune_max_contacts_floor)
             max_contacts = min(max_contacts, max_contacts_pruned_total)

@@ -208,6 +208,9 @@ class ColliderConfig(Config):
     """The compile-time configuration of the kernels of the collision detection of the rigid solver."""
 
     has_terrain: bool
+    # Whether the terrain holds vertical steps, against which a geom gets a contact patch on a riser on top of the one on
+    # the ground (see func_contact_mpr_terrain)
+    has_step_terrain: bool
     # Whether a convex-convex pair reaches the general narrowphase past the box-box and plane-box specializations: the
     # split narrowphase on GPU, func_narrow_phase_convex_vs_convex on CPU. It also gates the deterministic contact sort
     # (see func_sort_contacts). See its resolution in collider.py.
@@ -216,9 +219,11 @@ class ColliderConfig(Config):
     has_nonconvex_nonterrain: bool
     # Whether the link-pair contact pruning pass is compiled in, see its resolution in collider.py
     has_prunable_contacts: bool
-    # Contacts a convex pair and a nonconvex (vertex-versus-SDF) pair hold at most, the second one at least the first
+    # Contacts a convex pair, a nonconvex (vertex-versus-SDF) pair and a terrain pair hold at most, the last two at least
+    # the first
     n_contacts_per_convex_pair: int
     n_contacts_per_nonconvex_pair: int
+    n_contacts_per_terrain_pair: int
     ccd_algorithm: int
     # GPU core count, sizing the split narrow phase launches and scratch states
     gpu_cores: int

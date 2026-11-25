@@ -393,6 +393,7 @@ def test_vertical_steps(show_viewer, tol):
     HORIZONTAL_SCALE = 0.04
     STEP_HEIGHT = 0.22
     SPHERE_RADIUS = 0.1
+    BOX_SIZE = 0.2
 
     # A riser between rows 24 and 25, which stands halfway between them, then a raised block whose corner cells change
     # height at a single corner
@@ -420,6 +421,9 @@ def test_vertical_steps(show_viewer, tol):
             slope_threshold=1.0,
             height_field=height_field,
         ),
+        material=gs.materials.Rigid(
+            friction=0.1,
+        ),
     )
     sphere = scene.add_entity(
         morph=gs.morphs.Sphere(
@@ -427,18 +431,31 @@ def test_vertical_steps(show_viewer, tol):
             pos=(riser_x - SPHERE_RADIUS - 0.02, 0.6, SPHERE_RADIUS),
         ),
     )
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            pos=(riser_x - 0.5 * BOX_SIZE - 0.02, 0.25, 0.5 * BOX_SIZE),
+        ),
+        material=gs.materials.Rigid(
+            friction=0.1,
+        ),
+    )
     scene.build(n_envs=2)
 
-    # The tilted gravity rolls the sphere against the riser, which pushes it back horizontally
+    # The tilted gravity rolls the sphere and slides the box against the riser, which pushes them back horizontally.
+    # The box rests flat on the ground with its face on the riser.
     for _ in range(100):
         scene.step()
-    assert_allclose(sphere.get_pos()[:, 0], riser_x - SPHERE_RADIUS, atol=5e-5)
-    assert_allclose(sphere.get_dofs_velocity(), 0.0, tol=5e-5)
-    contacts = sphere.get_contacts(with_entity=terrain)
-    normals = tensor_to_array(contacts["normal"])[tensor_to_array(contacts["valid_mask"])]
-    riser_normals = normals[np.abs(normals[:, 0]) > 0.5]
-    assert len(riser_normals) >= scene.n_envs
-    assert_allclose(riser_normals, (-1.0, 0.0, 0.0), tol=tol)
+    for entity, half_extent, atol in ((sphere, SPHERE_RADIUS, 5e-5), (box, 0.5 * BOX_SIZE, 1e-7)):
+        assert_allclose(entity.get_pos()[:, 0], riser_x - half_extent, atol=atol)
+        assert_allclose(entity.get_dofs_velocity(), 0.0, tol=5e-5)
+        contacts = entity.get_contacts(with_entity=terrain)
+        normals = tensor_to_array(contacts["normal"])[tensor_to_array(contacts["valid_mask"])]
+        riser_normals = normals[np.abs(normals[:, 0]) > 0.5]
+        assert len(riser_normals) >= scene.n_envs
+        assert_allclose(riser_normals, (-1.0, 0.0, 0.0), tol=tol)
+    assert_allclose(box.get_pos()[:, 2], 0.5 * BOX_SIZE, atol=5e-7)
+    assert_allclose(box.get_quat(), (1.0, 0.0, 0.0, 0.0), tol=2e-7)
 
     # The height query follows the flat columns of the surface the mesh of the terrain shows
     positions = (
