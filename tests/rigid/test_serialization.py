@@ -1135,9 +1135,6 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
             dt=2e-3,
             substeps=10,
         ),
-        mpm_options=gs.options.MPMOptions(
-            enable_particle_constraints=True,
-        ),
         show_viewer=show_viewer,
     )
     plane = deformable_scene.add_entity(
