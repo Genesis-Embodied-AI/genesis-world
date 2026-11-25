@@ -69,8 +69,8 @@ class HybridEntity(Entity):
     ) -> None:
         morph = spec.morph
         material = spec.material
-        # Each part takes a copy of its material, which the coupling and the muscle groups of this entity complete
-        material_rigid = material.material_rigid.model_copy(update={"needs_coup": material.use_default_coupling})
+        material_rigid = material.material_rigid
+        # The soft part takes a copy of its material, which the muscle groups of this entity complete
         material_soft = material.material_soft.model_copy()
 
         surface_rigid = gs.surfaces.Smooth(roughness=0.4)  # HACK hardcoded
@@ -80,6 +80,8 @@ class HybridEntity(Entity):
         assert isinstance(material_soft, gs.materials.MPM.Base)  # TODO: need FEM and PBD
 
         if isinstance(morph, gs.morphs.URDF):
+            # The links of a robot description couple with the soft part through the default coupling alone
+            material_rigid = material_rigid.model_copy(update={"needs_coup": material.use_default_coupling})
             part_rigid = scene.add_entity(material=material_rigid, morph=morph, surface=surface_rigid)
 
             # get rigid part in world coords

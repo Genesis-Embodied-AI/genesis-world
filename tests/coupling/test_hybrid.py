@@ -208,12 +208,11 @@ def test_mesh_mpm_build(show_viewer):
     ]
     scene.build()
 
-    # Each part takes a copy of its material, which its own hybrid entity completes
-    assert material.material_rigid.needs_coup
+    # Each soft part takes a copy of its material, which its own hybrid entity completes
     assert material.material_soft.n_groups == 1
     for duck in ducks:
         assert scene.entities[duck.idx] is duck
-        assert not duck.part_rigid.material.needs_coup
+        assert duck.part_rigid.material.needs_coup
         assert duck.part_soft.material.n_groups == len(duck.part_rigid.links) > 1
 
 
