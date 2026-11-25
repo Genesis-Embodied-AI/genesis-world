@@ -424,8 +424,7 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         self.particle_constraints: MPMParticleConstraints | None = None
         self.data_manager: MPMData | None = None
         self._mpm_materials: MPMMaterials | None = None
-        # Whether a particle was ever attached, which gates the launch of the constraint kernel. It never resets, since
-        # telling that every particle got detached takes a reduction over all of them.
+        # Whether a particle was ever attached, which gates the launch of the constraint kernel
         self._is_constrained = False
 
     @gs.assert_unbuilt

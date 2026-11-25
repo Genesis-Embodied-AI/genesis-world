@@ -48,9 +48,7 @@ class Elastic(Base):
     def _update_stress_elastic(self, U, S, V, F_tmp, F_new, J):
         stress = qd.Matrix.zero(gs.qd_float, 3, 3)
         if qd.static(self.model == "corotation"):
-            stress = 2 * self.mu * (F_new - U @ V.transpose()) @ F_new.transpose() + qd.Matrix.identity(
-                gs.qd_float, 3
-            ) * self.lam * J * (J - 1)
+            stress = self._update_stress_corotated(U, V, F_new, J)
         else:
             stress = self.mu * (F_tmp @ F_tmp.transpose()) + qd.Matrix.identity(gs.qd_float, 3) * (
                 self.lam * qd.log(J) - self.mu
