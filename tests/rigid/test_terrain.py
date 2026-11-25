@@ -137,6 +137,41 @@ def test_discrete_obstacles():
 
 
 @pytest.mark.required
+def test_random_uniform_coarse_downsampling(tol):
+    scene = gs.Scene()
+    terrain = scene.add_entity(
+        gs.morphs.Terrain(
+            n_subterrains=(1, 1),
+            subterrain_size=(2.0, 3.0),
+            horizontal_scale=0.5,
+            vertical_scale=0.5,
+            subterrain_types=[["random_uniform_terrain"]],
+            subterrain_parameters={
+                "random_uniform_terrain": {
+                    "min_height": 1.0,
+                    "max_height": 1.0,
+                    "step": 1.0,
+                    "downsampled_scale": 1.0,
+                }
+            },
+        )
+    )
+    scene.build()
+    height_field = terrain.geoms[0].metadata["height_field"]
+
+    assert height_field.shape == (5, 7)
+    assert_allclose(height_field, 2.0, tol=tol)
+
+    XV = np.linspace(-1.0, 4.0, 11)
+    KNOTS_X = np.array([0.0, 1.0, 3.0])
+    KNOTS_Y = np.array([1.0, 2.0, 0.0])
+    for n_knots in (2, 3):
+        spline = gu.cubic_spline_1d(KNOTS_X[:n_knots], KNOTS_Y[:n_knots], XV)[:, 0]
+        reference = np.polyval(np.polyfit(KNOTS_X[:n_knots], KNOTS_Y[:n_knots], n_knots - 1), XV)
+        assert_allclose(spline, reference, tol=tol)
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_get_terrain_height(n_envs, tol):
     height_field = np.array(

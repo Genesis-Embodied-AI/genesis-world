@@ -2835,49 +2835,53 @@ def cubic_spline_1d(x, y, xv):
     n, m = y_2d.shape
     h = np.diff(x)
 
-    # Band storage: only store the non-zero diagonals
-    # band[0] = 2nd lower diagonal (only element at (2, 0))
-    # band[1] = 1st lower diagonal
-    # band[2] = main diagonal
-    # band[3] = 1st upper diagonal
-    # band[4] = 2nd upper diagonal (only element at (n - 3, n - 1))
-    band = np.zeros((5, n), dtype=gs.np_float)
-    rhs = np.zeros((n, m), dtype=gs.np_float)
+    # Not-a-knot reduces to a line through two knots and to the unique parabola through three. The banded solve
+    # below needs at least four.
+    c = np.zeros((n, m), dtype=gs.np_float)
+    if n == 3:
+        c[:] = ((y_2d[2] - y_2d[1]) / h[1] - (y_2d[1] - y_2d[0]) / h[0]) / (h[0] + h[1])
+    elif n > 3:
+        # Band storage: only store the non-zero diagonals
+        # band[0] = 2nd lower diagonal (only element at (2, 0))
+        # band[1] = 1st lower diagonal
+        # band[2] = main diagonal
+        # band[3] = 1st upper diagonal
+        # band[4] = 2nd upper diagonal (only element at (n - 3, n - 1))
+        band = np.zeros((5, n), dtype=gs.np_float)
+        rhs = np.zeros((n, m), dtype=gs.np_float)
 
-    # Not-a-knot boundary conditions
-    band[2, 0], band[3, 0], band[4, 0] = h[1], -(h[0] + h[1]), h[0]
-    band[0, n - 1], band[1, n - 1], band[2, n - 1] = h[-1], -(h[-2] + h[-1]), h[-2]
+        # Not-a-knot boundary conditions
+        band[2, 0], band[3, 0], band[4, 0] = h[1], -(h[0] + h[1]), h[0]
+        band[0, n - 1], band[1, n - 1], band[2, n - 1] = h[-1], -(h[-2] + h[-1]), h[-2]
 
-    # Interior points
-    for i in range(1, n - 1):
-        band[1, i], band[2, i], band[3, i] = h[i - 1], 2 * (h[i - 1] + h[i]), h[i]
-        rhs[i] = 3 * ((y_2d[i + 1] - y_2d[i]) / h[i] - (y_2d[i] - y_2d[i - 1]) / h[i - 1])
+        # Interior points
+        for i in range(1, n - 1):
+            band[1, i], band[2, i], band[3, i] = h[i - 1], 2 * (h[i - 1] + h[i]), h[i]
+            rhs[i] = 3 * ((y_2d[i + 1] - y_2d[i]) / h[i] - (y_2d[i] - y_2d[i - 1]) / h[i - 1])
 
-    # Specialized Gaussian elimination with band storage
-    for k in range(n - 1):
-        pivot = band[2, k]
-        if k + 1 < n:
-            factor = band[1, k + 1] / pivot
-            band[2, k + 1] -= factor * band[3, k]
-            if k + 2 < n:
-                band[3, k + 1] -= factor * band[4, k]
-            rhs[k + 1] -= factor * rhs[k]
-        if k == n - 3:
-            factor = band[0, n - 1] / pivot
-            band[1, n - 1] -= factor * band[3, k]
-            band[2, n - 1] -= factor * band[4, k]
-            rhs[n - 1] -= factor * rhs[k]
+        # Specialized Gaussian elimination with band storage
+        for k in range(n - 1):
+            pivot = band[2, k]
+            if k + 1 < n:
+                factor = band[1, k + 1] / pivot
+                band[2, k + 1] -= factor * band[3, k]
+                if k + 2 < n:
+                    band[3, k + 1] -= factor * band[4, k]
+                rhs[k + 1] -= factor * rhs[k]
+            if k == n - 3:
+                factor = band[0, n - 1] / pivot
+                band[1, n - 1] -= factor * band[3, k]
+                band[2, n - 1] -= factor * band[4, k]
+                rhs[n - 1] -= factor * rhs[k]
 
-    # Back substitution
-    c = np.zeros_like(rhs)
-    c[n - 1] = rhs[n - 1] / band[2, n - 1]
-    if n > 1:
+        # Back substitution
+        c[n - 1] = rhs[n - 1] / band[2, n - 1]
         c[n - 2] = (rhs[n - 2] - band[3, n - 2] * c[n - 1]) / band[2, n - 2]
-    for i in range(n - 3, -1, -1):
-        c[i] = rhs[i] - band[3, i] * c[i + 1]
-        if i + 2 < n and band[4, i] != 0:
-            c[i] -= band[4, i] * c[i + 2]
-        c[i] /= band[2, i]
+        for i in range(n - 3, -1, -1):
+            c[i] = rhs[i] - band[3, i] * c[i + 1]
+            if i + 2 < n and band[4, i] != 0:
+                c[i] -= band[4, i] * c[i + 2]
+            c[i] /= band[2, i]
 
     # Solve for b and d
     b = (y_2d[1:] - y_2d[:-1]) / h[:, None] - h[:, None] * (2 * c[:-1] + c[1:]) / 3
