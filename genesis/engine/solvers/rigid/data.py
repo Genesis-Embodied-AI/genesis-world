@@ -322,6 +322,13 @@ class LinksState(Data, kind=DataKind.DERIVED, shape=(LINKS, ENVS)):
     # opt it in when the accumulation order must be fixed, and the rigid solver adds it to the external wrench of the
     # links before its next substep reads it (see kernel_flush_external_wrenches).
     cfrc_external_sums: ExactSums = field(opt_in=True, kind=DataKind.STATE, labels=DYNAMICS)
+    # Classical linear acceleration of the link origin in world coordinates, with the orientation and angular velocity of
+    # the link at the instant cacc describes, the start of the substep. The pose and velocity the substep ends with are
+    # one substep ahead (see func_step_2), so transporting the acceleration to another point of the link or expressing
+    # it in the link frame takes these instead.
+    acc_lin: qd.Tensor = field((float, 3), grad=True, labels=DYNAMICS)
+    acc_quat: qd.Tensor = field((float, 4), grad=True, labels=DYNAMICS)
+    acc_cd_ang: qd.Tensor = field((float, 3), grad=True, labels=DYNAMICS)
 
 
 class JointsInfo(Data, kind=DataKind.INFO, shape=(JOINTS, JOINTS_INFO_ENVS)):

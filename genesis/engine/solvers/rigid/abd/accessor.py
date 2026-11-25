@@ -830,9 +830,13 @@ def kernel_control_dofs_position_velocity(
 
 @qd.func
 def func_link_offset_shift(
-    i_l: int, i_b: int, links_offset_pos: qd.types.ndarray(), links_offset_quat: qd.types.ndarray(), dyn_state: DynState
+    i_l: int,
+    i_b: int,
+    link_quat: qd.types.vector(4),
+    links_offset_pos: qd.types.ndarray(),
+    links_offset_quat: qd.types.ndarray(),
 ):
-    """World-frame displacement from the authored link origin to the internal one.
+    """World-frame displacement from the authored link origin to the internal one, for a given link orientation.
 
     The offset tensors carry a leading environment axis only when the offset is environment-specific.
     """
@@ -843,7 +847,7 @@ def func_link_offset_shift(
     offset_quat = qd.Vector.zero(gs.qd_float, 4)
     for j in qd.static(range(4)):
         offset_quat[j] = links_offset_quat[I_l, j]
-    authored_quat = gu.qd_transform_quat_by_quat(gu.qd_inv_quat(offset_quat), dyn_state.links.quat[i_l, i_b])
+    authored_quat = gu.qd_transform_quat_by_quat(gu.qd_inv_quat(offset_quat), link_quat)
     return gu.qd_transform_by_quat(offset_pos, authored_quat)
 
 
@@ -873,7 +877,8 @@ def kernel_get_links_vel(
         if qd.static(ref == gs.link_ref_frame.link_origin):
             cpos = dyn_state.links.pos[i_l, i_b] - dyn_state.links.root_COM[i_l, i_b]
             if qd.static(is_relative):
-                cpos = cpos - func_link_offset_shift(i_l, i_b, links_offset_pos, links_offset_quat, dyn_state)
+                link_quat = dyn_state.links.quat[i_l, i_b]
+                cpos = cpos - func_link_offset_shift(i_l, i_b, link_quat, links_offset_pos, links_offset_quat)
             vel = vel + dyn_state.links.cd_ang[i_l, i_b].cross(cpos)
 
         for j in qd.static(range(3)):
@@ -896,17 +901,15 @@ def kernel_get_links_acc(
         i_l = links_idx[i_l_]
         i_b = envs_idx[i_b_]
 
-        # Compute links spatial acceleration expressed at links origin in world coordinates
-        cpos = dyn_state.links.pos[i_l, i_b] - dyn_state.links.root_COM[i_l, i_b]
+        # The transport to the authored link origin takes the orientation and angular velocity at the instant of the
+        # acceleration (see acc_lin in rigid/data.py)
+        acc_classic_lin = dyn_state.links.acc_lin[i_l, i_b]
         if qd.static(is_relative):
-            cpos = cpos - func_link_offset_shift(i_l, i_b, links_offset_pos, links_offset_quat, dyn_state)
-        acc_ang = dyn_state.links.cacc_ang[i_l, i_b]
-        acc_lin = dyn_state.links.cacc_lin[i_l, i_b] + acc_ang.cross(cpos)
-
-        # Compute links classical linear acceleration expressed at links origin in world coordinates
-        ang = dyn_state.links.cd_ang[i_l, i_b]
-        vel = dyn_state.links.cd_vel[i_l, i_b] + ang.cross(cpos)
-        acc_classic_lin = acc_lin + ang.cross(vel)
+            link_quat = dyn_state.links.acc_quat[i_l, i_b]
+            offset_shift = func_link_offset_shift(i_l, i_b, link_quat, links_offset_pos, links_offset_quat)
+            acc_ang = dyn_state.links.cacc_ang[i_l, i_b]
+            ang = dyn_state.links.acc_cd_ang[i_l, i_b]
+            acc_classic_lin = acc_classic_lin - acc_ang.cross(offset_shift) - ang.cross(ang.cross(offset_shift))
 
         for j in qd.static(range(3)):
             tensor[i_b_, i_l_, j] = acc_classic_lin[j]

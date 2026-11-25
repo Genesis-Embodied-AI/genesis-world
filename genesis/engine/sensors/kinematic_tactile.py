@@ -280,7 +280,7 @@ def _func_kinematic_spring_damper(
             contact_vel = dyn_state.links.cd_vel[contact_link, i_b] + dyn_state.links.cd_ang[contact_link, i_b].cross(
                 probe_pos - dyn_state.links.root_COM[contact_link, i_b]
             )
-            sensor_cd_vel, sensor_cd_ang, _, _, sensor_root_com = func_sensor_link_motion(
+            sensor_cd_vel, sensor_cd_ang, sensor_root_com = func_sensor_link_motion(
                 sensor_link_idx, i_b, dyn_state.links
             )
             sensor_vel = sensor_cd_vel + sensor_cd_ang.cross(probe_pos - sensor_root_com)

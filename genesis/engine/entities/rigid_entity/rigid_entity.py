@@ -2141,6 +2141,9 @@ class RigidEntity(KinematicEntity):
         """
         Returns classical linear acceleration of all the entity's links expressed at their origin in world coordinates.
 
+        The acceleration is the one of the last substep, at its start: it lags one substep behind the pose and velocity
+        the other getters report, since the acceleration at the end of a step depends on forces not known yet.
+
         Parameters
         ----------
         links_idx_local : None | array_like
