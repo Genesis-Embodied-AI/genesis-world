@@ -850,12 +850,13 @@ class RasterizerContext(BuildableMixin):
             binding.texture_array.set_layers(n_variants + envs_pos_written, images)
             self._scene.updated_textures.add(binding.texture_array)
         envs_layer = np.where(is_batched, n_variants + np.arange(len(variants_idx)), variants_idx)
+        binding.texture_array.layers_shown = envs_layer
         column = 0 if texture.is_base_color else 1
         for primitive in binding.primitives:
             # A primitive standing in one environment samples its layer whichever row a pass reads
             env_idx = primitive.env_idx
             primitive.texture_layers[:, column] = envs_layer if env_idx is None else envs_layer[env_idx]
-            self.jit.update_texture_layers(primitive)
+        self.jit.update_texture_layers(binding.primitives)
 
     def _set_nodes_views(self, shape: Shape, shape_nodes: ShapeNodes) -> None:
         # The debug views draw the markers and the parts of the shapes the debug read holds, the other views the parts

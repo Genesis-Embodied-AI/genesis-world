@@ -2162,8 +2162,20 @@ def test_video_recording_lifecycle(tmp_path, monkeypatch, renderer, show_viewer)
 
 @pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
-def test_transparent_surfaces_show_what_lies_behind_them(renderer, show_viewer):
-    ALPHA = 0.5
+@pytest.mark.parametrize(
+    "alpha_source, n_envs", [("color", 2), ("image_texture", 2), ("dynamic_texture", 0), ("dynamic_texture", 2)]
+)
+@pytest.mark.parametrize("red_alpha_u8", [0, 128])
+def test_transparent_surfaces_show_what_lies_behind_them(
+    alpha_source, n_envs, red_alpha_u8, translucent_box_obj, renderer, show_viewer
+):
+    # Alphas that 8-bit texels store exactly, so that every source gives the same opacity
+    RED = (1.0, 0.0, 0.0, red_alpha_u8 / 255)
+    BLUE = (0.0, 0.0, 1.0, 128 / 255)
+    # The dynamic texture of the blue box shows an opaque image in environment 0 when there are several, which the
+    # translucent image of environment 1 must leave as it is
+    blues_color = [BLUE] if alpha_source != "dynamic_texture" or n_envs == 0 else [(0.0, 0.0, 1.0, 1.0), BLUE]
+    blues_alpha = np.array([color[3] for color in blues_color])[:, None]
     RES = 64
     # Wholly inside the field of view, high enough above the pair to project clear of the patch sampled below. Geometry
     # straddling the frustum boundary is misrasterized by software rendering backends, so it stays clear of the edge.
@@ -2177,6 +2189,8 @@ def test_transparent_surfaces_show_what_lies_behind_them(renderer, show_viewer):
         ),
         vis_options=gs.options.VisOptions(
             shadow=False,
+            # One image per environment, each holding its own pair of boxes
+            split_envs=True,
             # Black leaves each surface worth exactly its own contribution, so the composite below needs no offset
             background_color=(0.0, 0.0, 0.0),
         ),
@@ -2187,46 +2201,75 @@ def test_transparent_surfaces_show_what_lies_behind_them(renderer, show_viewer):
         renderer=renderer,
         show_viewer=show_viewer,
     )
+    # The red box of a dynamic texture shows its variant from build, and the blue one an opaque variant until its
+    # translucent image is written between two renders.
+    if alpha_source == "color":
+        surfaces = [
+            gs.surfaces.Default(
+                color=color,
+            )
+            for color in (RED, BLUE)
+        ]
+    elif alpha_source == "image_texture":
+        surfaces = [
+            gs.surfaces.Default(
+                diffuse_texture=gs.textures.ImageTexture(
+                    image_array=np.array([[color]]),
+                ),
+            )
+            for color in (RED, BLUE)
+        ]
+    else:
+        surfaces = [
+            gs.surfaces.Default(
+                diffuse_texture=gs.textures.DynamicTexture(
+                    resolution=(4, 4),
+                    variants=(gs.textures.ColorTexture(color=color),),
+                    is_batched=is_batched,
+                ),
+            )
+            for color, is_batched in ((RED, False), (BLUE[:3], True))
+        ]
     # Same size and lined up along the axis the camera sits on, so that the nearer one covers the farther one
     red = scene.add_entity(
-        gs.morphs.Box(
+        gs.morphs.Mesh(
             pos=(0.6, 0.0, 0.5),
-            size=(0.2, 0.2, 0.2),
+            file=translucent_box_obj,
+            scale=0.5,
         ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, ALPHA),
-        ),
+        surface=surfaces[0],
     )
     blue = scene.add_entity(
-        gs.morphs.Box(
+        gs.morphs.Mesh(
             pos=(-0.6, 0.0, 0.5),
-            size=(0.2, 0.2, 0.2),
+            file=translucent_box_obj,
+            scale=0.5,
         ),
-        surface=gs.surfaces.Default(
-            color=(0.0, 0.0, 1.0, ALPHA),
-        ),
+        surface=surfaces[1],
     )
     cam = scene.add_camera(
         res=(RES, RES),
         pos=(2.5, 0.0, 0.5),
         lookat=(0.0, 0.0, 0.5),
     )
-    scene.build()
+    scene.build(n_envs=n_envs)
 
     def centre_patch(pos_red, pos_blue):
         red.set_pos(pos_red)
         blue.set_pos(pos_blue)
         scene.step()
         rgb, *_ = cam.render()
-        return tensor_to_array(rgb)[CENTRE, CENTRE].reshape(-1, 3).mean(axis=0)
+        return tensor_to_array(rgb)[..., CENTRE, CENTRE, :].mean(axis=(-3, -2))
 
     # Where the two overlap, the near surface composites over whatever the far one left, so the pair is worth the near
     # one plus what survives of the far one. A far surface painted before the near one keeps that contribution; painted
     # afterwards it fails the depth test and vanishes, leaving the near box alone.
     patch_red = centre_patch((0.6, 0.0, 0.5), PARKED)
+    if alpha_source == "dynamic_texture":
+        blue.set_texture(blues_color)
     patch_blue = centre_patch(PARKED, (-0.6, 0.0, 0.5))
     patch_pair = centre_patch((0.6, 0.0, 0.5), (-0.6, 0.0, 0.5))
-    assert_allclose(patch_pair, patch_red + (1.0 - ALPHA) * patch_blue, atol=1.0)
+    assert_allclose(patch_pair, patch_red + (1.0 - RED[3]) * patch_blue, atol=1.0)
 
     # Rendering the same scene again gives the same image, whichever order two surfaces at the same depth end up in
     rgb, *_ = cam.render()
@@ -2235,11 +2278,11 @@ def test_transparent_surfaces_show_what_lies_behind_them(renderer, show_viewer):
     # Bringing the blue box in front of the red one swaps which of the two composites over the other
     patch_blue_ahead = centre_patch(PARKED, (1.2, 0.0, 0.5))
     patch_pair_swapped = centre_patch((0.6, 0.0, 0.5), (1.2, 0.0, 0.5))
-    assert_allclose(patch_pair_swapped, patch_blue_ahead + (1.0 - ALPHA) * patch_red, atol=1.0)
+    assert_allclose(patch_pair_swapped, patch_blue_ahead + (1.0 - blues_alpha) * patch_red, atol=1.0)
 
     # Crossing the camera over to the other side reverses which one is in front just the same
     cam.set_pose(pos=(-2.5, 0.0, 0.5), lookat=(0.0, 0.0, 0.5))
     patch_red_across = centre_patch((0.6, 0.0, 0.5), PARKED)
     patch_blue_across = centre_patch(PARKED, (-0.6, 0.0, 0.5))
     patch_pair_across = centre_patch((0.6, 0.0, 0.5), (-0.6, 0.0, 0.5))
-    assert_allclose(patch_pair_across, patch_blue_across + (1.0 - ALPHA) * patch_red_across, atol=1.0)
+    assert_allclose(patch_pair_across, patch_blue_across + (1.0 - blues_alpha) * patch_red_across, atol=1.0)

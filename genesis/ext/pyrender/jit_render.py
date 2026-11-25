@@ -546,9 +546,9 @@ class JITRenderer:
         self.texture_layers = np.zeros((np.count_nonzero(is_layered), len(self.envs_offset), 2), np.float32)
         self.pbr_mat = np.zeros((n, 9), np.float32)  # base_color <- 4, metallic <- 1, roughness <- 1, emissive <- 3
         self.spec_mat = np.zeros((n, 11), np.float32)  # diffuse <- 4, specular <- 3, glossiness <- 1, emissive <- 3
-        self.render_flags = np.zeros(
-            (n, 9), np.int8
-        )  # (blend, wireframe, double sided, pbr texture, reflective floor, transparent, marker, env shared, env filtered)
+        # (blend, wireframe, double sided, pbr texture, reflective floor, transparent, marker, env shared, env filtered,
+        # translucent color)
+        self.render_flags = np.zeros((n, 10), np.int8)
         self.mode = np.zeros(n, np.int32)
         self.n_instances = np.zeros(n, np.int32)
         # Per-(primitive, env) visibility used only when a primitive is "env filtered" (render_flags column 8), i.e. a
@@ -645,8 +645,6 @@ class JITRenderer:
                 self.textures[i, 0] |= 4 << 8
             if tf & 8 and material.baseColorTexture.tex_type == GL_TEXTURE_2D_ARRAY:
                 self.textures[i, 0] |= 8 << 8
-            if primitive.texture_layers is not None:
-                self.update_texture_layers(primitive)
 
             if isinstance(material, MetallicRoughnessMaterial):
                 self.pbr_mat[i, :4] = material.baseColorFactor
@@ -666,6 +664,9 @@ class JITRenderer:
             self.render_flags[i, 4] = primitive.is_floor and not floor_existed
             self.render_flags[i, 5] = node_list[i].mesh.is_transparent
             self.render_flags[i, 6] = node_list[i].mesh.is_marker
+            # The shadow maps sample no texture, so a mesh made transparent by the alpha of its texels alone casts the
+            # shadow of its whole surface
+            self.render_flags[i, 9] = node_list[i].mesh.has_translucent_color
             self.views[i] = node_list[i].mesh.views
             # A pass drawing one environment draws the instance of that environment of a per-environment instanced
             # primitive, and every instance of any other, which the culling below keeps to its environment
@@ -683,6 +684,8 @@ class JITRenderer:
             self.model_buffer_id[i] = primitive._buffers.get("model", 0)
             self.inst_tint_buffer_id[i] = primitive._buffers.get("inst_tint", 0)
             self.inst_attr_start[i] = getattr(primitive, "_inst_attr_start", 0)
+
+        self.update_texture_layers([primitive_list[i] for i in np.flatnonzero(is_layered)])
 
         # Gate the per-env culling to scenes with heterogeneous variants or primitives standing in one environment
         self._has_env_filtered = bool(self.render_flags[:, 8].any() or (self.env_row >= 0).any())
@@ -1086,8 +1089,8 @@ class JITRenderer:
         ):
             last_pid = -1
             for id in range(len(vao_id)):
-                # Do not render shadows for markers and transparent objects
-                if render_flags[id, 5] or render_flags[id, 6]:
+                # Do not render shadows for markers and meshes of translucent color
+                if render_flags[id, 9] or render_flags[id, 6]:
                     continue
 
                 pid = program_id[id]
@@ -1223,8 +1226,8 @@ class JITRenderer:
         ):
             last_pid = -1
             for id in range(len(vao_id)):
-                # Do not render shadows for markers and transparent objects
-                if render_flags[id, 5] or render_flags[id, 6]:
+                # Do not render shadows for markers and meshes of translucent color
+                if render_flags[id, 9] or render_flags[id, 6]:
                     continue
 
                 pid = program_id[id]
@@ -1539,11 +1542,28 @@ class JITRenderer:
                 self.gen_func_ptr()
             return self._update_normal_flat(vertices.reshape((-1, 3, 3)))
 
-    def update_texture_layers(self, primitive) -> None:
-        """Copy the texture array layers each rendered environment of a primitive samples, for the next render pass."""
-        i = self._primitive_index.get(primitive)
-        if i is not None:
-            self.texture_layers[self.texture_layers_idx[i]] = primitive.texture_layers
+    def update_texture_layers(self, primitives) -> None:
+        """Copy the texture array layers each rendered environment of some primitives samples, for the next render pass.
+
+        Parameters
+        ----------
+        primitives : iterable of Primitive
+            The primitives whose layers changed. Those that this renderer does not draw are skipped.
+        """
+        meshes = set()
+        for primitive in primitives:
+            i = self._primitive_index.get(primitive)
+            if i is not None:
+                self.texture_layers[self.texture_layers_idx[i]] = primitive.texture_layers
+                meshes.add(self.node_list[i].mesh)
+        # The alpha of the layers shown decides whether a mesh is drawn with the transparent ones, a flag that every
+        # primitive of the mesh carries. It is evaluated once per mesh, since it reads every primitive of the mesh.
+        for mesh in meshes:
+            is_transparent = mesh.is_transparent
+            for mesh_primitive in mesh.primitives:
+                i_p = self._primitive_index.get(mesh_primitive)
+                if i_p is not None:
+                    self.render_flags[i_p, 5] = is_transparent
 
     def update_buffer(self, primitives, buffer_name, data):
         """Queue the update of one buffer of several primitives, flushed during the next render pass.

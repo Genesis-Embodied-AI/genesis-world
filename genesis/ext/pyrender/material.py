@@ -227,6 +227,11 @@ class Material(metaclass=ABCMeta):
         return self._compute_transparency()
 
     @property
+    def has_translucent_color(self):
+        """bool : If True, the color factor is partially transparent, whatever the alpha of the textures."""
+        return self._compute_transparency(include_textures=False)
+
+    @property
     def tex_flags(self):
         """int : Texture availability flags."""
         if self._tex_flags is None:
@@ -240,7 +245,7 @@ class Material(metaclass=ABCMeta):
         """
         return self._compute_textures()
 
-    def _compute_transparency(self):
+    def _compute_transparency(self, include_textures=True):
         return False
 
     def _compute_tex_flags(self):
@@ -463,7 +468,7 @@ class MetallicRoughnessMaterial(Material):
             tex_flags |= TexFlags.METALLIC_ROUGHNESS
         return tex_flags
 
-    def _compute_transparency(self):
+    def _compute_transparency(self, include_textures=True):
         if self.alphaMode == "OPAQUE":
             return False
         cutoff = self.alphaCutoff
@@ -471,7 +476,7 @@ class MetallicRoughnessMaterial(Material):
             cutoff = 1.0
         if self.baseColorFactor[3] < cutoff:
             return True
-        if self.baseColorTexture is not None and self.baseColorTexture.is_transparent(cutoff):
+        if include_textures and self.baseColorTexture is not None and self.baseColorTexture.is_transparent(cutoff):
             return True
         return False
 
@@ -666,7 +671,7 @@ class SpecularGlossinessMaterial(Material):
             flags |= TexFlags.SPECULAR_GLOSSINESS
         return flags
 
-    def _compute_transparency(self):
+    def _compute_transparency(self, include_textures=True):
         if self.alphaMode == "OPAQUE":
             return False
         cutoff = self.alphaCutoff
@@ -674,7 +679,7 @@ class SpecularGlossinessMaterial(Material):
             cutoff = 1.0
         if self.diffuseFactor[3] < cutoff:
             return True
-        if self.diffuseTexture is not None and self.diffuseTexture.is_transparent(cutoff):
+        if include_textures and self.diffuseTexture is not None and self.diffuseTexture.is_transparent(cutoff):
             return True
         return False
 
