@@ -184,6 +184,8 @@ def test_particle_constraints(show_viewer, tol):
     scene_without_constraints.build()
     with pytest.raises(gs.GenesisException, match="enable_particle_constraints"):
         mpm_box.set_particle_constraints(True, 0, stiffness=1e3)
+    with pytest.raises(gs.GenesisException, match="enable_particle_constraints"):
+        mpm_box.remove_particle_constraints()
 
 
 @pytest.mark.required

@@ -743,7 +743,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
         if not isinstance(link_idx, int):
             gs.raise_exception("link_idx must be an integer.")
         if not self._enable_particle_constraints:
-            gs.raise_exception("Particles can be attached only with 'enable_particle_constraints=True' in MPMOptions.")
+            gs.raise_exception("Particle constraints require 'enable_particle_constraints=True' in MPMOptions.")
         particles_mask = self._broadcast_particles_mask(particles_mask, particles_start)
         rigid_solver = self._sim.rigid_solver
         # The attachment is a configuration of the constraint, which carries no gradient
@@ -791,7 +791,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
             Global index of the particle the mask starts at. Defaults to 0.
         """
         if not self._enable_particle_constraints:
-            gs.raise_exception("Particles can be attached only with 'enable_particle_constraints=True' in MPMOptions.")
+            gs.raise_exception("Particle constraints require 'enable_particle_constraints=True' in MPMOptions.")
         particles_mask = self._broadcast_particles_mask(particles_mask, particles_start)
         kernel_remove_particle_constraints(particles_start, particles_mask, self.particle_constraints)
 

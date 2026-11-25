@@ -265,6 +265,8 @@ class MPMEntity(ParticleEntity):
         """
         Remove constraints from specified particles, or all if None.
 
+        The scene must enable them with ``MPMOptions(enable_particle_constraints=True)``.
+
         Parameters
         ----------
         particles_mask : None | array_like, shape ([n_envs,] n_particles), optional
