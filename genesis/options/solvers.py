@@ -806,9 +806,8 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
         Whether to enable CPIC (Compatible Particle-in-Cell) to support coupling with thin objects. Defaults to False.
     enable_particle_constraints : bool, optional
         Whether particles can be attached to rigid links (see ``MPMEntity.set_particle_constraints``). It stores a
-        constraint for every particle in every environment, a few percent of the memory of the solver and of each
-        checkpoint, at no measurable cost in step time. Disable it to save that memory in a scene that attaches no
-        particle. Defaults to True.
+        constraint for every particle in every environment, which adds to the memory of the solver and to the size of
+        each checkpoint. Disable it to save that memory in a scene that attaches no particle. Defaults to True.
     lower_bound : tuple, shape (3,), optional
         Lower bound of the simulation domain. Defaults to (-1.0, -1.0, 0.0).
     upper_bound : tuple, shape (3,), optional
