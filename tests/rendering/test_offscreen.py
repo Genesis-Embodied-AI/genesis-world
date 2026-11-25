@@ -2082,9 +2082,7 @@ def test_rasterizer_draws_geometry_turned_about_distant_origin(renderer, n_envs,
     )
     scene.build(n_envs=n_envs)
 
-    rgb = tensor_to_array(sensor.read().rgb).astype(np.int32)
-    red, green, _ = np.moveaxis(rgb, -1, 0)
-    assert (red[..., 28:36, 28:36] > green[..., 28:36, 28:36] + 50).all()
+    assert (sensor.read().rgb[..., 28:36, 28:36, 0] > 100).all()
 
 
 @pytest.mark.required
