@@ -807,6 +807,8 @@ Please decrease the simulation timestep or adjust the material parameters."""
         particles_start : int, optional
             Global index of the particle the mask starts at. Defaults to 0.
         """
+        if not self._is_constrained:
+            return
         particles_mask = self._broadcast_particles_mask(particles_mask, particles_start)
         kernel_remove_particle_constraints(particles_start, particles_mask, self.particle_constraints)
 
