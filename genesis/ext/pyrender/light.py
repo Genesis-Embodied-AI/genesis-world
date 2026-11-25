@@ -166,8 +166,8 @@ class DirectionalLight(Light):
         """
         if scene_scale < 1e-6:
             scene_scale = 1.0
-        # The map spans the bounding sphere of the scene, whose radius is half the diagonal. Every shadow lies inside it,
-        # since a shadow falls where the light meets a caster first, and every caster lies inside the sphere.
+        # The map spans the bounding sphere of the scene, whose radius is half the diagonal. Every shadow lies inside
+        # it, since a shadow falls where the light meets a caster first, and every caster lies inside the sphere.
         radius = 0.5 * scene_scale
         return OrthographicCamera(znear=0.01 * scene_scale, zfar=10 * scene_scale, xmag=radius, ymag=radius)
 

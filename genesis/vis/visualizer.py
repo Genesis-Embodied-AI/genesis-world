@@ -247,7 +247,7 @@ class Visualizer(BuildableMixin, RBC):
             self._batch_renderer.reset()
         # Without 'ViewerOptions.update_on_setters', the renderers shared with the viewer sync at the next step that
         # updates the viewer, or at the next render of a camera. A setter then leaves the window alone, so that the
-        # caller alone decides how often it refreshes ('update_visualizer' of 'Scene.step').
+        # caller decides how often the window refreshes ('update_visualizer' of 'Scene.step').
         if self._viewer is None or self._viewer.update_on_setters:
             self._context.update(force_render=True)
             if self._viewer is not None:

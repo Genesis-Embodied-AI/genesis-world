@@ -68,8 +68,8 @@ class Font(object):
         self._face.set_pixel_sizes(0, font_pt)
         # The glyphs of the 128 ASCII characters are packed side by side into one texture, so that a string is drawn
         # in a single call whatever its length. Each glyph is bottom-aligned in the atlas, which the texture flips
-        # upright (see 'Texture'), so that the bottom of a glyph lies at v = 0. A blank column separates two glyphs, so
-        # that linear filtering never blends one into its neighbour.
+        # upright (see 'Texture'), so that the bottom of a glyph lies at v = 0. A blank column separates two glyphs,
+        # which keeps linear filtering within each glyph.
         bitmaps = []
         self._glyph_size = np.zeros((128, 2), dtype=np.int32)
         self._glyph_bearing = np.zeros((128, 2), dtype=np.int32)

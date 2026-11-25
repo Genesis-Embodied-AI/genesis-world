@@ -302,8 +302,7 @@ class JITRenderer:
         poses : np.ndarray
             The transforms of the instances of each primitive, one row per primitive.
         """
-        # The box of the bare geometry goes through each instance transform: its centre is transformed, and its
-        # half-extents go through the absolute rotation, which bounds the rotated box.
+        # The rotated box of the bare geometry (see 'Primitive.bounds')
         rotations = poses[..., :3, :3]
         centre = 0.5 * (self.bounds_geom[idx, 0] + self.bounds_geom[idx, 1])
         half = 0.5 * (self.bounds_geom[idx, 1] - self.bounds_geom[idx, 0])
@@ -339,17 +338,13 @@ class JITRenderer:
             # Instances move with the simulation, so where they place their primitive has to be refreshed as well
             self._update_instances()
         if self._scene_revision != scene.revision:
-            # The corners of the bounds the instances of each primitive cover, through the node pose, in the world. The
-            # grid pass spreads the environment-instanced primitives by their environment offsets, so it has corners
-            # of its own.
             for is_grid, bounds in ((False, self.instance_bounds), (True, self.instance_bounds_grid)):
                 corners = bounds.reshape((-1, 6))[:, CORNER_INDICES]
                 self.corners[is_grid] = (
                     np.einsum("nij,ncj->nci", self.pose[:, :3, :3], corners) + self.pose[:, np.newaxis, :3, 3]
                 )
             # The scene bounds as 'Scene.bounds' defines them, over every primitive at once. A floor counts by its
-            # centre alone and a marker counts for nothing, so a scene of markers keeps the bounds the scene computes
-            # itself.
+            # centre alone. A marker counts for nothing, so a scene of markers keeps the bounds of 'Scene.bounds'.
             is_bounded = self.render_flags[:, 6] == 0
             if is_bounded.any():
                 for is_grid, corners in self.corners.items():
@@ -607,7 +602,7 @@ class JITRenderer:
         # grid pass (True), None until a bounded primitive exists (see 'update')
         self.scene_bounds = {False: None, True: None}
         # World corners of the bounds of each primitive, for a pass rendering one environment at a time (False) and for
-        # the grid pass (True), (n, 8, 3) (see 'update')
+        # the grid pass (True), which spreads the environment-instanced primitives by their offsets (see 'update')
         self.corners = {False: None, True: None}
         self._primitive_index = {primitive: i for i, primitive in enumerate(primitive_list)}
 
@@ -725,15 +720,16 @@ class JITRenderer:
 
     @contextlib.contextmanager
     def _env_filtered_culling(self, env_idx, view_proj=None, is_grid=False):
-        # Temporarily zero the index count of the primitives absent from env_idx (heterogeneous variants, and those
-        # standing in another environment), of those the kind of view drawn leaves out (see 'view'), and, given the
-        # view-projection matrix of a camera, of those whose bounds lie entirely outside its view volume, so their draw
-        # renders nothing. Mirrors the SKIP_MARKERS approach used in forward_pass.
+        # Temporarily zero the index count of the primitives this pass does not draw, so their draw renders nothing.
+        # These are the primitives absent from env_idx (heterogeneous variants, and those standing in another
+        # environment) and those the kind of view drawn leaves out (see 'view'). Given the view-projection matrix of a
+        # camera, they also include the primitives whose bounds lie outside its view volume. Mirrors the SKIP_MARKERS
+        # approach used in forward_pass.
         inactive = (self.views & self.view) == 0
         corners = self.corners[is_grid]
         if view_proj is not None and corners is not None:
-            # A box lies outside the view volume when its 8 corners lie outside one of its planes, the clip coordinates
-            # of a point inside satisfying -w <= x, y, z <= w
+            # A box lies outside the view volume when its 8 corners lie outside one of its planes. A point inside has
+            # clip coordinates with -w <= x, y, z <= w.
             clip = corners @ view_proj[:, :3].T + view_proj[:, 3]
             coords, w = clip[..., :3], clip[..., 3:]
             inactive |= ((coords > w).all(axis=1) | (coords < -w).all(axis=1)).any(axis=-1)
@@ -859,7 +855,7 @@ class JITRenderer:
 
             for id in draw_order:
                 # Only render markers on the main graphical window, while skipping plane-reflection. A primitive this
-                # pass hides has no index to draw, so its state is left alone too (see 'forward_pass').
+                # pass hides has no index to draw, and its state setup costs the driver as much as a draw.
                 if (
                     n_indices[id] == 0
                     or ((render_flags[id, 4] or render_flags[id, 6]) and flags & RenderFlags_SKIP_FLOOR)
@@ -1602,8 +1598,8 @@ class JITRenderer:
     def update_buffer(self, primitives, buffer_name, data):
         """Queue the update of one buffer of several primitives, flushed during the next render pass.
 
-        New vertex positions move the bounds of the bare geometry along, and new instance transforms the bounds the
-        instances cover, a placed primitive getting that from its poses in bulk instead (see '_update_instances').
+        New vertex positions update the bounds of the bare geometry, and new instance transforms update the bounds of
+        the instances. A placed primitive refreshes the latter from its poses in bulk instead (see '_update_instances').
 
         The GL buffer id is resolved at flush time rather than here: a primitive is only added to the GL context during
         its first render pass, so an id resolved at enqueue time would be -1 for any update queued before that pass and
@@ -1627,7 +1623,7 @@ class JITRenderer:
                 if buffer_name == "pos":
                     self.bounds_geom[i, 0] = primitive_data.min(axis=0)
                     self.bounds_geom[i, 1] = primitive_data.max(axis=0)
-                    # The instances carry the new box along, the placed primitives refreshing theirs in bulk
+                    # The bounds of the instances follow the new box. A placed primitive refreshes them in bulk.
                     if not self.is_instance_placed[i]:
                         instance_poses = primitive.poses
                         if instance_poses is None or not len(instance_poses):

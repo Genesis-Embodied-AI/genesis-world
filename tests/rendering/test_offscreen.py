@@ -2055,13 +2055,13 @@ def test_rasterizer_sensor_env_spacing_invariance(renderer, context_mode):
 @pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_rasterizer_draws_turned_geometry_at_view_edge(renderer, n_envs, offset_box_obj):
+def test_rasterizer_draws_geometry_turned_about_distant_origin(renderer, n_envs, offset_box_obj):
     scene = gs.Scene(
         renderer=renderer,
         show_viewer=False,
     )
-    # A box standing away from the origin of its mesh, turned a quarter turn about the vertical axis of that origin,
-    # lies along y. The camera frames it alone, away from where it would stand unturned.
+    # The box stands 1 m from the origin of its mesh, so a quarter turn about the vertical axis moves it onto the y
+    # axis. The camera frames it there, far from where it would stand unturned.
     scene.add_entity(
         gs.morphs.Mesh(
             file=offset_box_obj,
