@@ -1,7 +1,8 @@
 from typing import Any, ClassVar
 
+from pydantic import StrictBool, model_validator
+
 import quadrants as qd
-from pydantic import StrictBool
 
 import genesis as gs
 from genesis.constants import STRUCTURE
@@ -30,25 +31,27 @@ class Liquid(Base):
 
     viscous: StrictBool = False
 
-    def model_post_init(self, context: Any) -> None:
-        super().model_post_init(context)
-        if not self.viscous:
-            self.mu = 0.0
-        self.update_F_S_Jp = self._update_F_S_Jp_liquid
-        self.update_stress = self._update_stress_liquid
-        # Viscous liquid uses U @ V.T in the 2*mu*(F_tmp - U@V.T)@F_tmp.T term; when mu==0 that term vanishes and SVD
-        # is pure waste.
-        self.needs_svd = self.viscous
+    @model_validator(mode="before")
+    @classmethod
+    def _zero_mu_if_inviscid(cls, data: dict[str, Any]) -> dict[str, Any]:
+        if not data.get("viscous", False):
+            data["mu"] = 0.0
+        return data
+
+    @property
+    def needs_svd(self) -> bool:
+        # The viscous term 2 * mu * (F_tmp - U @ V.T) @ F_tmp.T vanishes with mu, which a non-viscous liquid zeroes
+        return self.viscous
 
     @qd.func
-    def _update_F_S_Jp_liquid(self, J, F_tmp, U, S, V, Jp, eps):
+    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
         F_new = qd.Matrix.identity(gs.qd_float, 3) * qd.pow(J, 1.0 / 3.0)
         S_new = S
         Jp_new = Jp
         return F_new, S_new, Jp_new
 
     @qd.func
-    def _update_stress_liquid(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
         stress = 2 * self.mu * (F_tmp - U @ V.transpose()) @ F_tmp.transpose() + qd.Matrix.identity(
             gs.qd_float, 3
         ) * self.lam * J * (J - 1)

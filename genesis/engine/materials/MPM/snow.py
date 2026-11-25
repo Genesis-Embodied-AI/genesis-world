@@ -1,7 +1,8 @@
-from typing import Any, ClassVar
+from typing import ClassVar
+
+from pydantic import StrictBool, model_validator
 
 import quadrants as qd
-from pydantic import StrictBool, model_validator
 
 import genesis as gs
 from genesis.constants import STRUCTURE
@@ -49,13 +50,8 @@ class Snow(ElastoPlastic):
         data["use_von_mises"] = False
         return data
 
-    def model_post_init(self, context: Any) -> None:
-        super().model_post_init(context)
-        self.update_F_S_Jp = self._update_F_S_Jp_snow
-        self.update_stress = self._update_stress_snow
-
     @qd.func
-    def _update_F_S_Jp_snow(self, J, F_tmp, U, S, V, Jp, eps):
+    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         Jp_new = Jp
         for d in qd.static(range(3)):
@@ -65,7 +61,7 @@ class Snow(ElastoPlastic):
         return F_new, S_new, Jp_new
 
     @qd.func
-    def _update_stress_snow(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
         # Hardening coefficient: material harder when compressed
         h = qd.exp(10 * (1.0 - Jp))
         mu, lam = self.mu * h, self.lam * h

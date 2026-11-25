@@ -238,8 +238,8 @@ def test_perf_dispatch(variant, show_viewer):
 
     # Aggregate SVD flag must match the variant for the dispatch path under test to actually run.
     assert scene.mpm_solver.mpm_config.is_svd_needed == (variant == "svd")
-    # Materials of the same class and options dispatch to one branch of the kernels
-    assert elastic_twin.material.idx == elastic.material.idx != liquid.material.idx
+    # Materials of the same class and options are one material, which dispatches to one branch of the kernels
+    assert len({elastic.material, elastic_twin.material, liquid.material}) == 2
 
     init_elastic_pos = elastic.get_particles_pos()
     init_liquid_pos = liquid.get_particles_pos()

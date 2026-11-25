@@ -1,10 +1,9 @@
-from typing import Any
-
-import quadrants as qd
 from pydantic import StrictBool
 
+import quadrants as qd
+
 import genesis as gs
-from genesis.typing import NonNegativeFloat, PositiveFloat, ValidFloat
+from genesis.typing import NonNegativeFloat, PositiveFloat
 
 from .base import Base
 
@@ -37,12 +36,8 @@ class ElastoPlastic(Base):
     use_von_mises: StrictBool = True
     von_mises_yield_stress: PositiveFloat = 10000.0
 
-    def model_post_init(self, context: Any) -> None:
-        super().model_post_init(context)
-        self.update_F_S_Jp = self._update_F_S_Jp_elasto_plastic
-
     @qd.func
-    def _update_F_S_Jp_elasto_plastic(self, J, F_tmp, U, S, V, Jp, eps):
+    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
         F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         if qd.static(self.use_von_mises):

@@ -1,12 +1,11 @@
 import math
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import quadrants as qd
-from pydantic import Field
 
 import genesis as gs
 from genesis.constants import STRUCTURE
-from genesis.typing import PositiveFloat, ValidFloat
+from genesis.typing import PositiveFloat
 
 from ..base import SamplerType
 from .base import Base
@@ -32,20 +31,16 @@ class Sand(Base):
     """
 
     structure: ClassVar[STRUCTURE] = STRUCTURE.AMORPHOUS
+    _default_Jp: ClassVar[float] = 0.0
 
     sampler: SamplerType = "random"
     friction_angle: PositiveFloat = 45.0
 
-    # Derived from friction_angle, set in model_post_init.
-    alpha: ValidFloat = Field(default=0.0, exclude=True)
-
-    def model_post_init(self, context: Any) -> None:
-        super().model_post_init(context)
-        self._default_Jp = 0.0
+    @property
+    def alpha(self) -> float:
+        """The coefficient of the Drucker-Prager yield surface, derived from the friction angle."""
         sin_phi = math.sin(math.radians(self.friction_angle))
-        self.alpha = math.sqrt(2 / 3) * 2 * sin_phi / (3 - sin_phi)
-        self.update_F_S_Jp = self._update_F_S_Jp_sand
-        self.update_stress = self._update_stress_sand
+        return math.sqrt(2 / 3) * 2 * sin_phi / (3 - sin_phi)
 
     @qd.func
     def _sand_projection(self, S, Jp, eps):
@@ -70,13 +65,13 @@ class Sand(Base):
         return S_out, Jp_new
 
     @qd.func
-    def _update_F_S_Jp_sand(self, J, F_tmp, U, S, V, Jp, eps):
+    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
         S_new, Jp_new = self._sand_projection(S, Jp, eps)
         F_new = U @ S_new @ V.transpose()
         return F_new, S_new, Jp_new
 
     @qd.func
-    def _update_stress_sand(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
         log_S_sum = gs.qd_float(0.0)
         center = qd.Matrix.zero(gs.qd_float, 3, 3)
         for i in qd.static(range(3)):

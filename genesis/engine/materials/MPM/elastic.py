@@ -1,9 +1,8 @@
-from typing import Any, Literal
+from typing import Literal
 
 import quadrants as qd
 
 import genesis as gs
-
 from genesis.typing import PositiveFloat
 
 from .base import Base
@@ -29,36 +28,31 @@ class Elastic(Base):
     E: PositiveFloat = 3e5
     model: Literal["corotation", "neohooken"] = "corotation"
 
-    def model_post_init(self, context: Any) -> None:
-        super().model_post_init(context)
-
-        self.update_F_S_Jp = self._update_F_S_Jp_elastic
-        if self.model == "corotation":
-            self.update_stress = self._update_stress_corotation
-            # corotation stress uses U @ V.T from SVD(F_tmp).
-            self.needs_svd = True
-        elif self.model == "neohooken":
-            self.update_stress = self._update_stress_neohooken
-            # neohooken stress only reads F_tmp and J=det(F_tmp); SVD can be skipped.
-            self.needs_svd = False
+    @property
+    def needs_svd(self) -> bool:
+        # The corotated stress reads U @ V.T, while the neo-Hookean one reads F_tmp and J alone
+        return self.model == "corotation"
 
     @qd.func
-    def _update_F_S_Jp_elastic(self, J, F_tmp, U, S, V, Jp, eps):
+    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
         F_new = F_tmp
         S_new = S
         Jp_new = Jp
         return F_new, S_new, Jp_new
 
     @qd.func
-    def _update_stress_corotation(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-        stress = 2 * self.mu * (F_new - U @ V.transpose()) @ F_new.transpose() + qd.Matrix.identity(
-            gs.qd_float, 3
-        ) * self.lam * J * (J - 1)
-        return stress
+    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+        return self._update_stress_elastic(U, S, V, F_tmp, F_new, J)
 
     @qd.func
-    def _update_stress_neohooken(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-        stress = self.mu * (F_tmp @ F_tmp.transpose()) + qd.Matrix.identity(gs.qd_float, 3) * (
-            self.lam * qd.log(J) - self.mu
-        )
+    def _update_stress_elastic(self, U, S, V, F_tmp, F_new, J):
+        stress = qd.Matrix.zero(gs.qd_float, 3, 3)
+        if qd.static(self.model == "corotation"):
+            stress = 2 * self.mu * (F_new - U @ V.transpose()) @ F_new.transpose() + qd.Matrix.identity(
+                gs.qd_float, 3
+            ) * self.lam * J * (J - 1)
+        else:
+            stress = self.mu * (F_tmp @ F_tmp.transpose()) + qd.Matrix.identity(gs.qd_float, 3) * (
+                self.lam * qd.log(J) - self.mu
+            )
         return stress

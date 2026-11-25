@@ -403,8 +403,9 @@ class MPMSolver(ParticleSolver):
 Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upper_bound'."""
             )
 
-        # The distinct materials of the entities, each one dispatched to by its index (see 'add_material')
-        self._materials: list[MPM.Base] = []
+        # The index of each distinct material of the entities, which the kernels dispatch the particles by. Equal
+        # materials share an index, and so the branches of the kernels they compile.
+        self._materials_idx: dict[MPM.Base, int] = {}
 
         # The particles stay a few cells away from the walls, where the stencil of a particle reaches outside the grid
         self.boundary_padding = 3 * self._dx
@@ -432,12 +433,12 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         # deformation gradient, which spares the singular value decomposition. The backward pass reverses it alone.
         # TODO: validate the J = det(F_tmp) shortcut composes with quadrants autograd before enabling it there.
         self.mpm_config = MPMConfig(
-            is_svd_needed=self._requires_grad or any([material.needs_svd for material in self._materials]),
+            is_svd_needed=self._requires_grad or any([material.needs_svd for material in self._materials_idx]),
             requires_grad=self._requires_grad,
             is_cpic=self._enable_CPIC and self._sim.rigid_solver.is_active,
             is_deterministic=requires_deterministic_accumulation(),
         )
-        self._mpm_materials = MPMMaterials(tuple(self._materials))
+        self._mpm_materials = MPMMaterials(tuple(self._materials_idx))
 
         self.data_manager = MPMData(self)
         self.mpm_state = self.data_manager.mpm_state
@@ -496,7 +497,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
         spec: "gs.entities.MPM",
         desc: "EntityDescription | None" = None,
     ) -> "MPMEntity":
-        self.add_material(spec.material)
+        self._materials_idx.setdefault(spec.material, len(self._materials_idx))
 
         entity = MPMEntity(
             scene=self._sim.scene,
@@ -511,23 +512,11 @@ Please decrease the simulation timestep or adjust the material parameters."""
         self._n_particles += entity.n_particles
         return entity
 
-    def add_material(self, material: MPM.Base) -> None:
-        """Give a material its index among the distinct materials of the solver, registering it unless one equals it.
-
-        A material equal to one already registered shares its index, and so the branches of the kernels it compiles.
-        """
-        for material_registered in self._materials:
-            if material == material_registered:
-                material.idx = material_registered.idx
-                return
-        material.idx = len(self._materials)
-        self._materials.append(material)
-
     def add_particles(self, is_active: bool, particle_start: int, material: MPM.Base, pos: np.ndarray) -> None:
         """Add the particles of an entity at rest, with the parameters of its material, between two steps."""
         kernel_add_particles(
             particle_start,
-            material.idx,
+            self._materials_idx[material],
             is_active,
             material._default_Jp,
             material.rho,

@@ -70,8 +70,7 @@ class HybridEntity(Entity):
         morph = spec.morph
         material = spec.material
         material_rigid = material.material_rigid
-        # The soft part takes a copy of its material, which the muscle groups of this entity complete
-        material_soft = material.material_soft.model_copy()
+        material_soft = material.material_soft
 
         surface_rigid = gs.surfaces.Smooth(roughness=0.4)  # HACK hardcoded
         # The soft part following the rigid links of its muscle groups, held without the default coupling alone
@@ -138,8 +137,6 @@ class HybridEntity(Entity):
             if muscle_group is not None:
                 muscle_group = muscle_group.astype(gs.np_int, copy=False)
 
-            # set muscle group
-            material_soft.n_groups = len(link_idcs)
             self._muscle_group_cache = muscle_group
 
             if isinstance(material_soft, gs.materials.MPM.Base):
@@ -149,8 +146,8 @@ class HybridEntity(Entity):
                     groups_geom_idx=np.asarray(geom_idcs),
                     groups_trans_local_to_global=np.asarray(trans_local_to_global),
                     groups_quat_local_to_global=np.asarray(quat_local_to_global),
-                    groups_damping=np.full(material_soft.n_groups, material.damping),
-                    groups_soft_dv_coef=np.full(material_soft.n_groups, material.soft_dv_coef),
+                    groups_damping=np.full(len(link_idcs), material.damping),
+                    groups_soft_dv_coef=np.full(len(link_idcs), material.soft_dv_coef),
                     particles_idx=np.arange(part_soft.particle_start, part_soft.particle_start + n_particles),
                     particles_init_pos=part_soft.init_particles,
                 )
