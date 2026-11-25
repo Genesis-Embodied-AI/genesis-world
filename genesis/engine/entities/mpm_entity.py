@@ -243,8 +243,7 @@ class MPMEntity(ParticleEntity):
         """
         Attach some particles to a rigid link with critically damped springs.
 
-        Each particle is pulled toward the position it holds now, expressed in the frame of the link. A scene disabling
-        ``MPMOptions.enable_particle_constraints`` refuses it.
+        Each particle is pulled toward the position it holds now, expressed in the frame of the link.
 
         Parameters
         ----------
@@ -264,8 +263,6 @@ class MPMEntity(ParticleEntity):
     def remove_particle_constraints(self, particles_mask=None):
         """
         Remove constraints from specified particles, or all if None.
-
-        A scene disabling ``MPMOptions.enable_particle_constraints`` refuses it.
 
         Parameters
         ----------

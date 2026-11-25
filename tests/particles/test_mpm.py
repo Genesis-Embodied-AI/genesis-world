@@ -175,19 +175,6 @@ def test_particle_constraints(show_viewer, tol):
         scene.step()
     assert_allclose(mpm_follower.get_particles_vel()[..., 2], -GRAVITY * N_STEPS * scene.dt, tol=1e-3)
 
-    # Particles are attached only in a scene that allocated their constraints with its solver
-    scene_without_constraints = gs.Scene(
-        mpm_options=gs.options.MPMOptions(enable_particle_constraints=False), show_viewer=False
-    )
-    mpm_box = scene_without_constraints.add_entity(
-        morph=gs.morphs.Box(pos=(0.0, 0.0, 0.5), size=(0.1, 0.1, 0.1)), material=gs.materials.MPM.Elastic()
-    )
-    scene_without_constraints.build()
-    with pytest.raises(gs.GenesisException, match="enable_particle_constraints"):
-        mpm_box.set_particle_constraints(True, 0, stiffness=1e3)
-    with pytest.raises(gs.GenesisException, match="enable_particle_constraints"):
-        mpm_box.remove_particle_constraints()
-
 
 @pytest.mark.required
 @pytest.mark.parametrize("variant", ["svd", "no_svd"])

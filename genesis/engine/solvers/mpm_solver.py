@@ -375,7 +375,6 @@ class MPMSolver(ParticleSolver):
 
         self._grid_density = options.grid_density
         self._enable_CPIC = options.enable_CPIC
-        self._enable_particle_constraints = options.enable_particle_constraints
         # The rigid geoms separate the particles from the cells by their SDF (see MPMParticlesCPIC)
         opt_in(SDFInfo, cond=lambda: self.is_active and self._enable_CPIC)
         # The grid and the particles sum their forces on the rigid links exactly when the order of the sums is fixed
@@ -440,11 +439,10 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         self.data_manager = MPMData(self)
         self.mpm_state = self.data_manager.mpm_state
         self.mpm_info = self.data_manager.mpm_info
-        has_constraints = self.is_active and self._enable_particle_constraints
         self.particle_constraints = MPMParticleConstraints(
-            sizes=dict(particles=self._n_particles, envs=self.n_envs_), env_first=False, unused=not has_constraints
+            sizes=dict(particles=self._n_particles, envs=self.n_envs_), env_first=False, unused=not self.is_active
         )
-        if has_constraints:
+        if self.is_active:
             kernel_clear_particle_constraints(self.particle_constraints)
         # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
         self.register_errors(
@@ -587,10 +585,9 @@ Please decrease the simulation timestep or adjust the material parameters."""
             )
 
         # The particle constraints apply once the particles left the grid
-        if self._enable_particle_constraints:
-            kernel_apply_particle_constraints(
-                self.mpm_state, rigid_solver.dyn_state.links, self.particle_constraints, self.mpm_info
-            )
+        kernel_apply_particle_constraints(
+            self.mpm_state, rigid_solver.dyn_state.links, self.particle_constraints, self.mpm_info
+        )
 
         # The grid is not read after the integration of the particles, so the cells the substep touched are zeroed now,
         # across all envs, and the list of them emptied (see MPMGrid).
@@ -727,7 +724,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
 
         Each particle is pulled toward the position it holds now, expressed in the frame of the link. A spring applies the
         force -k (x - x_t) - 2 sqrt(k m) (v - v_t) to a particle of mass m, x_t and v_t being the position and velocity
-        of its target. A scene disabling ``MPMOptions.enable_particle_constraints`` refuses it.
+        of its target.
 
         Parameters
         ----------
@@ -742,8 +739,6 @@ Please decrease the simulation timestep or adjust the material parameters."""
         """
         if not isinstance(link_idx, int):
             gs.raise_exception("link_idx must be an integer.")
-        if not self._enable_particle_constraints:
-            gs.raise_exception("Particle constraints require 'enable_particle_constraints=True' in MPMOptions.")
         particles_mask = self._broadcast_particles_mask(particles_mask, particles_start)
         rigid_solver = self._sim.rigid_solver
         # The attachment is a configuration of the constraint, which carries no gradient
@@ -790,8 +785,6 @@ Please decrease the simulation timestep or adjust the material parameters."""
         particles_start : int, optional
             Global index of the particle the mask starts at. Defaults to 0.
         """
-        if not self._enable_particle_constraints:
-            gs.raise_exception("Particle constraints require 'enable_particle_constraints=True' in MPMOptions.")
         particles_mask = self._broadcast_particles_mask(particles_mask, particles_start)
         kernel_remove_particle_constraints(particles_start, particles_mask, self.particle_constraints)
 
