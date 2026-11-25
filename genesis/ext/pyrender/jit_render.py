@@ -645,8 +645,6 @@ class JITRenderer:
                 self.textures[i, 0] |= 4 << 8
             if tf & 8 and material.baseColorTexture.tex_type == GL_TEXTURE_2D_ARRAY:
                 self.textures[i, 0] |= 8 << 8
-            if primitive.texture_layers is not None:
-                self.update_texture_layers(primitive)
 
             if isinstance(material, MetallicRoughnessMaterial):
                 self.pbr_mat[i, :4] = material.baseColorFactor
@@ -686,6 +684,8 @@ class JITRenderer:
             self.model_buffer_id[i] = primitive._buffers.get("model", 0)
             self.inst_tint_buffer_id[i] = primitive._buffers.get("inst_tint", 0)
             self.inst_attr_start[i] = getattr(primitive, "_inst_attr_start", 0)
+
+        self.update_texture_layers([primitive_list[i] for i in np.flatnonzero(is_layered)])
 
         # Gate the per-env culling to scenes with heterogeneous variants or primitives standing in one environment
         self._has_env_filtered = bool(self.render_flags[:, 8].any() or (self.env_row >= 0).any())
@@ -1542,14 +1542,23 @@ class JITRenderer:
                 self.gen_func_ptr()
             return self._update_normal_flat(vertices.reshape((-1, 3, 3)))
 
-    def update_texture_layers(self, primitive) -> None:
-        """Copy the texture array layers each rendered environment of a primitive samples, for the next render pass."""
-        i = self._primitive_index.get(primitive)
-        if i is not None:
-            self.texture_layers[self.texture_layers_idx[i]] = primitive.texture_layers
-            # The alpha of the layers shown decides whether the mesh is drawn with the transparent ones, a flag that
-            # every primitive of the mesh carries
-            mesh = self.node_list[i].mesh
+    def update_texture_layers(self, primitives) -> None:
+        """Copy the texture array layers each rendered environment of some primitives samples, for the next render pass.
+
+        Parameters
+        ----------
+        primitives : iterable of Primitive
+            The primitives whose layers changed. Those that this renderer does not draw are skipped.
+        """
+        meshes = set()
+        for primitive in primitives:
+            i = self._primitive_index.get(primitive)
+            if i is not None:
+                self.texture_layers[self.texture_layers_idx[i]] = primitive.texture_layers
+                meshes.add(self.node_list[i].mesh)
+        # The alpha of the layers shown decides whether a mesh is drawn with the transparent ones, a flag that every
+        # primitive of the mesh carries. It is evaluated once per mesh, since it reads every primitive of the mesh.
+        for mesh in meshes:
             is_transparent = mesh.is_transparent
             for mesh_primitive in mesh.primitives:
                 i_p = self._primitive_index.get(mesh_primitive)
