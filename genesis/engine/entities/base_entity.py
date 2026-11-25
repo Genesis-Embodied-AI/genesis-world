@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -33,6 +33,8 @@ class Entity(BuildableMixin, RBC):
     Base class for all types of entities.
     """
 
+    _description_cls: ClassVar[type[EntityDescription]]
+
     def __init__(
         self,
         idx: int,
@@ -40,6 +42,9 @@ class Entity(BuildableMixin, RBC):
         solver: "Solver | None",
         desc: EntityDescription,
     ) -> None:
+        # A description read from a file can carry any class whose fields match
+        if type(desc) is not self._description_cls:
+            gs.raise_exception(f"{type(self).__name__} cannot be described by {type(desc).__name__}.")
         spec = desc.spec
         self._desc = desc
         # A hybrid entity holds no solver of its own and creates its parts through the scene, which lists every entity

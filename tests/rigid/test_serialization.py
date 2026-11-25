@@ -755,11 +755,11 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
         members = {name: archive.read(name) for name in archive.namelist()}
     original = json.loads(members[MANIFEST_NAME])
     for desc_cls_name, swapped_cls_name, refusal in (
-        ("SPHEntityDescription", "MPMEntityDescription", "SPHSolver simulates no entity described by MPM"),
-        ("MPMEntityDescription", "SPHEntityDescription", "MPMSolver simulates no entity described by SPH"),
+        ("SPHEntityDescription", "MPMEntityDescription", "SPHEntity cannot be described by MPM"),
+        ("MPMEntityDescription", "SPHEntityDescription", "MPMEntity cannot be described by SPH"),
         ("PBDEntityDescription", "SPHEntityDescription", "PBDParticleEntity cannot be described by SPH"),
-        ("FEMEntityDescription", "RigidEntityDescription", "FEMSolver simulates no entity described by Rigid"),
-        ("HybridEntityDescription", "RigidEntityDescription", "hybrid entity cannot be described by Rigid"),
+        ("FEMEntityDescription", "RigidEntityDescription", "FEMEntity cannot be described by Rigid"),
+        ("HybridEntityDescription", "RigidEntityDescription", "HybridEntity cannot be described by Rigid"),
     ):
         manifest = deepcopy(original)
         entities = manifest["held"]["scene"]["entities"]

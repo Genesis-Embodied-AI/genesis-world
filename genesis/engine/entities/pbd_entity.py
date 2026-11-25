@@ -142,9 +142,6 @@ class PBDBaseEntity(ParticleEntity):
         particle_start: int,
         need_skinning: bool = True,
     ) -> None:
-        # A description read from a file can carry any class whose fields match
-        if type(desc) is not self._description_cls:
-            gs.raise_exception(f"{type(self).__name__} cannot be described by {type(desc).__name__}.")
         super().__init__(scene, solver, desc, particle_size, idx, particle_start, need_skinning)
 
     @gs.assert_built

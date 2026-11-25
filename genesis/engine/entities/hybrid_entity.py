@@ -178,19 +178,19 @@ class HybridEntity(Entity):
         The simulation scene where the entity is added.
     desc : HybridEntityDescription
         The description the entity is created from, naming its parts and associating them.
-    part_rigid : RigidEntity
-        The rigid part, an entity of the scene the description names.
-    part_soft : MPMEntity
-        The soft part, an entity of the scene the description names.
+    get_entity : Callable[[str], Entity]
+        Returns the entity of the scene of a given name, which gives the two parts the description names.
     """
 
+    _description_cls = HybridEntityDescription
+
     def __init__(
-        self, idx: int, scene: "Scene", desc: HybridEntityDescription, part_rigid: Entity, part_soft: Entity
+        self, idx: int, scene: "Scene", desc: HybridEntityDescription, get_entity: Callable[[str], Entity]
     ) -> None:
         super().__init__(idx, scene, None, desc)
 
-        self._part_rigid = part_rigid
-        self._part_soft = part_soft
+        self._part_rigid = get_entity(desc.part_rigid_name)
+        self._part_soft = get_entity(desc.part_soft_name)
         if not isinstance(self._part_soft.material, gs.materials.MPM.Base):
             gs.raise_exception(f"Cannot handle soft material {self._part_soft.material}")
 

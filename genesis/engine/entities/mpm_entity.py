@@ -51,6 +51,8 @@ class MPMEntity(ParticleEntity):
         Starting particle index.
     """
 
+    _description_cls = MPMEntityDescription
+
     def __init__(
         self,
         scene: "Scene",

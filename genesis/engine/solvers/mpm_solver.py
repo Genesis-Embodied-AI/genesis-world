@@ -509,10 +509,6 @@ Please decrease the simulation timestep or adjust the material parameters."""
             desc = MPMEntityDescription.resolve(
                 spec, surface, self._particle_size, self.boundary_lower, self.boundary_upper
             )
-        elif type(desc) is not MPMEntityDescription:
-            gs.raise_exception(f"{type(self).__name__} simulates no entity described by {type(desc).__name__}.")
-        self._materials_idx.setdefault(desc.spec.material, len(self._materials_idx))
-
         entity = MPMEntity(
             scene=self._sim.scene,
             solver=self,
@@ -521,6 +517,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
             idx=idx,
             particle_start=self.n_particles,
         )
+        self._materials_idx.setdefault(desc.spec.material, len(self._materials_idx))
         self._entities.append(entity)
         self._n_particles += entity.n_particles
         return entity

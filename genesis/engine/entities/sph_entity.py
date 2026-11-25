@@ -34,6 +34,8 @@ class SPHEntity(ParticleEntity):
         Start index for the particles belonging to this entity.
     """
 
+    _description_cls = SPHEntityDescription
+
     def __init__(
         self,
         scene: "Scene",

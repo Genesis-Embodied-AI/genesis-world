@@ -262,6 +262,8 @@ class FEMEntity(DynamicTextureMixin, Entity):
         Starting index of this entity's surface triangles in the global surface array (default is 0).
     """
 
+    _description_cls = FEMEntityDescription
+
     def __init__(
         self,
         scene: "Scene",

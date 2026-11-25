@@ -370,8 +370,6 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
             desc = SPHEntityDescription.resolve(
                 spec, surface, self._particle_size, self.boundary_lower, self.boundary_upper
             )
-        elif type(desc) is not SPHEntityDescription:
-            gs.raise_exception(f"{type(self).__name__} simulates no entity described by {type(desc).__name__}.")
         entity = SPHEntity(
             scene=self._sim.scene,
             solver=self,
