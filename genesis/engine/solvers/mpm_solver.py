@@ -415,6 +415,9 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         self.particle_constraints: MPMParticleConstraints | None = None
         self.data_manager: MPMData | None = None
         self._mpm_materials: MPMMaterials | None = None
+        # Whether a particle was ever attached, which gates the launch of the constraint kernel. It never resets, since
+        # telling that every particle got detached takes a reduction over all of them.
+        self._is_constrained = False
 
     @gs.assert_unbuilt
     def build(self, n_envs: int) -> None:
@@ -585,9 +588,10 @@ Please decrease the simulation timestep or adjust the material parameters."""
             )
 
         # The particle constraints apply once the particles left the grid
-        kernel_apply_particle_constraints(
-            self.mpm_state, rigid_solver.dyn_state.links, self.particle_constraints, self.mpm_info
-        )
+        if self._is_constrained:
+            kernel_apply_particle_constraints(
+                self.mpm_state, rigid_solver.dyn_state.links, self.particle_constraints, self.mpm_info
+            )
 
         # The grid is not read after the integration of the particles, so the cells the substep touched are zeroed now,
         # across all envs, and the list of them emptied (see MPMGrid).
@@ -757,6 +761,20 @@ Please decrease the simulation timestep or adjust the material parameters."""
             self.mpm_state,
             self.particle_constraints,
         )
+        self._is_constrained = True
+
+    def load_checkpoint(
+        self,
+        checkpoint: SolverCheckpoint,
+        *,
+        boundary_only: bool = False,
+        envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
+    ) -> list[DataItem]:
+        items = super().load_checkpoint(checkpoint, boundary_only=boundary_only, envs_idx=envs_idx)
+        # A record made after some particle was attached brings its constraints back (see '_is_constrained')
+        if not self._is_constrained and qd_to_torch(self.particle_constraints.is_constrained).any():
+            self._is_constrained = True
+        return items
 
     def _broadcast_particles_mask(self, particles_mask, particles_start: int) -> torch.Tensor:
         # A missing mask selects every particle from `particles_start` on
