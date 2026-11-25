@@ -16,6 +16,13 @@ _qd_outputs = io.StringIO()
 
 os.environ.setdefault("QD_ENABLE_PYBUF", "0" if sys.stdout is sys.__stdout__ else "1")
 
+# OpenGL on macOS runs a new shader with a quick build at first, compiles it again in the background, and switches to
+# that build once it is ready, possibly between two draws of the same frame. The two builds may round differently, so
+# identical draws would give images that differ at random. Compiling synchronously keeps a single build per shader, at
+# the cost of a longer first draw. The variable has no effect once an OpenGL context exists, so it is set at import.
+if sys.platform == "darwin":
+    os.environ.setdefault("GLLLVM_SYNC_JIT", "1")
+
 with redirect_stdout(_qd_outputs):
     import quadrants as qd
 
