@@ -1325,7 +1325,7 @@ class FEMScopedRenderContext(ScopedRenderContext[FEMSolver]):
                     vgeom.surface,
                     vgeom.uvs,
                     vgeom.seg_keys,
-                    vgeom.verts_idx,
+                    vgeom.sim_verts_idx,
                     vgeoms_roles,
                     (),
                     self.dynamic_textures.get(vgeom.vmesh),

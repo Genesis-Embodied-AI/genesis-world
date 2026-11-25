@@ -19,7 +19,7 @@ from ..utils.assets import get_hf_dataset
 def test_interior_tetrahedralized_vertex(cube_verts_and_faces, box_obj_path, show_viewer):
     # A small maxvolume introduces internal vertices during tetrahedralization: all surface vertices must
     # still lie exactly on the original quad faces, and the visualizer's mesh vertices must track the
-    # simulated vertices through the visual geom's verts_idx.
+    # simulated vertices through the visual geom's sim_verts_idx.
     verts, faces = cube_verts_and_faces
 
     scene = gs.Scene(show_viewer=show_viewer)
@@ -86,12 +86,12 @@ def test_interior_tetrahedralized_vertex(cube_verts_and_faces, box_obj_path, sho
         )
 
     # The visualizer draws the input surface, whose vertices track the simulated vertices through the visual
-    # geom's verts_idx, while surface_triangles reflects the refined tetrahedral boundary: the two meshes
+    # geom's sim_verts_idx, while surface_triangles reflects the refined tetrahedral boundary: the two meshes
     # differ in granularity, so the invariant to check is per-vertex tracking.
     (vgeom,) = fem.vgeoms
     (fem_node_primitive,) = scene.visualizer.context.nodes_by_seg_keys[vgeom.seg_keys][0].mesh.primitives
     viz_verts = fem_node_primitive.positions
-    assert_allclose(viz_verts, vertices[vgeom.verts_idx], tol=gs.EPS)
+    assert_allclose(viz_verts, vertices[vgeom.sim_verts_idx], tol=gs.EPS)
 
 
 @pytest.mark.required
@@ -116,10 +116,10 @@ def test_multi_submesh_render_decoupling(n_envs, show_viewer):
     vertices = fem.get_verts_pos()
     for vgeom in fem.vgeoms:
         # Negative indices would wrap around silently.
-        assert vgeom.verts_idx.min() >= 0
+        assert vgeom.sim_verts_idx.min() >= 0
         # Mapped simulated vertices must land on the render vertices they stand for, in every environment, up to
         # the quantization of the float64 authored vertices to the simulation dtype.
-        assert_allclose(vertices[..., vgeom.verts_idx, :], vgeom.vmesh.verts, tol=gs.EPS)
+        assert_allclose(vertices[..., vgeom.sim_verts_idx, :], vgeom.vmesh.verts, tol=gs.EPS)
 
     # The rasterizer must register one node per visual geom and environment.
     nodes_by_seg_keys = scene.visualizer.context.nodes_by_seg_keys

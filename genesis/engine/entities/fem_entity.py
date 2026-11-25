@@ -28,16 +28,16 @@ if TYPE_CHECKING:
 class FEMVisGeom(DynamicTextureMixin, RBC):
     """A visual geom of a FEM entity, the deformable counterpart of `RigidVisGeom`.
 
-    It carries the render mesh drawn by the visualizer, decoupled from the simulation mesh, and 'verts_idx',
+    It carries the render mesh drawn by the visualizer, decoupled from the simulation mesh, and 'sim_verts_idx',
     the map from each render-mesh vertex to the simulated vertex standing for it (vertices co-located across visual
     geoms or duplicated by texture seams share a single simulated vertex).
     """
 
-    def __init__(self, entity, vmesh, verts_idx):
+    def __init__(self, entity, vmesh, sim_verts_idx):
         self._uid = gs.UID()
         self._entity = entity
         self._vmesh = vmesh
-        self._verts_idx = verts_idx
+        self._sim_verts_idx = sim_verts_idx
 
     def get_trimesh(self):
         """The underlying `trimesh.Trimesh` of the render mesh."""
@@ -75,9 +75,9 @@ class FEMVisGeom(DynamicTextureMixin, RBC):
         return self._vmesh
 
     @property
-    def verts_idx(self):
+    def sim_verts_idx(self):
         """Map from render-mesh vertex index to the entity's simulated vertex index."""
-        return self._verts_idx
+        return self._sim_verts_idx
 
     @property
     def surface(self):
@@ -376,7 +376,7 @@ class FEMEntity(DynamicTextureMixin, Entity):
         Build the entity's visual geoms and simulation mesh from its morph.
 
         Each morph sub-mesh becomes a visual geom with its own surface and UVs, while the simulation operates on a
-        single welded copy of their vertices, tracked through 'FEMVisGeom.verts_idx': welding and
+        single welded copy of their vertices, tracked through 'FEMVisGeom.sim_verts_idx': welding and
         tetrahedralization both keep the input vertices first and in order, so these maps remain valid indices into
         the simulated vertices.
         """
@@ -403,7 +403,7 @@ class FEMEntity(DynamicTextureMixin, Entity):
         )
         self._vgeoms = gs.List()
         for mesh, verts_idx in zip(meshes, verts_maps):
-            self._vgeoms.append(FEMVisGeom(entity=self, vmesh=mesh, verts_idx=verts_idx))
+            self._vgeoms.append(FEMVisGeom(entity=self, vmesh=mesh, sim_verts_idx=verts_idx))
 
         if isinstance(self.material, gs.materials.FEM.Cloth):
             # Cloth needs no tetrahedralization: the welded surface triangles are the simulation elements.
