@@ -538,45 +538,36 @@ def test_export_and_load(
     )
     fem_spec.select(gs.indices.Vertex.at(0)).set_is_fixed(True)
     fem_cube = deformable_scene.add_entity(spec=fem_spec)
-    hybrid_duck = deformable_scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.1,
+    hybrid_arm = deformable_scene.add_entity(
+        morph=gs.morphs.URDF(
+            file="urdf/simple/two_link_arm.urdf",
             pos=(0.0, 0.0, 0.3),
+            scale=0.2,
+            fixed=True,
         ),
         material=gs.materials.Hybrid(
-            material_rigid=gs.materials.Rigid(),
+            material_rigid=gs.materials.Rigid(
+                gravity_compensation=1.0,
+            ),
             material_soft=gs.materials.MPM.Muscle(),
         ),
     )
     deformable_path = tmp_path / f"deformable{SCENE_FORMAT}"
     deformable_scene.export(deformable_path)
     restored_deformable = gs.Scene.load(deformable_path)
-    assert [entity.name for entity in restored_deformable.entities] == [
-        entity.name for entity in deformable_scene.entities
-    ]
-    for entity in (mpm_cube, sph_liquid, pbd_liquid, pbd_cloth, pbd_elastic):
-        assert_equal(restored_deformable.get_entity(entity.name).init_particles, entity.init_particles)
-    # A cloth and an elastic entity hold the remeshed mesh, the tetrahedralization included, and its edges
-    restored_cloth = restored_deformable.get_entity(pbd_cloth.name)
-    assert_equal(restored_cloth.edges, pbd_cloth.edges)
-    assert restored_cloth.n_inner_edges == pbd_cloth.n_inner_edges
-    restored_elastic = restored_deformable.get_entity(pbd_elastic.name)
-    assert_equal(restored_elastic.edges, pbd_elastic.edges)
-    assert restored_elastic.n_elems == pbd_elastic.n_elems
-    restored_fem = restored_deformable.get_entity(fem_cube.name)
-    assert_equal(restored_fem.elems, fem_cube.elems)
-    assert_equal(restored_fem.desc.fixed_verts_idx, fem_cube.desc.fixed_verts_idx)
-    # A hybrid entity names its parts, which the file holds as entities of their own, and follows the same links
-    restored_duck = restored_deformable.get_entity(hybrid_duck.name)
-    assert restored_duck.part_rigid.name == hybrid_duck.part_rigid.name
-    assert restored_duck.part_soft.name == hybrid_duck.part_soft.name
-    assert restored_duck.part_soft.material.n_groups == hybrid_duck.part_soft.material.n_groups
-    assert_equal(restored_duck.mpm_hybrid_part.groups_link_idx, hybrid_duck.mpm_hybrid_part.groups_link_idx)
+    # The loaded scene holds the description it was exported from, and simulates as the original one does
+    assert description_digest(restored_deformable.desc) == description_digest(deformable_scene.desc)
     deformable_scene.build(n_envs=n_envs)
     restored_deformable.build(n_envs=n_envs)
-    assert_equal(restored_cloth.get_mass(), pbd_cloth.get_mass())
-    assert_equal(restored_fem.get_verts_pos(), fem_cube.get_verts_pos())
+    for _ in range(10):
+        deformable_scene.step()
+        restored_deformable.step()
+    for entity in (mpm_cube, sph_liquid, pbd_liquid, pbd_cloth, pbd_elastic, hybrid_arm.part_soft):
+        restored_particles_pos = restored_deformable.get_entity(entity.name).get_particles_pos()
+        assert_allclose(restored_particles_pos, entity.get_particles_pos(), tol=gs.EPS)
+    assert_allclose(restored_deformable.get_entity(fem_cube.name).get_verts_pos(), fem_cube.get_verts_pos(), tol=gs.EPS)
+    restored_arm_rigid = restored_deformable.get_entity(hybrid_arm.part_rigid.name)
+    assert_allclose(restored_arm_rigid.get_qpos(), hybrid_arm.part_rigid.get_qpos(), tol=gs.EPS)
 
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
