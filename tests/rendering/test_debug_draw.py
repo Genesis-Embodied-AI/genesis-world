@@ -425,7 +425,7 @@ def test_islands_and_hibernation_colors(n_envs, renderer, show_viewer):
             ]
         )
 
-    # Contacts climb the stack one box per step, one step later in single precision
+    # Long enough for the top box to join the island, short enough for every link to stay awake
     for _ in range(5):
         scene.step()
 
