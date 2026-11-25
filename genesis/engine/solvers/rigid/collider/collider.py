@@ -85,7 +85,7 @@ class Collider:
         self._diff_normal_tolerance = 1e-2
         self._prune_deep_penetration_ratio = 3.0
         self._prune_max_contacts_per_link_pair = 32
-        self._prune_max_contacts_floor = 512
+        self._max_contacts_floor = 512
 
         self._init_config()
         self._use_split_narrowphase = (
@@ -307,11 +307,13 @@ class Collider:
 
         # The constraint solver counts a terrain pair at the convex cap. The larger cap of the pair holds a patch on a
         # riser on top of the one on the ground, which only the few geoms against a riser fill, well within the budget
-        # the other terrain pairs of the env leave unused. Counting it in full would grow the solver of every env.
+        # the other pairs of the env leave unused. Counting it in full would grow the solver of every env. The floor
+        # covers the scenes of few pairs, whose geoms may all stand against a riser.
         pairs_n_contacts_solved = np.where(
             is_terrain_pair, self.collider_config.n_contacts_per_convex_pair, pairs_n_contacts
         )
         max_contacts = int(np.sort(pairs_n_contacts_solved)[::-1][:max_collision_pairs].sum())
+        max_contacts = max(max_contacts, min(max_candidate_contacts, self._max_contacts_floor))
         # The constraint solver only sees the contacts surviving link-pair pruning, roughly the support polygon of each
         # link pair, so its budget caps a link pair at _prune_max_contacts_per_link_pair points. A conforming patch is
         # left unpruned and can exceed it, which halts the simulation with a request to increase 'max_contacts'. The
@@ -327,7 +329,7 @@ class Collider:
             _, pairs_group_idx = np.unique(pairs_key, return_inverse=True)
             link_pairs_n_contacts = np.bincount(pairs_group_idx, weights=pairs_n_contacts_solved)
             max_contacts_pruned = np.minimum(link_pairs_n_contacts, self._prune_max_contacts_per_link_pair)
-            max_contacts_pruned_total = max(int(max_contacts_pruned.sum()), self._prune_max_contacts_floor)
+            max_contacts_pruned_total = max(int(max_contacts_pruned.sum()), self._max_contacts_floor)
             max_contacts = min(max_contacts, max_contacts_pruned_total)
 
         # The option 'max_contacts' replaces the post-pruning budget, capped by the candidate budget. It is resolved in

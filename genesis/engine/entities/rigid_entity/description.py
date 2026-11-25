@@ -2016,11 +2016,10 @@ class TerrainEntityDescription(RigidEntityDescription):
 
     terrain_hf: np.ndarray | None = None
     terrain_scale: np.ndarray | None = None
-    terrain_step_height: float | None = None
+    terrain_step_height: float = math.inf
 
     def _load_morph(self, morph, resolution: Resolution):
         """Load the height field a terrain morph describes, with its scales and the meshes standing for it."""
-        self.terrain_step_height = math.inf
         if morph.slope_threshold is not None:
             self.terrain_step_height = morph.slope_threshold * morph.horizontal_scale
         vmesh, mesh, terrain_hf = tu.parse_terrain(morph, self.surface, self.terrain_step_height)

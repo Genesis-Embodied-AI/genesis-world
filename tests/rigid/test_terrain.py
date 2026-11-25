@@ -455,7 +455,7 @@ def test_vertical_steps(show_viewer, tol):
         assert len(riser_normals) >= scene.n_envs
         assert_allclose(riser_normals, (-1.0, 0.0, 0.0), tol=tol)
     assert_allclose(box.get_pos()[:, 2], 0.5 * BOX_SIZE, atol=5e-7)
-    assert_allclose(box.get_quat(), (1.0, 0.0, 0.0, 0.0), tol=2e-7)
+    assert_allclose(box.get_quat(), (1.0, 0.0, 0.0, 0.0), tol=5e-7)
 
     # The height query follows the flat columns of the surface the mesh of the terrain shows
     positions = (

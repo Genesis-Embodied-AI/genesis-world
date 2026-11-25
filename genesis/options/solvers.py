@@ -572,7 +572,9 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         collision detection can emit (see 'max_collision_pairs'). Exceeding it at runtime halts the simulation with
         an error. None resolves it automatically: the pre-pruning worst case or, when contact pruning is enabled
         (see 'contact_pruning_tolerance'), 32 contact points per candidate link pair but no less than 512, whichever
-        is smaller.
+        is smaller. Past 512 contact points, the worst case counts the contacts of a geom against a terrain with
+        vertical steps (see 'slope_threshold' of 'gs.morphs.Terrain') on the ground alone, since few geoms stand
+        against a riser at once.
     integrator : gs.integrator, optional
         Integrator type. Current supported integrators are 'gs.integrator.Euler', 'gs.integrator.implicitfast' and
         'gs.integrator.approximate_implicitfast'. 'Euler' and 'implicitfast' are consistent with their Mujoco
