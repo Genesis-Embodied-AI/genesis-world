@@ -2033,6 +2033,39 @@ def test_rasterizer_sensor_env_spacing_invariance(renderer, context_mode):
 
 @pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_rasterizer_draws_geometry_turned_about_distant_origin(renderer, n_envs, offset_box_obj):
+    scene = gs.Scene(
+        renderer=renderer,
+        show_viewer=False,
+    )
+    # The box stands 1 m from the origin of its mesh, so a quarter turn about the vertical axis moves it onto the y
+    # axis. The camera frames it there, far from where it would stand unturned.
+    scene.add_entity(
+        gs.morphs.Mesh(
+            file=offset_box_obj,
+            euler=(0.0, 0.0, 90.0),
+            fixed=True,
+        ),
+        surface=gs.surfaces.Default(
+            color=(1.0, 0.0, 0.0),
+        ),
+    )
+    sensor = scene.add_sensor(
+        RasterizerCameraOptions(
+            res=(64, 64),
+            pos=(0.6, 1.0, 0.8),
+            lookat=(0.0, 1.0, 0.0),
+            fov=40.0,
+        )
+    )
+    scene.build(n_envs=n_envs)
+
+    assert (sensor.read().rgb[..., 28:36, 28:36, 0] > 100).all()
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
 def test_video_recording_lifecycle(tmp_path, monkeypatch, renderer, show_viewer):
     DT = 0.01
     # One frame every other step, so that a span of N_STEPS resolves 2 frames and the paused span below skips 2

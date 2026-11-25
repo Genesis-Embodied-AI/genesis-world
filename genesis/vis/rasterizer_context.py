@@ -734,7 +734,10 @@ class RasterizerContext(BuildableMixin):
                     self._update_vertices(node, tets_verts)
             else:
                 for node, pos in zip(nodes, poss):
-                    self.jit.update_buffer(node.mesh.primitives, "model", (gu.trans_to_T(pos).transpose((0, 2, 1)),))
+                    node.mesh.primitives[0].poses = gu.trans_to_T(pos)
+                    self.jit.update_buffer(
+                        node.mesh.primitives, "model", (node.mesh.primitives[0].poses.transpose((0, 2, 1)),)
+                    )
         elif isinstance(shape, (Frames, Arrows, Lines)):
             if isinstance(shape, Frames):
                 # The transforms of the instances of each node drawing the frames: one node per frame holding one

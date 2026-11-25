@@ -68,8 +68,10 @@ class ViewerOptions(Options):
         is managed by a gs.InteractiveScene that supports them.
     update_on_setters : bool, optional
         Whether the viewer shows the changes of a setter (``set_pos``, ``set_qpos``, ...) right away, without waiting
-        for a step. A workaround for a viewer lagging behind a tight loop of setters, such as a debugging script: False
-        speeds it up, at the cost of showing these changes only at its next refresh. Defaults to True.
+        for a step. False speeds up a loop calling setters at every step, at the cost of showing these changes only at
+        the next refresh of the viewer, which a step triggers. A script calling setters without stepping then leaves
+        the window as it is, unresponsive to input when the window has no thread of its own (see ``run_in_thread``).
+        Defaults to True.
     """
 
     res: PositiveVec2IType | None = None

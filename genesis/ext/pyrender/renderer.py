@@ -17,7 +17,6 @@ from .constants import (
     DEFAULT_Z_NEAR,
     GLTF,
     MAX_N_LIGHTS,
-    SHADOW_TEX_SZ,
     BufFlags,
     ProgramFlags,
     RenderFlags,
@@ -921,7 +920,7 @@ class Renderer(object):
         glReadBuffer(GL_NONE)
 
         glClear(GL_DEPTH_BUFFER_BIT)
-        glViewport(0, 0, SHADOW_TEX_SZ, SHADOW_TEX_SZ)
+        glViewport(0, 0, light.shadow_texture.width, light.shadow_texture.height)
         glEnable(GL_DEPTH_TEST)
         glDepthMask(GL_TRUE)
         glDepthFunc(GL_LESS)
@@ -936,7 +935,7 @@ class Renderer(object):
         glReadBuffer(GL_NONE)
 
         glClear(GL_DEPTH_BUFFER_BIT)
-        glViewport(0, 0, SHADOW_TEX_SZ, SHADOW_TEX_SZ)
+        glViewport(0, 0, light.shadow_texture.width, light.shadow_texture.height)
         glEnable(GL_DEPTH_TEST)
         glDepthMask(GL_TRUE)
         glDepthFunc(GL_LESS)

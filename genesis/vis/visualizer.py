@@ -238,21 +238,23 @@ class Visualizer(BuildableMixin, RBC):
     def sync(self):
         """Sync every renderer with the current state of the scene.
 
-        The renderers shared with the interactive viewer sync right away, while the raytracer and the batch renderer
-        sync at their next render. The interactive viewer then refreshes when a refresh is due (see 'Viewer.update').
+        The raytracer and the batch renderer sync at their next render. With 'ViewerOptions.update_on_setters', the
+        renderers shared with the interactive viewer sync right away, and the viewer refreshes when a refresh is due
+        (see 'Viewer.update'). Without it, they sync at the next refresh of the viewer or at the next render of a
+        camera, whichever comes first.
         """
         if self._raytracer is not None:
             self._raytracer.reset()
         if self._batch_renderer is not None:
             self._batch_renderer.reset()
-        # Without 'ViewerOptions.update_on_setters', the renderers shared with the viewer sync at its next refresh, or
-        # at the next render of a camera, so that a loop of setters does not pay one sync per call.
+        # Without 'ViewerOptions.update_on_setters', a setter leaves the window alone, so that the caller decides how
+        # often the window refreshes ('update_visualizer' of 'Scene.step').
         if self._viewer is None or self._viewer.update_on_setters:
             self._context.update(force_render=True)
+            if self._viewer is not None:
+                self._viewer.update()
         else:
             self._context.reset()
-        if self._viewer is not None:
-            self._viewer.update()
 
     def update_on_sim_step(self, advanced, auto=None):
         """Show a simulation step: refresh the viewer when due, run its per-step callbacks and pace the loop.

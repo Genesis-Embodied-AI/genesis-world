@@ -10,7 +10,7 @@ from OpenGL.GL import *
 
 from .constants import FLOAT_SZ, GLTF, UINT_SZ, BufFlags
 from .material import Material, MetallicRoughnessMaterial
-from .utils import format_color_array
+from .utils import format_color_array, transform_box
 
 
 @nb.jit(nopython=True, cache=True)
@@ -312,12 +312,7 @@ class Primitive(object):
             if self._bounds_0 is None:
                 self._bounds_0 = _compute_bounds(self.positions)
             if self.poses is not None:
-                if len(self.poses) == 1:
-                    self._bounds = self._bounds_0 + self.poses[:, :3, 3]
-                else:
-                    self._bounds = self._bounds_0 + np.stack(
-                        (np.min(self.poses[:, :3, 3], axis=0), np.max(self.poses[:, :3, 3], axis=0)), axis=0
-                    )
+                self._bounds = transform_box(self._bounds_0, self.poses)
             else:
                 self._bounds = self._bounds_0
         return self._bounds

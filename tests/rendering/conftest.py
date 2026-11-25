@@ -107,6 +107,16 @@ def translucent_box_obj(asset_tmp_path):
     return str(path)
 
 
+@pytest.fixture(scope="session")
+def offset_box_obj(asset_tmp_path):
+    """Path to an OBJ box of side 0.2 centred 1 m away from the origin of its frame, along x."""
+    box = trimesh.creation.box(extents=(0.2, 0.2, 0.2))
+    box.apply_translation((1.0, 0.0, 0.0))
+    path = asset_tmp_path / "offset_box.obj"
+    box.export(path)
+    return str(path)
+
+
 def build_planes_scene(planes_surface, *, plane_size, camera_pos, camera_res, split_envs, show_viewer):
     """Return an unbuilt scene of a fixed plane per surface, with a camera looking straight down at them.
 
