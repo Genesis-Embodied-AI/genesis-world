@@ -771,9 +771,11 @@ Please decrease the simulation timestep or adjust the material parameters."""
         envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
     ) -> list[DataItem]:
         items = super().load_checkpoint(checkpoint, boundary_only=boundary_only, envs_idx=envs_idx)
-        # A record made after some particle was attached brings its constraints back (see '_is_constrained')
-        if not self._is_constrained and qd_to_torch(self.particle_constraints.is_constrained).any():
-            self._is_constrained = True
+        # A full record made after some particle was attached brings its constraints back (see '_is_constrained'). A
+        # boundary record holds the state alone, which leaves the constraints as they are.
+        if not boundary_only and not self._is_constrained:
+            if qd_to_torch(self.particle_constraints.is_constrained, transpose=True).any():
+                self._is_constrained = True
         return items
 
     def _broadcast_particles_mask(self, particles_mask, particles_start: int) -> torch.Tensor:
