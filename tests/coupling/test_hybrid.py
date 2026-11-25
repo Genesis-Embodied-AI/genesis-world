@@ -214,6 +214,8 @@ def test_mesh_mpm_build(show_viewer):
         assert scene.entities[duck.idx] is duck
         assert duck.part_rigid.material.needs_coup
         assert duck.part_soft.material.n_groups == len(duck.part_rigid.links) > 1
+    # The soft parts share the branches of the kernels compiled for their material
+    assert ducks[0].part_soft.material.idx == ducks[1].part_soft.material.idx
 
 
 @pytest.mark.debug(False)  # Disable debug for speedup

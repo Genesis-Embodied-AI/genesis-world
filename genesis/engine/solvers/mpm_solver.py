@@ -514,14 +514,18 @@ Please decrease the simulation timestep or adjust the material parameters."""
     def add_material(self, material: MPM.Base) -> None:
         """Give a material its index among the distinct materials of the solver, registering it unless one equals it.
 
-        A material equal to one already registered shares its index, and so the branches of the kernels it compiles.
+        A material of the same class and options as one already registered shares its index, and so the branches of the
+        kernels it compiles.
         """
+        material_options = material.model_dump()
         for material_registered in self._materials:
-            if material == material_registered:
+            if type(material) is type(material_registered) and material_options == material_registered.model_dump():
                 material.idx = material_registered.idx
                 return
         material.idx = len(self._materials)
-        self._materials.append(material)
+        # The solver compares the materials as they were registered, since a hybrid entity completes its soft material
+        # after adding it (see 'HybridEntity')
+        self._materials.append(material.model_copy())
 
     def add_particles(self, is_active: bool, particle_start: int, material: MPM.Base, pos: np.ndarray) -> None:
         """Add the particles of an entity at rest, with the parameters of its material, between two steps."""
