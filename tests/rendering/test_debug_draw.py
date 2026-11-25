@@ -425,7 +425,8 @@ def test_islands_and_hibernation_colors(n_envs, renderer, show_viewer):
             ]
         )
 
-    for _ in range(3):
+    # Long enough for the top box to join the island, short enough for every link to stay awake
+    for _ in range(5):
         scene.step()
 
     # Awake, the links of one island share one hue, each at the brightness of its own material, and the islands of one
@@ -444,10 +445,8 @@ def test_islands_and_hibernation_colors(n_envs, renderer, show_viewer):
         assert_allclose(colors_awake[1, 3], colors_awake[1, 1], atol=1.0)
 
     # Asleep, the links keep the hue of their island, faded toward grey
-    for _ in range(100):
+    for _ in range(30):
         scene.step()
-        if qd_to_torch(scene.rigid_solver.dyn_state.links.is_hibernated)[1:].all():
-            break
     assert qd_to_torch(scene.rigid_solver.dyn_state.links.is_hibernated)[1:].all()
     colors_asleep = get_links_color(cam_debug)
     assert_allclose(get_links_color(cam_plain), colors_plain, atol=1.0)
