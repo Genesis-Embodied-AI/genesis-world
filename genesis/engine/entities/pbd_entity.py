@@ -378,17 +378,9 @@ class PBD3DEntity(PBDTetEntity):
         )
 
         self._elems = elems.astype(gs.np_int, copy=False)
-        self._edges = np.array(
-            list(
-                set(
-                    tuple(sorted((self._elems[i, j], self._elems[i, k])))
-                    for i in range(len(self._elems))
-                    for j in range(4)
-                    for k in range(j + 1, 4)
-                )
-            ),
-            dtype=gs.np_int,
-        )
+        # The six edges of each tetrahedron, sorted so that an edge shared by several elements appears once
+        elems_edges = self._elems[:, ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))].reshape((-1, 2))
+        self._edges = np.unique(np.sort(elems_edges, axis=1), axis=0)
         self._particle_mass = self._mass / len(self._particles)
 
         self._edges_len_rest = np.linalg.norm(

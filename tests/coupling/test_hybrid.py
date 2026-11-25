@@ -191,17 +191,26 @@ def test_mesh_mpm_build(show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.15,
-        ),
-        material=gs.materials.Hybrid(
-            material_rigid=gs.materials.Rigid(),
-            material_soft=gs.materials.MPM.Muscle(),
-        ),
+    material = gs.materials.Hybrid(
+        material_rigid=gs.materials.Rigid(),
+        material_soft=gs.materials.MPM.Muscle(),
     )
+    ducks = [
+        scene.add_entity(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.15,
+                pos=(pos_x, 0.0, 0.0),
+            ),
+            material=material,
+        )
+        for pos_x in (-0.25, 0.25)
+    ]
     scene.build()
+
+    for duck in ducks:
+        assert scene.entities[duck.idx] is duck
+        assert duck.part_rigid.material.needs_coup
 
 
 @pytest.mark.debug(False)  # Disable debug for speedup

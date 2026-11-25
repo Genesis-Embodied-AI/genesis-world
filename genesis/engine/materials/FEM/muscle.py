@@ -1,10 +1,6 @@
-from typing import Any
-
-from pydantic import Field
-
 import quadrants as qd
 
-from genesis.typing import PositiveInt, ValidFloat
+from genesis.typing import PositiveInt
 
 from .elastic import Elastic
 
@@ -33,12 +29,10 @@ class Muscle(Elastic):
 
     n_groups: PositiveInt = 1
 
-    # Auto-generated, equal to E.
-    stiffness: ValidFloat = Field(default=0.0, exclude=True)
-
-    def model_post_init(self, context: Any) -> None:
-        super().model_post_init(context)
-        self.stiffness = self.E
+    @property
+    def stiffness(self) -> float:
+        """The stiffness of the fibers, the Young's modulus of the material."""
+        return self.E
 
 
 # The active stress of the fibers of a muscle adds to the stress of its elastic model. The explicit solver applies it

@@ -179,7 +179,7 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
             spec = desc.spec
         if isinstance(spec, gs.entities.Hybrid):
             # A hybrid entity adds its parts to the scene itself, as entities of their own
-            entity = HybridEntity(self.n_entities, self.scene, surface, spec)
+            entity = HybridEntity(self.scene, surface, spec)
         else:
             solver = next(
                 (
