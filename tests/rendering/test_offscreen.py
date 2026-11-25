@@ -90,15 +90,10 @@ def test_render_api(show_viewer, renderer_type, renderer):
         if normal:
             normal_arrs.append(tensor_to_array(normal_arr).astype(np.float32))
 
-    try:
-        assert_equal(np.diff(rgb_arrs, axis=0), 0.0)
-        assert_equal(np.diff(seg_arrs, axis=0), 0.0)
-        assert_equal(np.diff(normal_arrs, axis=0), 0.0)
-        assert_equal(np.diff(depth_arrs, axis=0), 0.0)
-    except AssertionError:
-        if sys.platform == "darwin" and scene.visualizer.is_software:
-            pytest.xfail("Flaky on MacOS with Apple Software Renderer.")
-        raise
+    assert_equal(np.diff(rgb_arrs, axis=0), 0.0)
+    assert_equal(np.diff(seg_arrs, axis=0), 0.0)
+    assert_equal(np.diff(normal_arrs, axis=0), 0.0)
+    assert_equal(np.diff(depth_arrs, axis=0), 0.0)
 
     if IS_BATCHRENDER:
         # An output already rendered in the step comes back along with one rendered for the first time
@@ -890,13 +885,6 @@ def test_deterministic(tmp_path, renderer_type, renderer, show_viewer, tol):
     )
     scene.build(n_envs=3, env_spacing=(2.0, 2.0))
 
-    # Apple Software Renderer is fully deterministic: successive captures do not match exactly
-    if sys.platform == "darwin" and scene.visualizer.is_software:
-        tol_env = tol_step = 1.0
-    else:
-        tol_env = 0.002
-        tol_step = gs.EPS
-
     cam.start_recording(save_to_filename=(tmp_path / "video.mp4"))
     for _ in range(7):
         dofs_lower_bound, dofs_upper_bound = robot.get_dofs_limit()
@@ -930,26 +918,17 @@ def test_deterministic(tmp_path, renderer_type, renderer, show_viewer, tol):
                     )
                 rgb_array = tensor_to_array(rgb_array).astype(np.float32)
 
-                rgb_std = rgb_array.reshape((-1, 3)).std(axis=0).max()
-                try:
-                    assert rgb_std > 20.0
-                except AssertionError:
-                    if rgb_std < gs.EPS:
-                        if sys.platform == "darwin" and scene.visualizer.is_software:
-                            pytest.xfail(
-                                "Flaky on MacOS with Apple Software Renderer. Nothing but the background was rendered."
-                            )
-                    raise
+                assert rgb_array.reshape((-1, 3)).std(axis=0).max() > 20.0
                 if env_rgb_array is None:
                     env_rgb_array = rgb_array
                 else:
                     rgb_env_diff = np.abs(env_rgb_array - rgb_array)
-                    assert rgb_env_diff.mean() < tol_env, "Per-env renders do not match"
+                    assert rgb_env_diff.mean() < 0.002, "Per-env renders do not match"
 
             steps_rgb_arrays.append(env_rgb_array)
 
         rgb_step_diff = np.abs(np.diff(steps_rgb_arrays, axis=0))
-        assert rgb_step_diff.mean() < tol_step, "Per-step renders do not match"
+        assert rgb_step_diff.mean() < gs.EPS, "Per-step renders do not match"
 
     cam.stop_recording()
 
