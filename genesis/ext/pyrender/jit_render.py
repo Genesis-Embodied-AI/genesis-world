@@ -289,10 +289,19 @@ class JITRenderer:
             self._set_instance_bounds(idx, poses)
 
     def _set_instance_bounds(self, idx, poses):
-        """Record the bounds the instances of the primitives 'idx' cover in the frame of their node, given their
-        transforms as (k, n_instances, 4, 4), both where the instances stand and on the environment grid, where the
-        instances of one environment move by its offset and instance k of an environment-instanced primitive by the
-        offset of environment k."""
+        """Record the bounds the instances of some primitives cover in the frame of their node.
+
+        The bounds are recorded both where the instances stand and on the environment grid, where the instances of one
+        environment move by its offset and instance k of an environment-instanced primitive by the offset of
+        environment k.
+
+        Parameters
+        ----------
+        idx : np.ndarray
+            The indices of the primitives.
+        poses : np.ndarray
+            The transforms of the instances of each primitive, one row per primitive.
+        """
         # The box of the bare geometry goes through each instance transform: its centre is transformed, and its
         # half-extents go through the absolute rotation, which bounds the rotated box.
         rotations = poses[..., :3, :3]
