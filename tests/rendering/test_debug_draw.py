@@ -445,7 +445,7 @@ def test_islands_and_hibernation_colors(n_envs, renderer, show_viewer):
         assert_allclose(colors_awake[1, 3], colors_awake[1, 1], atol=1.0)
 
     # Asleep, the links keep the hue of their island, faded toward grey
-    for _ in range(35):
+    for _ in range(30):
         scene.step()
     assert qd_to_torch(scene.rigid_solver.dyn_state.links.is_hibernated)[1:].all()
     colors_asleep = get_links_color(cam_debug)
