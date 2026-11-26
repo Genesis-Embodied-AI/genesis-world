@@ -13,6 +13,8 @@ uniform vec4 intrinsics;
 uniform vec4 distortion;
 // The clipping distances of the camera, the far plane of the faces of the cube map, and the height of the image
 uniform vec4 depth_range;
+// The width and height of each face of the cube map, in texels
+uniform int face_size;
 
 out vec4 frag_color;
 
@@ -47,13 +49,19 @@ void main()
         discard;
     }
 
-    // The depth along the axis of the face, then along the ray. A pixel farther than the far clipping distance shows
-    // the background, as if nothing lay there.
+    // The depth along the axis of the face, then along the ray through the centre of the texel read, which holds the
+    // depth of the surface along that ray. Converting it along the ray of the pixel instead would err by as much as
+    // the slant of the ray across the texel. A pixel farther than the far clipping distance shows the background, as
+    // if nothing lay there.
     float near = depth_range.x;
     float far = depth_range.y;
     float face_far = depth_range.z;
     float face_depth = 2.0 * near * face_far / (face_far + near - (2.0 * depth - 1.0) * (face_far - near));
-    float dist = face_depth / max(abs(dir.x), max(abs(dir.y), abs(dir.z)));
+    vec3 dir_abs = abs(dir);
+    float major = max(dir_abs.x, max(dir_abs.y, dir_abs.z));
+    vec2 minor = dir_abs.x == major ? dir.yz : (dir_abs.y == major ? dir.xz : dir.xy);
+    vec2 texel = (floor((0.5 * minor / major + 0.5) * float(face_size)) + 0.5) / float(face_size) * 2.0 - 1.0;
+    float dist = face_depth * sqrt(1.0 + dot(texel, texel));
     if (dist > far) {
         discard;
     }

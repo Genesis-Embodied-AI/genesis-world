@@ -240,6 +240,20 @@ class FisheyeLens(Options):
     intrinsics: Matrix3x3Type
     distortion: Vec4FType = (0.0, 0.0, 0.0, 0.0)
 
+    @classmethod
+    def equidistant(cls, res, fov) -> "FisheyeLens":
+        """Return the lens of an equidistant fisheye, the circle inscribed in its image spanning its field of view.
+
+        Parameters
+        ----------
+        res : tuple of int, shape (2,)
+            The resolution of the camera, as (width, height).
+        fov : float
+            The angle that the circle inscribed in the image spans, in degrees.
+        """
+        f = 0.5 * min(res) / np.deg2rad(0.5 * fov)
+        return cls(intrinsics=((f, 0.0, 0.5 * res[0]), (0.0, f, 0.5 * res[1]), (0.0, 0.0, 1.0)))
+
     @model_validator(mode="after")
     def _validate_intrinsics(self):
         (fx, skew, _), (zero_10, fy, _), last_row = self.intrinsics

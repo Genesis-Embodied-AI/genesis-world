@@ -43,8 +43,10 @@ class Rasterizer(BuildableMixin, RBC):
 
     def add_camera(self, camera):
         if camera.model == "fisheye":
-            intrinsics = (camera.intrinsics[0, 0], camera.intrinsics[1, 1], camera.cx, camera.cy)
-            camera_node = pyrender.FisheyeCamera(intrinsics, camera.distortion, znear=camera.near, zfar=camera.far)
+            (fx, _, cx), (_, fy, cy), _ = camera.lens.intrinsics
+            camera_node = pyrender.FisheyeCamera(
+                (fx, fy, cx, cy), camera.lens.distortion, znear=camera.near, zfar=camera.far
+            )
         else:
             camera_node = pyrender.PerspectiveCamera(
                 yfov=np.deg2rad(camera.fov), znear=camera.near, zfar=camera.far, aspect_ratio=camera.aspect_ratio

@@ -17,6 +17,7 @@ from genesis.typing import (
     Vec3FType,
 )
 
+from ..vis import FisheyeLens
 from .options import KinematicSensorOptionsMixin
 
 if TYPE_CHECKING:
@@ -73,14 +74,31 @@ class RasterizerCameraOptions(BaseCameraOptions["RasterizerCameraSensor"]):
     """
     Options for Rasterizer camera sensor (OpenGL-based rendering).
 
+    A fisheye camera sees through a fisheye lens, whose wide view may span more than the half space in front of it.
+    Given a `lens`, it follows the calibration of a real camera, its intrinsics and its distortion in the Kannala-Brandt
+    model of OpenCV. Without lens, it is an equidistant projection, the circle inscribed in the image spanning `fov`.
+    Its depth image holds the distance of each pixel to the camera along its ray. The faces of a cube map around the
+    camera that the image reaches are rendered, up to six passes of the scene per image, and resampled.
+
     Parameters
     ----------
+    model : str | None
+        The projection of the camera: 'pinhole' or 'fisheye', None for that of its `lens`, pinhole without lens. Default
+        is None.
+    lens : gs.options.FisheyeLens | None
+        The calibrated lens of a fisheye camera, which gives its field of view. Default is None.
+    fov : float | None
+        The vertical field of view in degrees, below 180, or for a fisheye camera the angle that the circle inscribed in
+        its image spans, up to 360. A calibrated fisheye lens gives it. None for 60 degrees otherwise.
     near : float
         Near clipping plane distance. Default is 0.01.
     far : float
-        Far clipping plane distance. Default is 100.0.
+        Far clipping plane distance, the largest distance to the camera drawn for a fisheye camera. Default is 100.0.
     """
 
+    model: Literal["pinhole", "fisheye"] | None = None
+    lens: FisheyeLens | None = None
+    fov: ValidFloat | None = Field(default=None, gt=0, le=360)
     near: PositiveFloat = 0.01
     far: PositiveFloat = 100.0
 
@@ -88,6 +106,17 @@ class RasterizerCameraOptions(BaseCameraOptions["RasterizerCameraSensor"]):
         super().model_post_init(context)
         if self.far <= self.near:
             gs.raise_exception(f"far must be greater than near, got near={self.near}, far={self.far}")
+        if self.model is None:
+            self.model = "pinhole" if self.lens is None else "fisheye"
+        if self.lens is not None:
+            if self.model != "fisheye":
+                gs.raise_exception("A fisheye lens applies to the fisheye camera model alone.")
+            if self.fov is not None:
+                gs.raise_exception("The field of view of a camera with a calibrated fisheye lens comes from its lens.")
+        elif self.fov is None:
+            self.fov = 60.0
+        elif self.model == "pinhole" and self.fov >= 180.0:
+            gs.raise_exception(f"The field of view of a pinhole camera must be below 180 degrees, got {self.fov}.")
 
 
 class RaytracerCameraOptions(BaseCameraOptions["RaytracerCameraSensor"]):

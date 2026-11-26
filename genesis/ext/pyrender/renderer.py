@@ -749,6 +749,7 @@ class Renderer:
         program.set_uniform("distortion", camera.distortion)
         depth_range = (camera.znear, camera.zfar, camera.face_zfar, self.viewport_height)
         program.set_uniform("depth_range", depth_range)
+        program.set_uniform("face_size", face_size)
         glBindVertexArray(self._fisheye_vao)
         glDrawArrays(GL_TRIANGLES, 0, 3)
         glBindVertexArray(0)

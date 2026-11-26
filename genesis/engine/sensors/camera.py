@@ -20,10 +20,11 @@ from genesis.options.sensors import (
     RaytracerCameraOptions,
     SensorOptions,
 )
-from genesis.options.vis import ThinLens, VisOptions
+from genesis.options.vis import FisheyeLens, ThinLens, VisOptions
 from genesis.utils.geom import (
     T_to_quat,
     T_to_trans,
+    fisheye_pixels_to_rays,
     pos_lookat_up_to_T,
     trans_quat_to_T,
     transform_by_quat,
@@ -61,9 +62,8 @@ class CameraView(NamedTuple):
 
     depths: tuple[float, float]
     """The depths bounding the view, the near one zero for a view reaching the center of projection."""
-    is_fisheye: bool
-    """Whether the camera is an equidistant fisheye, a pinhole otherwise: a ray makes an angle with the line of sight
-    proportional to its distance to the center of the image, the shorter half side spanning half the field of view."""
+    lens: FisheyeLens | None
+    """The lens of a fisheye camera, None for a pinhole camera."""
     is_disk: bool
     """Whether the image holds its inscribed disk alone, the image as a whole otherwise."""
     is_radial: bool
@@ -109,6 +109,8 @@ class RasterizerCameraWrapper(BaseCameraWrapper):
     def __init__(self, sensor: "RasterizerCameraSensor"):
         super().__init__(sensor)
         self.aspect_ratio = self.res[0] / self.res[1]
+        self.model = sensor._options.model
+        self.lens = sensor._lens
 
 
 class BatchRendererCameraWrapper(BaseCameraWrapper):
@@ -300,34 +302,40 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
             view = self._get_view()
             if view is not None:
                 N_SIDE, N_RINGS = 16, 8
-                aspect_ratio = self._options.res[0] / self._options.res[1]
-                half_fov = np.deg2rad(self._options.fov / 2.0)
-                # The image boundary, in a frame of the image whose vertical half side spans one
-                rho_scale = min(aspect_ratio, 1.0)
+                width, height = self._options.res
+                # The image boundary in pixels from the top-left corner of the image, rows going down, around the
+                # principal point
+                if view.lens is None:
+                    center = np.array((0.5 * width, 0.5 * height))
+                else:
+                    (fx, _, cx), (_, fy, cy), _ = view.lens.intrinsics
+                    center = np.array((cx, cy))
                 if view.is_disk:
                     angles = np.linspace(0.0, 2.0 * np.pi, 4 * N_SIDE, endpoint=False)
-                    image_boundary = rho_scale * np.stack((np.cos(angles), np.sin(angles)), axis=-1)
+                    image_boundary = center + 0.5 * min(width, height) * np.stack(
+                        (np.cos(angles), -np.sin(angles)), axis=-1
+                    )
                 else:
-                    sides_pos = np.linspace(-1.0, 1.0, N_SIDE, endpoint=False)
+                    sides_pos = np.linspace(0.0, 1.0, N_SIDE, endpoint=False)
                     sides_end = np.ones_like(sides_pos)
                     image_boundary = np.concatenate(
                         (
-                            np.stack((aspect_ratio * sides_pos, -sides_end), axis=-1),
-                            np.stack((aspect_ratio * sides_end, sides_pos), axis=-1),
-                            np.stack((-aspect_ratio * sides_pos, sides_end), axis=-1),
-                            np.stack((-aspect_ratio * sides_end, -sides_pos), axis=-1),
+                            np.stack((width * sides_pos, height * sides_end), axis=-1),
+                            np.stack((width * sides_end, height * (1.0 - sides_pos)), axis=-1),
+                            np.stack((width * (1.0 - sides_pos), 0.0 * sides_end), axis=-1),
+                            np.stack((0.0 * sides_end, height * sides_pos), axis=-1),
                         )
                     )
                 n_boundary = len(image_boundary)
-                rings_pos = np.arange(1, N_RINGS + 1)[:, None, None] / N_RINGS * image_boundary
-                image_pos = np.concatenate((np.zeros((1, 2)), rings_pos.reshape((-1, 2))))
-                if view.is_fisheye:
-                    image_rho = np.linalg.norm(image_pos, axis=-1, keepdims=True)
-                    rays_angle = image_rho / rho_scale * half_fov
-                    rays_radial = np.divide(image_pos, image_rho, out=np.zeros_like(image_pos), where=image_rho > 0.0)
-                    rays_dir = np.concatenate((rays_radial * np.sin(rays_angle), -np.cos(rays_angle)), axis=-1)
+                rings_pos = center + np.arange(1, N_RINGS + 1)[:, None, None] / N_RINGS * (image_boundary - center)
+                image_pos = np.concatenate((center[None], rings_pos.reshape((-1, 2))))
+                # The rays in the frame of the camera of OpenCV, then in that of the camera, looking along -z with y up
+                if view.lens is None:
+                    f = 0.5 * height / np.tan(np.deg2rad(self._options.fov / 2.0))
+                    rays_dir = np.concatenate(((image_pos - center) / f, np.ones((len(image_pos), 1))), axis=-1)
                 else:
-                    rays_dir = np.concatenate((np.tan(half_fov) * image_pos, -np.ones((len(image_pos), 1))), axis=-1)
+                    rays_dir, _ = fisheye_pixels_to_rays(image_pos, (fx, fy, cx, cy), view.lens.distortion)
+                rays_dir[:, 1:] *= -1.0
                 rays_dir /= np.linalg.norm(rays_dir, axis=-1, keepdims=True) if view.is_radial else -rays_dir[:, 2:]
                 # A cap at each depth, a fan around the line of sight then a strip between consecutive rings, and the
                 # strip between the outer rings of the caps.
@@ -544,6 +552,10 @@ class RasterizerCameraSensor(
     ):
         super().__init__(options, idx, shared_context, shared_metadata, manager)
         self._options: RasterizerCameraOptions
+        # The lens of a fisheye camera, equidistant without calibration, None for a pinhole camera
+        self._lens = options.lens
+        if options.model == "fisheye" and options.lens is None:
+            self._lens = FisheyeLens.equidistant(options.res, options.fov)
         self._camera_node = None
         self._camera_target = None
         self._camera_wrapper = None
@@ -668,7 +680,10 @@ class RasterizerCameraSensor(
     def _get_view(self) -> CameraView:
         """Return the view of the camera between its clipping planes (see 'BaseCameraSensor._get_view')."""
         return CameraView(
-            depths=(self._options.near, self._options.far), is_fisheye=False, is_disk=False, is_radial=False
+            depths=(self._options.near, self._options.far),
+            lens=self._lens,
+            is_disk=False,
+            is_radial=self._lens is not None,
         )
 
     def _apply_camera_transform(self, camera_T: torch.Tensor):
@@ -717,7 +732,7 @@ class RaytracerCameraSensor(
 
     def _get_view(self) -> CameraView:
         """Return the view of the camera up to its plane in focus (see 'BaseCameraSensor._get_view')."""
-        return CameraView(depths=(0.0, self._options.focus_dist), is_fisheye=False, is_disk=False, is_radial=False)
+        return CameraView(depths=(0.0, self._options.focus_dist), lens=None, is_disk=False, is_radial=False)
 
     @gs.assert_unbuilt
     def build(self) -> None:
@@ -972,7 +987,7 @@ class BatchRendererCameraSensor(
         is_fisheye = self._options.model == "fisheye"
         return CameraView(
             depths=(self._options.near, self._options.far),
-            is_fisheye=is_fisheye,
+            lens=FisheyeLens.equidistant(self._options.res, self._options.fov) if is_fisheye else None,
             is_disk=is_fisheye and self._options.use_rasterizer,
             is_radial=not self._options.use_rasterizer,
         )
