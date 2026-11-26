@@ -238,11 +238,11 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
     assert_allclose(connect_line.end[:, 0], pivot_pos, tol=1e-3)
 
     # A weld added at runtime is drawn as a line while it exists, the line going away once the weld is removed
-    rgb_before, *_ = cam.render(rgb=True, force_render=True)
+    rgb_before, *_ = cam.render(rgb=True)
     scene.rigid_solver.add_weld_constraint(cube.base_link.idx, fixed_box.base_link.idx, envs_idx=[2])
-    rgb_added, *_ = cam.render(rgb=True, force_render=True)
+    rgb_added, *_ = cam.render(rgb=True)
     scene.rigid_solver.delete_weld_constraint(cube.base_link.idx, fixed_box.base_link.idx, envs_idx=[2])
-    rgb_removed, *_ = cam.render(rgb=True, force_render=True)
+    rgb_removed, *_ = cam.render(rgb=True)
     assert np.abs(rgb_added.astype(np.float32) - rgb_before.astype(np.float32)).max() > 100.0
     assert_equal(rgb_removed, rgb_before)
 

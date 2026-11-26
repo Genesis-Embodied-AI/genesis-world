@@ -196,19 +196,18 @@ class Visualizer(BuildableMixin, RBC):
     def build(self):
         self._context.build(self._scene)
 
+        # Setter changes, of the state of a solver or of the appearance of an entity, reach every renderer (see 'sync').
+        # Every category counts, since a shape or a marker may follow any of them (see 'Shape.invalidated_by'), the
+        # nodes of the shapes whose scoped context refreshed alone being updated (see 'RasterizerContext._sync_shapes').
+        # The window only repaints when a refresh is due, so that a loop of setters does not pay one repaint per call.
+        on_setter = Subscriber(to=frozenset(StateChange), callback=lambda change, **indices: self.sync())
+        for solver in self._scene.sim.active_solvers:
+            solver.changelog.subscribe(on_setter)
+        self._scene.sim.render_context.subscribe(
+            Subscriber(to=frozenset((StateChange.VISUAL,)), callback=lambda change, **indices: self.sync())
+        )
+
         if self._viewer is not None:
-            # Setter changes, of the state of a solver or of the appearance of an entity, are shown in the viewer right
-            # away, the nodes of the shapes whose scoped context refreshed alone being updated (see
-            # 'RasterizerContext._sync_shapes'). The window only repaints when a refresh is due, so that a loop of
-            # setters does not pay one repaint per call.
-            on_setter = Subscriber(
-                to=frozenset((StateChange.GEOMETRY,)), callback=lambda change, **indices: self.sync()
-            )
-            for solver in self._scene.sim.active_solvers:
-                solver.changelog.subscribe(on_setter)
-            self._scene.sim.render_context.subscribe(
-                Subscriber(to=frozenset((StateChange.VISUAL,)), callback=lambda change, **indices: self.sync())
-            )
             # The window draws its first frames as it builds, which show the scene once its nodes exist
             self._context.update(force_render=True)
             self._viewer.build(self._scene)
@@ -240,19 +239,20 @@ class Visualizer(BuildableMixin, RBC):
 
         The raytracer and the batch renderer sync at their next render. With 'ViewerOptions.update_on_setters', the
         renderers shared with the interactive viewer sync right away, and the viewer refreshes when a refresh is due
-        (see 'Viewer.update'). Without it, they sync at the next refresh of the viewer or at the next render of a
-        camera, whichever comes first.
+        (see 'Viewer.update'). Otherwise, they sync at the next refresh of the viewer or at the next render of a camera,
+        whichever comes first.
         """
         if self._raytracer is not None:
             self._raytracer.reset()
         if self._batch_renderer is not None:
             self._batch_renderer.reset()
+        # The cameras attached to a link or following an entity move at the next sync (see 'update_cameras')
+        self._t = -1
         # Without 'ViewerOptions.update_on_setters', a setter leaves the window alone, so that the caller decides how
         # often the window refreshes ('update_visualizer' of 'Scene.step').
-        if self._viewer is None or self._viewer.update_on_setters:
+        if self._viewer is not None and self._viewer.update_on_setters:
             self._context.update(force_render=True)
-            if self._viewer is not None:
-                self._viewer.update()
+            self._viewer.update()
         else:
             self._context.reset()
 

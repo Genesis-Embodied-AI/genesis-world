@@ -97,17 +97,18 @@ def test_render_api(show_viewer, renderer_type, renderer):
 
     if IS_BATCHRENDER:
         # An output already rendered in the step comes back along with one rendered for the first time
-        rgb_arr, *_ = camera.render(rgb=True, force_render=True)
+        rgb_arr, *_ = camera.render(rgb=True)
         rgb_arr_cached, *_ = camera.render(rgb=True, depth=True)
         assert_equal(rgb_arr_cached, rgb_arr)
 
     if renderer_type == RENDERER_TYPE.RASTERIZER:
-        # An entity whose pose blew up stays drawn where it last was, and follows its pose again once it is valid
+        # An entity whose pose blew up stays drawn where it last was, and follows its pose again once it is valid. A
+        # setter reaches the next render without a step.
         box.set_pos((float("nan"), 0.0, 0.0))
-        rgb_frozen, *_ = camera.render(rgb=True, force_render=True)
+        rgb_frozen, *_ = camera.render(rgb=True)
         assert_equal(rgb_frozen, rgb_arrs[0])
         box.set_pos((-2.0, 0.0, 0.0))
-        rgb_moved, *_ = camera.render(rgb=True, force_render=True)
+        rgb_moved, *_ = camera.render(rgb=True)
         assert (rgb_moved != rgb_frozen).any()
 
 
@@ -1053,7 +1054,7 @@ def test_deterministic(tmp_path, renderer_type, renderer, show_viewer, tol):
 
             if IS_BATCHRENDER:
                 rgb_array_all, *_ = cam.render(
-                    rgb=True, depth=False, segmentation=False, colorize_seg=False, normal=False, force_render=True
+                    rgb=True, depth=False, segmentation=False, colorize_seg=False, normal=False
                 )
 
             env_rgb_array = None
@@ -1068,7 +1069,7 @@ def test_deterministic(tmp_path, renderer_type, renderer, show_viewer, tol):
                     env_offset = scene.envs_offset[i_b] - scene.envs_offset[cam.env_idx]
                     cam.set_pose(pos=CAM_POS_LOCAL + env_offset, lookat=CAM_LOOKAT_LOCAL + env_offset)
                     rgb_array, *_ = cam.render(
-                        rgb=True, depth=False, segmentation=False, colorize_seg=False, normal=False, force_render=True
+                        rgb=True, depth=False, segmentation=False, colorize_seg=False, normal=False
                     )
                 rgb_array = tensor_to_array(rgb_array).astype(np.float32)
 
@@ -1755,23 +1756,19 @@ def test_camera_follow_entity(n_envs, renderer, show_viewer):
     # Second render - same
     for i, obj in enumerate(scene.entities):
         obj.set_pos((10.0, 0.0, i), envs_idx=([1] if n_envs else None))
-    force_render = True
     for entity_idx, cam in enumerate(scene.visualizer.cameras, 1):
-        _, _, seg, _ = cam.render(rgb=False, segmentation=True, force_render=force_render)
+        _, _, seg, _ = cam.render(rgb=False, segmentation=True)
         assert (np.unique(seg) == (0, entity_idx)).all()
         assert ((seg != 0) == seg_mask).all()
-        force_render = False
 
     # Third render - All objects but all different
     for i, obj in enumerate(scene.entities):
         obj.set_pos((0.1 * ((i // 2) % 2 - 1), 0.1 * (i % 2), 0.1 * i), envs_idx=([1] if n_envs else None))
-    force_render = True
     seg_masks = []
     for cam in scene.visualizer.cameras:
-        _, _, seg, _ = cam.render(rgb=False, segmentation=True, force_render=force_render)
+        _, _, seg, _ = cam.render(rgb=False, segmentation=True)
         assert (np.unique(seg) == np.arange(len(scene.entities) + 1)).all()
         seg_masks.append(seg != 0)
-        force_render = False
     assert np.diff(seg_masks, axis=0).any(axis=(1, 2)).all()
 
     # Track a trajectory over time
@@ -1780,7 +1777,7 @@ def test_camera_follow_entity(n_envs, renderer, show_viewer):
         quat = gu.rotvec_to_quat(np.pi * (np.random.rand(3) - 0.5))
         obj.set_pos(pos + np.array([10.0, 0.0, 0.0]), envs_idx=([1] if n_envs else None))
         obj.set_quat(quat, envs_idx=([1] if n_envs else None))
-        _, _, seg, _ = cam.render(segmentation=True, force_render=True)
+        _, _, seg, _ = cam.render(segmentation=True)
         assert (np.unique(seg) == (0, entity_idx)).all()
         assert not seg[tuple([*range(0, res // 3), *range(2 * res // 3, res)] for res in CAM_RES)].any()
 
