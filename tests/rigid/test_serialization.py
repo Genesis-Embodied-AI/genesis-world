@@ -80,7 +80,7 @@ def checkpoint_scene(mimic_hinges, requires_grad, show_viewer):
 
 @pytest.mark.parametrize("model_name", ["free_boxes_and_slider"])
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
-def test_export_and_load_rigid(
+def test_export_and_load(
     n_envs, xml_path, mimic_hinges, urdf_with_external_assets, xacro_robot, tmp_path, show_viewer, caplog
 ):
     scene = gs.Scene(
@@ -481,6 +481,97 @@ def test_export_and_load_rigid(
     left_out = " ".join(record.getMessage() for record in caplog.records)
     assert "visual vertices" not in left_out and "dynamic textures" not in left_out
 
+    # Particle, finite element and hybrid entities need substeps far below the time step of the rigid scene, so they
+    # stand in a scene of their own
+    deformable_scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=2e-3,
+            substeps=10,
+        ),
+        show_viewer=show_viewer,
+    )
+    # A random sampler draws other particles at every resolution, so only the particles of the file reproduce them
+    mpm_cube = deformable_scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.5, -0.5, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(
+            sampler="random",
+        ),
+    )
+    sph_liquid = deformable_scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.5, 0.5, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.SPH.Liquid(),
+    )
+    pbd_liquid = deformable_scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.5, -0.5, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.PBD.Liquid(),
+    )
+    pbd_cloth = deformable_scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file="meshes/cloth.obj",
+            pos=(0.5, 0.5, 0.5),
+            scale=0.3,
+        ),
+        material=gs.materials.PBD.Cloth(),
+    )
+    pbd_elastic = deformable_scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.5, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.PBD.Elastic(),
+    )
+    fem_spec = gs.entities.FEM(
+        morph=gs.morphs.Box(
+            pos=(0.0, -0.5, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    fem_spec.select(gs.indices.Vertex.at(0)).set_is_fixed(True)
+    fem_cube = deformable_scene.add_entity(spec=fem_spec)
+    hybrid_arm = deformable_scene.add_entity(
+        morph=gs.morphs.URDF(
+            file="urdf/simple/two_link_arm.urdf",
+            pos=(0.0, 0.0, 0.3),
+            scale=0.2,
+            fixed=True,
+        ),
+        material=gs.materials.Hybrid(
+            material_rigid=gs.materials.Rigid(
+                gravity_compensation=1.0,
+            ),
+            material_soft=gs.materials.MPM.Muscle(),
+        ),
+    )
+    deformable_path = tmp_path / f"deformable{SCENE_FORMAT}"
+    deformable_scene.export(deformable_path)
+    restored_deformable = gs.Scene.load(deformable_path)
+    # The loaded scene holds the description it was exported from, and simulates as the original one does
+    assert description_digest(restored_deformable.desc) == description_digest(deformable_scene.desc)
+    deformable_scene.build(n_envs=n_envs)
+    restored_deformable.build(n_envs=n_envs)
+    for _ in range(10):
+        deformable_scene.step()
+        restored_deformable.step()
+    for entity in (mpm_cube, sph_liquid, pbd_liquid, pbd_cloth, hybrid_arm.part_soft):
+        assert_equal(restored_deformable.get_entity(entity.name).get_particles_pos(), entity.get_particles_pos())
+    # The elements of a PBD elastic entity sum their corrections on the shared vertices atomically, in an order that
+    # varies between runs on CPU
+    restored_elastic_pos = restored_deformable.get_entity(pbd_elastic.name).get_particles_pos()
+    assert_allclose(restored_elastic_pos, pbd_elastic.get_particles_pos(), tol=gs.EPS)
+    assert_equal(restored_deformable.get_entity(fem_cube.name).get_verts_pos(), fem_cube.get_verts_pos())
+    restored_arm_rigid = restored_deformable.get_entity(hybrid_arm.part_rigid.name)
+    assert_equal(restored_arm_rigid.get_qpos(), hybrid_arm.part_rigid.get_qpos())
+
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_export_before_build(n_envs, checkpoint_scene, tmp_path, caplog):
@@ -637,16 +728,59 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
     with pytest.raises(gs.GenesisException, match="holds a str where a float was declared"):
         gs.Scene.load(exported)
 
+    # An entity stands for its solver by the class of its description, so a description another solver writes is
+    # rejected by the solver of its spec, even where the fields of both classes agree.
+    deformable_scene = gs.Scene()
+    for i_e, material in enumerate(
+        (gs.materials.SPH.Liquid(), gs.materials.MPM.Elastic(), gs.materials.PBD.Liquid(), gs.materials.FEM.Elastic())
+    ):
+        deformable_scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.3 * i_e, 0.0, 0.2),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=material,
+        )
+    deformable_scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file="meshes/duck.obj",
+            scale=0.1,
+            pos=(-0.3, 0.0, 0.3),
+        ),
+        material=gs.materials.Hybrid(
+            material_rigid=gs.materials.Rigid(),
+            material_soft=gs.materials.MPM.Muscle(),
+        ),
+    )
+    exported = tmp_path / f"deformable{SCENE_FORMAT}"
+    deformable_scene.export(exported)
+    with zipfile.ZipFile(exported) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    original = json.loads(members[MANIFEST_NAME])
+    for desc_cls_name, swapped_cls_name, refusal in (
+        ("SPHEntityDescription", "MPMEntityDescription", "SPHEntity cannot be described by MPM"),
+        ("MPMEntityDescription", "SPHEntityDescription", "MPMEntity cannot be described by SPH"),
+        ("PBDEntityDescription", "SPHEntityDescription", "PBDParticleEntity cannot be described by SPH"),
+        ("FEMEntityDescription", "RigidEntityDescription", "FEMEntity cannot be described by Rigid"),
+        ("HybridEntityDescription", "RigidEntityDescription", "HybridEntity cannot be described by Rigid"),
+    ):
+        manifest = deepcopy(original)
+        entities = manifest["held"]["scene"]["entities"]
+        next(entity for entity in entities if entity["@"] == desc_cls_name)["@"] = swapped_cls_name
+        members[MANIFEST_NAME] = json.dumps(manifest).encode()
+        with zipfile.ZipFile(exported, "w") as archive:
+            for name, content in members.items():
+                archive.writestr(name, content)
+        with pytest.raises(gs.GenesisException, match=refusal):
+            gs.Scene.load(exported)
+
 
 @pytest.mark.required
 def test_export_rejects_unsupported_physics(checkpoint_scene, tmp_path):
     # A scene holding what alters the simulation is rejected by name, since a file leaving it out would restore
-    # other physics. No description carries a particle entity either.
-    checkpoint_scene.add_entity(
-        morph=gs.morphs.Box(pos=(0.5, 0.5, 0.8), size=(0.1, 0.1, 0.1)), material=gs.materials.MPM.Elastic()
-    )
+    # other physics.
     checkpoint_scene.add_force_field(gs.force_fields.Wind(direction=(1.0, 0.0, 0.0)))
-    with pytest.raises(gs.GenesisException, match="1 MPMEntity, 1 Wind cannot be exported"):
+    with pytest.raises(gs.GenesisException, match="1 Wind cannot be exported"):
         checkpoint_scene.export(tmp_path / f"wind{SCENE_FORMAT}")
 
 
@@ -987,6 +1121,59 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         file.write(b"GSTRAJ3\n" + data[len(b"GSTRAJ3\n") :])
     with pytest.raises(gs.GenesisException, match="version 3 of the trajectory format"):
         Trajectory(cut_path, scene=replay_scene)
+
+    # The particle and finite element solvers log their state as well. They need substeps the rigid scene runs
+    # without, so they fall in a scene of their own.
+    deformable_scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=2e-3,
+            substeps=10,
+        ),
+        show_viewer=show_viewer,
+    )
+    plane = deformable_scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    mpm_cube = deformable_scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.3, 0.0, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(),
+    )
+    fem_cube = deformable_scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.3, 0.0, 0.2),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    deformable_path = tmp_path / f"deformable{TRAJECTORY_FORMAT}"
+    deformable_scene.start_recording(
+        gs.recorders.TrajectoryFile(
+            filename=str(deformable_path),
+            mode="minimal",
+        ),
+    )
+    deformable_scene.build(n_envs=n_envs)
+    deformables_pos = []
+    for i_step in range(N_STEPS):
+        # Particles attached halfway are recorded with the frames from there on
+        if i_step == N_STEPS // 2:
+            mpm_cube.set_particle_constraints(True, plane.links[0].idx, stiffness=1e5)
+        deformables_pos.append((mpm_cube.get_particles_pos(), fem_cube.get_verts_pos()))
+        deformable_scene.step()
+    final_mpm_pos = mpm_cube.get_particles_pos()
+    deformable_scene.stop_recording()
+    deformable_trajectory = gs.Scene.load_trajectory(deformable_path, show_viewer=show_viewer)
+    replay_mpm_cube, replay_fem_cube = deformable_trajectory.scene.entities[1:]
+    for index, (mpm_pos, fem_pos) in enumerate(deformables_pos):
+        deformable_trajectory.seek(index)
+        assert_equal(replay_mpm_cube.get_particles_pos(), mpm_pos)
+        assert_equal(replay_fem_cube.get_verts_pos(), fem_pos)
+    # A step from the last frame holds the particles attached as the recorded run did
+    deformable_trajectory.scene.step()
+    assert_equal(replay_mpm_cube.get_particles_pos(), final_mpm_pos)
 
 
 @pytest.mark.precision("32")

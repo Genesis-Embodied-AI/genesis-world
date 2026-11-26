@@ -274,7 +274,10 @@ class Mesh(RBC, serialization.SerializationMixin):
 
         verts, faces = remeshed
         self._mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+        # The remeshed vertices carry no uvs, and their visual follows the default surface, as for a mesh loaded back
+        self._uvs = None
         self.clear_visuals()
+        self._mesh.visual = mu.surface_uvs_to_trimesh_visual(self._surface, None, len(verts))
 
     def tetrahedralize(self, tet_cfg):
         """

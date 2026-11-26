@@ -1,11 +1,13 @@
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from pydantic import StrictBool
+from pydantic import Field, StrictBool
 
 from genesis.typing import NonNegativeFloat, ValidFloat
 
+from . import MPM
 from .base import Material
+from .rigid import Rigid
 
 if TYPE_CHECKING:
     from genesis.engine.entities.hybrid_entity import HybridEntity
@@ -17,9 +19,9 @@ class Hybrid(Material["HybridEntity"]):
 
     Parameters
     ----------
-    material_rigid : Material
+    material_rigid : Rigid
         The material of the rigid body.
-    material_soft : Material
+    material_soft : MPM.Base
         The material of the soft body.
     use_default_coupling : bool, optional
         Whether to use default solver coupling. Default is False.
@@ -30,19 +32,24 @@ class Hybrid(Material["HybridEntity"]):
     soft_dv_coef : float, optional
         The coefficient to apply delta velocity from rigid to soft. Default is 0.01.
     func_instantiate_rigid_from_soft : callable, optional
-        The function to instantiate rigid body from the geometry of soft body. Default is None.
+        The function to instantiate rigid body from the geometry of soft body, for a mesh morph. It is called with the
+        keyword arguments 'mesh', 'morph', 'material_rigid', 'material_hybrid' and 'surface', and returns the entity
+        spec of the rigid part, which Genesis adds to the scene. Default is None.
     func_instantiate_soft_from_rigid : callable, optional
-        The function to instantiate soft body from the geometry of rigid body. Default is None.
+        The function to instantiate soft body from the geometry of rigid body, for a URDF morph. It is called with the
+        keyword arguments 'part_rigid', 'material_soft', 'material_hybrid' and 'surface', and returns the entity spec
+        of the soft part, which Genesis adds to the scene. Default is None.
     func_instantiate_rigid_soft_association : callable, optional
         The function that determines the association of the rigid and the soft body. Default is None.
     """
 
-    material_rigid: Material = ...
-    material_soft: Material = ...
+    material_rigid: Rigid = ...
+    material_soft: MPM.Base = ...
     use_default_coupling: StrictBool = False
     damping: NonNegativeFloat = 0.0
     thickness: ValidFloat = 0.05
     soft_dv_coef: ValidFloat = 0.01
-    func_instantiate_rigid_from_soft: Callable | None = None
-    func_instantiate_soft_from_rigid: Callable | None = None
-    func_instantiate_rigid_soft_association: Callable | None = None
+    # Excluded from export, since a file holds no function and the description holds the parts they produced
+    func_instantiate_rigid_from_soft: Callable | None = Field(default=None, exclude=True)
+    func_instantiate_soft_from_rigid: Callable | None = Field(default=None, exclude=True)
+    func_instantiate_rigid_soft_association: Callable | None = Field(default=None, exclude=True)

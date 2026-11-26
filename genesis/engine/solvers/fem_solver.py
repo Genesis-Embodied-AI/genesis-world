@@ -11,7 +11,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.simt as su
-from genesis.engine.entities.fem_entity import FEMEntity
+from genesis.engine.entities.fem_entity import FEMEntity, FEMEntityDescription
 from genesis.engine.materials import FEM
 from genesis.engine.materials.FEM.elastic import (
     FEMModel,
@@ -89,7 +89,6 @@ from .base_solver import (
 )
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.simulator import Simulator
 
 # The most clusters an entity splits into, which bounds the size of its coarse matrix, the fewest vertices a cluster
@@ -855,19 +854,21 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self,
         idx: int,
-        surface: Surface,
-        spec: "gs.entities.FEM",
-        desc: "EntityDescription | None" = None,
-    ) -> "FEMEntity":
+        surface: Surface | None,
+        spec: "gs.entities.FEM | None",
+        desc: FEMEntityDescription | None = None,
+    ) -> FEMEntity:
+        """Create an entity from its description, resolved from the entity spec and its surface when none is given."""
+        if desc is None:
+            desc = FEMEntityDescription.resolve(spec, surface)
         entity = FEMEntity(
             scene=self._sim.scene,
             solver=self,
-            surface=surface,
+            desc=desc,
             idx=idx,
             v_start=self.n_vertices,
             el_start=self.n_elements,
             s_start=self.n_surfaces,
-            spec=spec,
         )
         self._entities.append(entity)
         self._n_vertices += entity.n_vertices

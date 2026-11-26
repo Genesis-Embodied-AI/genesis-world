@@ -7,10 +7,9 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.constants import STRUCTURE
-from genesis.options.surfaces import Surface
 from genesis.utils.misc import broadcast_tensor
 
-from .particle_entity import ParticleEntity, assert_active
+from .particle_entity import ParticleEntity, ParticleEntityDescription, assert_active
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
@@ -27,6 +26,10 @@ def assert_muscle(method):
     return wrapper
 
 
+class MPMEntityDescription(ParticleEntityDescription):
+    """Describe one MPM entity as its resolution left it: its sampled particles and its posed visual mesh."""
+
+
 @qd.data_oriented
 class MPMEntity(ParticleEntity):
     """
@@ -38,10 +41,8 @@ class MPMEntity(ParticleEntity):
         Scene object this entity belongs to.
     solver : Solver
         The solver responsible for simulating this entity.
-    spec : gs.entities.MPM
-        The entity spec the entity is constructed from, whose morph gives its geometry.
-    surface : Surface
-        Surface or texture representation.
+    desc : MPMEntityDescription
+        The description the entity is created from, holding its spec, its surface and its sampled particles.
     particle_size : float
         Particle size for discretization.
     idx : int
@@ -50,26 +51,19 @@ class MPMEntity(ParticleEntity):
         Starting particle index.
     """
 
+    _description_cls = MPMEntityDescription
+
     def __init__(
         self,
         scene: "Scene",
         solver: "MPMSolver",
-        surface: Surface,
+        desc: MPMEntityDescription,
         particle_size: float,
         idx: int,
         particle_start: int,
-        spec: "gs.entities.MPM",
     ) -> None:
-        super().__init__(
-            scene,
-            solver,
-            surface,
-            particle_size,
-            idx,
-            particle_start,
-            need_skinning=spec.material.structure == STRUCTURE.TEARABLE,
-            spec=spec,
-        )
+        need_skinning = desc.spec.material.structure == STRUCTURE.TEARABLE
+        super().__init__(scene, solver, desc, particle_size, idx, particle_start, need_skinning)
 
     def _add_to_solver(self):
         super()._add_to_solver()

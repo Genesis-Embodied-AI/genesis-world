@@ -37,8 +37,7 @@ class Material[EntityT: "Entity"](Options):
     This class should *not* be instantiated directly.
     """
 
-    # Frozen, so that a material is configuration the entities holding it share, and materials of equal options compare
-    # and hash equal (see 'MPMSolver', which compiles one branch of its kernels per distinct material)
+    # Frozen, so that entities share a material as configuration and materials of equal options compare and hash equal
     model_config = ConfigDict(frozen=True)
 
     structure: ClassVar[STRUCTURE]

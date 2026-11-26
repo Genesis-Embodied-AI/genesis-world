@@ -399,14 +399,18 @@ def _export_value(value, expect, exported: "Exported"):
     if _has_declared_fields(expect):
         exported.classes.add(type(value))
         given = vars(value)
-        values = {
-            name: _export_value(given[name], annotation, exported)
-            for name, annotation in _declared_fields(type(value)).items()
-        }
+        declared = _declared_fields(type(value))
+        if issubclass(type(value), Options):
+            # A field excluded from serialization is either derived when the option object is built (a shortcut
+            # resolved into the fields it stands for), or a callback, whose result the entity description holds.
+            declared = {
+                name: annotation for name, annotation in declared.items() if not type(value).model_fields[name].exclude
+            }
+        values = {name: _export_value(given[name], annotation, exported) for name, annotation in declared.items()}
         if issubclass(type(value), Options):
             # An option object carries the names of the fields the user gave, since rebuilding one needs them. They
             # are sorted, so exporting the same scene twice gives the same file.
-            values = {"values": values, "given": sorted(value.model_fields_set)}
+            values = {"values": values, "given": sorted(value.model_fields_set & values.keys())}
         return values if _accepted_classes(expect) == (type(value),) else {"@": type(value).__name__, **values}
     # A union mixing an option with a sequence of them, such as one morph or several, exports as the argument it holds
     deduced = _deduce_union(expect, value)

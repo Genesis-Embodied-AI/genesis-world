@@ -29,6 +29,7 @@ from genesis.utils.warnings import warn_once
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .couplers.rigid_mpm_hybrid import RigidMPMHybrid
 from .entities import HybridEntity
+from .entities.hybrid_entity import HybridEntityDescription
 from .render_context import RenderContext
 from .sensors import SensorManager
 from .solvers import FEMSolver, KinematicSolver, MPMSolver, PBDSolver, RigidSolver, SPHSolver
@@ -177,9 +178,12 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
     ) -> "Entity":
         if desc is not None:
             spec = desc.spec
+        # FIXME: Kill this please >:( need to rework how we define HybridEntity.
         if isinstance(spec, gs.entities.Hybrid):
-            # A hybrid entity adds its parts to the scene itself, as entities of their own
-            entity = HybridEntity(self.scene, surface, spec)
+            # A hybrid entity adds its parts to the scene as entities of their own, before itself
+            if desc is None:
+                desc = HybridEntityDescription.resolve(spec, surface, self.scene.add_entity)
+            entity = HybridEntity(self.n_entities, self.scene, desc, self.get_entity)
         else:
             solver = next(
                 (
@@ -192,8 +196,7 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
             assert solver is not None
             entity = solver.add_entity(self.n_entities, surface, spec, desc)
         self._entities.append(entity)
-        if entity.desc is not None:
-            self.scene._desc.entities.append(entity.desc)
+        self.scene._desc.entities.append(entity.desc)
         return entity
 
     def add_force_field(self, force_field):

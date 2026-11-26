@@ -203,13 +203,10 @@ class KinematicEntity(DynamicTextureMixin, Entity):
 
     def __init__(self, scene: "Scene", solver: "KinematicSolver", idx: int, desc: KinematicEntityDescription):
         # Set heterogeneous support before super().__init__() because _get_morph_identifier() needs it
-        self._desc = desc
         self._morph_heterogeneous = desc.spec.morphs[1:]
         self._enable_heterogeneous = bool(self._morph_heterogeneous)
 
-        super().__init__(idx, scene, solver, desc.surface, desc.spec)
-        # The scene names an entity as it is added, so the description takes the spec recording that name
-        desc.spec = self._spec
+        super().__init__(idx, scene, solver, desc)
 
         # Where this entity's links, joints and geoms begin in the solver: right after those of the entities it holds
         self._idx_in_solver = solver.n_entities
