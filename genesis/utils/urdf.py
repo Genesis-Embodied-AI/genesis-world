@@ -623,9 +623,8 @@ def compose_inertial_properties(mass1, com1, inertia1, mass2, com2, inertia2):
         combined_inertia: Combined inertia tensor (3,3) array
     """
     combined_mass = mass1 + mass2
-    if combined_mass <= 0.0:
-        gs.raise_exception("Combined mass is zero")
-    combined_com = (mass1 * com1 + mass2 * com2) / combined_mass
+    # Two massless bodies have no center of mass, the one of the first body standing for it
+    combined_com = (mass1 * com1 + mass2 * com2) / combined_mass if combined_mass > 0.0 else com1
     inertia1_new = translate_inertia(inertia1, mass1, combined_com - com1)
     inertia2_new = translate_inertia(inertia2, mass2, combined_com - com2)
     combined_inertia = inertia1_new + inertia2_new
@@ -645,21 +644,16 @@ def merge_inertia(link1: urdfpy.Link, link2: urdfpy.Link) -> None:
     elif link1.inertial.origin is None:
         link1.inertial.origin = np.eye(4, dtype=np.float64)
 
-    m1 = link1.inertial.mass
-    m2 = link2.inertial.mass
-    com1, R1 = link1.inertial.origin[:3, 3], link1.inertial.origin[:3, :3]
-    com2, R2 = link2.inertial.origin[:3, 3], link2.inertial.origin[:3, :3]
-
-    combined_mass = m1 + m2
-    if combined_mass > 0.0:
-        combined_com = (m1 * com1 + m2 * com2) / combined_mass
-    else:
-        combined_com = com1
-
-    # Rotate and translate inertia tensors to the new center of mass
-    inertia1_new = translate_inertia(R1 @ link1.inertial.inertia @ R1.T, m1, combined_com - com1)
-    inertia2_new = translate_inertia(R2 @ link2.inertial.inertia @ R2.T, m2, combined_com - com2)
-    combined_inertia = inertia1_new + inertia2_new
+    R1, R2 = link1.inertial.origin[:3, :3], link2.inertial.origin[:3, :3]
+    # The combined inertia is expressed in the frame of the combined center of mass, axes aligned with the link
+    combined_mass, combined_com, combined_inertia = compose_inertial_properties(
+        link1.inertial.mass,
+        link1.inertial.origin[:3, 3],
+        R1 @ link1.inertial.inertia @ R1.T,
+        link2.inertial.mass,
+        link2.inertial.origin[:3, 3],
+        R2 @ link2.inertial.inertia @ R2.T,
+    )
 
     # Set the properties of the combined link
     link1.inertial.mass = combined_mass
