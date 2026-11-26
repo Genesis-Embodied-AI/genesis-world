@@ -58,6 +58,7 @@ else:
         BeforeValidator(lambda v: v if is_sequence(v) else (v,) * 3),
         Field(strict=False),
     ]
+    # The classes are looked up lazily, since the engine imports these options before defining them
     EntityIdx = objects_idx_type(lambda: gs.engine.entities.Entity, many=False, allow_int=True)
     OptionalRigidLinksIdx = objects_idx_type(
         lambda: gs.engine.entities.rigid_entity.RigidLink, many=True, allow_empty=True, allow_int=True
