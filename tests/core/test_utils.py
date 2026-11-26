@@ -396,6 +396,13 @@ def test_geom_tensor_identity(batch_shape, tol):
         np.testing.assert_allclose(np_args[0], np_args[-1], atol=1e2 * gs.EPS)
         np.testing.assert_allclose(tensor_to_array(tc_args[0]), tensor_to_array(tc_args[-1]), atol=1e2 * gs.EPS)
 
+    # Rigid transforms composed with their inverse
+    trans = np.random.randn(*batch_shape, 3).astype(gs.np_float)
+    R = gu.rotvec_to_R(np.random.randn(*batch_shape, 3).clip(-1.0, 1.0).astype(gs.np_float))
+    T = gu.trans_R_to_T(trans, R)
+    for T_ in (T, torch.as_tensor(T, device=gs.device)):
+        assert_allclose(T_ @ gu.inv_T(T_), np.eye(4), tol=tol)
+
     # Directions near -z in every quadrant, with transverse components and norms spanning several decades
     transverse = 10.0 ** np.random.uniform(-30.0, -1.0, (*batch_shape, 1)) * np.random.randn(*batch_shape, 2)
     unit = np.concatenate((transverse, -np.sqrt(1.0 - np.sum(transverse**2, axis=-1, keepdims=True))), axis=-1)
@@ -458,12 +465,6 @@ def test_geom_tensor_identity(batch_shape, tol):
     assert_allclose(gu.rotvec_to_R(np.zeros(3, dtype=gs.np_float)), np.eye(3), tol=tol)
     R_true = Rotation.from_rotvec([0.0, 0.0, -3.0]).as_matrix()
     assert_allclose(gu.axis_angle_to_R(np.array([0.0, 0.0, 1.0], dtype=gs.np_float), -3), R_true, tol=tol)
-
-    trans = np.random.randn(*batch_shape, 3).astype(gs.np_float)
-    T = gu.trans_R_to_T(trans, gu.rotvec_to_R(rotvec.astype(gs.np_float)))
-    T_inv_true = np.linalg.inv(T)
-    assert_allclose(gu.inv_T(T), T_inv_true, tol=tol)
-    assert_allclose(gu.inv_T(torch.as_tensor(T, dtype=gs.tc_float, device=gs.device)), T_inv_true, tol=tol)
 
 
 @pytest.mark.required
