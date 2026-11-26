@@ -982,7 +982,12 @@ class RasterizerContext(BuildableMixin):
             pose = gu.trans_to_T(np.array(light.pos, dtype=np.float32))
             self.add_node(pyrender.PointLight(color=light.color, intensity=light.intensity), pose=pose)
         else:
-            gs.raise_exception(f"Unsupported light: {light}")
+            pose = gu.trans_to_T(np.array(light.pos, dtype=np.float32))
+            gu.z_up_to_R(-np.array(light.dir, dtype=np.float32), out=pose[:3, :3])
+            spot_light = pyrender.SpotLight(
+                color=light.color, intensity=light.intensity, outerConeAngle=np.deg2rad(light.cutoff)
+            )
+            self.add_node(spot_light, pose=pose)
 
     def create_node_seg(self, seg_key, seg_node):
         seg_idxc = self.seg_color_map.seg_key_to_idxc(seg_key)

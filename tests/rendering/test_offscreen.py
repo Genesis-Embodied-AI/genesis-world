@@ -2325,7 +2325,7 @@ def test_video_recording_lifecycle(tmp_path, monkeypatch, renderer, show_viewer)
     "alpha_source, n_envs", [("color", 2), ("image_texture", 2), ("dynamic_texture", 0), ("dynamic_texture", 2)]
 )
 @pytest.mark.parametrize("red_alpha_u8", [0, 128])
-@pytest.mark.parametrize("light_type", ["directional", "point"])
+@pytest.mark.parametrize("light_type", ["directional", "point", "spot"])
 def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
     alpha_source, n_envs, red_alpha_u8, light_type, translucent_box_obj, renderer, show_viewer
 ):
@@ -2344,6 +2344,30 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
     PARKED = (0.0, 0.0, 1.2)
     CENTRE = slice(RES // 2 - 3, RES // 2 + 3)
 
+    # Lighting the faces that the camera sees head-on keeps them clear of the edge of the shadow of their own box, and the
+    # shadow of each box falls clear of the other box. The point and spot lights stand along the same direction from the
+    # red box, the spot aiming at it, as bright on the slab below it.
+    if light_type == "directional":
+        light = gs.options.vis.DirectionalLight(
+            dir=(-1.0, -1.0, -2.0),
+            color=(1.0, 1.0, 1.0),
+            intensity=5.0,
+        )
+    elif light_type == "point":
+        light = gs.options.vis.PointLight(
+            pos=(3.3, 2.7, 5.9),
+            color=(1.0, 1.0, 1.0),
+            intensity=255.0,
+        )
+    else:
+        light = gs.options.vis.SpotLight(
+            pos=(3.3, 2.7, 5.9),
+            dir=(-1.0, -1.0, -2.0),
+            color=(1.0, 1.0, 1.0),
+            intensity=255.0,
+            cutoff=30.0,
+        )
+
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             # The boxes are placed by hand and their overlap is what is measured, so nothing may pull them down
@@ -2354,14 +2378,7 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
             split_envs=True,
             # Black leaves each surface worth exactly its own contribution, so the composite below needs no offset
             background_color=(0.0, 0.0, 0.0),
-            # Lighting the faces that the camera sees head-on keeps them clear of the edge of the shadow of their own
-            # box, and the shadow of each box falls clear of the other box. The point light stands along the same
-            # direction from the red box, as bright on the slab below it.
-            lights=[
-                {"type": "directional", "dir": (-1.0, -1.0, -2.0), "color": (1.0, 1.0, 1.0), "intensity": 5.0}
-                if light_type == "directional"
-                else {"type": "point", "pos": (3.3, 2.7, 5.9), "color": (1.0, 1.0, 1.0), "intensity": 255.0},
-            ],
+            lights=[light],
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.5, 0.0, 0.5),
