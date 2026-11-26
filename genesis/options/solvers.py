@@ -902,6 +902,13 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
         double precision ("64"). Defaults to None.
     max_density_solver_iterations : int, optional
         Maximum number of iterations of the pressure solve per substep. Defaults to 100.
+    max_interactions : int, optional
+        Maximum number of particles, and of their mirror images across walls and bodies, that each particle interacts
+        with at once. The pressure solve keeps them in memory for the whole substep, 4 bytes per particle, environment
+        and unit of this option, which makes each of its iterations several times faster. A liquid at rest takes about
+        30 interactions per particle, and bodies falling into it up to about 60. A larger value accommodates particles
+        packed more densely than a flowing liquid, such as droplets emitted on top of each other, at the cost of
+        memory. Exceeding it at runtime halts the simulation with an error. Defaults to 64.
     vis : gs.options.ParticleVisOptions, optional
         How the entities of the solver are drawn and the markers it draws (see ``gs.options.ParticleVisOptions``).
     """
@@ -918,6 +925,7 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
     # Pressure solve parameters
     max_density_error: PositiveFloat | None = None
     max_density_solver_iterations: PositiveInt = 100
+    max_interactions: PositiveInt = 64
 
     vis: ParticleVisOptions = Field(default_factory=ParticleVisOptions)
 

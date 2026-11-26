@@ -1,5 +1,6 @@
 import math
 from collections.abc import Iterator
+from enum import auto
 from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
@@ -15,7 +16,19 @@ from genesis.engine.materials import SPH
 from genesis.engine.state_change import StateChange
 from genesis.options.solvers import SPHOptions
 from genesis.options.surfaces import Surface
-from genesis.utils.data import ENVS, Config, ConfigItem, Data, DataItem, DataKind, eoa, field, is_opted_in, iter_data
+from genesis.utils.data import (
+    ENVS,
+    Config,
+    ConfigItem,
+    Data,
+    DataItem,
+    DataKind,
+    Size,
+    eoa,
+    field,
+    is_opted_in,
+    iter_data,
+)
 from genesis.utils.geom import (
     PARTICLES,
     SpatialHashGrid,
@@ -37,7 +50,7 @@ from genesis.utils.simt import (
     qd_block_sum,
 )
 
-from .base_solver import SimulatorState
+from .base_solver import ErrorCode, SimulatorState
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
@@ -170,6 +183,33 @@ class SPHBoundaryParticles(Data, kind=DataKind.SCRATCH, shape=(PARTICLES, 3, ENV
     surfaces_impulse: qd.Tensor = field(float)
 
 
+class SPHErrorCode(ErrorCode):
+    """
+    The error flags the smoothed particle hydrodynamics (SPH) solver writes in its errno (see 'Solver.register_errors').
+    """
+
+    INTERACTIONS_OVERFLOW = auto()
+
+
+# The particles and images a particle holds room to interact with (see 'SPHOptions.max_interactions')
+INTERACTIONS = Size("sph_interactions")
+
+
+class SPHInteractions(Data, kind=DataKind.SCRATCH, shape=(PARTICLES, INTERACTIONS, ENVS)):
+    """
+    The particles and images each sorted particle interacts with over the substep, which the pressure solve sweeps.
+
+    The particles keep their positions through the pressure solve, so the neighbor walk finds the interactions once per
+    substep (see kernel_find_interactions), in increasing order of their ids so that the sums over them are the same
+    from one run to the next.
+    """
+
+    # The sorted index of the other particle in the low 'interaction_index_bits' bits, and its query of
+    # func_for_all_interactions above them: the image across the walls or the surface it is reflected across
+    ids: qd.Tensor = field(int)
+    counts: qd.Tensor = field(int, shape=(PARTICLES, ENVS))
+
+
 class SPHState(Data, kind=DataKind.STATE):
     """
     Runtime state of the smoothed particle hydrodynamics (SPH) solver.
@@ -191,6 +231,7 @@ class SPHState(Data, kind=DataKind.STATE):
     hash_grid: SpatialHashGrid
     # The error flags of each env, which no kernel of the solver raises (see 'ErrnoMixin.register_errors')
     errno: qd.Tensor = field(int, shape=(ENVS,))
+    interactions: SPHInteractions
 
 
 class SPHInfo(Data, kind=DataKind.CONSTANT):
@@ -227,6 +268,8 @@ class SPHInfo(Data, kind=DataKind.CONSTANT):
     # The inverse of the bulk modulus of the liquid, the relative density change per unit pressure, which keeps the
     # pressure solve feasible where the liquid fills a closed volume
     compliance: qd.Tensor = field(float, shape=())
+    # The bits of an interaction id that hold the index of the other particle (see SPHInteractions)
+    interaction_index_bits: qd.Tensor = field(int, shape=())
 
 
 class SPHConfig(Config):
@@ -259,6 +302,7 @@ class SPHSolver(ParticleSolver):
         if self._density_err_tol is None:
             self._density_err_tol = 1e-5 if gs.qd_float == qd.f32 else 1e-6
         self._n_pressure_iters_max = options.max_density_solver_iterations
+        self._max_interactions = options.max_interactions
 
         # The samplers place one particle per cube of the particle size, the spacing over which the kernel sums to one
         self._particle_volume = self._particle_size**3
@@ -278,6 +322,11 @@ class SPHSolver(ParticleSolver):
         super().build(n_envs)
 
         sizes = dict(envs=self.n_envs_, particles=self._n_particles)
+        # An interaction id packs the index of the other particle with its query, of which there are 30 (see
+        # SPHInteractions), so the index takes the bits below the five of the query and the sign bit
+        interaction_index_bits = 26
+        if self._n_particles >= 2**interaction_index_bits:
+            gs.raise_exception(f"The SPH solver supports {2**interaction_index_bits} particles at most.")
         hash_grid_values = dict(cell_size=self._hash_grid_cell_size, grid_res=self._hash_grid_res)
         self.sph_state = SPHState(
             sizes=dict(
@@ -285,6 +334,7 @@ class SPHSolver(ParticleSolver):
                 # Each sum of an environment takes one slot, its terms spanning 96 bits (see SPHEnvsSolve)
                 exact_sum_slots=5,
                 exact_sum_bins=3,
+                sph_interactions=self._max_interactions,
                 **hash_grid_sizes(math.prod(self._hash_grid_res)),
             ),
             values=dict(hash_grid=hash_grid_values),
@@ -295,7 +345,15 @@ class SPHSolver(ParticleSolver):
             },
             unused=not self.is_active,
         )
-        self.register_errors(self.sph_state.errno, {})
+        self.register_errors(
+            self.sph_state.errno,
+            {
+                SPHErrorCode.INTERACTIONS_OVERFLOW: lambda: (
+                    f"An SPH particle interacts with more than {self._max_interactions} particles and images. Please "
+                    "increase 'max_interactions' of the SPH options."
+                ),
+            },
+        )
         if self.is_active:
             # The lowest bin of the sums resolves 2^-20 of their terms at the tolerance, the bins 2^32 apart (see
             # ExactSums). The dot products weigh squared density errors by the inverse diagonal of the operator, which
@@ -339,6 +397,7 @@ class SPHSolver(ParticleSolver):
                 contact_dist=self._support_radius / 6.0,
                 # Water
                 compliance=1.0 / 2.2e9,
+                interaction_index_bits=interaction_index_bits,
             )
         self.sph_info = SPHInfo(sizes=sizes, values=info_values, unused=not self.is_active)
         self._particles_pos = self.sph_state.particles.pos
@@ -423,6 +482,7 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
         )
         kernel_predict_velocity(self.sph_state, self.sph_info)
         kernel_compute_rhs(self.sph_state, self.sph_info, self.sph_config)
+        kernel_find_interactions(self.sph_state, self.sph_info, self.sph_config)
         kernel_solve_pressure(
             self._n_pressure_iters_max,
             self.sph_state.solve_loop.is_looping,
@@ -641,8 +701,8 @@ def func_for_all_interactions(
     sph_config : qd.template()
         The parts of the solver its kernels compile in.
     task : qd.template()
-        The task, which takes the indices of both particles, the environment, `ret`, the state and the info, in this
-        order, and accumulates its result in `ret`.
+        The task, which takes the indices of both particles, the environment, the query (see func_is_interacting),
+        `ret`, the state and the info, in this order, and accumulates its result in `ret`.
     n_lanes : qd.template()
         The number of lanes of the subgroup tile that take the particle together, 1 or 32.
     """
@@ -758,7 +818,7 @@ def func_for_all_interactions(
                 else:
                     ret.i_surface = i_query_run - 27
                 if func_is_interacting(i_p, j_p, i_b, i_query_run, ret, sph_state, sph_info, sph_config):
-                    task(i_p, j_p, i_b, ret, sph_state, sph_info)
+                    task(i_p, j_p, i_b, i_query_run, ret, sph_state, sph_info)
     ret.i_surface = -1
     ret.image_rot = qd.Matrix.identity(gs.qd_float, 3)
     ret.image_shift = qd.Vector.zero(gs.qd_float, 3)
@@ -900,7 +960,7 @@ def kernel_copy_from_reordered(sph_state: SPHState):
 
 @qd.func
 def func_task_compute_non_pressure_forces(
-    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
+    i_p: int, j_p: int, i_b: int, i_query: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
 ):
     # The images of the particles take part like the particles themselves (see func_for_all_interactions)
     offset_ij = ret.pos_i - (ret.image_rot @ sph_state.particles_reordered.pos[j_p, i_b] + ret.image_shift)
@@ -1024,7 +1084,9 @@ def kernel_advect_position(sph_state: SPHState, sph_info: SPHInfo):
 
 
 @qd.func
-def func_task_compute_rho(i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo):
+def func_task_compute_rho(
+    i_p: int, j_p: int, i_b: int, i_query: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
+):
     offset_ij = ret.pos_i - (ret.image_rot @ sph_state.particles_reordered.pos[j_p, i_b] + ret.image_shift)
     support_radius, particle_volume = sph_info.support_radius[None], sph_info.particle_volume[None]
     grad_ij = particle_volume * func_kernel_gradient(offset_ij, support_radius, sph_info.kernel_norm[None])
@@ -1143,7 +1205,7 @@ def kernel_predict_velocity(sph_state: SPHState, sph_info: SPHInfo):
 
 @qd.func
 def func_task_compute_density_rate(
-    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
+    i_p: int, j_p: int, i_b: int, i_query: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
 ):
     offset_ij = ret.pos_i - (ret.image_rot @ sph_state.particles_reordered.pos[j_p, i_b] + ret.image_shift)
     grad_ij = sph_info.particle_volume[None] * func_kernel_gradient(
@@ -1151,32 +1213,6 @@ def func_task_compute_density_rate(
     )
     vel_ij = ret.vel_i - (ret.image_rot @ sph_state.particles_reordered.vel[j_p, i_b] + ret.image_vel)
     ret.rate = ret.rate + vel_ij.dot(grad_ij)
-
-
-@qd.func
-def func_task_compute_dir_rate(
-    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
-):
-    offset_ij = ret.pos_i - (ret.image_rot @ sph_state.particles_reordered.pos[j_p, i_b] + ret.image_shift)
-    grad_ij = sph_info.particle_volume[None] * func_kernel_gradient(
-        offset_ij, sph_info.support_radius[None], sph_info.kernel_norm[None]
-    )
-    vel_ij = ret.vel_i - ret.image_rot @ sph_state.pressure_solve.dir_vel[j_p, i_b]
-    ret.rate = ret.rate + vel_ij.dot(grad_ij)
-
-
-@qd.func
-def func_task_compute_pressure_vel(
-    i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
-):
-    offset_ij = ret.pos_i - (ret.image_rot @ sph_state.particles_reordered.pos[j_p, i_b] + ret.image_shift)
-    grad_ij = sph_info.particle_volume[None] * func_kernel_gradient(
-        offset_ij, sph_info.support_radius[None], sph_info.kernel_norm[None]
-    )
-    pressure_j = sph_state.pressure_solve.dir[j_p, i_b]
-    if ret.is_recomputing:
-        pressure_j = sph_state.particles_reordered.p[j_p, i_b]
-    ret.force = ret.force + (ret.pressure_i + pressure_j) * grad_ij
 
 
 @qd.func
@@ -1304,7 +1340,7 @@ def func_compute_density_rate(
     sph_config : qd.template()
         The parts of the solver its kernels compile in.
     task : qd.template()
-        The task reading `vel_field`, func_task_compute_density_rate or func_task_compute_dir_rate.
+        The task reading `vel_field`.
     """
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
     vel_i = qd.Vector.zero(gs.qd_float, 3)
@@ -1324,6 +1360,109 @@ def func_compute_density_rate(
     if qd.static(N_LANES > 1):
         ret.rate = qd_block_sum(ret.rate, sph_config.log2_neighbor_lanes)
     return ret.rate
+
+
+@qd.func
+def func_task_add_interaction(
+    i_p: int, j_p: int, i_b: int, i_query: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
+):
+    i_k = qd.atomic_add(sph_state.interactions.counts[i_p, i_b], 1)
+    if i_k < sph_state.interactions.ids.shape[1]:
+        sph_state.interactions.ids[i_p, i_k, i_b] = j_p | (i_query << sph_info.interaction_index_bits[None])
+    else:
+        qd.atomic_or(sph_state.errno[i_b], SPHErrorCode.INTERACTIONS_OVERFLOW)
+
+
+@qd.func
+def func_interaction_grad(
+    i_p: int,
+    i_k: int,
+    i_b: int,
+    ret: qd.template(),
+    sph_state: SPHState,
+    sph_info: SPHInfo,
+    sph_config: qd.template(),
+):
+    """
+    Return the other particle of an interaction of a sorted particle (see SPHInteractions) and the kernel gradient
+    between the particle and the other particle or its image, scaled by the volume of a particle.
+
+    `ret` holds the position of the particle `ret.pos_i`, and takes the image transform of the interaction (see
+    func_for_all_interactions).
+    """
+    interaction_id = sph_state.interactions.ids[i_p, i_k, i_b]
+    index_bits = sph_info.interaction_index_bits[None]
+    j_p = interaction_id & ((1 << index_bits) - 1)
+    i_query = interaction_id >> index_bits
+    ret.i_surface = -1
+    ret.image_rot = qd.Matrix.identity(gs.qd_float, 3)
+    ret.image_shift = qd.Vector.zero(gs.qd_float, 3)
+    ret.image_vel = qd.Vector.zero(gs.qd_float, 3)
+    if i_query < 27:
+        lower, upper = sph_info.boundary.lower[None], sph_info.boundary.upper[None]
+        digits = qd.Vector([i_query % 3, i_query // 3 % 3, i_query // 9])
+        is_lower, is_upper = digits == 1, digits == 2
+        sign = qd.select(is_lower | is_upper, -1.0, 1.0)
+        ret.image_rot = qd.Matrix([[sign[0], 0.0, 0.0], [0.0, sign[1], 0.0], [0.0, 0.0, sign[2]]])
+        ret.image_shift = qd.select(is_lower, 2.0 * lower, qd.select(is_upper, 2.0 * upper, 0.0))
+    else:
+        # The plane of an image across a moving boundary is shared by both particles (see func_is_interacting)
+        if qd.static(sph_config.has_boundary):
+            ret.i_surface = i_query - 27
+            func_is_interacting(i_p, j_p, i_b, i_query, ret, sph_state, sph_info, sph_config)
+    offset_ij = ret.pos_i - (ret.image_rot @ sph_state.particles_reordered.pos[j_p, i_b] + ret.image_shift)
+    grad_ij = sph_info.particle_volume[None] * func_kernel_gradient(
+        offset_ij, sph_info.support_radius[None], sph_info.kernel_norm[None]
+    )
+    return j_p, grad_ij
+
+
+@qd.kernel(fastcache=True)
+def kernel_find_interactions(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template()):
+    """Find the particles and images each sorted particle interacts with over the substep (see SPHInteractions)."""
+    for i_p, i_b in qd.ndrange(
+        *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.interactions.counts))
+    ):
+        sph_state.interactions.counts[i_p, i_b] = 0
+
+    N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
+    n_particles, n_envs = sph_state.particles_reordered.pos.shape
+    for i_t in range(n_envs * n_particles * N_LANES):
+        i_lane = i_t % N_LANES
+        i_b = i_t // N_LANES % n_envs
+        i_p = i_t // (N_LANES * n_envs)
+        ret = qd.Struct(
+            pos_i=qd.Vector.zero(gs.qd_float, 3),
+            image_rot=qd.Matrix.identity(gs.qd_float, 3),
+            image_shift=qd.Vector.zero(gs.qd_float, 3),
+            image_vel=qd.Vector.zero(gs.qd_float, 3),
+            i_surface=-1,
+        )
+        if sph_state.particles_reordered.is_active[i_p, i_b]:
+            func_for_all_interactions(
+                i_p, i_b, i_lane, ret, sph_state, sph_info, sph_config, func_task_add_interaction, n_lanes=N_LANES
+            )
+
+    # The lanes append the interactions in the order they find them, which varies from one run to the next, so the
+    # interactions of each particle are sorted by their ids, an insertion sort over the few dozens of them
+    for i_p, i_b in qd.ndrange(
+        *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.interactions.counts))
+    ):
+        n_interactions = qd.min(sph_state.interactions.counts[i_p, i_b], sph_state.interactions.ids.shape[1])
+        sph_state.interactions.counts[i_p, i_b] = n_interactions
+        for i_k in range(1, n_interactions):
+            interaction_id = sph_state.interactions.ids[i_p, i_k, i_b]
+            i_dst = i_k
+            is_shifting = True
+            for i_m_ in range(i_k):
+                i_m = i_k - 1 - i_m_
+                if is_shifting:
+                    if sph_state.interactions.ids[i_p, i_m, i_b] > interaction_id:
+                        sph_state.interactions.ids[i_p, i_m + 1, i_b] = sph_state.interactions.ids[i_p, i_m, i_b]
+                        i_dst = i_m
+                    else:
+                        is_shifting = False
+            sph_state.interactions.ids[i_p, i_dst, i_b] = interaction_id
 
 
 @qd.kernel(fastcache=True)
@@ -1398,17 +1537,26 @@ def func_pressure_product(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd
         i_b = i_t // N_LANES % n_envs
         i_p = i_t // (N_LANES * n_envs)
         is_solved = sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]
-        rate = func_compute_density_rate(
-            i_p,
-            i_b,
-            i_lane,
-            is_solved,
-            sph_state.pressure_solve.dir_vel,
-            sph_state,
-            sph_info,
-            sph_config,
-            func_task_compute_dir_rate,
+        # The rate at which the velocity change per unit step changes the density, over the interactions of the particle
+        ret = qd.Struct(
+            pos_i=qd.Vector.zero(gs.qd_float, 3),
+            image_rot=qd.Matrix.identity(gs.qd_float, 3),
+            image_shift=qd.Vector.zero(gs.qd_float, 3),
+            image_vel=qd.Vector.zero(gs.qd_float, 3),
+            i_surface=-1,
         )
+        rate = gs.qd_float(0.0)
+        if is_solved:
+            ret.pos_i = sph_state.particles_reordered.pos[i_p, i_b]
+            vel_i = sph_state.pressure_solve.dir_vel[i_p, i_b]
+            n_interactions = sph_state.interactions.counts[i_p, i_b]
+            for i_k_ in range((n_interactions + N_LANES - 1) // N_LANES):
+                i_k = i_k_ * N_LANES + i_lane
+                if i_k < n_interactions:
+                    j_p, grad_ij = func_interaction_grad(i_p, i_k, i_b, ret, sph_state, sph_info, sph_config)
+                    rate = rate + (vel_i - ret.image_rot @ sph_state.pressure_solve.dir_vel[j_p, i_b]).dot(grad_ij)
+        if qd.static(N_LANES > 1):
+            rate = qd_block_sum(rate, sph_config.log2_neighbor_lanes)
         if is_solved and i_lane == 0:
             dt = sph_info.substep_dt[None]
             # The liquid gives way under pressure by its compliance
@@ -1498,9 +1646,16 @@ def func_pressure_dir_vel(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd
         # The pair takes the sum of both pressures, an image of a particle takes its pressure (see
         # func_for_all_interactions), and the contacts push the particle along the normal of their surface
         if is_solved:
-            func_for_all_interactions(
-                i_p, i_b, i_lane, ret, sph_state, sph_info, sph_config, func_task_compute_pressure_vel, n_lanes=N_LANES
-            )
+            ret.pos_i = sph_state.particles_reordered.pos[i_p, i_b]
+            n_interactions = sph_state.interactions.counts[i_p, i_b]
+            for i_k_ in range((n_interactions + N_LANES - 1) // N_LANES):
+                i_k = i_k_ * N_LANES + i_lane
+                if i_k < n_interactions:
+                    j_p, grad_ij = func_interaction_grad(i_p, i_k, i_b, ret, sph_state, sph_info, sph_config)
+                    pressure_j = sph_state.pressure_solve.dir[j_p, i_b]
+                    if ret.is_recomputing:
+                        pressure_j = sph_state.particles_reordered.p[j_p, i_b]
+                    ret.force = ret.force + (ret.pressure_i + pressure_j) * grad_ij
         if qd.static(N_LANES > 1):
             for i_d in qd.static(range(3)):
                 ret.force[i_d] = qd_block_sum(ret.force[i_d], sph_config.log2_neighbor_lanes)
@@ -1755,7 +1910,9 @@ def kernel_solve_pressure(
 
 
 @qd.func
-def func_task_apply_pressure(i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo):
+def func_task_apply_pressure(
+    i_p: int, j_p: int, i_b: int, i_query: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
+):
     offset_ij = ret.pos_i - (ret.image_rot @ sph_state.particles_reordered.pos[j_p, i_b] + ret.image_shift)
     grad_ij = sph_info.particle_volume[None] * func_kernel_gradient(
         offset_ij, sph_info.support_radius[None], sph_info.kernel_norm[None]

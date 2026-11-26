@@ -436,8 +436,11 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
             lower_bound=(0.0, -1.5, 0.0),
             upper_bound=(1.0, 1.5, 4.0),
         ),
+        # The emissions below pile droplets up at the same place before any step, which overlaps the particles far more
+        # than a flowing liquid does
         sph_options=gs.options.SPHOptions(
             particle_size=0.02,
+            max_interactions=128,
         ),
         pbd_options=gs.options.PBDOptions(
             particle_size=0.02,
