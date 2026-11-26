@@ -512,7 +512,7 @@ class ElastomerTaxel(
         super().model_post_init(context)
         _validate_filler_probe_radius(self.probe_radius, "ElastomerTaxel")
         if len(self.tracked_links) == 0:
-            gs.raise_exception("ElastomerTaxel requires at least one tracked link in tracked_links.")
+            gs.raise_exception("ElastomerTaxel requires at least one tracked link in `tracked_links`.")
         if self.normal_exponent < 1.0:
             gs.raise_exception(f"normal_exponent must be greater than or equal to 1.0. Got {self.normal_exponent}.")
         if self.compressibility > 1.0:

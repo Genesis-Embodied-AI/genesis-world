@@ -4,7 +4,7 @@ import pytest
 import genesis as gs
 import genesis.utils.geom as gu
 
-from ..utils.assertions import assert_allclose
+from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.required
@@ -178,8 +178,8 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
     assert_allclose(
         gu.transform_by_quat(force_sensor.read_ground_truth(), box.get_quat()), (0.0, 0.0, -GRAVITY), tol=tol
     )
-    assert_allclose(force_sensor_by_link.read(), force_sensor.read(), tol=gs.EPS)
-    assert_allclose(force_sensor_floor_filtered.read(), 0.0, tol=gs.EPS)
+    assert_equal(force_sensor_by_link.read(), force_sensor.read())
+    assert_equal(force_sensor_floor_filtered.read(), 0.0)
 
     # FIXME: Adding CoM offset on box is disturbing contact force computations on box_2 for some reason...
     assert_allclose(force_sensor_box_2.read_ground_truth(), (-0.8 * GRAVITY, 0.0, 0.0), tol=1e-2)
