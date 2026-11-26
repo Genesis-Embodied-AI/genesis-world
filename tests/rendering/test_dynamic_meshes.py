@@ -346,7 +346,7 @@ def test_set_vverts(renderer, show_viewer):
     # Every environment shows the first variant, the mesh of the asset placed at the pose of the visual geom
     sphere_vverts = sphere_verts + np.array((0.0, 0.0, 0.5))
     assert_allclose(entity.get_vverts(), sphere_vverts, tol=gs.EPS)
-    rgb_baseline = tensor_to_array(cam.render(rgb=True, force_render=True)[0])
+    rgb_baseline = tensor_to_array(cam.render(rgb=True)[0])
 
     # A variant is shown by name in some environments, and survives steps
     entity.set_vverts(envs_idx=[1], variant="squashed")
@@ -371,7 +371,7 @@ def test_set_vverts(renderer, show_viewer):
     # A reset shows the first variant again in every environment
     scene.reset()
     assert_allclose(entity.get_vverts(), sphere_vverts, tol=gs.EPS)
-    rgb_restored = tensor_to_array(cam.render(rgb=True, force_render=True)[0])
+    rgb_restored = tensor_to_array(cam.render(rgb=True)[0])
     # Rendering the same geometry again may round a color to the next level
     assert_allclose(rgb_restored, rgb_baseline, atol=1)
 
@@ -507,17 +507,17 @@ def test_set_vverts_sphere_to_box(renderer, show_viewer):
     scene.build()
 
     cam.set_pose(pos=(pos_sphere[0], pos_sphere[1], pos_sphere[2] + cam_dz), lookat=pos_sphere)
-    mask_sphere = cam.render(rgb=False, segmentation=True, force_render=True)[2] > 0
+    mask_sphere = cam.render(rgb=False, segmentation=True)[2] > 0
 
     cam.set_pose(pos=(pos_box[0], pos_box[1], pos_box[2] + cam_dz), lookat=pos_box)
-    mask_box = cam.render(rgb=False, segmentation=True, force_render=True)[2] > 0
+    mask_box = cam.render(rgb=False, segmentation=True)[2] > 0
 
     # The reference primitive sphere uses a different tessellation than the spherified cube grid, so the two circle
     # silhouettes differ by a handful of boundary pixels - bound the symmetric difference at 0.5% of the area.
     sphere_tolerance = max(int(0.005 * mask_sphere.sum()), 1)
 
     cam.set_pose(pos=(pos_deformable[0], pos_deformable[1], pos_deformable[2] + cam_dz), lookat=pos_deformable)
-    mask_deformable_sphere = cam.render(rgb=False, segmentation=True, force_render=True)[2] > 0
+    mask_deformable_sphere = cam.render(rgb=False, segmentation=True)[2] > 0
     assert int((mask_deformable_sphere ^ mask_sphere).sum()) < sphere_tolerance
 
     deformable.set_vverts(variant=1)

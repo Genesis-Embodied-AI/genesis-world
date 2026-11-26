@@ -210,7 +210,8 @@ class VisOptions(Options):
     shadow : bool
         Whether to render shadow. Defaults to True.
     plane_reflection : bool
-        Whether to render plane reflection. Defaults to False.
+        Whether a plane mirrors the scene in the rasterizer, as much as the reflectance of its surface gives and blurred
+        by its roughness. It costs one more render of the scene per frame of each camera. Defaults to False.
     split_envs : bool
         Whether the cameras render each environment in its own world, split from the others, or all the environments
         as if they shared one scene, laid out side by side as the interactive viewer shows them. Split, a camera returns

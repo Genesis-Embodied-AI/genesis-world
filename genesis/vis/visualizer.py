@@ -196,21 +196,20 @@ class Visualizer(BuildableMixin, RBC):
     def build(self):
         self._context.build(self._scene)
 
+        # Setter changes, of the state of a solver or of the appearance of an entity, reach every renderer (see 'sync').
+        # Every category counts, since a shape or a marker may follow any of them (see 'Shape.invalidated_by'), the
+        # nodes of the shapes whose scoped context refreshed alone being updated (see 'RasterizerContext._sync_shapes').
+        # The window only repaints when a refresh is due, so that a loop of setters does not pay one repaint per call.
+        on_setter = Subscriber(to=frozenset(StateChange), callback=lambda change, **indices: self.sync())
+        for solver in self._scene.sim.active_solvers:
+            solver.changelog.subscribe(on_setter)
+        self._scene.sim.render_context.subscribe(
+            Subscriber(to=frozenset((StateChange.VISUAL,)), callback=lambda change, **indices: self.sync())
+        )
+
         if self._viewer is not None:
-            # Setter changes, of the state of a solver or of the appearance of an entity, are shown in the viewer right
-            # away, the nodes of the shapes whose scoped context refreshed alone being updated (see
-            # 'RasterizerContext._sync_shapes'). The window only repaints when a refresh is due, so that a loop of
-            # setters does not pay one repaint per call.
-            on_setter = Subscriber(
-                to=frozenset((StateChange.GEOMETRY,)), callback=lambda change, **indices: self.sync()
-            )
-            for solver in self._scene.sim.active_solvers:
-                solver.changelog.subscribe(on_setter)
-            self._scene.sim.render_context.subscribe(
-                Subscriber(to=frozenset((StateChange.VISUAL,)), callback=lambda change, **indices: self.sync())
-            )
             # The window draws its first frames as it builds, which show the scene once its nodes exist
-            self._context.update(force_render=True)
+            self._context.update()
             self._viewer.build(self._scene)
             self.viewer_lock = self._viewer.lock
 
@@ -223,7 +222,8 @@ class Visualizer(BuildableMixin, RBC):
 
         # The nodes of the shared renderers are made once every view drawn from them is known, so that they hold the
         # representations these views show alone (see 'RasterizerContext.add_view').
-        self._context.update(force_render=True)
+        self._context.reset()
+        self._context.update()
 
         # Batch renderer needs to be built after cameras are built
         if self._batch_renderer is not None:
@@ -240,21 +240,21 @@ class Visualizer(BuildableMixin, RBC):
 
         The raytracer and the batch renderer sync at their next render. With 'ViewerOptions.update_on_setters', the
         renderers shared with the interactive viewer sync right away, and the viewer refreshes when a refresh is due
-        (see 'Viewer.update'). Without it, they sync at the next refresh of the viewer or at the next render of a
-        camera, whichever comes first.
+        (see 'Viewer.update'). Otherwise, they sync at the next refresh of the viewer or at the next render of a camera,
+        whichever comes first.
         """
         if self._raytracer is not None:
             self._raytracer.reset()
         if self._batch_renderer is not None:
             self._batch_renderer.reset()
+        # The cameras attached to a link or following an entity move at the next sync (see 'update_cameras')
+        self._t = -1
         # Without 'ViewerOptions.update_on_setters', a setter leaves the window alone, so that the caller decides how
         # often the window refreshes ('update_visualizer' of 'Scene.step').
-        if self._viewer is None or self._viewer.update_on_setters:
-            self._context.update(force_render=True)
-            if self._viewer is not None:
-                self._viewer.update()
-        else:
-            self._context.reset()
+        self._context.reset()
+        if self._viewer is not None and self._viewer.update_on_setters:
+            self._context.update()
+            self._viewer.update()
 
     def update_on_sim_step(self, advanced, auto=None):
         """Show a simulation step: refresh the viewer when due, run its per-step callbacks and pace the loop.
@@ -278,9 +278,9 @@ class Visualizer(BuildableMixin, RBC):
         else:
             self.update_on_sim_step(advanced=True, auto=auto)
 
-    def update_cameras(self, force_render: bool = False) -> None:
-        """Move the cameras attached to a link or following an entity, once per step unless forced to."""
-        if not force_render and self._t >= self.scene.sim.cur_step_global:
+    def update_cameras(self) -> None:
+        """Move the cameras attached to a link or following an entity, once per step or after a setter."""
+        if self._t >= self.scene.sim.cur_step_global:
             return
         self._t = self._scene.sim.cur_step_global
 

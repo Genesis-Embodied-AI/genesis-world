@@ -226,7 +226,10 @@ class ImageTexture(StaticTexture, SerializationMixin):
     def is_black(self) -> bool:
         assert gs.EPS is not None
         assert self.image_color is not None
-        assert self.image_array is not None
+        # An HDR image stays unloaded for the renderers that read the file themselves, the others drawing it white (see
+        # 'mean_color'), so that its factors alone tell whether it is black
+        if self.image_array is None:
+            return all(factor < gs.EPS for factor in self.image_color)
         # Black when every channel's effective value (texel x factor) is zero. Testing the factor and the array
         # independently would miss a per-channel factor that masks the only nonzero channels (e.g. a green texture
         # scaled by a red-only factor).

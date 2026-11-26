@@ -394,7 +394,6 @@ class Camera(BuildableMixin, RBC):
         segmentation=False,
         normal=False,
         antialiasing=True,
-        force_render=False,
     ):
         """
         Render the camera view with batch renderer.
@@ -402,7 +401,7 @@ class Camera(BuildableMixin, RBC):
         assert self._visualizer._batch_renderer is not None
 
         # Render all cameras at once no matter what
-        buffers = list(self._batch_renderer.render(rgb, depth, segmentation, normal, antialiasing, force_render))
+        buffers = list(self._batch_renderer.render(rgb, depth, segmentation, normal, antialiasing))
 
         # Only return current camera data
         for i, buffer in enumerate(buffers):
@@ -420,7 +419,6 @@ class Camera(BuildableMixin, RBC):
         colorize_seg=False,
         normal=False,
         antialiasing=False,
-        force_render=False,
     ):
         """
         Render the camera view.
@@ -450,8 +448,6 @@ class Camera(BuildableMixin, RBC):
             Whether to render the surface normal.
         antialiasing : bool, optional
             Whether to apply anti-aliasing. Only supported by 'BatchRenderer' for now.
-        force_render : bool, optional
-            Whether to force rendering even if the scene has not changed.
 
         Returns
         -------
@@ -468,20 +464,20 @@ class Camera(BuildableMixin, RBC):
         rgb_arr, depth_arr, seg_arr, seg_color_arr, seg_idxc_arr, normal_arr = None, None, None, None, None, None
         if self._batch_renderer is not None:
             rgb_arr, depth_arr, seg_idxc_arr, normal_arr = self._batch_render(
-                rgb, depth, segmentation, normal, antialiasing, force_render
+                rgb, depth, segmentation, normal, antialiasing
             )
         elif self._raytracer is not None:
             if rgb:
-                self._raytracer.update_scene(force_render)
+                self._raytracer.update_scene()
                 rgb_arr = self._raytracer.render_camera(self)
 
             if depth or segmentation or normal:
-                self._rasterizer.update_scene(force_render)
+                self._rasterizer.update_scene()
                 _, depth_arr, seg_idxc_arr, normal_arr = self._rasterizer.render_camera(
                     self, False, depth, segmentation, normal=normal, split_envs=self._is_batched
                 )
         else:
-            self._rasterizer.update_scene(force_render)
+            self._rasterizer.update_scene()
             rgb_arr, depth_arr, seg_idxc_arr, normal_arr = self._rasterizer.render_camera(
                 self, rgb, depth, segmentation, normal=normal, split_envs=self._is_batched, env_idx=self._render_env_idx
             )
@@ -565,7 +561,7 @@ class Camera(BuildableMixin, RBC):
             # FIXME: Avoid converting to numpy
             depth_arr = tensor_to_array(depth_arr)
         else:
-            self._rasterizer.update_scene(force_render=False)
+            self._rasterizer.update_scene()
             _, depth_arr, _, _ = self._rasterizer.render_camera(
                 self,
                 rgb=False,
@@ -708,6 +704,9 @@ class Camera(BuildableMixin, RBC):
             self._raytracer.update_camera(self)
         if self._batch_renderer is None:
             self._rasterizer.update_camera(self)
+        else:
+            # The batch renderer keeps the images of its cameras until the scene or one of its cameras changes
+            self._batch_renderer.reset()
 
     def update_recording(self):
         """

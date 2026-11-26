@@ -236,9 +236,8 @@ class Viewer(BuildableMixin, RBC):
         if force or is_refresh_due:
             self._last_refresh_time = now
             with self.lock:
-                # A step changes the state of every solver, so every solver is synced at each refresh. A setter syncs
-                # right away (see 'Visualizer.build').
-                self.context.update(force_render=True)
+                # The context syncs the scene once a step or a setter made it stale (see 'Visualizer.sync')
+                self.context.update()
 
                 # Refresh viewer by default if and if this is possible
                 if auto_refresh is None:

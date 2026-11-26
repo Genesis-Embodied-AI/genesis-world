@@ -97,17 +97,18 @@ def test_render_api(show_viewer, renderer_type, renderer):
 
     if IS_BATCHRENDER:
         # An output already rendered in the step comes back along with one rendered for the first time
-        rgb_arr, *_ = camera.render(rgb=True, force_render=True)
+        rgb_arr, *_ = camera.render(rgb=True)
         rgb_arr_cached, *_ = camera.render(rgb=True, depth=True)
         assert_equal(rgb_arr_cached, rgb_arr)
 
     if renderer_type == RENDERER_TYPE.RASTERIZER:
-        # An entity whose pose blew up stays drawn where it last was, and follows its pose again once it is valid
+        # An entity whose pose blew up stays drawn where it last was, and follows its pose again once it is valid. A
+        # setter reaches the next render without a step.
         box.set_pos((float("nan"), 0.0, 0.0))
-        rgb_frozen, *_ = camera.render(rgb=True, force_render=True)
+        rgb_frozen, *_ = camera.render(rgb=True)
         assert_equal(rgb_frozen, rgb_arrs[0])
         box.set_pos((-2.0, 0.0, 0.0))
-        rgb_moved, *_ = camera.render(rgb=True, force_render=True)
+        rgb_moved, *_ = camera.render(rgb=True)
         assert (rgb_moved != rgb_frozen).any()
 
 
@@ -1053,7 +1054,7 @@ def test_deterministic(tmp_path, renderer_type, renderer, show_viewer, tol):
 
             if IS_BATCHRENDER:
                 rgb_array_all, *_ = cam.render(
-                    rgb=True, depth=False, segmentation=False, colorize_seg=False, normal=False, force_render=True
+                    rgb=True, depth=False, segmentation=False, colorize_seg=False, normal=False
                 )
 
             env_rgb_array = None
@@ -1068,7 +1069,7 @@ def test_deterministic(tmp_path, renderer_type, renderer, show_viewer, tol):
                     env_offset = scene.envs_offset[i_b] - scene.envs_offset[cam.env_idx]
                     cam.set_pose(pos=CAM_POS_LOCAL + env_offset, lookat=CAM_LOOKAT_LOCAL + env_offset)
                     rgb_array, *_ = cam.render(
-                        rgb=True, depth=False, segmentation=False, colorize_seg=False, normal=False, force_render=True
+                        rgb=True, depth=False, segmentation=False, colorize_seg=False, normal=False
                     )
                 rgb_array = tensor_to_array(rgb_array).astype(np.float32)
 
@@ -1755,23 +1756,19 @@ def test_camera_follow_entity(n_envs, renderer, show_viewer):
     # Second render - same
     for i, obj in enumerate(scene.entities):
         obj.set_pos((10.0, 0.0, i), envs_idx=([1] if n_envs else None))
-    force_render = True
     for entity_idx, cam in enumerate(scene.visualizer.cameras, 1):
-        _, _, seg, _ = cam.render(rgb=False, segmentation=True, force_render=force_render)
+        _, _, seg, _ = cam.render(rgb=False, segmentation=True)
         assert (np.unique(seg) == (0, entity_idx)).all()
         assert ((seg != 0) == seg_mask).all()
-        force_render = False
 
     # Third render - All objects but all different
     for i, obj in enumerate(scene.entities):
         obj.set_pos((0.1 * ((i // 2) % 2 - 1), 0.1 * (i % 2), 0.1 * i), envs_idx=([1] if n_envs else None))
-    force_render = True
     seg_masks = []
     for cam in scene.visualizer.cameras:
-        _, _, seg, _ = cam.render(rgb=False, segmentation=True, force_render=force_render)
+        _, _, seg, _ = cam.render(rgb=False, segmentation=True)
         assert (np.unique(seg) == np.arange(len(scene.entities) + 1)).all()
         seg_masks.append(seg != 0)
-        force_render = False
     assert np.diff(seg_masks, axis=0).any(axis=(1, 2)).all()
 
     # Track a trajectory over time
@@ -1780,7 +1777,7 @@ def test_camera_follow_entity(n_envs, renderer, show_viewer):
         quat = gu.rotvec_to_quat(np.pi * (np.random.rand(3) - 0.5))
         obj.set_pos(pos + np.array([10.0, 0.0, 0.0]), envs_idx=([1] if n_envs else None))
         obj.set_quat(quat, envs_idx=([1] if n_envs else None))
-        _, _, seg, _ = cam.render(segmentation=True, force_render=True)
+        _, _, seg, _ = cam.render(segmentation=True)
         assert (np.unique(seg) == (0, entity_idx)).all()
         assert not seg[tuple([*range(0, res // 3), *range(2 * res // 3, res)] for res in CAM_RES)].any()
 
@@ -2328,14 +2325,15 @@ def test_video_recording_lifecycle(tmp_path, monkeypatch, renderer, show_viewer)
     "alpha_source, n_envs", [("color", 2), ("image_texture", 2), ("dynamic_texture", 0), ("dynamic_texture", 2)]
 )
 @pytest.mark.parametrize("red_alpha_u8", [0, 128])
+@pytest.mark.parametrize("light_type", ["directional", "point"])
 def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
-    alpha_source, n_envs, red_alpha_u8, translucent_box_obj, renderer, show_viewer
+    alpha_source, n_envs, red_alpha_u8, light_type, translucent_box_obj, renderer, show_viewer
 ):
     # Alphas that 8-bit texels store exactly, so that every source gives the same opacity
     RED = (1.0, 0.0, 0.0, red_alpha_u8 / 255)
     BLUE = (0.0, 0.0, 1.0, 128 / 255)
-    # The gray whose linear value is one half, so that a glass of that color lets through half of the light
-    GLASS_GRAY = 1.055 * 0.5 ** (1.0 / 2.4) - 0.055
+    # The linear color of a glass, which lets through that share of each color of the light at each of its faces
+    GLASS_LINEAR = np.array([0.8, 0.4, 0.1])
     # The dynamic texture of the blue box shows an opaque image in environment 0 when there are several, which the
     # translucent image of environment 1 must leave as it is
     blues_color = [BLUE] if alpha_source != "dynamic_texture" or n_envs == 0 else [(0.0, 0.0, 1.0, 1.0), BLUE]
@@ -2357,9 +2355,12 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
             # Black leaves each surface worth exactly its own contribution, so the composite below needs no offset
             background_color=(0.0, 0.0, 0.0),
             # Lighting the faces that the camera sees head-on keeps them clear of the edge of the shadow of their own
-            # box, and the shadow of each box falls clear of the other box
+            # box, and the shadow of each box falls clear of the other box. The point light stands along the same
+            # direction from the red box, as bright on the slab below it.
             lights=[
-                {"type": "directional", "dir": (-1.0, -1.0, -2.0), "color": (1.0, 1.0, 1.0), "intensity": 5.0},
+                {"type": "directional", "dir": (-1.0, -1.0, -2.0), "color": (1.0, 1.0, 1.0), "intensity": 5.0}
+                if light_type == "directional"
+                else {"type": "point", "pos": (3.3, 2.7, 5.9), "color": (1.0, 1.0, 1.0), "intensity": 255.0},
             ],
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -2444,7 +2445,7 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
             size=(0.2, 0.2, 0.2),
         ),
         surface=gs.surfaces.Glass(
-            color=(GLASS_GRAY, GLASS_GRAY, GLASS_GRAY),
+            color=tuple(1.055 * GLASS_LINEAR ** (1.0 / 2.4) - 0.055),
         ),
     )
     cam = scene.add_camera(
@@ -2497,8 +2498,9 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
     patch_pair_across = centre_patch((0.6, 0.0, 0.5), (-0.6, 0.0, 0.5))
     assert_allclose(patch_pair_across, patch_blue_across + (1.0 - blues_alpha) * patch_red_across, atol=1.0)
 
-    # A surface blocks the share of the light that its opacity gives, its shadow ranging from none when transparent to
-    # that of an opaque box of the same shape. The share holds in linear light.
+    # Each face of a translucent color blocks the share of the light that its alpha covers, its shadow ranging from none
+    # when transparent to that of an opaque box of the same shape, and tints the rest by its linear color as much as its
+    # alpha covers. The light crosses the two faces of the box, and the shares hold in linear light.
     def floor_patch(pos_red, pos_occluder):
         # The scene is rendered as it stands when no position is given
         if pos_red is not None:
@@ -2512,7 +2514,8 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
     floor_lit = floor_patch(PARKED, PARKED)
     floor_dark = floor_patch(PARKED, (0.6, 0.0, 0.5))
     floor_shadowed = floor_patch((0.6, 0.0, 0.5), PARKED)
-    assert_allclose((floor_lit - floor_shadowed) / (floor_lit - floor_dark), RED[3], atol=0.02)
+    red_passed = ((1.0 - RED[3]) * ((1.0 - RED[3]) + RED[3] * np.array(RED[:3]))) ** 2
+    assert_allclose((floor_lit - floor_shadowed) / (floor_lit - floor_dark), 1.0 - red_passed, atol=0.02)
 
     # The shadow of a dynamic texture follows the variant shown, as soon as it is shown
     if alpha_source == "dynamic_texture":
@@ -2521,10 +2524,13 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
         red.set_texture(variant=1)
         assert_allclose(floor_patch(None, None), floor_shadowed, atol=0.02)
 
-    # A glass blocks the share of the light that its linear color holds back
+    # Each of the two faces of a glass box lets through each color of the light as its linear color gives, less what its
+    # interface reflects head-on, which its index of refraction gives
     glass.set_pos((0.6, 0.0, 0.5))
     floor_glass = floor_patch(PARKED, PARKED)
-    assert_allclose((floor_lit - floor_glass) / (floor_lit - floor_dark), 0.5, atol=0.02)
+    f0 = ((glass.surface.ior - 1.0) / (glass.surface.ior + 1.0)) ** 2
+    transmitted = ((1.0 - f0) * GLASS_LINEAR) ** 2
+    assert_allclose((floor_lit - floor_glass) / (floor_lit - floor_dark), 1.0 - transmitted, atol=0.02)
 
 
 @pytest.mark.required
@@ -2643,3 +2649,77 @@ def test_glass_tints_what_lies_behind_it(renderer, show_viewer):
         )
         transmittance = 1.0 - coverage + coverage * transmittance
         assert_allclose(patch_pair, patch_alone + transmittance**2 * patch_board, atol=0.5)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
+@pytest.mark.parametrize("roughness", [0.04, 1.0])
+def test_plane_reflection(roughness, renderer, show_viewer):
+    RED = 0.8
+    AMBIENT = 0.5
+    RES = 256
+    CENTRE = slice(RES // 2 - 3, RES // 2 + 3)
+
+    scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            # The shadow of the box would darken the floor along with its mirror image
+            shadow=False,
+            plane_reflection=True,
+            background_color=(0.0, 0.0, 0.0),
+            # Under a uniform light alone, every face of a dielectric shows its linear color scaled by that light
+            ambient_light=(AMBIENT, AMBIENT, AMBIENT),
+            lights=[],
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -1.0, 1.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        renderer=renderer,
+        show_viewer=show_viewer,
+    )
+    # A floor and a box wholly in view of the camera and of its mirror image, since a software renderer misdraws
+    # geometry that leaves the view
+    scene.add_entity(
+        morph=gs.morphs.Plane(
+            plane_size=(0.4, 0.4),
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.0, 0.0, 0.0),
+            roughness=roughness,
+        ),
+    )
+    # The camera sees the face of the box that looks back along the view direction mirrored by the floor
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 1.6, 1.4),
+            size=(0.6, 0.6, 0.6),
+            fixed=True,
+        ),
+        surface=gs.surfaces.Default(
+            color=(RED, 0.0, 0.0),
+        ),
+    )
+    cam = scene.add_camera(
+        res=(RES, RES),
+        pos=(0.0, -1.0, 1.0),
+        lookat=(0.0, 0.0, 0.0),
+    )
+    scene.build()
+
+    def floor_patch():
+        rgb = tensor_to_array(cam.render()[0])[CENTRE, CENTRE] / 255.0
+        return np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4).mean(axis=(0, 1))
+
+    floor_mirrored = floor_patch()
+    box.set_pos((50.0, 1.6, 1.4))
+    floor_alone = floor_patch()
+
+    # The floor adds the mirror image of the scene in linear light, weighted by the share of the light that a
+    # dielectric surface of that roughness reflects at the view angle (the analytical fit of its environment BRDF)
+    nv = np.cos(np.pi / 4)
+    env_r = roughness * np.array([-1.0, -0.0275, -0.572, 0.022]) + np.array([1.0, 0.0425, 1.04, -0.04])
+    env_a = min(env_r[0] ** 2, 2.0 ** (-9.28 * nv)) * env_r[0] + env_r[1]
+    env_ab = np.array([-1.04, 1.04]) * env_a + env_r[2:]
+    reflectance = 0.04 * env_ab[0] + env_ab[1]
+    radiance = AMBIENT * ((RED + 0.055) / 1.055) ** 2.4
+    assert_allclose(floor_mirrored - floor_alone, (reflectance * radiance, 0.0, 0.0), atol=1e-4)

@@ -702,7 +702,7 @@ def test_raytracer_attached_without_offset_T():
     assert sensor_data.rgb.float().std() > 1.0, "Sensor camera RGB std too low, image may be blank"
 
     scene_camera.move_to_attach()
-    scene_rgb, *_ = scene_camera.render(rgb=True, force_render=True)
+    scene_rgb, *_ = scene_camera.render(rgb=True)
     scene_rgb = tensor_to_array(scene_rgb, dtype=np.int32)
     sensor_rgb = tensor_to_array(sensor_data.rgb, dtype=np.int32)
 

@@ -13,7 +13,14 @@ from OpenGL.GL import *
 
 from .utils import format_color_vector
 from .texture import Texture, CubeMapTexture
-from .constants import DIRECTIONAL_SHADOW_TEX_SZ, POINT_SHADOW_TEX_SZ, SHADOW_TEX_SZ
+from .constants import (
+    DIRECTIONAL_SHADOW_TEX_SZ,
+    POINT_SHADOW_TEX_SZ,
+    POINT_TRANSMITTANCE_TEX_SZ,
+    SHADOW_TEX_SZ,
+    TRANSMITTANCE_TEX_SZ,
+)
+from .sampler import Sampler
 from .camera import OrthographicCamera, PerspectiveCamera
 
 
@@ -43,6 +50,7 @@ class Light(metaclass=ABCMeta):
         self.intensity = intensity
         self._shadow_camera = None
         self._shadow_texture = None
+        self._transmittance_texture = None
         # (scene revision, environment index) the shadow texture holds a map for, None until one is rendered. See
         # Scene.revision.
         self.shadow_map_revision = None
@@ -87,6 +95,19 @@ class Light(metaclass=ABCMeta):
             if self._shadow_texture._in_context():
                 self._shadow_texture.delete()
         self._shadow_texture = value
+
+    @property
+    def transmittance_texture(self):
+        """:class:`.Texture` : The share of each color of the light that transparent surfaces let through, and the
+        depth of the nearest of them, for this light."""
+        return self._transmittance_texture
+
+    @transmittance_texture.setter
+    def transmittance_texture(self, value):
+        if self._transmittance_texture is not None:
+            if self._transmittance_texture._in_context():
+                self._transmittance_texture.delete()
+        self._transmittance_texture = value
 
     @abc.abstractmethod
     def _generate_shadow_texture(self, size=None):
@@ -150,6 +171,20 @@ class DirectionalLight(Light):
         if size is None:
             size = DIRECTIONAL_SHADOW_TEX_SZ
         self.shadow_texture = Texture(width=size, height=size, source_channels="D", data_format=GL_UNSIGNED_SHORT)
+        # The tint of the light varies slowly across a transparent surface, which a coarser map holds. Beyond the map,
+        # its white border lets the light through untinted.
+        self.transmittance_texture = Texture(
+            width=TRANSMITTANCE_TEX_SZ,
+            height=TRANSMITTANCE_TEX_SZ,
+            source_channels="RGBA",
+            data_format=GL_HALF_FLOAT,
+            sampler=Sampler(
+                magFilter=GL_LINEAR,
+                minFilter=GL_LINEAR,
+                wrapS=GL_CLAMP_TO_BORDER,
+                wrapT=GL_CLAMP_TO_BORDER,
+            ),
+        )
 
     def _get_shadow_camera(self, scene_scale):
         """Generate and return a shadow mapping camera for this light.
@@ -222,6 +257,10 @@ class PointLight(Light):
         if size is None:
             size = POINT_SHADOW_TEX_SZ
         self.shadow_texture = CubeMapTexture(size, size)
+        # The tint of the light varies slowly across a transparent surface, which a coarser map holds
+        self.transmittance_texture = CubeMapTexture(
+            POINT_TRANSMITTANCE_TEX_SZ, POINT_TRANSMITTANCE_TEX_SZ, is_color=True
+        )
 
     def _get_shadow_camera(self, scene_scale):
         """Generate and return a shadow mapping camera for this light.

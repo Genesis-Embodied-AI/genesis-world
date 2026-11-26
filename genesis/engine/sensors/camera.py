@@ -615,7 +615,8 @@ class RasterizerCameraSensor(
             gs.raise_exception("Rasterizer with n_envs > 1, does not work when using non rigid simulation")
         if scene.n_envs > 1:
             gs.logger.warning(
-                "Rasterizer with n_envs > 1 is slow as it doesn't do batched rendering consider using BatchRenderer instead."
+                "Rasterizer with n_envs > 1 is slow as it doesn't do batched rendering consider using BatchRenderer "
+                "instead."
             )
         vis_options = VisOptions(
             show_world_frame=False,
@@ -848,7 +849,6 @@ class RaytracerCameraSensor(
             colorize_seg=False,
             normal=False,
             antialiasing=False,
-            force_render=True,
         )
         # Ensure contiguous layout because the rendered array may have negative strides.
         rgb_tensor = torch.from_numpy(np.ascontiguousarray(rgb_arr)).to(dtype=torch.uint8, device=gs.device)
@@ -942,10 +942,13 @@ class BatchRendererCameraSensor(
             if sensor._link is not None:
                 sensor.move_to_attach()
 
-        self._shared_metadata.renderer.update_scene(force_render=True)
+        # The sensor renders a frame once it decided a new one is due, while the batch renderer it owns follows neither
+        # the setters nor a reset of the scene, so the images that renderer keeps are dropped first
+        self._shared_metadata.renderer.reset()
+        self._shared_metadata.renderer.update_scene()
 
         rgb_arr, *_ = self._shared_metadata.renderer.render(
-            rgb=True, depth=False, segmentation=False, normal=False, antialiasing=False, force_render=True
+            rgb=True, depth=False, segmentation=False, normal=False, antialiasing=False
         )
 
         # rgb_arr might be a tuple of arrays (one per camera) or a single array

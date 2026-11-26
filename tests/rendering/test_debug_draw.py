@@ -408,7 +408,7 @@ def test_islands_and_hibernation_colors(n_envs, renderer, show_viewer):
     links_idxc = {key[1]: idxc for idxc, key in scene.segmentation_idx_dict.items() if idxc > 0}
 
     def get_links_color(cam):
-        rgb, _, seg, _ = cam.render(rgb=True, segmentation=True, force_render=True)
+        rgb, _, seg, _ = cam.render(rgb=True, segmentation=True)
         rgb = rgb.reshape((max(n_envs, 1), RES[1], RES[0], 3))
         seg = seg.reshape((max(n_envs, 1), RES[1], RES[0]))
         # The median over the pixels of a link leaves its antialiased edges out
@@ -518,7 +518,7 @@ def test_islands_colors_single_tree(renderer, show_viewer):
     box_idxc = next(idxc for idxc, key in scene.segmentation_idx_dict.items() if idxc > 0 and key[1] == 1)
 
     def get_box_chroma():
-        rgb, _, seg, _ = cam.render(rgb=True, segmentation=True, force_render=True)
+        rgb, _, seg, _ = cam.render(rgb=True, segmentation=True)
         rgb = rgb.reshape((2, RES[1], RES[0], 3))
         seg = seg.reshape((2, RES[1], RES[0]))
         colors = np.array([np.median(rgb_env[seg_env == box_idxc], axis=0) for rgb_env, seg_env in zip(rgb, seg)])
@@ -580,7 +580,7 @@ def test_muscle_groups_colors(renderer):
     groups_rgb = 255.0 * mu.hsv_to_rgb(np.array([0.0, LABELS_HUE_STEP]), saturation=0.8, value=0.95)
 
     def get_sides_color():
-        rgb, _, seg, _ = cam.render(rgb=True, segmentation=True, force_render=True)
+        rgb, _, seg, _ = cam.render(rgb=True, segmentation=True)
         rgb = rgb.reshape((2, RES[1], RES[0], 3))
         seg = seg.reshape((2, RES[1], RES[0]))
         is_muscle = seg == next(idxc for idxc, key in scene.segmentation_idx_dict.items() if key == muscle.idx)
