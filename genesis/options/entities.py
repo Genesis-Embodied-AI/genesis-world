@@ -96,7 +96,8 @@ class Spec(Options, Generic[EntityT]):
         environment simulates one of them (see ``Scene.add_entity``). It must be set once the spec reaches
         ``Scene.add_entity``, while the spec given to ``Scene.add_emitter`` leaves it None, since the emitter sets it.
     surface : Surface | None, optional
-        The appearance of the entity. If None, use ``gs.surfaces.Default()``.
+        The appearance of the entity. If None, resolved based on the morph: ``gs.surfaces.Default(metallic=0.3,
+        roughness=0.5)`` for a plane, and ``gs.surfaces.Default()`` otherwise. Defaults to None.
     vis : EntityVisOptions | None, optional
         How the debug view draws the entity, for the kinds of entity with a debug representation. If None, the debug
         view follows ``VisOptions.debug`` and draws the entity in the first debug representation of its kind.
@@ -323,7 +324,7 @@ class _GeomSetters(_PartSelection[SpecT]):
     """The setters of the quantities of collision geoms, which a link selection applies to every geom of its links."""
 
     def set(self, *options: Geom) -> Self:
-        """Set on the selected geoms the fields each of the options gives explicitly, a later call overriding an earlier one."""
+        """Set the fields each option gives explicitly on the selected geoms, a later call overriding an earlier one."""
         return self._set(options)
 
     def set_rho(self, rho: float) -> Self:

@@ -155,8 +155,9 @@ def description_digest(desc: SceneDescription) -> str:
 @gs.assert_initialized
 class Scene(BuildableMixin, RBC):
     """
-    A ``genesis.Scene`` object wraps all components in a simulation environment, including a simulator (containing multiple physics solvers), entities, and a visualizer (controlling both the viewer and all the cameras).
-    Basically, everything happens inside a scene.
+    A ``genesis.Scene`` object wraps all components in a simulation environment, including a simulator (containing
+    multiple physics solvers), entities, and a visualizer (controlling both the viewer and all the cameras). Basically,
+    everything happens inside a scene.
 
     Parameters
     ----------
@@ -175,11 +176,13 @@ class Scene(BuildableMixin, RBC):
     coupler_options : gs.options.CouplerOptions
         The options configuring the `coupler` between different solvers.
     vis_options : gs.options.VisOptions
-        The options configuring the visualization system (``scene.visualizer``). Visualizer controls both the interactive viewer and the cameras.
+        The options configuring the visualization system (``scene.visualizer``). Visualizer controls both the
+        interactive viewer and the cameras.
     viewer_options : gs.options.ViewerOptions
         The options configuring the viewer (``scene.visualizer.viewer``).
     renderer : gs.renderers.RendererOptions
-        The renderer options used by `camera` for rendering images. This doesn't affect the behavior of the interactive viewer.
+        The renderer options used by `camera` for rendering images. This doesn't affect the behavior of the interactive
+        viewer.
     show_viewer : bool
         Whether to show the interactive viewer. Set it to False if you only need headless rendering.
     show_FPS : bool
@@ -395,7 +398,8 @@ class Scene(BuildableMixin, RBC):
         material : gs.materials.Material | None, optional
             The material of the entity. If None, use ``gs.materials.Rigid()``.
         surface : gs.surfaces.Surface | None, optional
-            The surface of the entity. If None, use ``gs.surfaces.Default()``.
+            The surface of the entity. If None, resolved based on the morph: ``gs.surfaces.Default(metallic=0.3,
+            roughness=0.5)`` for a plane, and ``gs.surfaces.Default()`` otherwise. Defaults to None.
         visualize_contact : bool | None, optional
             Whether the contacts of the entity are drawn as markers, arrows that the interactive viewer and the debug
             cameras draw. Each contact is read back and drawn at every frame, so reserve it for the entities being
@@ -423,7 +427,14 @@ class Scene(BuildableMixin, RBC):
         material = spec.material
         # The surface resolves on a copy, since other entities may share it. The morph resolves in place, as shared
         # morphs rely on (see 'Entity.spec').
-        surface = gs.surfaces.Default() if spec.surface is None else spec.surface.model_copy()
+        if spec.surface is not None:
+            surface = spec.surface.model_copy()
+        elif isinstance(spec.morphs[0], gs.morphs.Plane):
+            # A slightly metallic, glossy floor keeps the colors and the contrast of the checker texture of the plane
+            # under the default lights, and gives it the sheen of the ground planes of common simulators
+            surface = gs.surfaces.Default(metallic=0.3, roughness=0.5)
+        else:
+            surface = gs.surfaces.Default()
 
         # some morph should not smooth surface normal
         if isinstance(spec.morphs[0], (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)):
@@ -753,8 +764,8 @@ class Scene(BuildableMixin, RBC):
         Parameters
         ----------
         model : str
-            The projection of the camera: 'pinhole' or 'fisheye'. Deprecated: 'thinlens' stands for a pinhole camera with
-            a `lens`.
+            The projection of the camera: 'pinhole' or 'fisheye'. Deprecated: 'thinlens' stands for a pinhole camera
+            with a `lens`.
         res : tuple of int, shape (2,)
             The resolution of the camera, specified as a tuple (width, height).
         pos : tuple of float, shape (3,)
@@ -1175,10 +1186,10 @@ class Scene(BuildableMixin, RBC):
     @gs.assert_built
     def get_error_envs_mask(self) -> torch.Tensor:
         """
-        Return whether each environment flagged an error since its last reset, such as an overflow of contacts or a 'nan'.
+        Return whether each environment flagged an error since its last reset, such as a contact overflow or a 'nan'.
 
-        A flagged error raises at the beginning of the next step, before anything else, until it is cleared: by resetting
-        the state of the environment, or with 'clear_errno'.
+        A flagged error raises at the beginning of the next step, before anything else, until it is cleared: by
+        resetting the state of the environment, or with 'clear_errno'.
         """
         return self._sim.get_error_envs_mask()
 
@@ -1853,8 +1864,8 @@ class Scene(BuildableMixin, RBC):
         """Write the whole state of this scene to a file, for 'load_checkpoint' to open a copy standing where it stands.
 
         The file holds the scene as 'export' writes it and every array of the simulation, scratch included, so the
-        exact state of a failing run is kept for inspection. It is a trajectory file of one frame (see 'TrajectoryFile'),
-        and 'load_trajectory' opens it as such.
+        exact state of a failing run is kept for inspection. It is a trajectory file of one frame (see
+        'TrajectoryFile'), and 'load_trajectory' opens it as such.
 
         Parameters
         ----------
