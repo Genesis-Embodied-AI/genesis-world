@@ -1472,6 +1472,12 @@ class Terrain(Generator, specs=lambda: (gs.entities.Rigid,)):
                     "`subterrains`."
                 )
             else:
+                names_unknown = set(subterrain_parameters or {}) - set(terrain.Subterrain.CLS_BY_NAME)
+                if names_unknown:
+                    gs.raise_exception(
+                        f"Unsupported subterrain types in 'subterrain_parameters': {sorted(names_unknown)}, should be "
+                        f"among {list(terrain.Subterrain.CLS_BY_NAME)}."
+                    )
                 if subterrain_types is None:
                     names_by_cls = {cls: name for name, cls in terrain.Subterrain.CLS_BY_NAME.items()}
                     subterrain_types = [

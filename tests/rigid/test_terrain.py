@@ -278,6 +278,12 @@ def test_subterrain_parameters(show_viewer):
 
     with pytest.raises(gs.GenesisException, match="takes no gs.morphs.Terrain"):
         gs.entities.Kinematic(morph=gs.morphs.Terrain())
+    with pytest.raises(gs.GenesisException, match="exceeds 'max_height'"):
+        gs.options.terrain.RandomUniform(min_height=0.2, max_height=0.1)
+    with pytest.raises(gs.GenesisException, match="exceeds 'max_size'"):
+        gs.options.terrain.DiscreteObstacles(min_size=2.0, max_size=1.0)
+    with pytest.raises(gs.GenesisException, match="Unsupported subterrain types"):
+        gs.morphs.Terrain(subterrain_parameters={"wave": {"amplitude": 0.2}})
 
 
 def test_mesh_to_heightfield(tmp_path, show_viewer):

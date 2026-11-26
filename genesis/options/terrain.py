@@ -1,9 +1,10 @@
 """The kinds of subterrain a terrain is generated from, one options class each (see ``gs.morphs.Terrain``)."""
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pydantic import ConfigDict
 
+import genesis as gs
 from genesis.typing import NonNegativeFloat, PositiveFloat, PositiveInt, ValidFloat
 
 from .options import Options
@@ -68,6 +69,11 @@ class RandomUniform(Subterrain, name="random_uniform_terrain"):
     min_height: ValidFloat = -0.1
     max_height: ValidFloat = 0.1
     step: PositiveFloat = 0.1
+
+    def model_post_init(self, context: Any) -> None:
+        if self.min_height > self.max_height:
+            gs.raise_exception(f"'min_height' ({self.min_height}) exceeds 'max_height' ({self.max_height}).")
+
     downsampled_scale: PositiveFloat = 0.5
 
 
@@ -120,6 +126,10 @@ class DiscreteObstacles(Subterrain, name="discrete_obstacles_terrain"):
     max_size: PositiveFloat = 5.0
     num_rects: PositiveInt = 20
     platform_size: NonNegativeFloat = 1.0
+
+    def model_post_init(self, context: Any) -> None:
+        if self.min_size > self.max_size:
+            gs.raise_exception(f"'min_size' ({self.min_size}) exceeds 'max_size' ({self.max_size}).")
 
 
 class Wave(Subterrain, name="wave_terrain"):

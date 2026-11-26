@@ -102,7 +102,15 @@ def generate(morph: Generator, context: GeneratorContext) -> Morph:
     context : GeneratorContext
         The scene the geometry may be generated from.
     """
-    generate_morph = _GENERATE_FUNC_BY_MORPH_CLS.get(type(morph))
+    # A subclass of a registered generator morph is generated as its closest registered ancestor
+    generate_morph = next(
+        (
+            _GENERATE_FUNC_BY_MORPH_CLS[morph_cls]
+            for morph_cls in type(morph).__mro__
+            if morph_cls in _GENERATE_FUNC_BY_MORPH_CLS
+        ),
+        None,
+    )
     if generate_morph is None:
         gs.raise_exception(
             f"No generation is registered for gs.morphs.{type(morph).__name__}. Register one with gs.register_generator."

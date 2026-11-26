@@ -173,7 +173,15 @@ def generate_height_field(morph: Terrain) -> np.ndarray:
 
         for i, j in zip(*map(np.ravel, np.meshgrid(*map(range, morph.n_subterrains), indexing="ij"))):
             subterrain = morph.subterrains[i][j]
-            generate_subterrain = _GENERATE_FUNC_BY_SUBTERRAIN_CLS.get(type(subterrain))
+            # A subclass of a registered kind of subterrain is generated as its closest registered ancestor
+            generate_subterrain = next(
+                (
+                    _GENERATE_FUNC_BY_SUBTERRAIN_CLS[subterrain_cls]
+                    for subterrain_cls in type(subterrain).__mro__
+                    if subterrain_cls in _GENERATE_FUNC_BY_SUBTERRAIN_CLS
+                ),
+                None,
+            )
             if generate_subterrain is None:
                 gs.raise_exception(
                     f"No generation is registered for gs.options.terrain.{type(subterrain).__name__}. Register one with "
@@ -189,9 +197,11 @@ def generate_height_field(morph: Terrain) -> np.ndarray:
             if not morph.randomize:
                 saved_state = np.random.get_state()
                 np.random.seed(0)
-            data = generate_subterrain(new_subterrain, subterrain)
-            if not morph.randomize:
-                np.random.set_state(saved_state)
+            try:
+                data = generate_subterrain(new_subterrain, subterrain)
+            finally:
+                if not morph.randomize:
+                    np.random.set_state(saved_state)
 
             subterrain_heightfield = heightfield[
                 i * (subterrain_rows - 1) : (i + 1) * (subterrain_rows - 1) + 1,
