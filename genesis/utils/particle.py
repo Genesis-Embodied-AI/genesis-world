@@ -264,30 +264,116 @@ def _box_to_particles(p_size, pos, size, sampler):
     return positions
 
 
-def primitive_to_particles(primitive, p_size, sampler):
-    """
-    Sample particles inside a trimesh box, cylinder or sphere primitive centered at the origin.
-
-    The 'pbs' samplers sample the mesh of the primitive. The 'random' and 'regular' samplers fill the bounding box of
-    the exact primitive, keeping what lies inside it.
-    """
-    assert isinstance(primitive, (trimesh.primitives.Box, trimesh.primitives.Cylinder, trimesh.primitives.Sphere))
+def _primitive_to_particles(primitive, p_size, sampler):
+    """The 'pbs' samplers sample the mesh of the primitive, the others fill the bounding box of the exact primitive."""
     # The random and regular samplers test the exact primitive rather than going through 'trimesh_to_particles_simple',
     # whose signed distance is slower and whose cache would store one entry per emission of the random sampler.
     if "pbs" in sampler:
-        positions = trimesh_to_particles_pbs(primitive, p_size, sampler)
-    elif isinstance(primitive, trimesh.primitives.Box):
-        positions = _box_to_particles(p_size=p_size, pos=np.zeros(3), size=primitive.primitive.extents, sampler=sampler)
+        return trimesh_to_particles_pbs(primitive, p_size, sampler)
+    if isinstance(primitive, trimesh.primitives.Box):
+        return _box_to_particles(p_size=p_size, pos=np.zeros(3), size=primitive.primitive.extents, sampler=sampler)
+    # The cylinder rejects particles by their distance to the z axis, the sphere by their distance to the origin
+    radius = primitive.primitive.radius
+    if isinstance(primitive, trimesh.primitives.Cylinder):
+        size, n_axes = np.array((2.0 * radius, 2.0 * radius, primitive.primitive.height)), 2
     else:
-        # The cylinder rejects particles by their distance to the z axis, the sphere by their distance to the origin
-        radius = primitive.primitive.radius
-        if isinstance(primitive, trimesh.primitives.Cylinder):
-            size, n_axes = np.array((2.0 * radius, 2.0 * radius, primitive.primitive.height)), 2
-        else:
-            size, n_axes = np.full(3, 2.0 * radius), 3
-        positions = _box_to_particles(p_size=p_size, pos=np.zeros(3), size=size, sampler=sampler)
-        positions = positions[np.linalg.norm(positions[:, :n_axes], axis=-1) <= radius]
-    return positions
+        size, n_axes = np.full(3, 2.0 * radius), 3
+    positions = _box_to_particles(p_size=p_size, pos=np.zeros(3), size=size, sampler=sampler)
+    return positions[np.linalg.norm(positions[:, :n_axes], axis=-1) <= radius]
+
+
+def box_to_particles(p_size=0.01, pos=(0.0, 0.0, 0.0), size=(1.0, 1.0, 1.0), sampler="random"):
+    """Sample particles inside a box aligned with the world axes.
+
+    Parameters
+    ----------
+    p_size : float, optional
+        The diameter of the particles. Defaults to 0.01.
+    pos : array_like, shape (3,), optional
+        The center of the box. Defaults to the origin.
+    size : array_like, shape (3,), optional
+        The extents of the box along each axis. Defaults to (1.0, 1.0, 1.0).
+    sampler : str, optional
+        The sampler: 'pbs-<res>', 'random' or 'regular' (see ``gs.materials.MPM.Base``), 'res' being the resolution of
+        the signed distance field of the physics-based sampler. Defaults to 'random'.
+
+    Returns
+    -------
+    positions : np.ndarray, shape (n_particles, 3)
+        The positions of the particles.
+    """
+    return _primitive_to_particles(trimesh.primitives.Box(extents=size), p_size, sampler) + pos
+
+
+def cylinder_to_particles(p_size=0.01, pos=(0.0, 0.0, 0.0), radius=0.5, height=1.0, sampler="random"):
+    """Sample particles inside a cylinder whose axis is the z axis.
+
+    Parameters
+    ----------
+    p_size : float, optional
+        The diameter of the particles. Defaults to 0.01.
+    pos : array_like, shape (3,), optional
+        The center of the cylinder. Defaults to the origin.
+    radius : float, optional
+        The radius of the cylinder. Defaults to 0.5.
+    height : float, optional
+        The height of the cylinder. Defaults to 1.0.
+    sampler : str, optional
+        The sampler (see ``box_to_particles``). Defaults to 'random'.
+
+    Returns
+    -------
+    positions : np.ndarray, shape (n_particles, 3)
+        The positions of the particles.
+    """
+    return _primitive_to_particles(trimesh.primitives.Cylinder(radius=radius, height=height), p_size, sampler) + pos
+
+
+def sphere_to_particles(p_size=0.01, pos=(0.0, 0.0, 0.0), radius=0.5, sampler="random"):
+    """Sample particles inside a sphere.
+
+    Parameters
+    ----------
+    p_size : float, optional
+        The diameter of the particles. Defaults to 0.01.
+    pos : array_like, shape (3,), optional
+        The center of the sphere. Defaults to the origin.
+    radius : float, optional
+        The radius of the sphere. Defaults to 0.5.
+    sampler : str, optional
+        The sampler (see ``box_to_particles``). Defaults to 'random'.
+
+    Returns
+    -------
+    positions : np.ndarray, shape (n_particles, 3)
+        The positions of the particles.
+    """
+    return _primitive_to_particles(trimesh.primitives.Sphere(radius=radius), p_size, sampler) + pos
+
+
+def shell_to_particles(p_size=0.01, pos=(0.0, 0.0, 0.0), inner_radius=0.5, outer_radius=0.7, sampler="random"):
+    """Sample particles inside a spherical shell.
+
+    Parameters
+    ----------
+    p_size : float, optional
+        The diameter of the particles. Defaults to 0.01.
+    pos : array_like, shape (3,), optional
+        The center of the shell. Defaults to the origin.
+    inner_radius : float, optional
+        The radius of the hollow of the shell. Defaults to 0.5.
+    outer_radius : float, optional
+        The outer radius of the shell. Defaults to 0.7.
+    sampler : str, optional
+        The sampler (see ``box_to_particles``). Defaults to 'random'.
+
+    Returns
+    -------
+    positions : np.ndarray, shape (n_particles, 3)
+        The positions of the particles.
+    """
+    positions = _primitive_to_particles(trimesh.primitives.Sphere(radius=outer_radius), p_size, sampler)
+    return positions[np.linalg.norm(positions, axis=-1) >= inner_radius] + pos
 
 
 def particles_to_mesh(positions, radius, backend):
