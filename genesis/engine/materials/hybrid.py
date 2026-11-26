@@ -49,6 +49,7 @@ class Hybrid(Material["HybridEntity"]):
     damping: NonNegativeFloat = 0.0
     thickness: ValidFloat = 0.05
     soft_dv_coef: ValidFloat = 0.01
+    # Excluded from export, since a file holds no function and the description holds the parts they produced
     func_instantiate_rigid_from_soft: Callable | None = Field(default=None, exclude=True)
     func_instantiate_soft_from_rigid: Callable | None = Field(default=None, exclude=True)
     func_instantiate_rigid_soft_association: Callable | None = Field(default=None, exclude=True)
