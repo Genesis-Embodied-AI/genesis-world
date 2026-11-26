@@ -13,6 +13,7 @@ from .light import DirectionalLight, PointLight, SpotLight
 from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
 from .numba_gl_wrapper import GLWrapper
 from .scene import CORNER_INDICES
+from .texture import CubeMapTexture, Texture
 from .utils import transform_box
 
 
@@ -151,7 +152,7 @@ def set_uniform_4fv(pid, name, value, gl):
 
 
 @nb.jit(nopython=True, cache=True)
-def bind_lighting(pid, flags, light, shadow_map, light_matrix, ambient_light, gl):
+def bind_lighting(pid, flags, light, shadow_map, light_matrix, ambient_light, placeholder_tex, gl):
     n = len(light)
     set_uniform_3fv(pid, "ambient_light", ambient_light, gl)
     n_dir, n_pt, n_spot = 0, 0, 0
@@ -196,13 +197,17 @@ def bind_lighting(pid, flags, light, shadow_map, light_matrix, ambient_light, gl
 
     # A draw fails when sampler uniforms of two types point at the same texture unit, and every sampler left unset
     # points at unit 0 along with the material textures (sampler2D). So the shadow samplers (sampler2DShadow,
-    # samplerCube) take units of their own, and the light slots beyond the lights present point at one of those.
+    # samplerCube) take units of their own, and the light slots beyond the lights present point at one of those. A
+    # unit that no light fills holds a placeholder of its type, since a sampler reading no complete texture makes the
+    # draw invalid on some drivers.
     if flags & RenderFlags_SHADOWS_DIRECTIONAL:
         if depth_tex < 0:
             if active_texture == 0:
                 active_texture += 1
             depth_tex = active_texture
             active_texture += 1
+            gl.glActiveTexture(GL_TEXTURE0 + depth_tex)
+            gl.glBindTexture(GL_TEXTURE_2D, placeholder_tex[1])
 
         for i in range(n_dir, MAX_N_LIGHTS):
             b = "directional_lights[" + str(i) + "]."
@@ -214,6 +219,8 @@ def bind_lighting(pid, flags, light, shadow_map, light_matrix, ambient_light, gl
                 active_texture += 1
             cube_tex = active_texture
             active_texture += 1
+            gl.glActiveTexture(GL_TEXTURE0 + cube_tex)
+            gl.glBindTexture(GL_TEXTURE_CUBE_MAP, placeholder_tex[2])
 
         for i in range(n_pt, MAX_N_LIGHTS):
             b = "point_lights[" + str(i) + "]."
@@ -272,6 +279,8 @@ class JITRenderer:
         self._meshes = set()
         self._mesh_textures = set()
         self._shadow_textures = set()
+        self._placeholder_textures = None
+        self.placeholder_tex = None
         self._context_revision = None
         self.set_primitive(scene, node_list, primitive_list)
         self.set_light(scene, scene.light_nodes, scene.ambient_light)
@@ -460,13 +469,14 @@ class JITRenderer:
                     pass
         self._meshes.clear()
 
-        for texture in (*self._mesh_textures, *self._shadow_textures):
+        for texture in (*self._mesh_textures, *self._shadow_textures, *(self._placeholder_textures or ())):
             try:
                 texture.delete()
             except (GL.error.GLError, GL.error.NullFunctionError):
                 pass
         self._mesh_textures.clear()
         self._shadow_textures.clear()
+        self._placeholder_textures = None
         self._context_revision = None
         if self.env_offset_buffer is not None:
             try:
@@ -800,6 +810,7 @@ class JITRenderer:
                 nb.float32[:, :],
                 nb.float32[:, :],
                 nb.int32,
+                nb.int32[:],
                 nb.float32[:],
                 nb.int32,
                 nb.int32[:],
@@ -839,6 +850,7 @@ class JITRenderer:
             color_list,
             reflection_mat,
             floor_tex,
+            placeholder_tex,
             screen_size,
             env_idx,
             model_buffer_id,
@@ -855,6 +867,11 @@ class JITRenderer:
             gl,
         ):
             is_rgba = not (flags & RenderFlags_DEPTH_ONLY or flags & RenderFlags_SEG)
+
+            # Every sampler left unset reads unit 0, which holds a placeholder until a material binds a texture there
+            # (see bind_lighting). This also unbinds the mirror image that a floor pass draws into.
+            gl.glActiveTexture(GL_TEXTURE0)
+            gl.glBindTexture(GL_TEXTURE_2D, placeholder_tex[0])
 
             det_reflection = np.linalg.det(reflection_mat)
             last_pid = -1
@@ -884,7 +901,7 @@ class JITRenderer:
                                 RenderFlags_SHADOWS_DIRECTIONAL | RenderFlags_SHADOWS_SPOT | RenderFlags_SHADOWS_POINT
                             )
                         lighting_texture = bind_lighting(
-                            pid, light_flags, light, shadow_map, light_matrix, ambient_light, gl
+                            pid, light_flags, light, shadow_map, light_matrix, ambient_light, placeholder_tex, gl
                         )
                         set_uniform_3fv(pid, "cam_pos", cam_pos, gl)
                         set_uniform_matrix_4fv(pid, "reflection_mat", reflection_mat, gl)
@@ -1488,6 +1505,16 @@ class JITRenderer:
         self.load_programs(renderer, flags, program_flags)
         if self._forward_pass is None:
             self.gen_func_ptr()
+        if self._placeholder_textures is None:
+            # A 2D color texture, a 2D depth texture compared as a shadow map, and a depth cube map (see bind_lighting)
+            self._placeholder_textures = (
+                Texture(source=np.full((1, 1, 4), 255, np.uint8), source_channels="RGBA"),
+                Texture(width=1, height=1, source_channels="D", data_format=GL.GL_UNSIGNED_SHORT),
+                CubeMapTexture(1, 1),
+            )
+            for texture in self._placeholder_textures:
+                texture._add_to_context()
+            self.placeholder_tex = np.array([texture._texid for texture in self._placeholder_textures], np.int32)
         # Temporarily hide markers for non-debug offscreen cameras by setting their
         # index count to 0, so draw calls render nothing for these nodes.
         if flags & RenderFlags.SKIP_MARKERS:
@@ -1539,6 +1566,7 @@ class JITRenderer:
                 color_list if flags & RenderFlags.SEG else self.pbr_mat,
                 reflection_mat,
                 floor_tex,
+                self.placeholder_tex,
                 screen_size,
                 env_idx,
                 self.model_buffer_id,
