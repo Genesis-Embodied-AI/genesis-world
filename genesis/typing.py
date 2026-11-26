@@ -1,6 +1,6 @@
 import math
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Annotated, Any, TypeVar, get_args
 
@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from frozendict import frozendict
-from pydantic import BeforeValidator, Field, GetCoreSchemaHandler, GetPydanticSchema
+from pydantic import BeforeValidator, Field, GetCoreSchemaHandler, GetPydanticSchema, PlainValidator, ValidationInfo
 from pydantic_core import PydanticCustomError, core_schema
 
 
@@ -61,6 +61,56 @@ def is_sequence(v):
     except TypeError:
         return False
     return True
+
+
+def objects_idx_type(
+    get_cls: Callable[[], type],
+    *,
+    many: bool,
+    allow_empty: bool = False,
+    allow_int: bool = False,
+) -> Any:
+    """Return the annotation of a field that takes objects of a class and holds their indices.
+
+    The field holds the 'idx' of the object, or a tuple of indices with 'many', and accepts nothing but the objects, so
+    that an option referring to an entity or a link takes the object itself rather than an index the user computes.
+    'allow_empty' admits an empty sequence with 'many', and 'allow_int' admits the indices themselves beside the
+    objects. A file holds the indices the objects resolved to, which a load accepts as they are. 'get_cls' returns the
+    class as the field is validated, since the module declaring the field is imported before the class is defined.
+    """
+
+    def _objects_to_idx(val: Any, info: ValidationInfo) -> int | tuple[int, ...]:
+        # See 'ignore_invalid_load' in genesis/utils/serialization.py for the context of a value read from a file
+        if info.context is not None and info.context.get("from_file", False):
+            return tuple(val) if many else val
+        cls = get_cls()
+        if many and not is_sequence(val):
+            raise PydanticCustomError(
+                "invalid_type",
+                "Input should be a sequence of {cls}, got {t}",
+                {"cls": cls.__name__, "t": type(val).__name__},
+            )
+        objects = tuple(val) if many else (val,)
+        if not objects and not allow_empty:
+            raise PydanticCustomError("too_short", "Input should hold at least one {cls}", {"cls": cls.__name__})
+        objects_idx = []
+        for i, obj in enumerate(objects):
+            if isinstance(obj, cls):
+                objects_idx.append(obj.idx)
+            elif allow_int and isinstance(obj, (int, np.integer)) and not isinstance(obj, bool):
+                # Native int, since the indices reach kernels as arguments
+                objects_idx.append(int(obj))
+            else:
+                expected = f"{cls.__name__} or int" if allow_int else cls.__name__
+                raise PydanticCustomError(
+                    "invalid_type",
+                    "Item {i} should be a {cls}, got {t}",
+                    {"i": i, "cls": expected, "t": type(obj).__name__},
+                )
+        objects_idx = tuple(objects_idx)
+        return objects_idx if many else objects_idx[0]
+
+    return Annotated[tuple[int, ...] if many else int, PlainValidator(_objects_to_idx)]
 
 
 # Pydantic-compatible frozendict annotation.
