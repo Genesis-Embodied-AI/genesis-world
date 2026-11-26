@@ -548,17 +548,14 @@ def test_islands_colors_single_tree(renderer, show_viewer):
 @pytest.mark.required
 def test_muscle_groups_colors(renderer):
     RES = (160, 120)
+    MUSCLE_COLOR = (0.5, 0.5, 0.5)
 
     scene = gs.Scene(
-        mpm_options=gs.options.MPMOptions(
-            vis=gs.options.MPMVisOptions(
-                muscle_groups=True,
-            ),
-        ),
         vis_options=gs.options.VisOptions(
-            # Ambient light alone shades every marker with its exact color, which is read back pixel by pixel
+            # Ambient light alone shades every particle with its exact color, which is read back pixel by pixel
             ambient_light=(1.0, 1.0, 1.0),
             lights=[],
+            debug=True,
             split_envs=True,
         ),
         renderer=renderer,
@@ -572,6 +569,9 @@ def test_muscle_groups_colors(renderer):
         material=gs.materials.MPM.Muscle(
             sampler="regular",
             n_groups=2,
+        ),
+        surface=gs.surfaces.Default(
+            color=MUSCLE_COLOR,
         ),
     )
     cam = scene.add_camera(
@@ -603,7 +603,9 @@ def test_muscle_groups_colors(renderer):
             ]
         )
 
-    # Each side takes the color of its muscle group in every environment, which follows the groups set at runtime
+    # A single muscle group draws the muscle in the color of its surface
+    assert_allclose(get_sides_color(), 255.0 * np.array(MUSCLE_COLOR), atol=5.0)
+    # Several groups draw each side in the color of its group in every environment, following the groups at runtime
     for groups_side in ((0, 1), (1, 0)):
         muscle.set_muscle_group(torch.where(is_particle_right, groups_side[1], groups_side[0]))
         assert_allclose(get_sides_color(), np.broadcast_to(groups_rgb[list(groups_side)], (2, 2, 3)), atol=5.0)

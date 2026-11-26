@@ -507,12 +507,12 @@ class MPMVisOptions(ParticleVisOptions):
     n_support_neighbors : int, optional
         See ``ParticleVisOptions``.
     muscle_groups : bool, optional
-        Whether to draw the particles of the muscles as markers colored by muscle group, which the interactive viewer
-        and the debug cameras draw. The markers cover the particles and hide the look of the muscles, and the groups
-        are read back at each frame drawn. Defaults to False.
+        Whether a muscle holding several muscle groups draws the particles of each group in a color of its own in its
+        debug representation, in place of the color of its surface. The groups are read back from the device at each frame
+        drawn while the scene holds a muscle. Defaults to True.
     """
 
-    muscle_groups: StrictBool = False
+    muscle_groups: StrictBool = True
 
 
 class PBDVisOptions(ParticleVisOptions):
