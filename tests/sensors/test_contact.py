@@ -120,6 +120,12 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
         scene.add_sensor(gs.sensors.Contact())
     with pytest.raises(gs.GenesisException, match="requires an entity"):
         scene.add_sensor(gs.sensors.ContactForce())
+    with pytest.raises(gs.GenesisException, match="link must be a link"):
+        scene.add_sensor(gs.sensors.ContactForce(link=box))
+    with pytest.raises(gs.GenesisException, match="an index >= 0 or None"):
+        scene.add_sensor(gs.sensors.ContactForce(entity=-2))
+    with pytest.raises(gs.GenesisException, match="should be RigidLink or int"):
+        scene.add_sensor(gs.sensors.ContactForce(link=box.base_link, filtered_links=(floor,)))
     scene.build(n_envs=n_envs)
 
     # Move CoM to get unbalanced forces on each contact points
@@ -184,9 +190,6 @@ def test_filter_link_idx(show_viewer, tol):
         ),
         show_viewer=show_viewer,
     )
-    floor = scene.add_entity(
-        morph=gs.morphs.Plane(),
-    )
     box_on_floor = scene.add_entity(
         morph=gs.morphs.Box(
             size=(0.2, 0.2, 0.2),
@@ -198,6 +201,10 @@ def test_filter_link_idx(show_viewer, tol):
             size=(0.2, 0.2, 0.2),
             pos=(0.0, 0.5, 0.1),
         ),
+    )
+    # The floor comes last, so that its link index in the rigid solver differs from its index in the entity
+    floor = scene.add_entity(
+        morph=gs.morphs.Plane(),
     )
     sensor = scene.add_sensor(
         gs.sensors.Contact(
