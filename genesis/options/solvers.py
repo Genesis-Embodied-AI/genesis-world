@@ -1,7 +1,7 @@
 from typing import Any, Literal
 
 import numpy as np
-from pydantic import Field, PrivateAttr, StrictBool, field_validator, model_validator
+from pydantic import Field, PrivateAttr, StrictBool, StrictInt, field_validator, model_validator
 
 import genesis as gs
 from genesis.typing import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, Vec3FType
@@ -478,12 +478,13 @@ class ParticleVisOptions(Options):
     n_support_neighbors : int, optional
         The number of particles whose positions place each vertex of a visual mesh skinned on the particles of an MPM
         or PBD entity. More neighbors deform the mesh more smoothly, at the cost of the memory and of the time of
-        skinning it at each frame drawn. Defaults to 12.
+        skinning it at each frame drawn. At least 4, since fewer particles span a plane at most, off which no vertex
+        can be placed. Defaults to 12.
     """
 
     boundary: StrictBool = False
     recon_backend: Literal["splashsurf", "levelset"] = "splashsurf"
-    n_support_neighbors: PositiveInt = 12
+    n_support_neighbors: StrictInt = Field(default=12, ge=4)
 
     @field_validator("recon_backend", mode="before")
     @classmethod

@@ -47,6 +47,13 @@ if TYPE_CHECKING:
 # the overhead of numpy per chunk.
 VVERTS_DIST2_MAX_SIZE = 2**20
 
+# The distance, relative to the particle spacing, by which each support of the simplex of a visual vertex lies off the
+# flat spanned by the previous ones. Supports lying closer to a flat, such as the particles of a single layer of the
+# regular sampler, place a vertex off it only through weights inverting rounding noise, which amplify the motion of the
+# particles without bound, or snap the vertex onto the flat otherwise. A quarter of the spacing sits well below the
+# distance between two layers of particles, and well above rounding noise.
+SUPPORTS_SPREAD_MIN = 0.25
+
 # The visual vertices skinned on the particles, the particles supporting each of them, the entities whose visual mesh
 # may tear, and the edges of their meshes.
 VVERTS = Size("vverts")
@@ -300,27 +307,64 @@ class ParticleScopedRenderContext(ScopedRenderContext[ParticleSolver]):
         # The edges of the box confining the particles
         self._boundary: tuple[Lines, ...] = ()
         self._entities_recon_surface: list[Surface | None] = []
-        # The weights of a visual vertex are its barycentric coordinates in the simplex of its support particles, its
-        # nearest particles at rest. The distances of the vertices to the particles are computed by chunks of bounded
-        # memory, a chunk holding one vertex at least.
+        # The weights of a visual vertex are its barycentric coordinates in the simplex of its support particles, chosen
+        # among its nearest particles at rest. The distances of the vertices to the particles are computed by chunks of
+        # bounded memory, a chunk holding one vertex at least. Four supports span the space around the vertex, each one
+        # being the nearest particle off the flat of the previous ones (see SUPPORTS_SPREAD_MIN), and the nearest other
+        # particles complete them. A vertex whose entity holds no particle off that flat is placed at its projection
+        # onto the flat.
         n_supports = solver.options.vis.n_support_neighbors
+        spread_min = SUPPORTS_SPREAD_MIN * solver.particle_size
         for entity in self._skinned_entities:
             vverts, particles = entity.vmesh.verts.astype(gs.np_float, copy=False), entity.init_particles
             chunk_size = max(VVERTS_DIST2_MAX_SIZE // len(particles), 1)
             supports_idx = np.empty((len(vverts), n_supports), dtype=gs.np_int)
+            supports_offset_pinv = np.empty((len(vverts), n_supports - 1, 3), dtype=gs.np_float)
             for i_vv_start in range(0, len(vverts), chunk_size):
-                vverts_chunk = vverts[i_vv_start : i_vv_start + chunk_size]
-                dist2 = np.sum(np.square(vverts_chunk[:, None, :] - particles), axis=-1)
-                chunk_supports_idx = np.argpartition(dist2, n_supports - 1, axis=1)[:, :n_supports]
-                chunk_supports_dist2 = np.take_along_axis(dist2, chunk_supports_idx, axis=1)
-                sorted_order = np.lexsort((chunk_supports_idx, chunk_supports_dist2))
-                supports_idx[i_vv_start : i_vv_start + chunk_size] = np.take_along_axis(
-                    chunk_supports_idx, sorted_order, axis=1
-                )
-            supports_idx = np.clip(supports_idx, 0, len(particles) - 1)
-            supports_pos = particles[supports_idx]
-            supports_offset = supports_pos[:, :-1].swapaxes(-2, -1) - supports_pos[:, -1, :, None]
-            supports_offset_pinv = np.linalg.pinv(supports_offset)
+                chunk = slice(i_vv_start, i_vv_start + chunk_size)
+                dist2 = np.sum(np.square(vverts[chunk, None, :] - particles), axis=-1)
+                vverts_idx = np.arange(len(dist2))
+                simplex_idx = np.empty((len(dist2), 4), dtype=gs.np_int)
+                simplex_dir = np.zeros((len(dist2), 3, 3), dtype=gs.np_float)
+                is_simplex_dir_found = np.empty((len(dist2), 3), dtype=bool)
+                simplex_idx[:, 0] = np.argmin(dist2, axis=1)
+                # The offsets of the particles off the flat of the supports of the simplex chosen so far, and the
+                # distances of the particles left to choose. When no particle lies off the flat, the next supports of
+                # the simplex are the nearest particles left, and the flat keeps its directions.
+                particles_offset = particles - particles[simplex_idx[:, 0], None]
+                particles_dist2 = dist2.copy()
+                particles_dist2[vverts_idx, simplex_idx[:, 0]] = np.inf
+                for i_d in range(3):
+                    particles_dist2_flat = np.sum(np.square(particles_offset), axis=-1)
+                    is_off_flat = particles_dist2_flat >= spread_min**2
+                    is_simplex_dir_found[:, i_d] = is_off_flat.any(axis=1)
+                    is_candidate = is_off_flat | ~is_simplex_dir_found[:, i_d, None]
+                    simplex_idx[:, i_d + 1] = np.argmin(np.where(is_candidate, particles_dist2, np.inf), axis=1)
+                    particles_dist2[vverts_idx, simplex_idx[:, i_d + 1]] = np.inf
+                    simplex_offset = particles_offset[vverts_idx, simplex_idx[:, i_d + 1]]
+                    simplex_dist = np.sqrt(particles_dist2_flat[vverts_idx, simplex_idx[:, i_d + 1]])
+                    simplex_dir[:, i_d] = np.divide(
+                        simplex_offset,
+                        simplex_dist[:, None],
+                        out=np.zeros_like(simplex_offset),
+                        where=is_simplex_dir_found[:, i_d, None],
+                    )
+                    particles_offset -= particles_offset @ simplex_dir[:, i_d, :, None] * simplex_dir[:, i_d, None]
+                n_fill = n_supports - 4
+                fill_idx = np.argpartition(particles_dist2, n_fill, axis=1)[:, :n_fill]
+                fill_dist2 = np.take_along_axis(particles_dist2, fill_idx, axis=1)
+                fill_idx = np.take_along_axis(fill_idx, np.lexsort((fill_idx, fill_dist2)), axis=1)
+                supports_idx[chunk] = np.concatenate((fill_idx, simplex_idx), axis=1)
+                supports_pos = particles[supports_idx[chunk]]
+                supports_offset = supports_pos[:, :-1].swapaxes(-2, -1) - supports_pos[:, -1, :, None]
+                # The weights reproduce the projection of the vertex onto the flat of its simplex, the offsets of the
+                # supports being restricted to the directions of that flat, as many as the simplex spans.
+                simplex_n_dirs = is_simplex_dir_found.sum(axis=1)
+                for n_dirs in range(4):
+                    is_n_dirs = simplex_n_dirs == n_dirs
+                    flat_dir = simplex_dir[is_n_dirs, :n_dirs]
+                    flat_offset = flat_dir @ supports_offset[is_n_dirs]
+                    supports_offset_pinv[chunk][is_n_dirs] = np.linalg.pinv(flat_offset) @ flat_dir
             kernel_add_vverts(
                 self._entities_vvert_start[entity],
                 entity.particle_start,
