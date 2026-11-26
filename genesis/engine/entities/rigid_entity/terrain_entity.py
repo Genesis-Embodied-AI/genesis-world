@@ -31,6 +31,11 @@ class TerrainEntity(RigidEntity):
         """Horizontal size of a grid cell in meters, and the factor the elevation is scaled by."""
         return self._desc.terrain_scale
 
+    @property
+    def terrain_step_height(self) -> float:
+        """Height difference within a grid cell in meters beyond which the cell is made of flat columns."""
+        return self._desc.terrain_step_height
+
     @gs.assert_built
     def get_terrain_height(self, positions, envs_idx=None):
         """

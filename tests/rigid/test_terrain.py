@@ -342,11 +342,12 @@ def test_box_on_terrain_no_spurious_spin(show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
+    # The cells are much smaller than the boxes, so that every box rests on many of them
     scene.add_entity(
         morph=gs.morphs.Terrain(
             pos=(-1.5, -1.5, 0.0),
-            height_field=np.zeros((4, 4), dtype=np.float32),
-            horizontal_scale=1.0,
+            height_field=np.zeros((151, 151), dtype=np.float32),
+            horizontal_scale=0.02,
         ),
         surface=gs.surfaces.Default(
             color=(0.4, 0.8, 0.4),
@@ -382,6 +383,89 @@ def test_box_on_terrain_no_spurious_spin(show_viewer):
 
     quat_delta = gu.transform_quat_by_quat(tensor_to_array(box.get_quat()), gu.inv_quat(quat_initial))
     assert_allclose(gu.quat_to_rotvec(quat_delta), 0.0, tol=0.02)
+    assert_allclose(box.get_pos()[:, 2], z, atol=5e-5)
+    assert_allclose(box.get_vel(), 0.0, tol=2e-7)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+def test_vertical_steps(show_viewer, tol):
+    HORIZONTAL_SCALE = 0.04
+    STEP_HEIGHT = 0.22
+    SPHERE_RADIUS = 0.1
+    BOX_SIZE = 0.2
+
+    # A riser between rows 24 and 25, which stands halfway between them, then a raised block whose corner cells change
+    # height at a single corner
+    height_field = np.zeros((51, 31), dtype=np.float32)
+    height_field[25:] = STEP_HEIGHT
+    height_field[5:9, 20:26] = 0.5 * STEP_HEIGHT
+    riser_x = 24.5 * HORIZONTAL_SCALE
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.005,
+            gravity=(2.0, 0.0, -9.81),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(-0.5, -1.0, 1.2),
+            camera_lookat=(1.0, 0.6, 0.0),
+        ),
+        show_viewer=show_viewer,
+        show_FPS=False,
+    )
+    terrain = scene.add_entity(
+        morph=gs.morphs.Terrain(
+            horizontal_scale=HORIZONTAL_SCALE,
+            vertical_scale=1.0,
+            slope_threshold=1.0,
+            height_field=height_field,
+        ),
+        material=gs.materials.Rigid(
+            friction=0.1,
+        ),
+    )
+    sphere = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            radius=SPHERE_RADIUS,
+            pos=(riser_x - SPHERE_RADIUS - 0.02, 0.6, SPHERE_RADIUS),
+        ),
+    )
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            pos=(riser_x - 0.5 * BOX_SIZE - 0.02, 0.25, 0.5 * BOX_SIZE),
+        ),
+        material=gs.materials.Rigid(
+            friction=0.1,
+        ),
+    )
+    scene.build(n_envs=2)
+
+    # The tilted gravity rolls the sphere and slides the box against the riser, which pushes them back horizontally.
+    # The box rests flat on the ground with its face on the riser.
+    for _ in range(100):
+        scene.step()
+    for entity, half_extent, atol in ((sphere, SPHERE_RADIUS, 5e-5), (box, 0.5 * BOX_SIZE, 1e-7)):
+        assert_allclose(entity.get_pos()[:, 0], riser_x - half_extent, atol=atol)
+        assert_allclose(entity.get_dofs_velocity(), 0.0, tol=5e-5)
+        contacts = entity.get_contacts(with_entity=terrain)
+        normals = tensor_to_array(contacts["normal"])[tensor_to_array(contacts["valid_mask"])]
+        riser_normals = normals[np.abs(normals[:, 0]) > 0.5]
+        assert len(riser_normals) >= scene.n_envs
+        assert_allclose(riser_normals, (-1.0, 0.0, 0.0), tol=tol)
+    assert_allclose(box.get_pos()[:, 2], 0.5 * BOX_SIZE, atol=5e-7)
+    assert_allclose(box.get_quat(), (1.0, 0.0, 0.0, 0.0), tol=5e-7)
+
+    # The height query follows the flat columns of the surface the mesh of the terrain shows
+    positions = (
+        np.random.default_rng(0).uniform(0.0, 1.0, (400, 2)) * HORIZONTAL_SCALE * (np.array(height_field.shape) - 1)
+    )
+    terrain_mesh = terrain.geoms[0].trimesh
+    ray_origins = np.column_stack((positions, np.full(len(positions), STEP_HEIGHT + 1.0)))
+    ray_directions = np.tile((0.0, 0.0, -1.0), (len(positions), 1))
+    locations, ray_ids, _ = terrain_mesh.ray.intersects_location(ray_origins, ray_directions, multiple_hits=False)
+    assert_allclose(terrain.get_terrain_height(positions, envs_idx=0), locations[np.argsort(ray_ids), 2], tol=1e-6)
 
 
 @pytest.mark.required

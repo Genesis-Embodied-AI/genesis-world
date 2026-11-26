@@ -1363,6 +1363,14 @@ class Terrain(Morph):
         The height of each step in the subterrain in meters. Defaults to 0.005.
     uv_scale : float, optional
         The scale of the UV mapping for the terrain. Defaults to 1.0.
+    slope_threshold : float, optional
+        Steepness, as rise over run, beyond which the terrain stands vertical. A grid cell whose heights differ by more
+        than `slope_threshold * horizontal_scale` is made of four flat columns, each at the height of its nearest
+        corner, with vertical walls between them. Stair risers, walls and box edges then stand vertical with flat tops,
+        instead of turning into slopes one cell wide, while slopes steeper than the threshold turn into steps. It applies
+        to a given `height_field` as well. A geom against a riser holds contacts on both the tread and the riser, which
+        makes collision detection on steps somewhat slower than on a smooth terrain. Defaults to None, which keeps the
+        whole terrain smooth.
     subterrain_types : str or 2D list of str, optional
         The types of subterrains to generate. If a string, it will be repeated for all subterrains.
         If a 2D list, it should have the same shape as `n_subterrains`.
@@ -1389,6 +1397,7 @@ class Terrain(Morph):
     horizontal_scale: PositiveFloat = 0.25
     vertical_scale: PositiveFloat = 0.005
     uv_scale: PositiveFloat = 1.0
+    slope_threshold: PositiveFloat | None = None
     subterrain_types: Any = [
         ["flat_terrain", "random_uniform_terrain", "stepping_stones_terrain"],
         ["pyramid_sloped_terrain", "discrete_obstacles_terrain", "wave_terrain"],

@@ -18,7 +18,7 @@ NONCONVEX_PAIR_CONTACTS = Size("nonconvex_pair_contacts")
 # A pair holds its first contact and its four perturbed ones (see N_PERTURBATIONS in narrowphase.py), or its first
 # contact alone under the contact patch
 CONTACT_SLOTS = Size("contact_slots")
-# Threads of the terrain pass, each testing the prism under one triangle
+# Threads of the terrain pass, each testing one solid of the terrain at a time
 TERRAIN_THREADS = Size("terrain_threads")
 
 # The scratch of the box-box detection
@@ -153,8 +153,10 @@ class ColliderState(Data, kind=DataKind.SCRATCH):
     box_axi: qd.Tensor = field((float, 3), shape=(3, ENVS), labels=BOX_BOX)
     box_ppts2: qd.Tensor = field(float, shape=(4, 2, ENVS), labels=BOX_BOX)
     box_pu: qd.Tensor = field((float, 3), shape=(4, ENVS), labels=BOX_BOX)
-    # The prism under the triangle every thread of the terrain pass tests, which reads its thread count from its shape
-    prism: qd.Tensor = field((float, 3), shape=(6, TERRAIN_THREADS))
+    # The solid of the terrain every thread of the terrain pass tests, which reads its thread count from its shape: the
+    # vertical prism under a triangle or a rectangle of the height field, its four bottom corners first, then the four
+    # top corners above them. A triangle repeats its last corner, which never changes a support point.
+    prism: qd.Tensor = field((float, 3), shape=(8, TERRAIN_THREADS))
     # See 'ContactData'
     n_contacts: qd.Tensor = field(
         int, shape=(ENVS,), kind=DataKind.DERIVED, invalidated_by=(StateChange.GEOMETRY, StateChange.MODEL)
@@ -206,6 +208,9 @@ class ColliderConfig(Config):
     """The compile-time configuration of the kernels of the collision detection of the rigid solver."""
 
     has_terrain: bool
+    # Whether the terrain holds vertical steps, against which a geom gets a contact patch on a riser on top of the one on
+    # the ground (see func_contact_mpr_terrain)
+    has_step_terrain: bool
     # Whether a convex-convex pair reaches the general narrowphase past the box-box and plane-box specializations: the
     # split narrowphase on GPU, func_narrow_phase_convex_vs_convex on CPU. It also gates the deterministic contact sort
     # (see func_sort_contacts). See its resolution in collider.py.
@@ -214,9 +219,11 @@ class ColliderConfig(Config):
     has_nonconvex_nonterrain: bool
     # Whether the link-pair contact pruning pass is compiled in, see its resolution in collider.py
     has_prunable_contacts: bool
-    # Contacts a convex pair and a nonconvex (vertex-versus-SDF) pair hold at most, the second one at least the first
+    # Contacts a convex pair, a nonconvex (vertex-versus-SDF) pair and a terrain pair hold at most, the last two at least
+    # the first
     n_contacts_per_convex_pair: int
     n_contacts_per_nonconvex_pair: int
+    n_contacts_per_terrain_pair: int
     ccd_algorithm: int
     # GPU core count, sizing the split narrow phase launches and scratch states
     gpu_cores: int
@@ -449,6 +456,9 @@ class ColliderInfo(Data, kind=DataKind.CONSTANT):
     terrain_rc: qd.Tensor = field(int, shape=(2,))
     terrain_scale: qd.Tensor = field(float, shape=(2,))
     terrain_xyz_maxmin: qd.Tensor = field(float, shape=(6,))
+    # Height difference within a cell of the height field beyond which the cell is made of flat columns (see
+    # 'slope_threshold' of the terrain morph)
+    terrain_step_height: qd.Tensor = field(float, shape=())
     # Perturbation and tolerance of the multi-contact detection
     mc_perturbation: qd.Tensor = field(float, shape=())
     mc_tolerance: qd.Tensor = field(float, shape=())

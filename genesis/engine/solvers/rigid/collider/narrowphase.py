@@ -15,7 +15,7 @@ from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidErrorCode,
 from genesis.utils.data import eoa
 from genesis.utils.sdf import SDFInfo
 
-from . import capsule_contact, diff_gjk, gjk, mpr
+from . import capsule_contact, diff_gjk, gjk, mpr, support_field
 from .box_contact import func_box_box_contact, func_plane_box_contact, func_sphere_box_contact
 from .constants import CCD_ALGORITHM_CODE, MULTICONTACT_ENTRY, MULTICONTACT_SLOT, PORTAL_STATUS
 from .contact import (
@@ -1486,6 +1486,177 @@ def func_contact_convex_convex_sdf(
 
 
 @qd.func
+def func_terrain_cell_shape(r: int, c: int, EPS: float, collider_info: ColliderInfo):
+    """Return the height range of a cell of the height field and the axis its heights change along alone.
+
+    The cell is the one from sample (r, c) to sample (r + 1, c + 1). The axis is 0 when the corners of each row share
+    their height, 1 when those of each column do, and -1 otherwise.
+    """
+    h_00 = collider_info.terrain_hf[r, c]
+    h_10 = collider_info.terrain_hf[r + 1, c]
+    h_01 = collider_info.terrain_hf[r, c + 1]
+    h_11 = collider_info.terrain_hf[r + 1, c + 1]
+    h_range = qd.max(qd.max(h_00, h_10), qd.max(h_01, h_11)) - qd.min(qd.min(h_00, h_10), qd.min(h_01, h_11))
+    i_axis = -1
+    if qd.abs(h_00 - h_01) <= EPS and qd.abs(h_10 - h_11) <= EPS:
+        i_axis = 0
+    elif qd.abs(h_00 - h_10) <= EPS and qd.abs(h_01 - h_11) <= EPS:
+        i_axis = 1
+    return h_range, i_axis
+
+
+@qd.func
+def func_terrain_cell_range(xyz_max_min: qd.types.vector(6), collider_info: ColliderInfo):
+    """Return whether bounds miss the terrain, then the range of samples of the height field they span.
+
+    The bounds are in the frame of the terrain, their upper corner first. The samples span rows r_min to r_max and
+    columns c_min to c_max, both included, which leaves no cell when the bounds reach past the last sample.
+    """
+    is_outside = False
+    for i in qd.static(range(3)):
+        if (
+            collider_info.terrain_xyz_maxmin[i] < xyz_max_min[i + 3]
+            or collider_info.terrain_xyz_maxmin[i + 3] > xyz_max_min[i]
+        ):
+            is_outside = True
+
+    sh = collider_info.terrain_scale[0]
+    r_min = gs.qd_int(qd.floor((xyz_max_min[3] - collider_info.terrain_xyz_maxmin[3]) / sh))
+    r_max = gs.qd_int(qd.ceil((xyz_max_min[0] - collider_info.terrain_xyz_maxmin[3]) / sh))
+    c_min = gs.qd_int(qd.floor((xyz_max_min[4] - collider_info.terrain_xyz_maxmin[4]) / sh))
+    c_max = gs.qd_int(qd.ceil((xyz_max_min[1] - collider_info.terrain_xyz_maxmin[4]) / sh))
+
+    # The bounds of the terrain reach one cell past its last sample
+    r_max = qd.min(collider_info.terrain_rc[0] - 1, r_max)
+    c_max = qd.min(collider_info.terrain_rc[1] - 1, c_max)
+    r_min = qd.min(qd.max(0, r_min), r_max)
+    c_min = qd.min(qd.max(0, c_min), c_max)
+    return is_outside, r_min, r_max, c_min, c_max
+
+
+@qd.func
+def func_contact_flat_terrain(
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    collider_config: qd.template(),
+    errno: qd.Tensor,
+):
+    """Detect in closed form the contacts of a sphere, a capsule or a box with the terrain under a flat area.
+
+    Under bounds over samples of a single height, the terrain meets the geom as the half-space under that height,
+    whose contacts are exact: the deepest point of a sphere or of either end cap of a capsule, and every corner of a box
+    under that height. A geom whose bounds miss the terrain has no contact.
+
+    Returns whether the contacts are found, which leaves any other geom, and one over uneven samples, to the detection
+    of func_contact_mpr_terrain.
+    """
+    geom_type = dyn_info.geoms.type[i_ga]
+    is_found = False
+    if geom_type == gs.GEOM_TYPE.SPHERE or geom_type == gs.GEOM_TYPE.CAPSULE or geom_type == gs.GEOM_TYPE.BOX:
+        EPS = rigid_info.EPS[None]
+        geom_data = dyn_info.geoms.data[i_ga]
+        gb_pos, gb_quat = dyn_state.geoms.pos[i_gb, i_b], dyn_state.geoms.quat[i_gb, i_b]
+        pos, quat = gu.qd_transform_pos_quat_by_trans_quat(
+            dyn_state.geoms.pos[i_ga, i_b] - gb_pos,
+            dyn_state.geoms.quat[i_ga, i_b],
+            qd.Vector.zero(gs.qd_float, 3),
+            gu.qd_inv_quat(gb_quat),
+        )
+        R = gu.qd_quat_to_R(quat, EPS)
+
+        # The half extents of the bounds of the geom in the frame of the terrain
+        extent = qd.Vector([geom_data[0], geom_data[0], geom_data[0]], dt=gs.qd_float)
+        if geom_type == gs.GEOM_TYPE.CAPSULE:
+            extent = extent + 0.5 * geom_data[1] * qd.abs(R[:, 2])
+        elif geom_type == gs.GEOM_TYPE.BOX:
+            extent = qd.abs(R) @ (0.5 * qd.Vector([geom_data[0], geom_data[1], geom_data[2]], dt=gs.qd_float))
+        xyz_max_min = qd.Vector.zero(gs.qd_float, 6)
+        for k in qd.static(range(3)):
+            xyz_max_min[k] = pos[k] + extent[k]
+            xyz_max_min[k + 3] = pos[k] - extent[k]
+        is_outside, r_min, r_max, c_min, c_max = func_terrain_cell_range(xyz_max_min, collider_info)
+
+        # The half-space stands for the terrain only where samples lie, so bounds reaching past the last row or column of
+        # samples are left to the detection, which sees the edge of the terrain. The corners of the bounds then reject
+        # most uneven areas before the scan of every sample.
+        sh = collider_info.terrain_scale[0]
+        is_flat = (
+            not is_outside
+            and r_min < r_max
+            and c_min < c_max
+            and xyz_max_min[3] >= collider_info.terrain_xyz_maxmin[3]
+            and xyz_max_min[4] >= collider_info.terrain_xyz_maxmin[4]
+            and xyz_max_min[0] <= collider_info.terrain_xyz_maxmin[3] + sh * (collider_info.terrain_rc[0] - 1)
+            and xyz_max_min[1] <= collider_info.terrain_xyz_maxmin[4] + sh * (collider_info.terrain_rc[1] - 1)
+        )
+        h_flat = gs.qd_float(0.0)
+        if is_flat:
+            h_flat = collider_info.terrain_hf[r_min, c_min]
+            is_flat = (
+                qd.abs(collider_info.terrain_hf[r_max, c_min] - h_flat) <= EPS
+                and qd.abs(collider_info.terrain_hf[r_min, c_max] - h_flat) <= EPS
+                and qd.abs(collider_info.terrain_hf[r_max, c_max] - h_flat) <= EPS
+            )
+        if is_flat:
+            for r in range(r_min, r_max + 1):
+                for c in range(c_min, c_max + 1):
+                    if qd.abs(collider_info.terrain_hf[r, c] - h_flat) > EPS:
+                        is_flat = False
+        is_found = is_outside or is_flat
+
+        if is_flat:
+            normal = gu.qd_transform_by_quat(qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float), gb_quat)
+            i_pair = collider_info.collision_pair_idx[i_ga, i_gb]
+            n_points = 1
+            if geom_type == gs.GEOM_TYPE.CAPSULE:
+                n_points = 2
+            elif geom_type == gs.GEOM_TYPE.BOX:
+                n_points = 8
+            n_con = 0
+            for i_point in range(n_points):
+                # Point i_point of the geom, and the radius around it
+                point_local = qd.Vector.zero(gs.qd_float, 3)
+                radius = gs.qd_float(0.0)
+                if geom_type == gs.GEOM_TYPE.BOX:
+                    for k in qd.static(range(3)):
+                        point_local[k] = (((i_point >> k) & 1) - 0.5) * geom_data[k]
+                else:
+                    radius = geom_data[0]
+                    if geom_type == gs.GEOM_TYPE.CAPSULE:
+                        point_local[2] = (i_point - 0.5) * geom_data[1]
+                point = R @ point_local + pos
+                penetration = h_flat - (point[2] - radius)
+                if penetration > 0.0 and n_con < collider_config.n_contacts_per_terrain_pair:
+                    # The point midway between the deepest point of the geom and the face
+                    contact_pos = point + qd.Vector([0.0, 0.0, 0.5 * penetration - radius], dt=gs.qd_float)
+                    contact_pos = gu.qd_transform_by_trans_quat(contact_pos, gb_pos, gb_quat)
+                    func_add_contact(
+                        i_ga,
+                        i_gb,
+                        i_b,
+                        i_pair,
+                        normal,
+                        contact_pos,
+                        penetration,
+                        dyn_state,
+                        collider_state,
+                        dyn_info,
+                        rigid_info,
+                        collider_info,
+                        use_atomic=True,
+                        errno=errno,
+                    )
+                    n_con = n_con + 1
+    return is_found
+
+
+@qd.func
 def func_contact_mpr_terrain(
     i_ga: int,
     i_gb: int,
@@ -1507,14 +1678,16 @@ def func_contact_mpr_terrain(
 ):
     """Detect the contacts of a convex geom against the terrain, the lanes of a block sharing the work.
 
-    The geom is tested with MPR against the prism under every triangle of the height field its bounds overlap, the
-    block_dim lanes of the block sharing the work, lane tid on slot i_scratch of the prism scratch and of mpr_state. The
-    contacts are those of a serial walk over the detections and triangles, whatever the number of lanes.
+    The geom is tested with MPR against the vertical prism under every solid of the height field its bounds overlap (a
+    triangle, a flat column, the single flat rectangle under bounds over samples of one height, or a rectangle merging
+    the columns of equal height under bounds over flat cells and vertical steps alone), the block_dim lanes of the block
+    sharing the work, lane tid on slot i_scratch of the prism scratch and of mpr_state. The contacts are those of a
+    serial walk over the detections and solids, whatever the number of lanes.
     """
     ga_pos, ga_quat = dyn_state.geoms.pos[i_ga, i_b], dyn_state.geoms.quat[i_ga, i_b]
     gb_pos, gb_quat = dyn_state.geoms.pos[i_gb, i_b], dyn_state.geoms.quat[i_gb, i_b]
     margin = gs.qd_float(0.0)
-    n_max = qd.static(collider_config.n_contacts_per_convex_pair)
+    n_max = qd.static(collider_config.n_contacts_per_terrain_pair)
     N_PERTURBATIONS = qd.static(4)
 
     multi_contact = (
@@ -1562,66 +1735,133 @@ def func_contact_mpr_terrain(
         else:
             xyz_max_min[i_dir] = extent
 
-    for i in qd.static(range(3)):
-        if (
-            collider_info.terrain_xyz_maxmin[i] < xyz_max_min[i + 3] - margin
-            or collider_info.terrain_xyz_maxmin[i + 3] > xyz_max_min[i] + margin
-        ):
-            is_return = True
-
+    is_return, r_min, r_max, c_min, c_max = func_terrain_cell_range(xyz_max_min, collider_info)
     if not is_return:
         sh = collider_info.terrain_scale[0]
-        r_min = gs.qd_int(qd.floor((xyz_max_min[3] - collider_info.terrain_xyz_maxmin[3]) / sh))
-        r_max = gs.qd_int(qd.ceil((xyz_max_min[0] - collider_info.terrain_xyz_maxmin[3]) / sh))
-        c_min = gs.qd_int(qd.floor((xyz_max_min[4] - collider_info.terrain_xyz_maxmin[4]) / sh))
-        c_max = gs.qd_int(qd.ceil((xyz_max_min[1] - collider_info.terrain_xyz_maxmin[4]) / sh))
 
-        r_min = qd.max(0, r_min)
-        c_min = qd.max(0, c_min)
-        r_max = qd.min(collider_info.terrain_rc[0] - 1, r_max)
-        c_max = qd.min(collider_info.terrain_rc[1] - 1, c_max)
+        # A cell whose heights differ by more than the step height stands as four flat columns, one per corner, and as
+        # two triangles cut along the diagonal of the visual mesh otherwise (see genesis/utils/terrain.py). The columns
+        # of a cell whose heights change along one axis alone, as along a straight riser, merge into two strips. Bounds
+        # over samples of a single height stand on a single flat rectangle, whose contact patch one detection and its
+        # perturbations find whole, where the triangles would each add the contact nearest to them in walk order.
+        n_rows = qd.max(r_max - r_min, 0)
+        n_cols = qd.max(c_max - c_min, 0)
+        n_cells = n_rows * n_cols
+        step_height = collider_info.terrain_step_height[None]
+        EPS = rigid_info.EPS[None]
+        # The cells are scanned when the corners of the bounds share their height, or when the height range of the
+        # terrain, the most a cell can span, exceeds the step height
+        h_corner = collider_info.terrain_hf[r_min, c_min]
+        is_flat = (
+            n_cells > 0
+            and qd.abs(collider_info.terrain_hf[r_max, c_min] - h_corner) <= EPS
+            and qd.abs(collider_info.terrain_hf[r_min, c_max] - h_corner) <= EPS
+            and qd.abs(collider_info.terrain_hf[r_max, c_max] - h_corner) <= EPS
+        )
+        has_step = False
+        has_slope = False
+        has_columns = False
+        n_scanned = n_cells
+        if not is_flat and step_height >= collider_info.terrain_xyz_maxmin[2] - collider_info.terrain_xyz_maxmin[5]:
+            n_scanned = 0
+        for i_batch_ in range((n_scanned + block_dim - 1) // block_dim):
+            i_cell = i_batch_ * block_dim + tid
+            is_cell_flat = True
+            is_cell_step = False
+            is_cell_slope = False
+            is_cell_columns = False
+            if i_cell < n_cells:
+                r = r_min + i_cell // n_cols
+                c = c_min + i_cell % n_cols
+                h_range, i_axis = func_terrain_cell_shape(r, c, EPS, collider_info)
+                is_cell_flat = h_range <= EPS
+                is_cell_step = h_range > step_height
+                is_cell_slope = not is_cell_flat and not is_cell_step
+                is_cell_columns = is_cell_step and i_axis == -1
+            if qd.static(block_dim > 1):
+                is_cell_flat = su.qd_block_all(is_cell_flat)
+                is_cell_step = su.qd_block_any(is_cell_step)
+                is_cell_slope = su.qd_block_any(is_cell_slope)
+                is_cell_columns = su.qd_block_any(is_cell_columns)
+            is_flat = is_flat and is_cell_flat
+            has_step = has_step or is_cell_step
+            has_slope = has_slope or is_cell_slope
+            has_columns = has_columns or is_cell_columns
+        # Under bounds over flat cells and step cells alone, the terrain is the flat column of each sample, a quarter of
+        # each of its cells, so the solids are the rectangles merging the columns of equal height. Walking the cells
+        # instead adds a contact per cell on the same face, which fills the budget of the pair before the walk reaches
+        # a riser.
+        is_crisp = False
+        if qd.static(collider_config.has_step_terrain):
+            is_crisp = not is_flat and has_step and not has_slope
+        # The solids of a cell, 2**log2_cell_solids of them: its two triangles or strips, or its four columns, the cells of
+        # fewer solids leaving their last slots empty. A crisp area has a solid slot per sample, holding the rectangle
+        # that starts at the sample, the samples inside a rectangle leaving theirs empty.
+        log2_cell_solids = 2 if has_columns else 1
+        n_solids = n_cells << log2_cell_solids
+        if is_flat:
+            n_solids = 1
+        elif is_crisp:
+            n_solids = (n_rows + 1) * (n_cols + 1)
+        geom_type_a = dyn_info.geoms.type[i_ga]
+        geom_data_a = dyn_info.geoms.data[i_ga]
 
-        # Row r lists its verts (r, c_min), (r + 1, c_min), (r, c_min + 1), ..., every three consecutive verts making a
-        # triangle, which cuts every cell along the diagonal of the visual mesh (see genesis/utils/terrain.py)
-        n_triangles_row = 2 * qd.max(c_max - c_min, 0)
-        n_triangles = qd.max(r_max - r_min, 0) * n_triangles_row
-
-        # The perturbed detections rotate geom A by a small angle about an axis orthogonal to the normal of the first
-        # contact, which tips a box face onto another corner of the contact patch. They only run when the first contact
-        # is face-vs-face (snap fired).
+        # The perturbed detections rotate geom A by a small angle about an axis orthogonal to the normal of a seed
+        # contact, which tips a box face onto another corner of the contact patch. The first contact of the walk seeds
+        # the patch on the top faces when it is face-vs-face (snap fired). On a terrain with vertical steps, the first
+        # contact may lie on a riser, so the first face-vs-face contact seeds the top faces wherever it falls in the
+        # walk, and the first contact snapped to the side of a column seeds the patch on a riser, where a single contact
+        # would leave the geom free to turn about it.
         is_col_0 = False
         face_face_0 = False
+        has_side_seed = False
         contact_pos_0 = qd.Vector.zero(gs.qd_float, 3)
-        normal_0 = qd.Vector.zero(gs.qd_float, 3)
         axis_0 = qd.Vector.zero(gs.qd_float, 3)
         axis_1 = qd.Vector.zero(gs.qd_float, 3)
+        contact_pos_1 = qd.Vector.zero(gs.qd_float, 3)
+        normal_1 = qd.Vector.zero(gs.qd_float, 3)
+        axis_2 = qd.Vector.zero(gs.qd_float, 3)
+        axis_3 = qd.Vector.zero(gs.qd_float, 3)
         n_con = 0
         # Contacts of the pair, spread over the lanes (see su.qd_lane_vector_get), which a new contact merges against
         # since the other pairs of the env append theirs to the buffer concurrently
         contacts_pos = qd.Matrix.zero(gs.qd_float, qd.static((n_max + block_dim - 1) // block_dim), 3)
 
-        # Pass 0 walks the triangles of the first detection, pass 1 those of every perturbed detection in turn
+        # Pass 0 walks the solids of the first detection, pass 1 those of every perturbed detection in turn
         for i_pass in range(2):
-            n_items = n_triangles
+            n_items = n_solids
             if i_pass == 1:
-                n_items = 0
-                if multi_contact and face_face_0:
-                    n_items = N_PERTURBATIONS * n_triangles
+                n_seeds = 0
+                if multi_contact:
+                    n_seeds = qd.cast(face_face_0, gs.qd_int) + qd.cast(has_side_seed, gs.qd_int)
+                n_items = n_seeds * N_PERTURBATIONS * n_solids
             for i_batch_ in range((n_items + block_dim - 1) // block_dim):
                 if n_con < n_max:
                     i_item = i_batch_ * block_dim + tid
                     i_detection = 0
-                    i_triangle = i_item
+                    i_solid = i_item
+                    is_side_seed = False
                     if i_pass == 1:
-                        i_detection = 1 + i_item // n_triangles
-                        i_triangle = i_item % n_triangles
+                        i_perturbation = i_item // n_solids
+                        i_detection = 1 + i_perturbation % N_PERTURBATIONS
+                        i_solid = i_item % n_solids
+                        is_side_seed = i_perturbation >= N_PERTURBATIONS or not face_face_0
+                    contact_pos_seed = contact_pos_0
+                    axis_seed_0 = axis_0
+                    axis_seed_1 = axis_1
+                    if qd.static(collider_config.has_step_terrain):
+                        if is_side_seed:
+                            contact_pos_seed = contact_pos_1
+                            axis_seed_0 = axis_2
+                            axis_seed_1 = axis_3
                     ga_pos_tf = ga_pos_terrain_frame
                     ga_quat_tf = ga_quat_terrain_frame
+                    qrot = gu.qd_identity_quat()
                     if i_detection > 0:
-                        axis = axis_0 if i_detection < 3 else axis_1
+                        axis = axis_seed_0 if i_detection < 3 else axis_seed_1
                         angle_sign = 2 * (i_detection % 2) - 1
                         qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis)
-                        ga_pos_curr, ga_quat_curr = func_rotate_frame(ga_pos, ga_quat, contact_pos_0, qrot)
+                        ga_pos_curr, ga_quat_curr = func_rotate_frame(ga_pos, ga_quat, contact_pos_seed, qrot)
                         ga_pos_tf, ga_quat_tf = gu.qd_transform_pos_quat_by_trans_quat(
                             ga_pos_curr - gb_pos, ga_quat_curr, qd.Vector.zero(gs.qd_float, 3), gu.qd_inv_quat(gb_quat)
                         )
@@ -1629,32 +1869,160 @@ def func_contact_mpr_terrain(
                     is_col = False
                     is_contact_candidate = False
                     face_face = False
+                    is_side_face = False
                     normal = qd.Vector.zero(gs.qd_float, 3)
                     contact_pos = qd.Vector.zero(gs.qd_float, 3)
                     penetration = gs.qd_float(0.0)
+                    is_rectangle = False
+                    top_normal = qd.Vector.zero(gs.qd_float, 3)
                     if i_item < n_items:
-                        r = r_min + i_triangle // n_triangles_row
-                        i_v_end = i_triangle % n_triangles_row + 2
-                        # A triangle all of whose verts lie below the geom cannot touch it
-                        is_reachable = False
-                        for i_p in qd.static(range(3)):
-                            r_v = r + (i_v_end - 2 + i_p) % 2
-                            c_v = c_min + (i_v_end - 2 + i_p) // 2
-                            x = sh * r_v + collider_info.terrain_xyz_maxmin[3]
-                            y = sh * c_v + collider_info.terrain_xyz_maxmin[4]
-                            z = collider_info.terrain_hf[r_v, c_v] + margin
-                            collider_state.prism[i_p, i_scratch] = qd.Vector(
-                                [x, y, collider_info.terrain_xyz_maxmin[5]], dt=gs.qd_float
-                            )
-                            collider_state.prism[i_p + 3, i_scratch] = qd.Vector([x, y, z], dt=gs.qd_float)
-                            if z >= xyz_max_min[5]:
-                                is_reachable = True
-                        if is_reachable:
-                            center_b = qd.Vector.zero(gs.qd_float, 3)
-                            for i_p in qd.static(range(6)):
-                                center_b = center_b + collider_state.prism[i_p, i_scratch]
-                            center_b = center_b / 6.0
+                        # The corners of the cross-section of the solid, in the frame of the height field: the
+                        # rectangle under the bounds, a rectangle of equal samples of a crisp area, the column of corner
+                        # i_sub of a step cell, or the triangle of the verts i_sub + (0, 1, 2) in the walk (r, c),
+                        # (r + 1, c), (r, c + 1), (r + 1, c + 1) of a smooth cell, which repeats its last corner
+                        corners = qd.Matrix.zero(gs.qd_float, 4, 3)
+                        is_rectangle = is_flat or is_crisp
+                        has_solid = True
+                        # A rectangle spans rows rect_r0 to rect_r1 and columns rect_c0 to rect_c1, in samples
+                        rect_r0 = gs.qd_float(r_min)
+                        rect_r1 = gs.qd_float(r_max)
+                        rect_c0 = gs.qd_float(c_min)
+                        rect_c1 = gs.qd_float(c_max)
+                        rect_h = collider_info.terrain_hf[r_min, c_min]
+                        if is_crisp:
+                            # The rectangle of sample (r, c) spans the run of samples of its height along its row and
+                            # the rows after it holding the same run, when the run starts at c and the row before it
+                            # does not hold the run
+                            r = r_min + i_solid // (n_cols + 1)
+                            c = c_min + i_solid % (n_cols + 1)
+                            rect_h = collider_info.terrain_hf[r, c]
+                            c_prev = qd.max(c - 1, c_min)
+                            has_solid = c == c_min or qd.abs(collider_info.terrain_hf[r, c_prev] - rect_h) > EPS
+                            c_end = c
+                            is_run = True
+                            for c_ in range(c + 1, c_max + 1):
+                                is_run = is_run and qd.abs(collider_info.terrain_hf[r, c_] - rect_h) <= EPS
+                                if is_run:
+                                    c_end = c_
+                            c_next = qd.min(c_end + 1, c_max)
+                            r_end = r
+                            is_stacked = True
+                            for r_ in range(qd.max(r - 1, r_min), r_max + 1):
+                                if r_ != r:
+                                    is_same_run = (
+                                        c == c_min or qd.abs(collider_info.terrain_hf[r_, c_prev] - rect_h) > EPS
+                                    ) and (
+                                        c_end == c_max or qd.abs(collider_info.terrain_hf[r_, c_next] - rect_h) > EPS
+                                    )
+                                    for c_ in range(c, c_end + 1):
+                                        is_same_run = (
+                                            is_same_run and qd.abs(collider_info.terrain_hf[r_, c_] - rect_h) <= EPS
+                                        )
+                                    if r_ < r:
+                                        has_solid = has_solid and not is_same_run
+                                    else:
+                                        is_stacked = is_stacked and is_same_run
+                                        if is_stacked:
+                                            r_end = r_
+                            rect_r0 = qd.max(r - 0.5, r_min)
+                            rect_r1 = qd.min(r_end + 0.5, r_max)
+                            rect_c0 = qd.max(c - 0.5, c_min)
+                            rect_c1 = qd.min(c_end + 0.5, c_max)
+                        elif not is_flat:
+                            i_cell = i_solid >> log2_cell_solids
+                            i_sub = i_solid & ((1 << log2_cell_solids) - 1)
+                            r = r_min + i_cell // n_cols
+                            c = c_min + i_cell % n_cols
+                            i_axis = -1
+                            if has_step:
+                                h_range, i_axis = func_terrain_cell_shape(r, c, EPS, collider_info)
+                                is_rectangle = h_range > step_height
+                            if is_rectangle:
+                                # The column of corner (i_corner_r, i_corner_c) spans the quarter of the cell nearest to
+                                # it, or the strip across axis 1 - i_axis on the side of corner i_sub along i_axis
+                                i_corner_r = i_sub % 2
+                                i_corner_c = i_sub // 2
+                                size_r = gs.qd_float(0.5)
+                                size_c = gs.qd_float(0.5)
+                                if i_axis == 0:
+                                    i_corner_c = 0
+                                    size_c = 1.0
+                                elif i_axis == 1:
+                                    i_corner_r = 0
+                                    i_corner_c = i_sub % 2
+                                    size_r = 1.0
+                                has_solid = i_axis == -1 or i_sub < 2
+                                rect_r0 = r + 0.5 * i_corner_r
+                                rect_r1 = rect_r0 + size_r
+                                rect_c0 = c + 0.5 * i_corner_c
+                                rect_c1 = rect_c0 + size_c
+                                rect_h = collider_info.terrain_hf[r + i_corner_r, c + i_corner_c]
+                            elif i_sub < 2:
+                                for i_p in qd.static(range(3)):
+                                    r_v = r + (i_sub + i_p) % 2
+                                    c_v = c + (i_sub + i_p) // 2
+                                    corners[i_p, 0] = sh * r_v
+                                    corners[i_p, 1] = sh * c_v
+                                    corners[i_p, 2] = collider_info.terrain_hf[r_v, c_v]
+                                for k in qd.static(range(3)):
+                                    corners[3, k] = corners[2, k]
+                            else:
+                                has_solid = False
+                        if is_rectangle:
+                            for i_p in qd.static(range(4)):
+                                corners[i_p, 0] = (rect_r0 + qd.static(i_p % 2) * (rect_r1 - rect_r0)) * sh
+                                corners[i_p, 1] = (rect_c0 + qd.static(i_p // 2) * (rect_c1 - rect_c0)) * sh
+                                corners[i_p, 2] = rect_h
 
+                        # A solid all of whose top corners lie below the geom cannot touch it
+                        is_reachable = False
+                        center_b = qd.Vector.zero(gs.qd_float, 3)
+                        if has_solid:
+                            z_bottom = collider_info.terrain_xyz_maxmin[5]
+                            for i_p in qd.static(range(4)):
+                                corners[i_p, 0] = corners[i_p, 0] + collider_info.terrain_xyz_maxmin[3]
+                                corners[i_p, 1] = corners[i_p, 1] + collider_info.terrain_xyz_maxmin[4]
+                                corners[i_p, 2] = corners[i_p, 2] + margin
+                                collider_state.prism[i_p, i_scratch] = qd.Vector(
+                                    [corners[i_p, 0], corners[i_p, 1], z_bottom], dt=gs.qd_float
+                                )
+                                collider_state.prism[i_p + 4, i_scratch] = corners[i_p, :]
+                                if corners[i_p, 2] >= xyz_max_min[5]:
+                                    is_reachable = True
+                            # The center sums the bottom corners then the top ones
+                            for i_p in qd.static(range(3)):
+                                center_b = center_b + qd.Vector([corners[i_p, 0], corners[i_p, 1], z_bottom])
+                            for i_p in qd.static(range(3)):
+                                center_b = center_b + corners[i_p, :]
+                            if is_rectangle:
+                                center_b = center_b + qd.Vector([corners[3, 0], corners[3, 1], z_bottom])
+                                center_b = (center_b + corners[3, :]) / 8.0
+                            else:
+                                center_b = center_b / 6.0
+                            top_normal = (
+                                (corners[1, :] - corners[0, :]).cross(corners[2, :] - corners[0, :]).normalized()
+                            )
+                            if top_normal[2] < 0.0:
+                                top_normal = -top_normal
+                        if is_reachable:
+                            # Every corner of the solid lies on or under the plane of its top face, so a sphere, a
+                            # capsule or a box whose lowest point along the face normal stands above that plane cannot
+                            # touch it. Their lowest point has a closed form, cheaper than the detection it saves.
+                            depth_lowest = top_normal.dot(ga_pos_tf)
+                            if geom_type_a == gs.GEOM_TYPE.SPHERE:
+                                depth_lowest = depth_lowest - geom_data_a[0]
+                            elif geom_type_a == gs.GEOM_TYPE.CAPSULE:
+                                axis = gu.qd_transform_by_quat(qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float), ga_quat_tf)
+                                depth_lowest = depth_lowest - 0.5 * geom_data_a[1] * qd.abs(top_normal.dot(axis))
+                                depth_lowest = depth_lowest - geom_data_a[0]
+                            elif geom_type_a == gs.GEOM_TYPE.BOX:
+                                normal_local = gu.qd_inv_transform_by_quat(top_normal, ga_quat_tf)
+                                for k in qd.static(range(3)):
+                                    depth_lowest = depth_lowest - 0.5 * geom_data_a[k] * qd.abs(normal_local[k])
+                            else:
+                                depth_lowest = -qd.math.inf
+                            is_reachable = depth_lowest <= top_normal.dot(corners[0, :])
+                        if is_reachable:
                             is_col, normal, penetration, contact_pos = mpr.func_mpr_contact_from_centers(
                                 i_ga,
                                 i_gb,
@@ -1682,26 +2050,45 @@ def func_contact_mpr_terrain(
                         # the exact face normal. Only snap when the bias is small (dot > 0.95) so that contacts on real
                         # cliff edges, where MPR's normal is genuinely far from any single cell's top face normal, keep
                         # MPR's result.
-                        e1 = collider_state.prism[4, i_scratch] - collider_state.prism[3, i_scratch]
-                        e2 = collider_state.prism[5, i_scratch] - collider_state.prism[3, i_scratch]
-                        top_face_normal = e1.cross(e2).normalized()
-                        if top_face_normal[2] < 0.0:
-                            top_face_normal = -top_face_normal
+                        top_face_normal = top_normal
                         if top_face_normal.dot(normal) > 0.95:
                             normal = top_face_normal
                             snap_fired = True
                             # Cell is essentially horizontal in the terrain's local frame (within ~8 deg). Independent
                             # of the terrain's world orientation.
                             face_face = top_face_normal[2] > 0.99
+                        elif is_rectangle:
+                            # The sides of a rectangle stand along the axes of the height field, and neighboring
+                            # columns meet at their vertical edges, where MPR's normal picks up the same bias
+                            i_axis = 0 if qd.abs(normal[0]) >= qd.abs(normal[1]) else 1
+                            if qd.abs(normal[i_axis]) > 0.95:
+                                side_normal = qd.Vector.zero(gs.qd_float, 3)
+                                side_normal[i_axis] = 1.0 if normal[i_axis] > 0.0 else -1.0
+                                normal = side_normal
+                                is_side_face = True
+                        # A point of the face the normal snapped to, the support of the solid along it
+                        face_point = qd.Vector.zero(gs.qd_float, 3)
+                        if i_detection > 0:
+                            face_point, _ = support_field._func_support_prism(i_scratch, normal, collider_state)
+                            face_point = gu.qd_transform_by_trans_quat(face_point, gb_pos, gb_quat)
 
                         normal = gu.qd_transform_by_quat(normal, gb_quat)
                         contact_pos = gu.qd_transform_by_quat(contact_pos, gb_quat)
                         contact_pos = contact_pos + gb_pos
 
-                        # No perturbation correction: the perturbation magnitude (mc_perturbation) is small enough that
-                        # the perturbed contact_pos stays close to the unperturbed contact patch. The deduplication
-                        # tolerance downstream picks the unique corner contacts and the constraint solver tolerates the
-                        # residual offset.
+                        # A perturbed detection only keeps a contact on a face it snapped to. The witness on the
+                        # rotated geom A, turned back about its seed, is a material point of the unperturbed geom,
+                        # whose depth below the plane of the face is exact. Without it, the depth of the corners that
+                        # the rotation dips into the face would lift the geom by the perturbation angle times its size.
+                        # A point that lies above the face leaves the patch.
+                        is_on_patch = True
+                        if i_detection > 0 and (snap_fired or is_side_face):
+                            R_rot = gu.qd_quat_to_R(qrot, EPS)
+                            witness_a = contact_pos - 0.5 * penetration * normal
+                            witness_a = R_rot.transpose() @ (witness_a - contact_pos_seed) + contact_pos_seed
+                            penetration = (face_point - witness_a).dot(normal)
+                            contact_pos = witness_a + 0.5 * penetration * normal
+                            is_on_patch = penetration >= 0.0
 
                         contact_pos = func_apply_smooth_refinement(
                             i_ga,
@@ -1717,10 +2104,15 @@ def func_contact_mpr_terrain(
                             rigid_config,
                         )
 
-                        # Perturbed contacts are only kept when they still describe a face-vs-face contact on the same
-                        # horizontal cell face. A perturbed corner that landed against a cliff wall (snap did not fire)
-                        # is a fictitious contact.
-                        is_contact_candidate = i_detection == 0 or snap_fired
+                        # Perturbed contacts are only kept when they still describe a face-vs-face contact on a face
+                        # of their seed: a top face for the seed on a top face, the side of a column facing the same
+                        # way for the seed on a riser. A perturbed corner that landed on any other face is a fictitious
+                        # contact.
+                        is_seed_face = snap_fired
+                        if qd.static(collider_config.has_step_terrain):
+                            if is_side_seed:
+                                is_seed_face = is_side_face and normal.dot(normal_1) > 0.99
+                        is_contact_candidate = i_detection == 0 or (is_seed_face and is_on_patch)
 
                     lanes_candidate = qd.cast(is_contact_candidate, qd.u32)
                     if qd.static(block_dim > 1):
@@ -1731,6 +2123,7 @@ def func_contact_mpr_terrain(
                         contact_pos_lane = contact_pos
                         normal_lane = normal
                         is_face_face_lane = face_face
+                        is_side_face_lane = is_side_face
                         if qd.static(block_dim > 1):
                             contact_pos_lane = qd.Vector(
                                 [su.qd_block_shuffle(contact_pos[k], i_lane) for k in qd.static(range(3))]
@@ -1739,6 +2132,8 @@ def func_contact_mpr_terrain(
                                 [su.qd_block_shuffle(normal[k], i_lane) for k in qd.static(range(3))]
                             )
                             is_face_face_lane = su.qd_block_shuffle(qd.cast(face_face, gs.qd_int), i_lane) != 0
+                            if qd.static(collider_config.has_step_terrain):
+                                is_side_face_lane = su.qd_block_shuffle(qd.cast(is_side_face, gs.qd_int), i_lane) != 0
 
                         if n_con < n_max:
                             is_contact_duplicate = False
@@ -1770,26 +2165,44 @@ def func_contact_mpr_terrain(
                                     )
                                 su.qd_lane_slot_write(contacts_pos, n_con, contact_pos_lane, tid, block_dim)
                                 n_con = n_con + 1
-                                if i_pass == 0 and not is_col_0:
+                                # A top face seeds perturbations only when essentially horizontal (in the terrain's
+                                # local frame, within ~8 deg of the heightfield +z): on steeper slopes the corner
+                                # contacts generated by perturbation map to different parts of neighbouring cells and
+                                # create constraint-solver oscillation. The side of a column is one vertical rectangle,
+                                # which holds the whole patch.
+                                if i_pass == 0:
+                                    is_seed_open = not is_col_0
+                                    if qd.static(collider_config.has_step_terrain):
+                                        is_seed_open = not face_face_0
                                     is_col_0 = True
-                                    # Perturbation only applies on essentially-horizontal cell faces (in the terrain's
-                                    # local frame, within ~8 deg of the heightfield +z): on steeper slopes the corner
-                                    # contacts generated by perturbation map to different parts of neighbouring cells
-                                    # and create constraint-solver oscillation.
-                                    face_face_0 = is_face_face_lane
-                                    contact_pos_0 = contact_pos_lane
-                                    normal_0 = normal_lane
-                                    if face_face_0:
+                                    if is_seed_open and is_face_face_lane:
+                                        face_face_0 = True
+                                        contact_pos_0 = contact_pos_lane
                                         axis_0, axis_1 = func_contact_orthogonals(
                                             i_ga,
                                             i_gb,
                                             i_b,
-                                            normal_0,
+                                            normal_lane,
                                             dyn_state,
                                             dyn_info,
                                             rigid_info,
                                             rigid_config,
                                         )
+                                    if qd.static(collider_config.has_step_terrain):
+                                        if not has_side_seed and is_side_face_lane:
+                                            has_side_seed = True
+                                            contact_pos_1 = contact_pos_lane
+                                            normal_1 = normal_lane
+                                            axis_2, axis_3 = func_contact_orthogonals(
+                                                i_ga,
+                                                i_gb,
+                                                i_b,
+                                                normal_lane,
+                                                dyn_state,
+                                                dyn_info,
+                                                rigid_info,
+                                                rigid_config,
+                                            )
 
 
 @qd.func
@@ -4872,10 +5285,23 @@ def func_narrow_phase_any_vs_terrain(
                     # The terrain is detected against the convex hull of the other geom, which would fill the cavities
                     # of a non-convex geom
                     if dyn_info.geoms.is_convex[i_ga]:
-                        i_work = qd.atomic_add(collider_state.work_queue.n_pairs[0], 1)
-                        collider_state.work_queue.i_b[i_work] = i_b
-                        collider_state.work_queue.i_ga[i_work] = i_ga
-                        collider_state.work_queue.i_gb[i_work] = i_gb
+                        # The pairs over flat areas whose contacts have a closed form are done, the others queued
+                        if not func_contact_flat_terrain(
+                            i_ga,
+                            i_gb,
+                            i_b,
+                            dyn_state,
+                            collider_state,
+                            dyn_info,
+                            rigid_info,
+                            collider_info,
+                            collider_config,
+                            errno=errno,
+                        ):
+                            i_work = qd.atomic_add(collider_state.work_queue.n_pairs[0], 1)
+                            collider_state.work_queue.i_b[i_work] = i_b
+                            collider_state.work_queue.i_ga[i_work] = i_ga
+                            collider_state.work_queue.i_gb[i_work] = i_gb
                     else:
                         errno[i_b] = errno[i_b] | RigidErrorCode.UNSUPPORTED_COLLISION_PAIR
 

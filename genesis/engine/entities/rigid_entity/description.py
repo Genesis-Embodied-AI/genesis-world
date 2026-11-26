@@ -2013,16 +2013,20 @@ class TerrainEntityDescription(RigidEntityDescription):
     """Describe one terrain, which is a rigid entity beside the height field its surface is made of.
 
     The field holds the elevation of every grid cell in meters, vertical scale applied, and the scale gives the
-    horizontal size of a cell and the vertical factor. The collider reads them at build and the height query reads
-    them at runtime. They stand here because no link describes them.
+    horizontal size of a cell and the vertical factor. A cell whose heights differ by more than the step height is made
+    of flat columns. The collider reads them at build and the height query reads them at runtime. They stand here
+    because no link describes them.
     """
 
     terrain_hf: np.ndarray | None = None
     terrain_scale: np.ndarray | None = None
+    terrain_step_height: float = math.inf
 
     def _load_morph(self, morph, resolution: Resolution):
         """Load the height field a terrain morph describes, with its scales and the meshes standing for it."""
-        vmesh, mesh, terrain_hf = tu.parse_terrain(morph, self.surface)
+        if morph.slope_threshold is not None:
+            self.terrain_step_height = morph.slope_threshold * morph.horizontal_scale
+        vmesh, mesh, terrain_hf = tu.parse_terrain(morph, self.surface, self.terrain_step_height)
         self.terrain_scale = np.array((morph.horizontal_scale, morph.vertical_scale), dtype=gs.np_float)
         self.terrain_hf = terrain_hf * self.terrain_scale[1]
 
