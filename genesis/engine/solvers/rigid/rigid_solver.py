@@ -78,6 +78,7 @@ from .abd.accessor import (
     kernel_get_links_vel,
     kernel_set_dofs_act_bias,
     kernel_set_dofs_act_gain,
+    kernel_set_dofs_act_ki,
     kernel_set_dofs_armature,
     kernel_set_dofs_damping,
     kernel_set_dofs_force_range,
@@ -398,6 +399,17 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self._options.tolerance = 1e-5 if gs.qd_float == qd.f32 else 1e-8
             if not self._enable_mujoco_compatibility:
                 self._options.tolerance *= 0.1
+
+        # The link of each configuration entry and of each dof, to restart the integral term of every dof of a link on
+        # a write of its configuration (see ctrl_force_int in rigid/data.py). The dofs are padded like the state, which
+        # leaves the padding slot unset, since a scene without dofs has no configuration entry either.
+        qs_link_idx = np.empty((self.n_qs,), dtype=gs.np_int)
+        dofs_link_idx = np.zeros((max(1, self.n_dofs),), dtype=gs.np_int)
+        for link in self.links:
+            qs_link_idx[link.q_start : link.q_end] = link.idx
+            dofs_link_idx[link.dof_start : link.dof_end] = link.idx
+        self._qs_link_idx = torch.from_numpy(qs_link_idx).to(device=gs.device)
+        self._dofs_link_idx = torch.from_numpy(dofs_link_idx).to(device=gs.device)
 
         super().build(n_envs)
 
@@ -896,7 +908,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def _create_data_manager(self):
         # We initialize data even if the solver is not active because the coupler needs arguments like
         # rigid_solver.dyn_state.links, etc. regardless of the solver is active or not.
-        self.data_manager = RigidData(self, kinematic_only=False)
+        self.data_manager = RigidData(self)
         self._errno = self.data_manager.errno
         self._is_external_wrench_exact = is_opted_in(RigidData.dyn_state.links.cfrc_external_sums)
 
@@ -1908,6 +1920,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     )
             mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
             assign_indexed_tensor(target, mask, pos)
+            if not link.is_fixed:
+                # Restart the integral term on a pose write
+                ctrl_force_int = qd_to_torch(self.dyn_state.dofs.ctrl_force_int, transpose=True, copy=False)
+                assign_indexed_tensor(ctrl_force_int[:, link.dof_start : link.dof_end], mask, value=0.0)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -2028,6 +2044,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     )
             mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
             assign_indexed_tensor(target, mask, quat)
+            if not link.is_fixed:
+                # Restart the integral term on a pose write
+                ctrl_force_int = qd_to_torch(self.dyn_state.dofs.ctrl_force_int, transpose=True, copy=False)
+                assign_indexed_tensor(ctrl_force_int[:, link.dof_start : link.dof_end], mask, value=0.0)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -2285,10 +2305,17 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.constraint_solver is not None:
             self.constraint_solver.reset(envs_idx)
 
+        # Restart the integral term on a pose write, for every dof of each link with a configuration entry set
+        is_link_set = torch.zeros((self.n_links_,), dtype=gs.tc_bool, device=gs.device)
+        is_link_set[self._qs_link_idx[indices_to_mask(qs_idx)]] = True
+        is_dof_set = is_link_set[self._dofs_link_idx]
         if gs.use_zerocopy:
             data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
             mask = (0, *indices_to_mask(qs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, qs_idx)
             assign_indexed_tensor(data, mask, qpos)
+            ctrl_force_int = qd_to_torch(self.dyn_state.dofs.ctrl_force_int, transpose=True, copy=False)
+            envs_mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
+            ctrl_force_int[envs_mask] = torch.where(is_dof_set, 0.0, ctrl_force_int[envs_mask])
             if mask and isinstance(mask[0], torch.Tensor):
                 envs_idx = mask[0].reshape((-1,))
             if gs.backend == gs.metal:
@@ -2312,7 +2339,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     self.rigid_config,
                 )
 
-            kernel_set_qpos(qs_idx, envs_idx, qpos, self.rigid_info, self.rigid_config)
+            kernel_set_qpos(qs_idx, is_dof_set, envs_idx, qpos, self.dyn_state, self.rigid_info, self.rigid_config)
+
         self.clear_errno(envs_idx)
 
         # The warm start of the detection was found at the previous pose. The contacts found there are not fresh until
@@ -2402,6 +2430,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             "kv",
             "act_gain",
             "act_bias",
+            "act_ki",
             "force_range",
             "stiffness",
             "damping",
@@ -2466,6 +2495,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             kernel_set_dofs_act_gain(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
         elif name == "act_bias":
             kernel_set_dofs_act_bias(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
+        elif name == "act_ki":
+            kernel_set_dofs_act_ki(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
         else:
             gs.raise_exception(f"Invalid `name` {name}.")
 
@@ -2474,6 +2505,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def set_dofs_kv(self, kv, dofs_idx=None, envs_idx=None):
         self._set_dofs_info([kv], dofs_idx, "kv", envs_idx)
+
+    def set_dofs_ki(self, ki, dofs_idx=None, envs_idx=None):
+        if not ((ki if isinstance(ki, torch.Tensor) else np.asarray(ki)) >= 0.0).all():
+            gs.raise_exception("`ki` must be non-negative.")
+        self._set_dofs_info([ki], dofs_idx, "act_ki", envs_idx)
 
     def set_dofs_act_gain(self, act_gain, dofs_idx=None, envs_idx=None):
         self._set_dofs_info([act_gain], dofs_idx, "act_gain", envs_idx)
@@ -2515,7 +2551,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         positions[:, dofs_idx] = position
         is_dof_set = torch.zeros((self.n_dofs,), dtype=gs.tc_bool, device=gs.device)
         is_dof_set[dofs_idx] = True
-        kernel_set_dofs_position(is_dof_set, envs_idx, positions, self.dyn_info, self.rigid_info, self.rigid_config)
+        kernel_set_dofs_position(
+            is_dof_set, envs_idx, positions, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
+        )
 
         self.clear_errno(envs_idx)
 
@@ -2930,6 +2968,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 "Use get_dofs_act_gain() and get_dofs_act_bias() instead."
             )
         return -bias[..., 2]
+
+    def get_dofs_ki(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
+        if not self._options.batch_dofs_info and envs_idx is not None:
+            gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
+        tensor = qd_to_torch(self.dyn_info.dofs.act_ki, envs_idx, dofs_idx, transpose=True, copy=copy)
+        return tensor[0] if self.n_envs == 0 and self._options.batch_dofs_info else tensor
 
     def get_dofs_act_gain(self, dofs_idx=None, envs_idx=None, *, copy: bool | None = True):
         if not self._options.batch_dofs_info and envs_idx is not None:

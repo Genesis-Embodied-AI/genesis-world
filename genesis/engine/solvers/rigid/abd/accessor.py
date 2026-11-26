@@ -54,6 +54,9 @@ def kernel_set_links_pos(
                 dyn_state.fixed_roots.pos[i_fr, i_b][j] = pos[i_b_, i_l_, j]
         else:
             q_start = dyn_info.links.q_start[I_l]
+            if qd.static(rigid_config.has_dynamics):
+                for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
+                    dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0  # Restart the integral term on a pose write
             for j in qd.static(range(3)):
                 rigid_info.qpos[q_start + j, i_b] = pos[i_b_, i_l_, j]
 
@@ -222,6 +225,9 @@ def kernel_set_links_quat(
                 dyn_state.fixed_roots.quat[i_fr, i_b][j] = quat[i_b_, i_l_, j]
         else:
             q_start = dyn_info.links.q_start[I_l]
+            if qd.static(rigid_config.has_dynamics):
+                for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
+                    dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0  # Restart the integral term on a pose write
             for j in qd.static(range(4)):
                 rigid_info.qpos[q_start + j + 3, i_b] = quat[i_b_, i_l_, j]
 
@@ -411,14 +417,28 @@ def kernel_set_geoms_friction_ratio(
 @qd.kernel(fastcache=True)
 def kernel_set_qpos(
     qs_idx: qd.types.ndarray(),
+    is_dof_set: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     qpos: qd.types.ndarray(),
+    dyn_state: DynState,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
+    """Set the given configuration entries, and restart the integral term of the dofs flagged by the mask.
+
+    The mask is read only by a solver with dynamics, and may be empty otherwise.
+    """
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_q_, i_b_ in qd.ndrange(qs_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(rigid_info.qpos))):
         rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]] = qpos[i_b_, i_q_]
+
+    if qd.static(rigid_config.has_dynamics):
+        qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+        for i_d, i_b_ in qd.ndrange(
+            is_dof_set.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_state.dofs.ctrl_force_int))
+        ):
+            if is_dof_set[i_d]:
+                dyn_state.dofs.ctrl_force_int[i_d, envs_idx[i_b_]] = 0.0  # Restart the integral term on a pose write
 
 
 @qd.kernel(fastcache=True)
@@ -516,6 +536,23 @@ def kernel_set_dofs_kv(
     else:
         for i_d_ in range(dofs_idx.shape[0]):
             dyn_info.dofs.act_bias[dofs_idx[i_d_]][2] = -kv[i_d_]
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_dofs_act_ki(
+    dofs_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    ki: qd.types.ndarray(),
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+):
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    if qd.static(rigid_config.batch_dofs_info):
+        for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_info.dofs.act_ki))):
+            dyn_info.dofs.act_ki[dofs_idx[i_d_], envs_idx[i_b_]] = ki[i_b_, i_d_]
+    else:
+        for i_d_ in range(dofs_idx.shape[0]):
+            dyn_info.dofs.act_ki[dofs_idx[i_d_]] = ki[i_d_]
 
 
 @qd.kernel(fastcache=True)
@@ -699,6 +736,7 @@ def kernel_set_dofs_position(
     is_dof_set: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     position: qd.types.ndarray(),
+    dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -723,6 +761,9 @@ def kernel_set_dofs_position(
             if is_dof_set[i_d]:
                 has_dof_set = True
         if has_dof_set:
+            if qd.static(rigid_config.has_dynamics):
+                for i_d in range(dof_start, dof_end):
+                    dyn_state.dofs.ctrl_force_int[i_d, i_b] = 0.0  # Restart the integral term on a pose write
             q_start = dyn_info.links.q_start[I_l]
             i_j = dyn_info.links.joint_start[I_l]
             I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
