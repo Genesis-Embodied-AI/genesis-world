@@ -7,16 +7,13 @@ import os
 import sys
 
 from OpenGL.GL import (
-    GL_COLOR_BUFFER_BIT,
-    GL_DEPTH_BUFFER_BIT,
     GL_RENDERER,
-    glClear,
     glGetString,
 )
 
 import genesis as gs
 
-from .constants import RenderFlags, ViewFlags
+from .constants import RenderFlags
 
 
 class OffscreenRenderer(object):
@@ -110,64 +107,24 @@ class OffscreenRenderer(object):
                 "Ensure that the right context is set before rendering. Please call the method 'make_current'."
             )
 
-        if camera_node is not None:
-            saved_camera_node = scene.main_camera_node
-            scene.main_camera_node = camera_node
-
+        flags |= RenderFlags.OFFSCREEN
         if shadow:
             flags |= RenderFlags.SHADOWS_ALL
-
-        if depth and not (rgb or seg):
-            flags |= RenderFlags.DEPTH_ONLY
-
         if plane_reflection:
             flags |= RenderFlags.REFLECTIVE_FLOOR
-
         if split_envs:
             flags |= RenderFlags.ENV_SEPARATE
-
-        # A debug view draws the markers, seen through what hides them, and the debug representation of the entities
-        if debug_view:
-            flags |= RenderFlags.MARKER_XRAY
-        else:
-            flags |= RenderFlags.SKIP_MARKERS
-        renderer.jit.view = ViewFlags.DEBUG if debug_view else ViewFlags.NORMAL
-
-        if seg:
-            seg_node_map = self._seg_node_map
-            flags |= RenderFlags.SEG
-        else:
-            seg_node_map = None
-
-        if depth:
-            flags |= RenderFlags.RET_DEPTH
-
-        first_pass_done = False
-        if rgb or depth or seg:
-            flags |= RenderFlags.OFFSCREEN
-            retval = renderer.render(scene, flags, seg_node_map, env_idx=env_idx)
-            assert retval is not None
-            first_pass_done = True
-        else:
-            retval = ()
-
-        if normal:
-            flags = RenderFlags.NORMAL | RenderFlags.OFFSCREEN
-            if split_envs:
-                flags |= RenderFlags.ENV_SEPARATE
-            if not debug_view:
-                flags |= RenderFlags.SKIP_MARKERS
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-
-            normal_arr, *_ = renderer.render(
-                scene, flags, is_first_pass=not first_pass_done, force_skip_shadows=True, env_idx=env_idx
-            )
-            retval = (*retval, normal_arr)
-
-        if camera_node is not None:
-            scene.main_camera_node = saved_camera_node
-
-        return retval
+        return renderer.render_images(
+            scene,
+            flags,
+            camera_node,
+            rgb=rgb,
+            depth=depth,
+            seg_node_map=self._seg_node_map if seg else None,
+            normal=normal,
+            env_idx=env_idx,
+            debug_view=debug_view,
+        )
 
     def delete(self):
         """Free all OpenGL resources."""

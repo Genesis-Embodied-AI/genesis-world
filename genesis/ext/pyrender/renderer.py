@@ -82,6 +82,7 @@ from .constants import (
     RenderFlags,
     TexFlags,
     TextAlign,
+    ViewFlags,
 )
 from .font import FontCache
 from .jit_render import is_env_pass
@@ -292,6 +293,81 @@ class Renderer(object):
         else:
             retval_list = tuple(val_list[0] for val_list in retval_list)
         return retval_list
+
+    def render_images(
+        self,
+        scene,
+        flags,
+        camera_node=None,
+        *,
+        rgb=True,
+        depth=False,
+        seg_node_map=None,
+        normal=False,
+        env_idx=None,
+        debug_view=False,
+    ):
+        """Render the images asked for, from a camera of a scene.
+
+        Parameters
+        ----------
+        scene : Scene
+            The scene to render.
+        flags : int
+            The flags of the render (see RenderFlags), on top of those that the other arguments set.
+        camera_node : Node, optional
+            The node of the camera to render from. Defaults to the main camera of the scene.
+        rgb : bool, optional
+            Whether to render the color image. Defaults to True.
+        depth : bool, optional
+            Whether to render the depth image. Defaults to False.
+        seg_node_map : dict, optional
+            The color of each node in a segmentation image, rendered in place of the color image when given. Defaults
+            to None.
+        normal : bool, optional
+            Whether to render the image of the normals of the surfaces. Defaults to False.
+        env_idx : int, optional
+            The environment to render, all of them when None. Defaults to None.
+        debug_view : bool, optional
+            Whether to draw the markers, seen through what hides them, and the debug representation of the entities.
+            Defaults to False.
+
+        Returns
+        -------
+        images : tuple
+            The color or segmentation image, the depth image and the normal image, those rendered offscreen alone and
+            in this order.
+        """
+        if camera_node is not None:
+            saved_camera_node = scene.main_camera_node
+            scene.main_camera_node = camera_node
+
+        flags |= RenderFlags.MARKER_XRAY if debug_view else RenderFlags.SKIP_MARKERS
+        self.jit.view = ViewFlags.DEBUG if debug_view else ViewFlags.NORMAL
+        if seg_node_map is not None:
+            flags |= RenderFlags.SEG
+        if depth:
+            flags |= RenderFlags.RET_DEPTH
+            if not (rgb or seg_node_map is not None):
+                flags |= RenderFlags.DEPTH_ONLY
+
+        images = ()
+        is_first_pass = True
+        if rgb or depth or seg_node_map is not None:
+            images = self.render(scene, flags, seg_node_map, env_idx=env_idx)
+            is_first_pass = False
+        if normal:
+            normal_flags = RenderFlags.NORMAL | RenderFlags.OFFSCREEN
+            normal_flags |= flags & (RenderFlags.ENV_SEPARATE | RenderFlags.SKIP_MARKERS)
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+            normal_image, *_ = self.render(
+                scene, normal_flags, is_first_pass=is_first_pass, force_skip_shadows=True, env_idx=env_idx
+            )
+            images = (*images, normal_image)
+
+        if camera_node is not None:
+            scene.main_camera_node = saved_camera_node
+        return images
 
     def render_text(
         self, text, x, y, font_name="OpenSans-Regular", font_pt=40, color=None, scale=1.0, align=TextAlign.BOTTOM_LEFT

@@ -15,9 +15,6 @@ import numpy as np
 import OpenGL
 from OpenGL.GL import (
     ArgumentError,
-    GL_COLOR_BUFFER_BIT,
-    GL_DEPTH_BUFFER_BIT,
-    glClear,
 )
 import pyglet
 
@@ -42,7 +39,6 @@ from .constants import (
     TARGET_OPEN_GL_MINOR,
     TEXT_PADDING,
     RenderFlags,
-    ViewFlags,
     TextAlign,
 )
 from .light import DirectionalLight
@@ -1091,10 +1087,6 @@ class Viewer(pyglet.window.Window):
         if renderer is None:
             renderer = self._renderer
 
-        if camera_node is not None:
-            saved_camera_node = self.scene.main_camera_node
-            self.scene.main_camera_node = camera_node
-
         # Set lighting
         vli = self.viewer_flags["lighting_intensity"]
         if self.viewer_flags["use_raymond_lighting"]:
@@ -1137,44 +1129,17 @@ class Viewer(pyglet.window.Window):
 
         if self.render_flags["offscreen"]:
             flags |= RenderFlags.OFFSCREEN
-        # A debug view draws the markers, seen through what hides them, and the debug representation of the entities
-        if self.render_flags["debug_view"]:
-            flags |= RenderFlags.MARKER_XRAY
-        else:
-            flags |= RenderFlags.SKIP_MARKERS
-        renderer.jit.view = ViewFlags.DEBUG if self.render_flags["debug_view"] else ViewFlags.NORMAL
-
-        seg_node_map = None
-        if self.render_flags["seg"]:
-            flags |= RenderFlags.SEG
-            seg_node_map = self._seg_node_map
-
-        if self.render_flags["depth"]:
-            flags |= RenderFlags.RET_DEPTH
-            if not (self.render_flags["rgb"] or self.render_flags["seg"]):
-                flags |= RenderFlags.DEPTH_ONLY
-
-        first_pass_done = False
-        if self.render_flags["rgb"] or self.render_flags["depth"] or self.render_flags["seg"]:
-            retval = renderer.render(self.scene, flags, seg_node_map=seg_node_map, env_idx=env_idx)
-            first_pass_done = True
-        else:
-            retval = ()
-
-        if normal:
-            flags = RenderFlags.NORMAL | RenderFlags.OFFSCREEN
-            if self.render_flags.get("split_envs", False):
-                flags |= RenderFlags.ENV_SEPARATE
-            if not self.render_flags["debug_view"]:
-                flags |= RenderFlags.SKIP_MARKERS
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-            normal_arr, *_ = renderer.render(scene, flags, is_first_pass=not first_pass_done, env_idx=env_idx)
-            retval = (*retval, normal_arr)
-
-        if camera_node is not None:
-            self.scene.main_camera_node = saved_camera_node
-
-        return retval
+        return renderer.render_images(
+            self.scene,
+            flags,
+            camera_node,
+            rgb=self.render_flags["rgb"],
+            depth=self.render_flags["depth"],
+            seg_node_map=self._seg_node_map if self.render_flags["seg"] else None,
+            normal=normal,
+            env_idx=env_idx,
+            debug_view=self.render_flags["debug_view"],
+        )
 
     def start(self, auto_refresh=True):
         import pyglet  # For some reason, this is necessary if 'pyglet.window.xlib' fails to import...
