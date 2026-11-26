@@ -81,6 +81,10 @@ class EQUALITY_TYPE(IntEnum):
     SCREW = 3
 
 
+# Number of parameters of an equality authored in a model file.
+EQUALITY_DATA_SIZE = 11
+
+
 class CTRL_MODE(IntEnum):
     POSITION = 0
     VELOCITY = 1

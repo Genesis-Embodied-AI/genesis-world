@@ -172,6 +172,44 @@ def long_chain():
     return mjcf
 
 
+@pytest.fixture(scope="session")
+def hanging_cable():
+    # A chain of capsules on ball joints, welded to a fixed anchor at its top and to a small sphere at its bottom
+    mjcf = ET.Element("mujoco", model="hanging_cable")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    anchor = ET.SubElement(worldbody, "body", name="anchor", pos="-0.38 -0.26 1.07")
+    ET.SubElement(anchor, "geom", type="sphere", size="0.01", contype="0", conaffinity="0")
+    weight = ET.SubElement(worldbody, "body", name="weight", pos="-0.38 -0.26 0.05")
+    ET.SubElement(weight, "freejoint")
+    ET.SubElement(
+        weight,
+        "geom",
+        type="sphere",
+        size="0.01",
+        mass="0.0005",
+        contype="1",
+        conaffinity="0",
+        condim="6",
+        priority="10",
+        friction="10 10 10",
+        solref="0.004 1",
+        solimp="9.88 8 0.001",
+    )
+    body = ET.SubElement(worldbody, "body", name="cable0", pos="-0.38 -0.26 0.06", quat="0 0.707107 0 0.707107")
+    ET.SubElement(body, "freejoint")
+    for i in range(25):
+        if i > 0:
+            body = ET.SubElement(body, "body", name=f"cable{i}", pos="0.04 0 0")
+            ET.SubElement(body, "joint", type="ball", damping="0.01", armature="0.001")
+        ET.SubElement(
+            body, "geom", type="capsule", size="0.005 0.02", pos="0.02 0 0", quat="0.707107 0 -0.707107 0", mass="0.001"
+        )
+    equality = ET.SubElement(mjcf, "equality")
+    ET.SubElement(equality, "weld", body1="cable24", body2="anchor")
+    ET.SubElement(equality, "weld", body1="cable0", body2="weight")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
 # Canonical skip reason registry.
 # When a test is skipped during setup with one of these reasons, the skip trace location is
 # normalized to point to the definition line below instead of scattered test function locations.
