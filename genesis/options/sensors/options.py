@@ -80,7 +80,9 @@ def _resolve_tracked_links(cls_name: str, data: Any) -> Any:
     if not isinstance(data, dict) or "tracked_links" not in data:
         return data
     if "track_link_idx" in data:
-        gs.logger.warning(f"{cls_name}: Both tracked_links and track_link_idx were provided, using tracked_links.")
+        gs.logger.warning(
+            f"{cls_name}: Both `tracked_links` and `track_link_idx` were provided, using `tracked_links`."
+        )
     data = dict(data)
     links = data.pop("tracked_links")
     if not is_sequence(links):
@@ -182,7 +184,7 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
         if "link" in data:
             if "entity_idx" in data or "link_idx_local" in data:
                 gs.logger.warning(
-                    f"{cls.__name__}: Both link and entity_idx or link_idx_local were provided, using link."
+                    f"{cls.__name__}: Both `link` and `entity_idx` or `link_idx_local` were provided, using `link`."
                 )
             data = dict(data)
             link = data.pop("link")
