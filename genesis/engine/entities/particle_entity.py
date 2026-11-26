@@ -217,8 +217,7 @@ class ParticleEntity(Entity):
 
         self._need_skinning = need_skinning
 
-        # The renderer deforms the visual mesh of the entity, so the description keeps its own at rest
-        self._vmesh = desc.vmesh.copy() if desc.vmesh is not None else None
+        self._vmesh = desc.vmesh
         if need_skinning and desc.vmesh is not None:
             self._vverts = np.asarray(desc.vmesh.verts, dtype=gs.np_float)
             self._vfaces = np.asarray(desc.vmesh.faces, dtype=gs.np_int)
