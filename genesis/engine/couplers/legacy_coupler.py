@@ -1583,12 +1583,36 @@ def func_pbd_collide_with_rigid_geom(
     contact_normal = sdf.sdf_func_normal_world(
         i_g, i_b, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
     )
+    pos_start = pbd_state.particles_reordered.ipos[i_p, i_b]
+    # The SDF at the predicted position points to the closest face, which is the far one once the particle center moves
+    # past the middle of a thin box within one substep. The face that the center enters through gives the side of
+    # contact instead. The sweep takes the pose of the box as constant over the substep, which holds for a fixed geom.
+    if geoms_info.is_fixed[i_g] and geoms_info.type[i_g] == gs.GEOM_TYPE.BOX:
+        box_pos = geoms_state.pos[i_g, i_b]
+        box_quat = geoms_state.quat[i_g, i_b]
+        pos_start_local = qd_inv_transform_by_trans_quat(pos_start, box_pos, box_quat)
+        pos_end_local = qd_inv_transform_by_trans_quat(pos_world, box_pos, box_quat)
+        geom_data = geoms_info.data[i_g]
+        box_half_size = 0.5 * gs.qd_vec3([geom_data[0], geom_data[1], geom_data[2]])
+        for axis in qd.static(range(3)):
+            side = qd.select(pos_start_local[axis] >= 0.0, 1.0, -1.0)
+            gap_start = side * pos_start_local[axis] - box_half_size[axis]
+            gap_end = side * pos_end_local[axis] - box_half_size[axis]
+            if gap_start >= 0.0 and gap_end < 0.0:
+                pos_hit = pos_start_local + gap_start / (gap_start - gap_end) * (pos_end_local - pos_start_local)
+                u, v = qd.static((axis + 1) % 3), qd.static((axis + 2) % 3)
+                if qd.abs(pos_hit[u]) <= box_half_size[u] and qd.abs(pos_hit[v]) <= box_half_size[v]:
+                    normal_local = qd.Vector.zero(gs.qd_float, 3)
+                    normal_local[axis] = side
+                    contact_normal = qd_transform_by_quat(normal_local, box_quat)
+                    signed_dist = gap_end
+
     new_pos = pos_world
     new_vel = vel
     particle_radius = pbd_info.particle_size[None] / 2
     if signed_dist < particle_radius:
         new_pos = pos_world + contact_normal * (particle_radius - signed_dist)
-        new_vel = (new_pos - pbd_state.particles_reordered.ipos[i_p, i_b]) / pbd_info.substep_dt[None]
+        new_vel = (new_pos - pos_start) / pbd_info.substep_dt[None]
 
         delta_mv = mass * (new_vel - vel)
         force = -delta_mv / rigid_info.substep_dt[None]
