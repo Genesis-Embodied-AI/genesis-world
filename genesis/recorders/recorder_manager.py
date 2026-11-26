@@ -1,5 +1,4 @@
 import functools
-import logging
 import threading
 import weakref
 from collections.abc import Callable
@@ -12,8 +11,6 @@ from genesis.utils.misc import BuildableMixin
 
 if TYPE_CHECKING:
     from .base_recorder import Recorder, RecorderOptions
-
-LOGGER = logging.getLogger(__name__)
 
 
 class RecorderManager(BuildableMixin):
@@ -85,11 +82,11 @@ class RecorderManager(BuildableMixin):
         self._is_built = True
 
         try:
-            # A run that ends without 'stop_recording' has its recordings stopped here. The hook runs before every
-            # 'atexit' callback, among them the one of 'pyplot', which puts the base canvas back on each figure and
-            # leaves the plotters nothing to draw on, and the one of Genesis, which destroys the scenes. The sample of
-            # the state the stop records stays out of a recording stopped this way, since an encoder closes its file in
-            # a hook of its own, registered at its first frame and therefore ahead of this one.
+            # A run that ends without 'stop_recording' has its recordings stopped here. Hooks registered through
+            # 'atexit.register' run after 'threading._shutdown', which deadlocks on the threads of the recorders, and
+            # after the hook of 'pyplot', which leaves the plotters a canvas they cannot draw on. An encoder closes its
+            # file in a hook of its own, registered at its first frame and therefore run after this one, so the sample
+            # a stop records is missing from a recording stopped this way.
             def stop_at_exit(manager_ref):
                 manager = manager_ref()
                 if manager is not None and manager._is_built and manager._is_recording:
@@ -98,7 +95,7 @@ class RecorderManager(BuildableMixin):
                     except Exception as error:
                         # 'threading' runs its exit hooks without catching anything, so a failure raised here would
                         # skip the hooks left and the join of the threads of the run
-                        (gs.logger or LOGGER).error(f"[DataRecorder] Stopping the recordings at exit failed: {error}")
+                        gs.logger.error(f"[DataRecorder] Stopping the recordings at exit failed: {error}")
 
             threading._register_atexit(functools.partial(stop_at_exit, weakref.ref(self)))
         except AttributeError:
