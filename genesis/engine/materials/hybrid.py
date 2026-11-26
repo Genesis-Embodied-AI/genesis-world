@@ -34,13 +34,11 @@ class Hybrid(Material["HybridEntity"]):
     func_instantiate_rigid_from_soft : callable, optional
         The function to instantiate rigid body from the geometry of soft body, for a mesh morph. It is called with the
         keyword arguments 'mesh', 'morph', 'material_rigid', 'material_hybrid' and 'surface', and returns the entity
-        spec of the rigid part, which Genesis adds to the scene. A function also taking a 'scene' argument adds the
-        part itself and returns the entity, which is deprecated. Default is None.
+        spec of the rigid part, which Genesis adds to the scene. Default is None.
     func_instantiate_soft_from_rigid : callable, optional
         The function to instantiate soft body from the geometry of rigid body, for a URDF morph. It is called with the
         keyword arguments 'part_rigid', 'material_soft', 'material_hybrid' and 'surface', and returns the entity spec
-        of the soft part, which Genesis adds to the scene. A function also taking a 'scene' argument adds the part
-        itself and returns the entity, which is deprecated. Default is None.
+        of the soft part, which Genesis adds to the scene. Default is None.
     func_instantiate_rigid_soft_association : callable, optional
         The function that determines the association of the rigid and the soft body. Default is None.
     """

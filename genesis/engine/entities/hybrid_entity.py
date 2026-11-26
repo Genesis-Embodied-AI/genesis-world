@@ -1,4 +1,3 @@
-import inspect
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -25,7 +24,6 @@ from genesis.utils.hybrid import (
     trimesh_to_gelmesh,
 )
 from genesis.utils.mesh import load_mesh
-from genesis.utils.warnings import warn_once
 
 from .base_entity import Entity, EntityDescription
 
@@ -75,14 +73,11 @@ class HybridEntityDescription(EntityDescription):
     muscle_groups: HybridMuscleGroupsDescription | None = None
 
     @classmethod
-    def resolve(
-        cls, spec: "gs.entities.Hybrid", surface: Surface, add_part: Callable[..., Entity], scene: "Scene"
-    ) -> Self:
+    def resolve(cls, spec: "gs.entities.Hybrid", surface: Surface, add_part: Callable[..., Entity]) -> Self:
         """Add the rigid and the soft parts of an entity spec to the scene, and associate the soft part with the links.
 
         'surface' is the one resolved from the spec, which the soft part takes. 'add_part' adds the entity spec of a
-        part to the scene and returns the entity. 'scene' is handed to an instantiation function of the hybrid material
-        that still adds its part itself, a deprecated form.
+        part to the scene and returns the entity.
         """
         morph = spec.morph
         material = spec.material
@@ -103,15 +98,13 @@ class HybridEntityDescription(EntityDescription):
             func_instantiate_soft_from_rigid = (
                 material.func_instantiate_soft_from_rigid or default_func_instantiate_soft_from_rigid
             )
-            part_soft = instantiate_part(
-                func_instantiate_soft_from_rigid,
-                add_part,
-                scene,
+            spec_soft = func_instantiate_soft_from_rigid(
                 part_rigid=part_rigid,
                 material_soft=material_soft,
                 material_hybrid=material,
                 surface=surface,
             )
+            part_soft = add_part(spec=spec_soft)
 
         elif isinstance(morph, gs.morphs.Mesh):
             # instantiate soft part
@@ -124,16 +117,14 @@ class HybridEntityDescription(EntityDescription):
             func_instantiate_rigid_from_soft = (
                 material.func_instantiate_rigid_from_soft or default_func_instantiate_rigid_from_soft
             )
-            part_rigid = instantiate_part(
-                func_instantiate_rigid_from_soft,
-                add_part,
-                scene,
+            spec_rigid = func_instantiate_rigid_from_soft(
                 mesh=mesh,
                 morph=morph,
                 material_rigid=material_rigid,
                 material_hybrid=material,
                 surface=surface_rigid,
             )
+            part_rigid = add_part(spec=spec_rigid)
 
         else:
             gs.raise_exception("`morph` in hybrid entity should be either URDF or Mesh")
@@ -191,8 +182,6 @@ class HybridEntity(Entity):
 
         self._part_rigid = get_entity(desc.part_rigid_name)
         self._part_soft = get_entity(desc.part_soft_name)
-        if not isinstance(self._part_soft.material, gs.materials.MPM.Base):
-            gs.raise_exception(f"Cannot handle soft material {self._part_soft.material}")
 
         # The soft part following the rigid links of its muscle groups, held without the default coupling alone
         self._mpm_hybrid_part: MPMHybridPart | None = None
@@ -470,22 +459,6 @@ def augment_link_world_coords(part_rigid):
 # ------------------------------------------------------------------------------------
 # ----------------------------- default instantiation --------------------------------
 # ------------------------------------------------------------------------------------
-
-
-def instantiate_part(func: Callable, add_part: Callable[..., Entity], scene: "Scene", **kwargs) -> Entity:
-    """Add the part of a hybrid entity that an instantiation function of the hybrid material states.
-
-    The function returns the entity spec of the part, which 'add_part' adds. A function taking a 'scene' argument
-    adds its part to the scene itself and returns the entity, a deprecated form.
-    """
-    if "scene" in inspect.signature(func).parameters:
-        warn_once(
-            func,
-            f"The hybrid instantiation function '{func.__name__}' adds its part to the scene it is given, which is "
-            "deprecated. Return the entity spec of the part instead, and drop its 'scene' argument.",
-        )
-        return func(scene=scene, **kwargs)
-    return add_part(spec=func(**kwargs))
 
 
 def default_func_instantiate_soft_from_rigid(part_rigid, material_soft, material_hybrid, surface):
