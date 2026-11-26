@@ -379,6 +379,18 @@ def test_geom_quadrants_identity(batch_shape, tol):
 
 
 @pytest.mark.required
+def test_z_up_to_R_colinear_up(tol):
+    # An up vector colinear with z leaves the roll of the frame free
+    z = np.concatenate((np.eye(3), -np.eye(3))).astype(gs.np_float)
+    for up in (z, -z):
+        for convert in (lambda x: x, partial(torch.as_tensor, device=gs.device)):
+            R = tensor_to_array(gu.z_up_to_R(convert(z), convert(up)))
+            assert_allclose(R[..., 2], z, tol=tol)
+            assert_allclose(R @ R.swapaxes(-1, -2), np.eye(3), tol=tol)
+            assert_allclose(np.linalg.det(R), 1.0, tol=tol)
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
 def test_geom_tensor_identity(batch_shape, tol):
     for py_funcs, shape_args in (

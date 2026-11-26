@@ -2018,9 +2018,12 @@ def _np_z_up_to_R(z, up=None, out=None):
             else:
                 z[:] = 0.0, 0.0, 1.0
 
+        x_norm = 0.0
         if up is not None:
             x[:] = np.cross(up[i], z)
-        else:
+            x_norm = np.linalg.norm(x)
+        # An up vector colinear with z leaves the roll free, exactly as no up vector at all
+        if x_norm < gs.EPS:
             if abs(z[2]) < 1.0 - gs.EPS:
                 # up = (0.0, 0.0, 1.0)
                 x[0] = z[1]
@@ -2031,14 +2034,10 @@ def _np_z_up_to_R(z, up=None, out=None):
                 x[0] = z[2]
                 x[1] = 0.0
                 x[2] = -z[0]
+            x_norm = np.linalg.norm(x)
 
-        x_norm = np.linalg.norm(x)
-        if x_norm > gs.EPS:
-            x /= x_norm
-            y[:] = np.cross(z, x)
-        else:
-            # This would only occurs if the user specified non-zero colinear z and up
-            R[:] = np.eye(3, dtype=R.dtype)
+        x /= x_norm
+        y[:] = np.cross(z, x)
 
     return out_
 
@@ -2057,25 +2056,23 @@ def _tc_z_up_to_R(z: torch.Tensor, up: torch.Tensor | None, eps: float) -> torch
         z = torch.where(zero_mask & up_mask, e_y, z)
         z = torch.where(zero_mask & ~up_mask, e_z, z)
 
-    # Compute x vectors (first column)
+    # Compute x vectors (first column), from a default up vector
+    up_mask = z[..., 2].abs() < 1.0 - eps
+    x = torch.stack(
+        (
+            torch.where(up_mask, z[..., 1], z[..., 2]),
+            torch.where(up_mask, -z[..., 0], 0.0),
+            torch.where(up_mask, 0.0, -z[..., 0]),
+        ),
+        dim=-1,
+    )
     if up is not None:
-        x = torch.cross(torch.broadcast_to(up, z.shape), z, dim=-1)
-    else:
-        up_mask = z[..., 2].abs() < 1.0 - eps
-        x = torch.stack(
-            (
-                torch.where(up_mask, z[..., 1], z[..., 2]),
-                torch.where(up_mask, -z[..., 0], 0.0),
-                torch.where(up_mask, 0.0, -z[..., 0]),
-            ),
-            dim=-1,
-        )
-    x_norm = torch.linalg.vector_norm(x, ord=2, dim=-1, keepdim=True)
-    x = x / x_norm.clamp(min=eps)
+        # An up vector colinear with z leaves the roll free, exactly as no up vector at all
+        x_up = torch.cross(torch.broadcast_to(up, z.shape), z, dim=-1)
+        x = torch.where(torch.linalg.vector_norm(x_up, ord=2, dim=-1, keepdim=True) < eps, x, x_up)
+    x = x / torch.linalg.vector_norm(x, ord=2, dim=-1, keepdim=True)
 
-    # Fall back to identity for zero-norm x vectors
-    R = torch.stack((x, torch.cross(z, x, dim=-1), z), dim=-1)
-    return torch.where(x_norm[..., None] < eps, torch.eye(3, device=z.device, dtype=z.dtype), R)
+    return torch.stack((x, torch.cross(z, x, dim=-1), z), dim=-1)
 
 
 def z_up_to_R(z, up=None, out=None):
