@@ -49,6 +49,18 @@ def test_surface_shortcut_resolution(tmp_path):
     assert hdr_emit.emissive_texture.image_path == str(hdr_path)
     # The renderers that read no HDR file draw the emission white
     assert_allclose(hdr_emit.get_rgba().color, 1.0, tol=gs.EPS)
+    # An HDR base scaled to black defers to the emission
+    hdr_black = gs.surfaces.BSDF(
+        diffuse_texture=gs.textures.ImageTexture(
+            image_path=str(hdr_path),
+            image_color=0.0,
+            encoding="linear",
+        ),
+        emissive_texture=ColorTexture(
+            color=(1.0, 0.5, 0.0),
+        ),
+    )
+    assert_allclose(hdr_black.get_rgba().color, (1.0, 0.5, 0.0, 1.0), tol=gs.EPS)
 
     # Explicit default_roughness wins over the roughness shortcut.
     override = gs.surfaces.Rough(roughness=0.7, default_roughness=0.5)
