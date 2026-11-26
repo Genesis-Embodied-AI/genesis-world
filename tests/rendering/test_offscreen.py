@@ -674,8 +674,6 @@ def test_render_api_advanced(tmp_path, n_envs, show_viewer, png_snapshot, render
             enable_collision=False,
         ),
         vis_options=gs.options.VisOptions(
-            # Disable shadows systematically for Rasterizer because they are forcibly disabled on CPU backend anyway
-            shadow=(renderer_type != RENDERER_TYPE.RASTERIZER),
             split_envs=False,
         ),
         renderer=renderer,
@@ -1373,8 +1371,6 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
 
     scene = gs.Scene(
         vis_options=gs.options.VisOptions(
-            # Disable shadows systematically for Rasterizer because they are forcibly disabled on CPU backend anyway
-            shadow=(renderer_type != RENDERER_TYPE.RASTERIZER),
             split_envs=(renderer_type == RENDERER_TYPE.RASTERIZER),
             segmentation_level="geom",
         ),
@@ -1862,8 +1858,6 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
         ),
         vis_options=gs.options.VisOptions(
             show_world_frame=True,
-            # Disable shadows systematically for Rasterizer because they are forcibly disabled on CPU backend anyway
-            shadow=False,
             split_envs=True,
             rendered_envs_idx=RENDERED_ENVS,
         ),

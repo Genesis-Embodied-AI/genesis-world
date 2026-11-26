@@ -1117,7 +1117,7 @@ class Viewer(pyglet.window.Window):
         elif self.render_flags["all_solid"]:
             flags |= RenderFlags.ALL_SOLID
 
-        if self.render_flags["shadows"] and not self._is_software:
+        if self.render_flags["shadows"]:
             flags |= RenderFlags.SHADOWS_ALL
         if self.render_flags["plane_reflection"] and not self._is_software:
             flags |= RenderFlags.REFLECTIVE_FLOOR
@@ -1361,8 +1361,7 @@ class Viewer(pyglet.window.Window):
         gs.logger.debug(f"Using interactive viewer OpenGL device: {renderer}")
         if self._is_software:
             gs.logger.info(
-                "Software rendering context detected. Shadows and plane reflection not supported. Beware rendering "
-                "will be extremely slow."
+                "Software rendering context detected. Plane reflection not supported. Beware rendering will be slow."
             )
 
         if auto_refresh:

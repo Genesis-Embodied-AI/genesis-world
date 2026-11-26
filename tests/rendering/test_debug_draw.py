@@ -120,10 +120,6 @@ def test_draw_debug(renderer, show_viewer):
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
 def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
     scene = gs.Scene(
-        vis_options=gs.options.VisOptions(
-            # Disable shadows systematically for Rasterizer because they are forcibly disabled on CPU backend anyway
-            shadow=(renderer_type != RENDERER_TYPE.RASTERIZER),
-        ),
         viewer_options=gs.options.ViewerOptions(
             # Force screen-independent low-quality resolution when running unit tests for consistency
             res=(320, 320),
@@ -214,7 +210,8 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
             debug_ray_hit_color=(0.5, 1.0, 1.0, 1.0),
         )
     )
-    # Behind the camera, so that moving it changes nothing in view
+    # Behind the camera, so that turning it changes nothing in view. A half turn about the vertical axis maps the box
+    # onto itself, which keeps the bounds of the scene that the shadows are fitted to.
     kinematic_box = scene.add_entity(
         gs.morphs.Box(
             size=(0.1, 0.1, 0.1),
@@ -257,7 +254,7 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
         pink_pixel_counts.append(((PINK_LOWER <= rgb_shown) & (rgb_shown <= PINK_UPPER)).all(axis=-1).sum())
     assert pink_pixel_counts[0] < pink_pixel_counts[1]
     assert_equal(rgb_shown, rgb_arr)
-    kinematic_box.set_pos((2.4, 2.4, 2.4))
+    kinematic_box.set_quat((0.0, 0.0, 0.0, 1.0))
     rgb_arr_kept, *_ = pyrender_viewer.render_offscreen(
         pyrender_viewer._camera_node, pyrender_viewer._renderer, rgb=True, depth=False, seg=False, normal=False
     )
@@ -277,10 +274,6 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
 def test_draw_debug_frustum_and_trajectory(n_envs, renderer_type, renderer, png_snapshot):
     scene = gs.Scene(
-        vis_options=gs.options.VisOptions(
-            # Disable shadows systematically for Rasterizer because they are forcibly disabled on CPU backend anyway
-            shadow=(renderer_type != RENDERER_TYPE.RASTERIZER),
-        ),
         viewer_options=gs.options.ViewerOptions(
             # Force screen-independent low-quality resolution when running unit tests for consistency
             res=(480, 320),

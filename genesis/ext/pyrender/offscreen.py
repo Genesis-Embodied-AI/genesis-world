@@ -108,8 +108,7 @@ class OffscreenRenderer(object):
             saved_camera_node = scene.main_camera_node
             scene.main_camera_node = camera_node
 
-        # Forcibly disable shadow for software rendering as it may hang indefinitely
-        if shadow and not self._is_software:
+        if shadow:
             flags |= RenderFlags.SHADOWS_ALL
 
         if depth and not (rgb or seg):
@@ -222,8 +221,7 @@ class OffscreenRenderer(object):
             pass
         if self._is_software:
             gs.logger.info(
-                "Software rendering context detected. Shadows and plane reflection not supported. Beware rendering "
-                "will be extremely slow."
+                "Software rendering context detected. Plane reflection not supported. Beware rendering will be slow."
             )
         self._platform.make_uncurrent()
 
