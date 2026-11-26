@@ -1238,7 +1238,7 @@ def func_linesearch_islands_coop(
         is_owner = tid < n_group
         is_active = False
         if is_owner:
-            is_active = constraint_state.island.improved[i_island, i_b]
+            is_active = qd.cast(constraint_state.island.improved[i_island, i_b], qd.u1)
         for k in qd.static(range(10)):
             sh_acc[k * _K + tid] = 0.0
         if qd.static(rigid_config.enable_signorini_contact):
@@ -1576,7 +1576,7 @@ def func_exit_islands_coop(
         i_island = base + tid
         is_active = False
         if tid < n_group:
-            is_active = constraint_state.island.improved[i_island, i_b]
+            is_active = qd.cast(constraint_state.island.improved[i_island, i_b], qd.u1)
         for k in qd.static(range(7)):
             sh_acc[k * _K + tid] = 0.0
         qd.simt.block.sync()

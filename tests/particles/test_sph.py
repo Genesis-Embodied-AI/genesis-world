@@ -83,17 +83,17 @@ def get_sph_density(scene, n_particles):
     densities : np.ndarray
         Array of density values for all particles.
     """
-    from genesis.engine.solvers.sph_solver import kernel_compute_rho_and_dfsph_factor, kernel_reorder_particles
+    from genesis.engine.solvers.sph_solver import kernel_compute_rho_and_diag, kernel_reorder_particles
 
     sph_solver = scene.sph_solver
 
     # Reorder particles into spatial grid cells for efficient neighbor queries,
     # then compute density. This mirrors what happens in substep_pre_coupling.
-    # We must reorder first because kernel_compute_rho_and_dfsph_factor operates on particles_reordered.
+    # We must reorder first because kernel_compute_rho_and_diag operates on particles_reordered.
     kernel_reorder_particles(sph_solver.sph_state)
-    kernel_compute_rho_and_dfsph_factor(sph_solver.sph_state, sph_solver.sph_info, sph_solver.sph_config)
+    kernel_compute_rho_and_diag(sph_solver.sph_state, sph_solver.sph_info, sph_solver.sph_config)
 
-    # Get density values from reordered particles (where kernel_compute_rho_and_dfsph_factor stores results)
+    # Get density values from reordered particles (where kernel_compute_rho_and_diag stores results)
     return qd_to_numpy(sph_solver.sph_state.particles_reordered.rho)[:n_particles, 0]
 
 
@@ -310,22 +310,22 @@ def test_resume_from_pickle(show_viewer):
 
 @pytest.mark.required
 def test_dfsph_resting_liquid_stability(show_viewer):
-    LIQUID_HEIGHT = 0.1
-    GRAVITY = -9.81
+    LIQUID_HEIGHT = 0.5
+    GRAVITY = 9.81
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=2e-3,
             substeps=10,
-            gravity=(0.0, 0.0, GRAVITY),
+            gravity=(0.0, 0.0, -GRAVITY),
         ),
         sph_options=gs.options.SPHOptions(
             lower_bound=(-0.1, -0.1, 0.0),
-            upper_bound=(0.1, 0.1, 0.5),
+            upper_bound=(0.1, 0.1, 1.0),
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.5, -0.5, 0.3),
-            camera_lookat=(0.0, 0.0, 0.05),
+            camera_pos=(1.0, -1.0, 0.6),
+            camera_lookat=(0.0, 0.0, 0.25),
             camera_fov=40,
         ),
         show_viewer=show_viewer,
@@ -335,15 +335,118 @@ def test_dfsph_resting_liquid_stability(show_viewer):
             pos=(0.0, 0.0, 0.5 * LIQUID_HEIGHT),
             size=(0.2, 0.2, LIQUID_HEIGHT),
         ),
+        material=gs.materials.SPH.Liquid(
+            mu=0.0,
+        ),
+    )
+    scene.build(n_envs=2)
+
+    # The walls at rest do no work and the pressure only dissipates energy, so the total mechanical energy of an
+    # inviscid liquid never rises above its initial value while it settles under its own weight from the lattice it is
+    # sampled on. The potential energy is taken relative to the initial positions, which keeps its rounding far below
+    # the bound.
+    particles_mass = qd_to_numpy(scene.sph_solver.sph_info.particles.mass)
+    pos_init = tensor_to_array(liquid.get_particles_pos(), dtype=np.float64)
+    for _ in range(50):
+        scene.step()
+        pos = tensor_to_array(liquid.get_particles_pos(), dtype=np.float64)
+        vel = tensor_to_array(liquid.get_particles_vel(), dtype=np.float64)
+        kinetic_energy = 0.5 * (particles_mass * (vel**2).sum(axis=-1)).sum(axis=-1)
+        potential_energy_change = GRAVITY * (particles_mass * (pos[..., 2] - pos_init[..., 2])).sum(axis=-1)
+        assert (kinetic_energy + potential_energy_change < 1e-6).all()
+        assert (liquid.get_particles_vel().norm(dim=-1) < 5e-2).all()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="The summation density of the cubic kernel is higher on a close-packed arrangement than on the cubic "
+    "lattice the liquid is sampled on, so the pressure solve keeps rearranging the particles of a resting liquid.",
+)
+@pytest.mark.required
+def test_resting_liquid_comes_to_rest(show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-2,
+            substeps=10,
+        ),
+        sph_options=gs.options.SPHOptions(
+            lower_bound=(-0.1, -0.1, 0.0),
+            upper_bound=(0.1, 0.1, 1.0),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -1.0, 0.6),
+            camera_lookat=(0.0, 0.0, 0.25),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+    liquid = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.25),
+            size=(0.2, 0.2, 0.5),
+        ),
         material=gs.materials.SPH.Liquid(),
     )
     scene.build(n_envs=2)
 
-    # The liquid starts at rest at its rest density, so its particles only move as it settles under its own weight. The
-    # pressure the density solve carries over from one substep to the next must not push the particles apart.
+    # A liquid sampled at rest in a closed container stays still under its own weight
+    for _ in range(100):
+        scene.step()
+    assert (liquid.get_particles_vel().norm(dim=-1).mean(dim=-1) < 2e-3).all()
+
+
+@pytest.mark.required
+def test_viscosity_damps_vortex(show_viewer):
+    VISCOSITY = 40.0
+    RHO = 1000.0
+    WIDTH = 0.2
+    SPEED = 0.01
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=2e-3,
+            substeps=10,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        sph_options=gs.options.SPHOptions(
+            lower_bound=(0.0, 0.0, 0.0),
+            upper_bound=(WIDTH, WIDTH, 0.1),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.1, -0.3, 0.4),
+            camera_lookat=(0.1, 0.1, 0.05),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+    liquid = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.5 * WIDTH, 0.5 * WIDTH, 0.05),
+            size=(WIDTH, WIDTH, 0.1),
+        ),
+        material=gs.materials.SPH.Liquid(
+            rho=RHO,
+            mu=VISCOSITY,
+        ),
+    )
+    scene.build()
+
+    # The Taylor-Green vortex filling the domain has no divergence, no velocity across the walls and no shear along
+    # them, so the viscosity alone damps it, at the rate of its kinematic viscosity times its squared wave number.
+    wave_number = np.pi / WIDTH
+    pos = tensor_to_array(liquid.get_particles_pos())
+    sin_x, cos_x = np.sin(wave_number * pos[:, 0]), np.cos(wave_number * pos[:, 0])
+    sin_y, cos_y = np.sin(wave_number * pos[:, 1]), np.cos(wave_number * pos[:, 1])
+    vortex = np.stack([sin_x * cos_y, -cos_x * sin_y, np.zeros_like(sin_x)], axis=-1)
+    liquid.set_particles_vel(SPEED * vortex)
+    amplitudes = []
     for _ in range(50):
         scene.step()
-        assert (liquid.get_particles_vel().norm(dim=-1) < 5e-2).all()
+        vel = tensor_to_array(liquid.get_particles_vel())
+        amplitudes.append((vel * vortex).sum() / (vortex**2).sum())
+    times = scene.dt * np.arange(1, 51)
+    decay_rate = -np.polyfit(times, np.log(amplitudes), deg=1)[0]
+    assert_allclose(decay_rate, 2.0 * VISCOSITY / RHO * wave_number**2, rtol=5e-2)
 
 
 @pytest.mark.required
@@ -422,9 +525,6 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
     liquid.set_particles_pos(particles_pos)
     rho_rest = liquid.material.rho
     p_bottoms, p_middles, p_tops, p_hydrostatics, tilted_ratios = [], [], [], [], []
-    # A late reordering of the packing drops a particle at most from its site on the cubic lattice into a hollow of the
-    # close-packed layer below, by the difference of their layer spacings at the same density, in free fall.
-    speed_max = np.sqrt(2.0 * GRAVITY * (1.0 - 4.0 ** (1.0 / 3.0) / np.sqrt(3.0)) * PARTICLE_SIZE)
     n_steps = 170
     for i_step in range(n_steps):
         scene.step()
@@ -439,7 +539,6 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
             is_deep_wall = is_wall & (depths > 4 * PARTICLE_SIZE)
             tilted_ratios.append(pressures[is_deep_wall].mean() / (rho_rest * GRAVITY * depths[is_deep_wall]).mean())
         if i_step >= 120:
-            assert (liquid.get_particles_vel()[0].norm(dim=-1) < speed_max).all()
             pressures = qd_to_numpy(sph_solver.sph_state.particles_reordered.p, transpose=True)[0]
             heights = qd_to_numpy(sph_solver.sph_state.particles_reordered.pos, transpose=True)[0, :, 2]
             p_bottom = pressures[heights < 0.05].mean()

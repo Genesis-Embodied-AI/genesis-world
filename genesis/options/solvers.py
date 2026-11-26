@@ -868,8 +868,8 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
 
 class SPHOptions(GravityMixin, TimeBasedMixin):
     """
-    Options configuring the SPHSolver, which keeps the liquid incompressible with divergence-free smoothed particle
-    hydrodynamics (DFSPH).
+    Options configuring the SPHSolver, which keeps the smoothed particle hydrodynamics (SPH) liquid incompressible by
+    solving for the non-negative pressures that hold every particle at most at its rest density.
 
     The liquid is a single incompressible phase, without air to cushion its impacts, so the pressure it exerts on a wall
     it strikes exceeds measured values: averaged over a few milliseconds, the first impact of a dam break on the
@@ -892,17 +892,14 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
         Size of the spatially-repetitive spatial hashing grid in meters. If none, it will be computed automatically. Defaults to None.
     hash_grid_cell_size : float, optional
         Size of the lattic cell of the spatial hashing grid in meters. This should be at least 2 * `particle_size`. If none, it will be computed automatically. Defaults to None.
-    max_divergence_error : float, optional
-        Maximum divergence error for DFSPH. Defaults to 0.1.
     max_density_error_percent : float, optional
-        Average density error that DFSPH allows at the end of a substep, in percent of the rest density, so 0.1 means
-        0.1%. A lower value keeps the liquid closer to incompressible and its pressure steadier from one substep to the
-        next, at the cost of more solver iterations per substep. A larger value saves iterations, but lets the pressure
-        swing between substeps, which can shake a liquid at rest and the bodies it carries. Defaults to 0.01.
-    max_divergence_solver_iterations : int, optional
-        Maximum number of iterations for the divergence solver. Defaults to 100.
+        Average density error that the pressure solve allows at the end of a substep, in percent of the rest density,
+        so 0.1 means 0.1%. A lower value keeps the liquid closer to incompressible and conserves its energy better, at
+        the cost of more solver iterations per substep. A larger value saves iterations, but the density error it leaves
+        is corrected in the next substeps by pushing the particles apart, which feeds energy into the liquid and can
+        keep a liquid at rest moving. Defaults to 1e-4.
     max_density_solver_iterations : int, optional
-        Maximum number of iterations for the density solver. Defaults to 100.
+        Maximum number of iterations of the pressure solve per substep. Defaults to 100.
     vis : gs.options.ParticleVisOptions, optional
         How the entities of the solver are drawn and the markers it draws (see ``gs.options.ParticleVisOptions``).
     """
@@ -916,10 +913,8 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
     hash_grid_res: Vec3FType | None = None  # size of the spatially-repetitive hash grid in meters
     hash_grid_cell_size: PositiveFloat | None = None  # size of the cubic cell in meters
 
-    # DFSPH parameters
-    max_divergence_error: PositiveFloat = 0.1
-    max_density_error_percent: PositiveFloat = 0.01
-    max_divergence_solver_iterations: PositiveInt = 100
+    # Pressure solve parameters
+    max_density_error_percent: PositiveFloat = 1e-4
     max_density_solver_iterations: PositiveInt = 100
 
     vis: ParticleVisOptions = Field(default_factory=ParticleVisOptions)

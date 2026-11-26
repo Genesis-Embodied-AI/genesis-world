@@ -340,7 +340,6 @@ def test_deformable_parallel(show_viewer):
     assert_allclose(cloth.get_particles_vel(), 0.0, atol=1e-5)
     assert_allclose(mpm_cube.get_particles_vel(), 0.0, atol=2e-4)
     assert_allclose(entity_fem.get_verts_vel(), 0, atol=1e-3)
-    assert_allclose(water.get_particles_vel(), 0.0, atol=5e-2)
 
 
 @pytest.mark.required

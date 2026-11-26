@@ -153,7 +153,7 @@ def _func_update_qfrc_constraint_per_dof(
             con_n = constraint_state.n_constraints[i_b]
             if qd.static(not rigid_config.is_single_island):
                 i_island = constraint_state.island.dofs_island_idx[i_d, i_b]
-                is_island_moving = constraint_state.island.improved[i_island, i_b]
+                is_island_moving = qd.cast(constraint_state.island.improved[i_island, i_b], qd.u1)
                 con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
                 con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
             if is_island_moving:
