@@ -45,9 +45,6 @@ obj_sand = scene.add_entity(
             size=(0.3, 0.3, 0.3),
         ),
         material=gs.materials.MPM.Liquid(),
-        surface=gs.surfaces.Default(
-            color=(0.3, 0.3, 1.0),
-        ),
         vis=gs.options.EntityVisOptions(
             debug=True,
         ),

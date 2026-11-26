@@ -108,6 +108,20 @@ def translucent_box_obj(asset_tmp_path):
 
 
 @pytest.fixture(scope="session")
+def glossy_quad_obj(asset_tmp_path):
+    """Path to an OBJ quad of side 1.0 facing up, whose gray material has a shininess (Ns) of 1000."""
+    material = trimesh.visual.material.SimpleMaterial(diffuse=(128, 128, 128, 255), glossiness=1000.0)
+    path = asset_tmp_path / "glossy_quad.obj"
+    trimesh.Trimesh(
+        vertices=[[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, 0.5, 0.0]],
+        faces=[[0, 1, 2], [0, 2, 3]],
+        visual=trimesh.visual.TextureVisuals(uv=[[0, 0], [1, 0], [1, 1], [0, 1]], material=material),
+        process=False,
+    ).export(path, mtl_name="glossy_quad.mtl")
+    return str(path)
+
+
+@pytest.fixture(scope="session")
 def offset_box_obj(asset_tmp_path):
     """Path to an OBJ box of side 0.2 centred 1 m away from the origin of its frame, along x."""
     box = trimesh.creation.box(extents=(0.2, 0.2, 0.2))

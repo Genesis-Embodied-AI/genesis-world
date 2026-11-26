@@ -36,9 +36,6 @@ liquid = scene.add_entity(
         pos=(0.0, 0.0, 0.65),
         size=(0.4, 0.4, 0.4),
     ),
-    surface=gs.surfaces.Default(
-        color=(0.4, 0.8, 1.0),
-    ),
 )
 
 scene.build()

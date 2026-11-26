@@ -37,6 +37,27 @@ POSE_MAX_ABS = 1e20
 SEGMENTATION_LEVELS = ("entity", "link", "geom")
 
 
+class _MaterialFactors(NamedTuple):
+    metallic_factor: float = 0.0
+    roughness_factor: float = 1.0
+    base_color_factor: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    transmission_factor: float = 0.0
+    ior: float | None = None
+
+
+def _get_material_factors(surface: "gs.surfaces.Surface | None") -> _MaterialFactors:
+    # A mesh drawn without a surface (a marker, a debug geometry) takes the factors of the default surface
+    if surface is None:
+        return _MaterialFactors()
+    return _MaterialFactors(
+        surface.metallic_factor,
+        surface.roughness_factor,
+        surface.base_color_factor,
+        surface.transmission_factor,
+        surface.ior,
+    )
+
+
 class SegmentationColorMap:
     def __init__(self, seed: int = 0, to_torch: bool = False):
         self.seed = seed
@@ -556,6 +577,7 @@ class RasterizerContext(BuildableMixin):
                         is_marker=is_marker,
                         views=0,
                         inst_tints=mesh_tints,
+                        **_get_material_factors(geometry.surface)._asdict(),
                     )
                     vis_materials += [
                         (key, mesh_node.primitives[0].material)
@@ -668,6 +690,7 @@ class RasterizerContext(BuildableMixin):
                         is_marker=is_marker,
                         views=views,
                         inst_tints=None if tints is None else tints[i_r, None],
+                        **_get_material_factors(shape.surface)._asdict(),
                     )
                     nodes.append(self._add_node_seg(mesh_node, seg_keys=None if is_marker else shape.seg_keys))
                 if shape.textures:
@@ -711,6 +734,7 @@ class RasterizerContext(BuildableMixin):
                         shape.surface, n_verts=len(shape_nodes.tets_mesh.vertices)
                     )
                     vels = self._read(shape.vel, shape_nodes, arrays_host)
+                material_factors = _get_material_factors(shape.surface)._asdict()
                 for i_r, (env_i, pos) in enumerate(zip(nodes_env, poss)):
                     if sphere is None:
                         mesh_node = pyrender.Mesh.from_points(
@@ -721,10 +745,22 @@ class RasterizerContext(BuildableMixin):
                         tets_mesh.vertices = mu.transform_tets_mesh_verts(
                             tets_mesh.vertices, positions=pos, zs=vels[i_r]
                         )
-                        mesh_node = pyrender.Mesh.from_trimesh(tets_mesh, smooth=False, envs=env_i, views=views)
+                        mesh_node = pyrender.Mesh.from_trimesh(
+                            tets_mesh,
+                            smooth=False,
+                            envs=env_i,
+                            views=views,
+                            **material_factors,
+                        )
                     else:
                         mesh_node = pyrender.Mesh.from_trimesh(
-                            sphere, smooth=True, poses=gu.trans_to_T(pos), envs=env_i, is_marker=is_marker, views=views
+                            sphere,
+                            smooth=True,
+                            poses=gu.trans_to_T(pos),
+                            envs=env_i,
+                            is_marker=is_marker,
+                            views=views,
+                            **material_factors,
                         )
                     nodes.append(self._add_node_seg(mesh_node, seg_keys=None if is_marker else shape.seg_keys))
             elif shape_nodes.tets_mesh is not None:

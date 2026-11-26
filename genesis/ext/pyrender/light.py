@@ -13,7 +13,7 @@ from OpenGL.GL import *
 
 from .utils import format_color_vector
 from .texture import Texture, CubeMapTexture
-from .constants import DIRECTIONAL_SHADOW_TEX_SZ, SHADOW_TEX_SZ
+from .constants import DIRECTIONAL_SHADOW_TEX_SZ, POINT_SHADOW_TEX_SZ, SHADOW_TEX_SZ
 from .camera import OrthographicCamera, PerspectiveCamera
 
 
@@ -220,7 +220,7 @@ class PointLight(Light):
             Size of texture map. Must be a positive power of two.
         """
         if size is None:
-            size = SHADOW_TEX_SZ
+            size = POINT_SHADOW_TEX_SZ
         self.shadow_texture = CubeMapTexture(size, size)
 
     def _get_shadow_camera(self, scene_scale):

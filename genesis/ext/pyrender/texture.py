@@ -300,17 +300,17 @@ class Texture(object):
         glTexParameterfv(self.tex_type, GL_TEXTURE_BORDER_COLOR, border_color)
 
         if fmt == GL_DEPTH_COMPONENT:
-            # A depth texture is a shadow map read through a sampler2DShadow: a fetch compares the fragment depth against
-            # the texels and blends the comparisons bilinearly, further from the light counting as shadowed. The border
-            # depth of 1.0 leaves fragments beyond the map lit.
+            # A depth texture is a shadow map read through a sampler2DShadow: a fetch compares the fragment depth
+            # against the texels and blends the comparisons bilinearly, further from the light counting as shadowed.
+            # The border depth of 1.0 leaves fragments beyond the map lit. A shadow map takes no anisotropic filtering,
+            # whose depth comparisons differ between GPUs and software renderers at grazing angles.
             glTexParameteri(self.tex_type, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE)
             glTexParameteri(self.tex_type, GL_TEXTURE_COMPARE_FUNC, GL_GREATER)
             glTexParameteri(self.tex_type, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
             glTexParameteri(self.tex_type, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
             glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER)
             glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER)
-
-        if texture_filter_anisotropic.glInitTextureFilterAnisotropicEXT():
+        elif texture_filter_anisotropic.glInitTextureFilterAnisotropicEXT():
             max_aniso = glGetFloat(texture_filter_anisotropic.GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT)
             glTexParameterf(GL_TEXTURE_2D, texture_filter_anisotropic.GL_TEXTURE_MAX_ANISOTROPY_EXT, max_aniso)
         else:

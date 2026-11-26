@@ -195,10 +195,6 @@ def test_deformable_uv_textures(renderer_type, renderer, show_viewer, png_snapsh
         pbd_options=gs.options.PBDOptions(
             particle_size=0.01,
         ),
-        vis_options=gs.options.VisOptions(
-            # Disable shadows systematically for Rasterizer because they are forcibly disabled on CPU backend anyway
-            shadow=(renderer_type != RENDERER_TYPE.RASTERIZER),
-        ),
         renderer=renderer,
         show_viewer=show_viewer,
         show_FPS=False,

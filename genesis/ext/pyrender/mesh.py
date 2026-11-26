@@ -7,6 +7,7 @@ Author: Matthew Matl
 import copy
 
 import numpy as np
+
 import trimesh
 
 from .constants import GLTF, ViewFlags
@@ -171,6 +172,11 @@ class Mesh(object):
         is_floor=False,
         envs=None,
         inst_tints=None,
+        metallic_factor=0.0,
+        roughness_factor=1.0,
+        base_color_factor=(1.0, 1.0, 1.0),
+        transmission_factor=0.0,
+        ior=1.5,
     ):
         """Create a Mesh from a :class:`~trimesh.base.Trimesh`.
 
@@ -200,6 +206,18 @@ class Mesh(object):
             Defaults to every environment.
         inst_tints : (n,4) float, optional
             RGBA tint of every instance (see :class:`Primitive`). Defaults to None.
+        metallic_factor : float, optional
+            Metalness of the material made from the vertex colors, the face colors or the simple material of the mesh.
+            A physically based rendering (PBR) material keeps its own. Defaults to 0.0.
+        roughness_factor : float, optional
+            Roughness of the material made from the vertex colors, the face colors or the simple material of the mesh.
+            A PBR material keeps its own. Defaults to 1.0.
+        base_color_factor : (3,) float, optional
+            Color that the base color of every material made from the mesh is multiplied by. Defaults to white.
+        transmission_factor : float, optional
+            Share of the light that the materials made from the mesh let through. Defaults to 0.0.
+        ior : float | None, optional
+            Index of refraction of the materials made from the mesh, 1.5 if None. Defaults to 1.5.
 
         Returns
         -------
@@ -232,7 +250,9 @@ class Mesh(object):
                 vertex_mapping = m.faces.reshape((-1,))
 
             # Compute colors, texture coords, and material properties
-            color_0, texcoord_0, primitive_material = Mesh._get_trimesh_props(m, smooth=smooth, material=material)
+            color_0, texcoord_0, primitive_material = Mesh._get_trimesh_props(
+                m, smooth=smooth, material=material, metallic_factor=metallic_factor, roughness_factor=roughness_factor
+            )
 
             # Override if material is given. Shallow-copy so per-primitive state (e.g. wireframe) stays isolated, while
             # the heavy Texture objects stay shared with the source material. Primitives reusing one material then
@@ -243,8 +263,16 @@ class Mesh(object):
             if primitive_material is None:
                 # Replace material with default if needed
                 primitive_material = MetallicRoughnessMaterial(
-                    alphaMode="BLEND", baseColorFactor=[0.3, 0.3, 0.3, 1.0], metallicFactor=0.2, roughnessFactor=0.8
+                    alphaMode="BLEND",
+                    baseColorFactor=[0.3, 0.3, 0.3, 1.0],
+                    metallicFactor=metallic_factor,
+                    roughnessFactor=roughness_factor,
                 )
+            if material is None:
+                primitive_material.baseColorFactor = primitive_material.baseColorFactor * (*base_color_factor, 1.0)
+                # The materials of trimesh hold no transmission, so every material made here takes the given one
+                primitive_material.transmissionFactor = transmission_factor
+                primitive_material.ior = ior
 
             primitive_material.wireframe = wireframe
 
@@ -270,7 +298,7 @@ class Mesh(object):
         return Mesh(primitives=primitives, name=name, is_visible=is_visible, is_marker=is_marker, views=views)
 
     @staticmethod
-    def _get_trimesh_props(mesh, smooth=False, material=None):
+    def _get_trimesh_props(mesh, smooth, material, *, metallic_factor, roughness_factor):
         """Gets the vertex colors, texture coordinates, and material properties
         from a :class:`~trimesh.base.Trimesh`.
         """
@@ -295,8 +323,8 @@ class Mesh(object):
                 material = MetallicRoughnessMaterial(
                     alphaMode="OPAQUE" if colors.shape[-1] < 4 or (colors[..., 3] == 255).all() else "BLEND",
                     baseColorFactor=[1.0, 1.0, 1.0, 1.0],
-                    metallicFactor=0.2,
-                    roughnessFactor=0.8,
+                    metallicFactor=metallic_factor,
+                    roughnessFactor=roughness_factor,
                 )
             # Process face colors
             elif mesh.visual.kind == "face":
@@ -307,8 +335,8 @@ class Mesh(object):
                 material = MetallicRoughnessMaterial(
                     alphaMode="OPAQUE" if colors.shape[-1] < 4 or (colors[..., 3] == 255).all() else "BLEND",
                     baseColorFactor=[1.0, 1.0, 1.0, 1.0],
-                    metallicFactor=0.2,
-                    roughnessFactor=0.8,
+                    metallicFactor=metallic_factor,
+                    roughnessFactor=roughness_factor,
                 )
 
         # Process texture colors
@@ -341,15 +369,10 @@ class Mesh(object):
                         alphaCutoff=mat.alphaCutoff,
                     )
                 elif isinstance(mat, trimesh.visual.texture.SimpleMaterial):
-                    glossiness = mat.kwargs.get("Ns", 1.0)
-                    if isinstance(glossiness, list):
-                        glossiness = float(glossiness[0])
-                    roughness = (2 / (glossiness + 2)) ** (1.0 / 4.0)
                     material = MetallicRoughnessMaterial(
                         alphaMode="OPAQUE" if (np.asarray(mat.image.convert("RGBA"))[..., 3] == 255).all() else "BLEND",
-                        roughnessFactor=roughness,
-                        # NOTE: most assets seems to have incorrect mat.diffuse when texture image exists, So let's just use white for baseColorFactor
-                        # baseColorFactor=np.array([255, 255, 255, 255], dtype=np.uint8) if mat.image is not None else mat.diffuse,
+                        metallicFactor=metallic_factor,
+                        roughnessFactor=roughness_factor,
                         baseColorFactor=mat.diffuse,
                         baseColorTexture=mat.image,
                     )

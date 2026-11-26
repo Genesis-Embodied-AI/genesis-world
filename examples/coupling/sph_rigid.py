@@ -47,9 +47,6 @@ def main():
             pos=(0.5, 0.0, 0.6),
             size=(0.9, 1.6, 1.2),
         ),
-        surface=gs.surfaces.Default(
-            color=(0.5, 0.7, 0.9, 1.0),
-        ),
     )
 
     cube = scene.add_entity(

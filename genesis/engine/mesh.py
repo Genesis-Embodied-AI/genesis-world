@@ -540,10 +540,11 @@ class Mesh(RBC, serialization.SerializationMixin):
                 color_factor = tuple(np.array(visual.main_color, dtype=np.float32) / 255.0)
         elif isinstance(surface.texture, gs.textures.ColorTexture):
             color_factor = surface.texture.color
-        elif (isinstance(visual, trimesh.visual.color.ColorVisuals) and visual.defined) or (
-            isinstance(visual, trimesh.visual.color.VertexColor) and visual.vertex_colors.size > 0
+        elif surface.texture is None and (
+            (isinstance(visual, trimesh.visual.color.ColorVisuals) and visual.defined)
+            or (isinstance(visual, trimesh.visual.color.VertexColor) and visual.vertex_colors.size > 0)
         ):
-            # Color is already vertex-based. It is not only necessary to create a new visual.
+            # Color is already vertex-based, and the surface gives no texture of its own to draw instead
             must_update_surface = False
         else:
             # use white color as default
