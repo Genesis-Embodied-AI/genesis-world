@@ -1,4 +1,5 @@
 import csv
+import os
 import pathlib
 import subprocess
 import sys
@@ -308,26 +309,43 @@ def test_file_writers(tmp_path):
     assert scene.timings["period"] > timings["step"] > 0.0
 
 
-def _stop_recording_then_exit_child(args: list[str]):
-    """Child process: stop recording, then exit while the exit hook of the recorder is still registered."""
+def _exit_with_recordings_child(args: list[str]):
+    """Child process: exit with a threaded recorder and a plotter drawing through 'pyplot', stopped or still running."""
     gs.init(backend=gs.constants.backend.cpu)
 
     scene = gs.Scene(show_viewer=False)
     scene.add_recorder(data_func=lambda: 1.0, rec_options=gs.recorders.NPZFile(filename=args[0]))
+    scene.add_recorder(
+        data_func=lambda: 1.0,
+        rec_options=gs.recorders.MPLLinePlot(labels=("value",), save_to_filename=args[1], show_window=False),
+    )
     scene.build()
     scene.step()
-    scene.stop_recording()
+    if args[2] == "True":
+        scene.stop_recording()
 
     sys.exit(RET_SUCCESS)
 
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [None])
-def test_stop_recording_then_exit(tmp_path):
+@pytest.mark.parametrize("stop_recording", [True, False])
+def test_exit_with_recordings(stop_recording, tmp_path):
     npz_file = tmp_path / "data.npz"
-    cmd_line = [sys.executable, "-m", MODULE, _stop_recording_then_exit_child.__name__, str(npz_file)]
+    video_file = tmp_path / "plot.mp4"
+    cmd_line = [
+        sys.executable,
+        "-m",
+        MODULE,
+        _exit_with_recordings_child.__name__,
+        str(npz_file),
+        str(video_file),
+        str(stop_recording),
+    ]
 
-    proc = subprocess.run(cmd_line, capture_output=True, text=True, encoding="utf-8", cwd=MODULE_ROOT_DIR)
+    # The plotter draws on the backend matplotlib selects, and the runners of the macOS lane have no display
+    env = {**os.environ, "MPLBACKEND": "Agg"}
+    proc = subprocess.run(cmd_line, capture_output=True, text=True, encoding="utf-8", cwd=MODULE_ROOT_DIR, env=env)
     if proc.returncode != RET_SUCCESS or "Exception ignored" in proc.stderr:
         print(proc.stdout)
         print("-" * 100)
@@ -335,6 +353,7 @@ def test_stop_recording_then_exit(tmp_path):
     assert proc.returncode == RET_SUCCESS
     assert "Exception ignored" not in proc.stderr
     assert npz_file.exists()
+    assert video_file.exists()
 
 
 @pytest.mark.required

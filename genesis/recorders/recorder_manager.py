@@ -1,3 +1,6 @@
+import functools
+import threading
+import weakref
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -77,6 +80,21 @@ class RecorderManager(BuildableMixin):
             raise
         self._is_recording = True
         self._is_built = True
+
+        # Stop the recordings of a run that ends without 'stop_recording'. An 'atexit' hook would run too late, after
+        # 'threading._shutdown' waits on the recorder threads and after 'pyplot' tears down the plotter canvases.
+        # It records no final sample, since the encoders have closed their videos in hooks that run before this one.
+        def stop_at_exit(manager_ref):
+            manager = manager_ref()
+            if manager is not None and manager._is_built and manager._is_recording:
+                try:
+                    manager.stop()
+                except Exception as error:
+                    # 'threading' runs its exit hooks without catching anything, so a failure raised here would skip
+                    # the hooks left and the join of the threads of the run
+                    gs.logger.error(f"[DataRecorder] Stopping the recordings at exit failed: {error}")
+
+        threading._register_atexit(functools.partial(stop_at_exit, weakref.ref(self)))
 
     @gs.assert_built
     def stop(self):

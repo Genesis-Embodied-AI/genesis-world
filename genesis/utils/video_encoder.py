@@ -3,8 +3,9 @@ import os
 import queue
 import tempfile
 import threading
+import weakref
 from fractions import Fraction
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 
 import numpy as np
@@ -241,14 +242,21 @@ class VideoEncoder:
                 self._is_encoding_over = False
                 self._thread = threading.Thread(target=self._encode_loop)
                 self._thread.start()
-                try:
-                    # Same private threading atexit as the recorders use, and for the same reason: functions
-                    # registered through 'atexit.register' run after 'threading._shutdown', which deadlocks on
-                    # non-daemon threads. It also finalizes the video when the interpreter exits before teardown
-                    # had a chance to run.
-                    threading._register_atexit(self.close)
-                except AttributeError:
-                    pass
+
+                # Same private threading atexit as 'RecorderManager.build' uses, and for the same reason: functions
+                # registered through 'atexit.register' run after 'threading._shutdown', which deadlocks on non-daemon
+                # threads. It also finalizes the video when the interpreter exits before teardown had a chance to run.
+                def close_at_exit(encoder_ref):
+                    encoder = encoder_ref()
+                    if encoder is not None:
+                        try:
+                            encoder.close()
+                        except gs.GenesisException as error:
+                            # 'threading' runs its exit hooks without catching anything, so a failure raised here
+                            # would skip the hooks left, the one stopping the recordings of the scene included
+                            (gs.logger or LOGGER).error(f"{error}")
+
+                threading._register_atexit(partial(close_at_exit, weakref.ref(self)))
             self._enqueue(frame)
         else:
             self._encode(frame)

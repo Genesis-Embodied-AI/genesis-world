@@ -1,8 +1,6 @@
-import functools
 import queue
 import threading
 import time
-import weakref
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -176,18 +174,6 @@ class Recorder[T](BuildableMixin):
             self._data_queue = queue.Queue(maxsize=self._options.buffer_size)
             self._processor_thread = threading.Thread(target=self._process_data_loop)
             self._processor_thread.start()
-            try:
-                # Note that it is necessary to rely on private threading atexit because functions registered using
-                # 'atexit.register' are called AFTER 'threading._shutdown', causing deadlock for non-daemon threads.
-                # 'RecorderManager.stop' destroys the recorders it stops, which leaves nothing to stop at exit.
-                def stop_at_exit(recorder_ref):
-                    recorder = recorder_ref()
-                    if recorder is not None and recorder._is_built:
-                        recorder.stop()
-
-                threading._register_atexit(functools.partial(stop_at_exit, weakref.ref(self)))
-            except AttributeError:
-                pass
         else:
             gs.logger.warning(f"[{type(self).__name__}] start_thread(): Processor thread already exists.")
 
