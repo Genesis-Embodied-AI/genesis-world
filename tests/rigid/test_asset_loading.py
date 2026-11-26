@@ -227,6 +227,7 @@ def test_parsing_inertia_defaults(
     undefined_inertia_arm,
     degenerate_inertials,
     zero_density_marker_mjcf,
+    geom_densities_mjcf,
     implicit_inertial_origin_chain,
     show_viewer,
     tol,
@@ -405,6 +406,15 @@ def test_parsing_inertia_defaults(
     )
     stacked_tip.attach(stacked_middle, parent_link_name=stacked_middle.base_link.name, pos=(0.0, 0.0, 0.2))
     stacked_middle.attach(stacked_base, parent_link_name=stacked_base.base_link.name, pos=(0.0, 0.0, 0.2))
+    entity_densities = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=geom_densities_mjcf,
+            pos=(7.2, 0.0, 1.0),
+        ),
+        material=gs.materials.Rigid(
+            rho=100.0,
+        ),
+    )
 
     with caplog.at_level("WARNING"):
         scene.build()
@@ -412,6 +422,17 @@ def test_parsing_inertia_defaults(
     # A 0.1 m cube of each entity's own density, rather than both taking the density of the one they hang from.
     assert_allclose(stacked_middle.base_link.get_mass(), 2000.0 * 0.1**3, tol=gs.EPS)
     assert_allclose(stacked_tip.base_link.get_mass(), 8000.0 * 0.1**3, tol=gs.EPS)
+
+    # The density of the material weighs every geometry of the asset, the densities the asset states on a geom and on
+    # the class it belongs to included, while a mass the asset states, through the geom or through an inertial, stands.
+    for name, mass in (
+        ("from_geometry", 100.0 * 0.1**3),
+        ("from_geom_density", 100.0 * 0.1**3),
+        ("from_class_density", 100.0 * 0.1**3),
+        ("from_geom_mass", 2.0),
+        ("from_inertial", 3.0),
+    ):
+        assert_allclose(entity_densities.get_link(name).get_mass(), mass, tol=gs.EPS)
 
     # The link 'no_inertial' has no inertial element, so its whole inertial is the geometry estimate. Every link carries
     # the same sphere, so this mass is the reference for the recovered masses below.

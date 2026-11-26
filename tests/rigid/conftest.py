@@ -842,6 +842,30 @@ def zero_density_marker_mjcf():
 
 
 @pytest.fixture(scope="session")
+def geom_densities_mjcf():
+    """Generate an MJCF whose five free bodies state the mass of a 0.1m cube each in a different way: through the
+    geometry alone, through the density of the geom, through the density of the class it belongs to, through the mass
+    of the geom, and through an inertial of its own."""
+    mjcf = ET.Element("mujoco", model="geom_densities")
+    default = ET.SubElement(mjcf, "default")
+    ET.SubElement(ET.SubElement(default, "default", {"class": "heavy"}), "geom", density="7000")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for name, geom_attrib in (
+        ("from_geometry", {}),
+        ("from_geom_density", {"density": "250"}),
+        ("from_class_density", {"class": "heavy"}),
+        ("from_geom_mass", {"mass": "2.0"}),
+        ("from_inertial", {}),
+    ):
+        body = ET.SubElement(worldbody, "body", name=name)
+        ET.SubElement(body, "freejoint")
+        if name == "from_inertial":
+            ET.SubElement(body, "inertial", pos="0.0 0.0 0.0", mass="3.0", diaginertia="5e-3 5e-3 5e-3")
+        ET.SubElement(body, "geom", {"type": "box", "size": "0.05 0.05 0.05", **geom_attrib})
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def implicit_inertial_origin_chain():
     """Generate a URDF with two fixed-jointed links, each authoring an inertia whose origin is omitted."""
     urdf = ET.Element("robot", name="implicit_inertial_origin_chain")

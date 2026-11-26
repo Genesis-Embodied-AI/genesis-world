@@ -927,7 +927,9 @@ class KinematicEntityDescription(EntityDescription):
         # initialized undetermined physics parameters.
         if isinstance(morph, gs.morphs.MJCF):
             # Mujoco's unified MJCF+URDF parser systematically for MJCF files
-            l_infos, links_j_infos, links_g_infos, eqs_info = mju.parse_xml(morph, self.surface, resolution.options)
+            l_infos, links_j_infos, links_g_infos, eqs_info = mju.parse_xml(
+                morph, self.surface, resolution.options, self.spec.material.rho
+            )
         elif isinstance(morph, (gs.morphs.URDF, gs.morphs.Drone)):
             # Custom "legacy" URDF parser for loading geometries (visual and collision) and equality constraints.
             # This is necessary because Mujoco cannot parse visual geometries (meshes) reliably for URDF. The glTF meshes

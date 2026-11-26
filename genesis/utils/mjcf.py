@@ -66,6 +66,7 @@ def build_model(
     merge_fixed_links=False,
     exclude_ground_plane=False,
     links_to_keep=(),
+    rho=None,
 ):
     if isinstance(xml, (str, Path, urdfpy.URDF)):
         if isinstance(xml, urdfpy.URDF):
@@ -128,6 +129,21 @@ def build_model(
         compiler = mjcf.find("compiler")
         if compiler is None:
             compiler = ET.SubElement(mjcf, "compiler")
+
+        # The density of the material overrides the one the asset states on each geom, as it does for the other
+        # coefficients of a geom (see '_resolve_geoms_values'), leaving the compiler to derive the mass and the
+        # inertia of each body from its geometry at that density. A geom stating its own mass keeps it, as does a body
+        # stating an inertial, both being a mass rather than a density. Every geom of the tree takes the density,
+        # those a default class holds included, so that a class-scoped density is overridden too. The mass of a moving
+        # body is floored as the URDF pass floors it, so that a zero density compiles.
+        if rho is not None and not is_urdf_file:
+            for geom in mjcf.iter("geom"):
+                if "mass" not in geom.attrib:
+                    geom.attrib["density"] = str(rho)
+            compiler.attrib |= dict(
+                boundmass=str(mujoco.mjMINVAL),
+                boundinertia=str(mujoco.mjMINVAL),
+            )
 
         # Set absolute asset search directory
         for name in ("assetdir", "meshdir", "texturedir"):
@@ -221,7 +237,7 @@ def build_model(
     return mj
 
 
-def parse_xml(morph, surface, rigid_options=None):
+def parse_xml(morph, surface, rigid_options=None, rho=None):
     # Always merge fixed links unless explicitly asked not to do so
     merge_fixed_links, links_to_keep = False, ()
     if isinstance(morph, (gs.morphs.URDF, gs.morphs.Drone)):
@@ -239,6 +255,7 @@ def parse_xml(morph, surface, rigid_options=None):
         merge_fixed_links,
         exclude_ground_plane,
         links_to_keep,
+        rho,
     )
 
     # We have another more informative warning later so we suppress this one
