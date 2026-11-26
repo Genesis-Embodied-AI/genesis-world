@@ -25,6 +25,7 @@ from genesis.typing import Matrix3x3Type, Vec3FType
 from genesis.utils import serialization
 from genesis.utils.cache import OwnedCache, get_gsd_path, get_hashkey
 from genesis.utils.misc import redirect_libc_stderr
+from genesis.utils.warnings import warn_once
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.description import SignedDistanceFieldDescription
@@ -525,7 +526,13 @@ class Mesh(RBC, serialization.SerializationMixin):
                         color_factor = tuple(np.array(material.diffuse, dtype=np.float32) / 255.0)
 
                     if material.glossiness is not None:
-                        roughness_factor = (mu.glossiness_to_roughness(material.glossiness),)
+                        # The shininess of a material lies in [0, 1000], which some exporters ignore
+                        glossiness = material.glossiness
+                        if glossiness < 0.0:
+                            mesh_descr = f" of '{metadata['mesh_path']}'" if "mesh_path" in metadata else ""
+                            warn_once(cls, f"The material{mesh_descr} holds a negative shininess, read as 0.")
+                            glossiness = 0.0
+                        roughness_factor = (mu.glossiness_to_roughness(glossiness),)
 
                     opacity = float(material.kwargs.get("d", [1.0])[0])
                     if opacity < 1.0:
