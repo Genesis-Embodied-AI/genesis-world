@@ -100,6 +100,13 @@ def parse_preview_surface(prim: Usd.Prim, output_name):
         if normal_uvname is not None and uvname is None:
             uvname = normal_uvname
 
+        # parse occlusion, whose surface option takes an image alone
+        occlusion_texture, occlusion_uvname = parse_component(shader, "occlusion", "linear")
+        if not isinstance(occlusion_texture, gs.textures.ImageTexture):
+            occlusion_texture = None
+        if occlusion_uvname is not None and uvname is None:
+            uvname = occlusion_uvname
+
         # parse ior
         ior = get_input_attribute_value(shader, "ior", "value")[0]
 
@@ -113,6 +120,7 @@ def parse_preview_surface(prim: Usd.Prim, output_name):
             "metallic_texture": metallic_texture,
             "emissive_texture": emissive_texture,
             "normal_texture": normal_texture,
+            "occlusion_texture": occlusion_texture,
             "ior": ior,
         }, uvname
 

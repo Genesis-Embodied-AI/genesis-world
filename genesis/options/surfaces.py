@@ -485,6 +485,10 @@ class Glass(Surface):
         Roughness texture of the surface.
     normal_texture : gs.textures.Texture | None, optional
         Normal texture of the surface.
+    occlusion_texture : gs.textures.ImageTexture | None, optional
+        Ambient occlusion texture of the surface, the share of the ambient light reaching each point, read from its
+        first channel. The rasterizer darkens creases and cavities by it, which its lighting cannot shade otherwise,
+        for one more texture lookup per pixel. The raytracer computes this occlusion itself and ignores the texture.
     emissive_texture : gs.textures.Texture | None, optional
         Emissive texture of the surface.
     """
@@ -502,6 +506,7 @@ class Glass(Surface):
     thickness_texture: Texture | None = None
     roughness_texture: Texture | None = None
     normal_texture: Texture | None = None
+    occlusion_texture: ImageTexture | None = None
     emissive_texture: Texture | None = None
 
     @model_validator(mode="after")
@@ -547,6 +552,7 @@ class Glass(Surface):
                 self.thickness_texture,
                 self.roughness_texture,
                 self.normal_texture,
+                self.occlusion_texture,
                 self.emissive_texture,
             )
         )
@@ -556,6 +562,7 @@ class Glass(Surface):
         *,
         roughness_texture: Texture | None = None,
         normal_texture: Texture | None = None,
+        occlusion_texture: ImageTexture | None = None,
         emissive_texture: Texture | None = None,
         force: bool = False,
         **kwargs,
@@ -565,6 +572,7 @@ class Glass(Surface):
             self.roughness_texture, roughness_texture, ColorTexture(color=(self.default_roughness,)), force
         )
         self.normal_texture = self._update_field(self.normal_texture, normal_texture, None, force)
+        self.occlusion_texture = self._update_field(self.occlusion_texture, occlusion_texture, None, force)
         self.emissive_texture = self._update_field(self.emissive_texture, emissive_texture, None, force)
 
 
@@ -602,6 +610,10 @@ class Metal(Surface):
         Roughness texture of the surface.
     normal_texture : gs.textures.Texture | None, optional
         Normal texture of the surface.
+    occlusion_texture : gs.textures.ImageTexture | None, optional
+        Ambient occlusion texture of the surface, the share of the ambient light reaching each point, read from its
+        first channel. The rasterizer darkens creases and cavities by it, which its lighting cannot shade otherwise,
+        for one more texture lookup per pixel. The raytracer computes this occlusion itself and ignores the texture.
     emissive_texture : gs.textures.Texture | None, optional
         Emissive texture of the surface.
     """
@@ -613,6 +625,7 @@ class Metal(Surface):
     opacity_texture: Texture | None = None
     roughness_texture: Texture | None = None
     normal_texture: Texture | None = None
+    occlusion_texture: ImageTexture | None = None
     emissive_texture: Texture | None = None
 
     @property
@@ -648,6 +661,7 @@ class Metal(Surface):
                 self.opacity_texture,
                 self.roughness_texture,
                 self.normal_texture,
+                self.occlusion_texture,
                 self.emissive_texture,
             )
         )
@@ -668,6 +682,7 @@ class Metal(Surface):
         opacity_texture: Texture | None = None,
         roughness_texture: Texture | None = None,
         normal_texture: Texture | None = None,
+        occlusion_texture: ImageTexture | None = None,
         emissive_texture: Texture | None = None,
         force: bool = False,
         **kwargs,
@@ -680,6 +695,7 @@ class Metal(Surface):
             self.roughness_texture, roughness_texture, ColorTexture(color=(self.default_roughness,)), force
         )
         self.normal_texture = self._update_field(self.normal_texture, normal_texture, None, force)
+        self.occlusion_texture = self._update_field(self.occlusion_texture, occlusion_texture, None, force)
         self.emissive_texture = self._update_field(self.emissive_texture, emissive_texture, None, force)
 
 
@@ -703,6 +719,10 @@ class Plastic(Surface):
         Roughness texture of the surface.
     normal_texture : gs.textures.Texture | None, optional
         Normal texture of the surface.
+    occlusion_texture : gs.textures.ImageTexture | None, optional
+        Ambient occlusion texture of the surface, the share of the ambient light reaching each point, read from its
+        first channel. The rasterizer darkens creases and cavities by it, which its lighting cannot shade otherwise,
+        for one more texture lookup per pixel. The raytracer computes this occlusion itself and ignores the texture.
     emissive_texture : gs.textures.Texture | None, optional
         Emissive texture of the surface.
     """
@@ -714,6 +734,7 @@ class Plastic(Surface):
     opacity_texture: Texture | None = None
     roughness_texture: Texture | None = None
     normal_texture: Texture | None = None
+    occlusion_texture: ImageTexture | None = None
     emissive_texture: Texture | None = None
 
     @property
@@ -742,6 +763,7 @@ class Plastic(Surface):
                 self.opacity_texture,
                 self.roughness_texture,
                 self.normal_texture,
+                self.occlusion_texture,
                 self.emissive_texture,
             )
         )
@@ -762,6 +784,7 @@ class Plastic(Surface):
         opacity_texture: Texture | None = None,
         roughness_texture: Texture | None = None,
         normal_texture: Texture | None = None,
+        occlusion_texture: ImageTexture | None = None,
         emissive_texture: Texture | None = None,
         force: bool = False,
         **kwargs,
@@ -774,6 +797,7 @@ class Plastic(Surface):
             self.roughness_texture, roughness_texture, ColorTexture(color=(self.default_roughness,)), force
         )
         self.normal_texture = self._update_field(self.normal_texture, normal_texture, None, force)
+        self.occlusion_texture = self._update_field(self.occlusion_texture, occlusion_texture, None, force)
         self.emissive_texture = self._update_field(self.emissive_texture, emissive_texture, None, force)
 
 
@@ -801,6 +825,10 @@ class BSDF(Surface):
         Metallic texture of the surface.
     normal_texture : gs.textures.Texture | None, optional
         Normal texture of the surface.
+    occlusion_texture : gs.textures.ImageTexture | None, optional
+        Ambient occlusion texture of the surface, the share of the ambient light reaching each point, read from its
+        first channel. The rasterizer darkens creases and cavities by it, which its lighting cannot shade otherwise,
+        for one more texture lookup per pixel. The raytracer computes this occlusion itself and ignores the texture.
     emissive_texture : gs.textures.Texture | None, optional
         Emissive texture of the surface.
     """
@@ -812,6 +840,7 @@ class BSDF(Surface):
     roughness_texture: Texture | None = None
     metallic_texture: Texture | None = None
     normal_texture: Texture | None = None
+    occlusion_texture: ImageTexture | None = None
     emissive_texture: Texture | None = None
     specular_trans: float = 0.0
     diffuse_trans: float = 0.0
@@ -850,6 +879,7 @@ class BSDF(Surface):
                 self.roughness_texture,
                 self.metallic_texture,
                 self.normal_texture,
+                self.occlusion_texture,
                 self.emissive_texture,
             )
         )
@@ -871,6 +901,7 @@ class BSDF(Surface):
         roughness_texture: Texture | None = None,
         metallic_texture: Texture | None = None,
         normal_texture: Texture | None = None,
+        occlusion_texture: ImageTexture | None = None,
         emissive_texture: Texture | None = None,
         force: bool = False,
         **kwargs,
@@ -884,6 +915,7 @@ class BSDF(Surface):
         )
         self.metallic_texture = self._update_field(self.metallic_texture, metallic_texture, None, force)
         self.normal_texture = self._update_field(self.normal_texture, normal_texture, None, force)
+        self.occlusion_texture = self._update_field(self.occlusion_texture, occlusion_texture, None, force)
         self.emissive_texture = self._update_field(self.emissive_texture, emissive_texture, None, force)
 
 
