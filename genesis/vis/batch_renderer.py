@@ -303,6 +303,13 @@ class BatchRenderer(BuildableMixin, RBC):
         )
         if not self._cameras:
             gs.raise_exception("Please add at least one camera when using BatchRender.")
+        if any(
+            isinstance(camera, Camera) and isinstance(camera.lens, gs.options.FisheyeLens) for camera in self._cameras
+        ):
+            gs.raise_exception(
+                "The BatchRenderer draws a fisheye camera as an equidistant projection of its field of view, which a "
+                "calibrated fisheye lens leaves out. Render it with the Rasterizer."
+            )
 
         # Build the geometry retriever
         self._geom_retriever.build()

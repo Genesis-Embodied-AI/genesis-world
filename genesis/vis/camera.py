@@ -91,7 +91,7 @@ class Camera(BuildableMixin, RBC):
     ):
         self._idx = idx
         self._uid = gs.UID()
-        self._model = model if lens is None else "thinlens"
+        self._model = "thinlens" if isinstance(lens, gs.options.ThinLens) else model
         self._res = res
         self._fov = fov
         self._lens = lens
@@ -139,11 +139,22 @@ class Camera(BuildableMixin, RBC):
 
         if model not in ("pinhole", "fisheye"):
             gs.raise_exception(f"Invalid camera model: {model}")
-        if lens is not None and model != "pinhole":
-            gs.raise_exception("A lens applies to the pinhole camera model alone.")
+        if isinstance(lens, gs.options.ThinLens) and model != "pinhole":
+            gs.raise_exception("A thin lens applies to the pinhole camera model alone.")
+        if isinstance(lens, gs.options.FisheyeLens) and model != "fisheye":
+            gs.raise_exception("A fisheye lens applies to the fisheye camera model alone.")
 
-        # A lens focuses on the point the camera looks at unless it states its focus distance
-        if lens is not None and lens.focus_dist is None:
+        # The field of view of a calibrated fisheye lens spans the shorter side of the image through its principal
+        # point, as that of an equidistant fisheye spans the circle inscribed in the image
+        if isinstance(lens, gs.options.FisheyeLens):
+            (fx, _, cx), (_, fy, cy), _ = lens.intrinsics
+            width, height = res
+            edges_pixel = ((cx, 0.0), (cx, height)) if height <= width else ((0.0, cy), (width, cy))
+            _, edges_angle = gu.fisheye_pixels_to_rays(np.array(edges_pixel), (fx, fy, cx, cy), lens.distortion)
+            self._fov = float(np.rad2deg(edges_angle.sum()))
+
+        # A thin lens focuses on the point the camera looks at unless it states its focus distance
+        if isinstance(lens, gs.options.ThinLens) and lens.focus_dist is None:
             focus_dist = float(np.linalg.norm(np.subtract(lookat, pos)))
             self._lens = lens.model_copy(update=dict(focus_dist=focus_dist))
 
@@ -572,27 +583,30 @@ class Camera(BuildableMixin, RBC):
                 env_idx=self._render_env_idx,
             )
 
-        # Convert OpenGL projection matrix to camera intrinsics
-        width, height = self.res
-        fx = fy = self.f
-        cx = self.cx
-        cy = self.cy
-
         # Mask out invalid depth
         mask = (self.near < depth_arr) & (depth_arr < self.far * (1.0 - 1e-3))
 
         # Compute normalized pixel coordinates
+        width, height = self.res
         v, u = np.meshgrid(np.arange(height, dtype=np.int32), np.arange(width, dtype=np.int32), indexing="ij")
         u = u.reshape((-1,))
         v = v.reshape((-1,))
 
-        # Convert to world coordinates
+        # Convert to the frame of the camera of OpenCV, from the depth along the line of sight of a pinhole camera, and
+        # from the distance to the centre of projection along the ray of the pixel for a fisheye camera
         depth_grid = depth_arr[..., v, u]
-        world_x = depth_grid * (u + 0.5 - cx) / fx
-        world_y = depth_grid * (v + 0.5 - cy) / fy
-        world_z = depth_grid
+        fx, fy, cx, cy = self.intrinsics[0, 0], self.intrinsics[1, 1], self.cx, self.cy
+        if self._model == "fisheye":
+            rays, _ = gu.fisheye_pixels_to_rays(
+                np.stack((u + 0.5, v + 0.5), axis=-1), (fx, fy, cx, cy), self.distortion
+            )
+            points = depth_grid[..., None] * rays
+        else:
+            points = depth_grid[..., None] * np.stack(
+                ((u + 0.5 - cx) / fx, (v + 0.5 - cy) / fy, np.ones(len(u))), axis=-1
+            )
 
-        point_cloud = np.stack((world_x, world_y, world_z, np.ones_like(world_z)), axis=-1)
+        point_cloud = np.concatenate((points, np.ones((*points.shape[:-1], 1))), axis=-1)
         if world_frame:
             T_OPENGL_TO_OPENCV = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]], dtype=np.float32)
             cam_pose = self.transform @ T_OPENGL_TO_OPENCV
@@ -929,8 +943,9 @@ class Camera(BuildableMixin, RBC):
         return self._fov
 
     @property
-    def lens(self) -> "gs.options.ThinLens | None":
-        """The lens of a thin-lens camera, its focus distance resolved, None for another camera."""
+    def lens(self) -> "gs.options.ThinLens | gs.options.FisheyeLens | None":
+        """The lens of a thin-lens camera, its focus distance resolved, or of a calibrated fisheye camera, None for
+        another camera."""
         return self._lens
 
     @property
@@ -1029,14 +1044,34 @@ class Camera(BuildableMixin, RBC):
 
     @cached_property
     def intrinsics(self):
-        """The current intrinsics matrix of the camera."""
-        res = np.array([[self.f, 0, self.cx], [0, self.f, self.cy], [0, 0, 1]])
+        """The intrinsics matrix of the camera: its focal lengths and its principal point, in pixels from the top-left
+        corner of the image. Those of a fisheye camera follow the Kannala-Brandt model of OpenCV (see 'distortion')."""
+        if isinstance(self._lens, gs.options.FisheyeLens):
+            res = np.array(self._lens.intrinsics)
+        else:
+            # A pinhole camera spans its vertical field of view, and an equidistant fisheye half of it at the edges of
+            # the circle inscribed in its image
+            if self._model == "fisheye":
+                f = 0.5 * min(self._res) / np.deg2rad(0.5 * self._fov)
+            else:
+                f = 0.5 * self._res[1] / np.tan(np.deg2rad(0.5 * self._fov))
+            res = np.array([[f, 0.0, 0.5 * self._res[0]], [0.0, f, 0.5 * self._res[1]], [0.0, 0.0, 1.0]])
         res.flags.writeable = False
         return res
+
+    @property
+    def distortion(self):
+        """The distortion coefficients (k1, k2, k3, k4) of a fisheye camera, following the Kannala-Brandt model of
+        OpenCV, all zero for an equidistant projection, None for another camera."""
+        if self._model != "fisheye":
+            return None
+        return (0.0, 0.0, 0.0, 0.0) if self._lens is None else self._lens.distortion
 
     @cached_property
     def projection_matrix(self):
         """Return the projection matrix for this camera."""
+        if self._model == "fisheye":
+            gs.raise_exception("A fisheye camera bends the lines it sees, which no projection matrix holds.")
         a = self._aspect_ratio
         t = np.tan(np.deg2rad(0.5 * self._fov))
         n = self.near
@@ -1054,12 +1089,15 @@ class Camera(BuildableMixin, RBC):
 
     @cached_property
     def f(self):
-        return 0.5 * self._res[1] / np.tan(np.deg2rad(0.5 * self._fov))
+        """The vertical focal length of the camera, in pixels (see 'intrinsics')."""
+        return self.intrinsics[1, 1]
 
     @cached_property
     def cx(self):
-        return 0.5 * self._res[0]
+        """The horizontal position of the principal point, in pixels from the left edge of the image."""
+        return self.intrinsics[0, 2]
 
     @cached_property
     def cy(self):
-        return 0.5 * self._res[1]
+        """The vertical position of the principal point, in pixels from the top edge of the image."""
+        return self.intrinsics[1, 2]

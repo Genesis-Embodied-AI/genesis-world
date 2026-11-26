@@ -16,6 +16,7 @@ from OpenGL.GL import (
     glDeleteVertexArrays,
     glGenVertexArrays,
     glGetUniformLocation,
+    glUniform1i,
     glUniform4fv,
     glUniformMatrix4fv,
     glUseProgram,
@@ -171,10 +172,13 @@ class ShaderProgram:
         ----------
         name : str
             The name of the uniform. A uniform that the program lacks or leaves unused is ignored.
-        value : (4,) or (4, 4) float
-            The value of the uniform, a vector or a matrix.
+        value : int or (4,) or (4, 4) float
+            The value of the uniform, an integer such as the texture unit of a sampler, a vector or a matrix.
         """
         loc = glGetUniformLocation(self._program_id, name)
+        if isinstance(value, int):
+            glUniform1i(loc, value)
+            return
         value = np.ascontiguousarray(value, dtype=np.float32)
         if value.ndim == 1:
             glUniform4fv(loc, 1, value)

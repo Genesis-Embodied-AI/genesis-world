@@ -82,6 +82,45 @@ class PerspectiveCamera(Camera):
         return P
 
 
+class FisheyeCamera(Camera):
+    """Camera projecting as a fisheye lens, following the Kannala-Brandt model of the fisheye module of OpenCV.
+
+    A ray making an angle theta with the line of sight reaches the image at the distance
+    theta * (1 + k1 theta^2 + k2 theta^4 + k3 theta^6 + k4 theta^8) from the principal point, in units of the focal
+    lengths. The model holds beyond a right angle, up to a ray pointing backwards. The rasterizer renders the faces of a
+    cube map around the camera and resamples them. The depth of a pixel is its distance to the centre of projection,
+    which the clipping distances bound.
+
+    Parameters
+    ----------
+    intrinsics : (4,) float
+        The focal lengths and the principal point (fx, fy, cx, cy), in pixels from the top-left corner of the image.
+    distortion : (4,) float
+        The distortion coefficients (k1, k2, k3, k4), all zero for an equidistant projection.
+    znear : float, optional
+        The distance to the near clipping plane of each face of the cube map. Defaults to DEFAULT_Z_NEAR.
+    zfar : float, optional
+        The largest distance to the centre of projection drawn, beyond 'znear'. Defaults to DEFAULT_Z_FAR.
+    """
+
+    def __init__(self, intrinsics, distortion, znear=DEFAULT_Z_NEAR, zfar=DEFAULT_Z_FAR):
+        super().__init__(znear=znear, zfar=zfar)
+        assert zfar is not None
+        self.intrinsics = intrinsics
+        self.distortion = distortion
+
+    @property
+    def face_zfar(self):
+        """float : The far plane of the faces of the cube map, at the far clipping distance in their corners."""
+        return np.sqrt(3.0) * self.zfar
+
+    def get_projection_matrix(self, width=None, height=None):
+        # The projection of each face of the cube map, a right angle wide, the resampling clipping the depth at the far
+        # clipping distance (see fisheye.frag)
+        face_camera = PerspectiveCamera(yfov=0.5 * np.pi, znear=self.znear, zfar=self.face_zfar, aspect_ratio=1.0)
+        return face_camera.get_projection_matrix()
+
+
 class OrthographicCamera(Camera):
     """Camera projecting orthographically.
 
@@ -116,4 +155,4 @@ class OrthographicCamera(Camera):
         return P
 
 
-__all__ = ["Camera", "PerspectiveCamera", "OrthographicCamera"]
+__all__ = ["Camera", "PerspectiveCamera", "FisheyeCamera", "OrthographicCamera"]

@@ -2,11 +2,10 @@
 
 import os
 import sys
+from typing import NamedTuple
 
 import numpy as np
 
-import pyglet
-from PIL import Image
 from OpenGL.GL import (
     GL_BLEND,
     GL_CLAMP_TO_EDGE,
@@ -20,14 +19,18 @@ from OpenGL.GL import (
     GL_DRAW_FRAMEBUFFER,
     GL_DST_COLOR,
     GL_FALSE,
+    GL_FILL,
     GL_FLOAT,
     GL_FRAMEBUFFER,
+    GL_FRONT_AND_BACK,
     GL_FUNC_ADD,
     GL_GREATER,
     GL_HALF_FLOAT,
     GL_LESS,
     GL_LINEAR,
     GL_LINEAR_MIPMAP_LINEAR,
+    GL_MAX_CUBE_MAP_TEXTURE_SIZE,
+    GL_MAX_RENDERBUFFER_SIZE,
     GL_MAX_SAMPLES,
     GL_MIN,
     GL_MULTISAMPLE,
@@ -38,14 +41,23 @@ from OpenGL.GL import (
     GL_READ_FRAMEBUFFER,
     GL_RENDERBUFFER,
     GL_RGBA,
+    GL_TEXTURE0,
     GL_TEXTURE_2D,
     GL_TEXTURE_2D_ARRAY,
+    GL_TEXTURE_CUBE_MAP,
+    GL_TEXTURE_CUBE_MAP_SEAMLESS,
+    GL_TEXTURE_MAG_FILTER,
+    GL_TEXTURE_MIN_FILTER,
+    GL_TRIANGLES,
     GL_TRUE,
     GL_UNSIGNED_BYTE,
+    GL_UNSIGNED_INT,
     GL_ZERO,
+    glActiveTexture,
     glBindFramebuffer,
     glBindRenderbuffer,
     glBindTexture,
+    glBindVertexArray,
     glBlendEquation,
     glBlendEquationSeparate,
     glBlendFuncSeparate,
@@ -54,23 +66,33 @@ from OpenGL.GL import (
     glClearColor,
     glDeleteFramebuffers,
     glDeleteRenderbuffers,
+    glDeleteVertexArrays,
     glDepthFunc,
     glDepthMask,
     glDepthRange,
     glDisable,
+    glDrawArrays,
     glDrawBuffer,
     glEnable,
     glFramebufferRenderbuffer,
     glGenFramebuffers,
     glGenRenderbuffers,
+    glGenVertexArrays,
     glGenerateMipmap,
     glGetIntegerv,
+    glPolygonMode,
     glReadBuffer,
     glRenderbufferStorage,
     glRenderbufferStorageMultisample,
+    glTexParameteri,
     glViewport,
 )
+from PIL import Image
+import pyglet
 
+import genesis.utils.geom as gu
+
+from .camera import FisheyeCamera
 from .constants import (
     BufFlags,
     LightType,
@@ -82,15 +104,23 @@ from .constants import (
     TexChannels,
 )
 from .font import FontCache
-from .jit_render import is_env_pass
+from .jit_render import CUBE_MAP_FACES_ROT, is_env_pass
 from .sampler import Sampler
 from .shader_program import ShaderProgramCache
-from .texture import Texture
+from .texture import CubeMapTexture, Texture
 from .utils import format_color_vector
 
 
 MARKER_XRAY_DIM_FACTOR = 0.3
 MARKER_XRAY_ALPHA = 0.4
+
+
+class _FisheyeLayout(NamedTuple):
+    """The faces of the cube map that the image of a fisheye camera reaches, and their size, for its parameters."""
+
+    camera_params: tuple
+    is_face_drawn: np.ndarray
+    face_size: int
 
 
 class Renderer:
@@ -136,6 +166,17 @@ class Renderer:
         self._floor_texture_depth = None
 
         self.jit = jit
+
+        # The cube map that a fisheye camera resamples, its faces drawn by a renderer of their own, and the faces that
+        # its image reaches with their size (see '_fisheye_pass'). The rotation from the frame of the camera to that of
+        # the face that a face renderer draws.
+        self._face_renderer = None
+        self._face_rot = None
+        self._fisheye_layout = None
+        self._fisheye_color_cube = None
+        self._fisheye_depth_cube = None
+        self._fisheye_fb = None
+        self._fisheye_vao = None
 
     @property
     def viewport_width(self):
@@ -234,11 +275,15 @@ class Renderer:
                         glBindFramebuffer(GL_FRAMEBUFFER, 0)
                         light.shadow_map_revision = (scene.revision, i_e)
 
-            if flags & RenderFlags.REFLECTIVE_FLOOR:
-                self._floor_pass(scene, flags, env_idx=i_e)
+            if isinstance(scene.main_camera_node.camera, FisheyeCamera):
+                self._fisheye_pass(scene, flags, seg_node_map, env_idx=i_e)
+            else:
+                if flags & RenderFlags.REFLECTIVE_FLOOR:
+                    self._floor_pass(scene, flags, env_idx=i_e)
+                self._forward_pass(scene, flags, seg_node_map=seg_node_map, env_idx=i_e)
 
-            retval = self._forward_pass(scene, flags, seg_node_map=seg_node_map, env_idx=i_e)
-            if retval is not None:
+            if flags & RenderFlags.OFFSCREEN:
+                retval = self._read_main_framebuffer(scene, flags)
                 if retval_list is None:
                     retval_list = tuple([val] for val in retval)
                 else:
@@ -399,6 +444,12 @@ class Renderer:
         self._delete_main_framebuffer()
         self._delete_shadow_framebuffer()
         self._delete_floor_framebuffer()
+        self._delete_fisheye_textures()
+        if self._fisheye_fb is not None:
+            glDeleteFramebuffers(1, [self._fisheye_fb])
+            glDeleteVertexArrays(1, [self._fisheye_vao])
+            self._fisheye_fb = None
+            self._fisheye_vao = None
 
     ###########################################################################
     # Rendering passes
@@ -502,10 +553,6 @@ class Renderer:
                     markers_only=markers_only,
                 )
 
-        # If doing offscreen render, copy result from framebuffer and return
-        if flags & RenderFlags.OFFSCREEN:
-            return self._read_main_framebuffer(scene, flags)
-
     def _marker_xray_pass(self, V, P, cam_pos, flags, screen_size, env_idx):
         """Render markers behind geometry with darkened transparency (X-ray effect)."""
         marker_mask = self.jit.is_marker
@@ -587,6 +634,127 @@ class Renderer:
             program_flags |= ProgramFlags.FACE_NORMALS
         self.jit.forward_pass(self, V, P, cam_pos, flags, program_flags, screen_size, env_idx=env_idx)
 
+    def _fisheye_pass(self, scene, flags, seg_node_map, env_idx=-1):
+        """Draw the image of a fisheye camera, resampled from a cube map of what it sees all around it.
+
+        The faces of the cube map are rendered as square perspective images a right angle wide, each pass of a pinhole
+        camera running for them. Only the faces that the image reaches are rendered.
+        """
+        camera = scene.main_camera_node.camera
+        # The intrinsics count the pixels of the viewport, which the display scale multiplies
+        intrinsics = self.dpscale * np.array(camera.intrinsics)
+        camera_params = (*intrinsics, *camera.distortion, self.viewport_width, self.viewport_height)
+        if self._fisheye_layout is None or self._fisheye_layout.camera_params != camera_params:
+            # The faces that the rays of the pixels reach, along the axes of the frame of the camera. A face gives the
+            # centre of the image as many texels per radian as the image has pixels, its texels growing denser away
+            # from its centre where the lens spreads the image more.
+            v, u = np.meshgrid(
+                np.arange(self.viewport_height) + 0.5, np.arange(self.viewport_width) + 0.5, indexing="ij"
+            )
+            rays, rays_angle = gu.fisheye_pixels_to_rays(np.stack((u, v), axis=-1), intrinsics, camera.distortion)
+            rays = rays[rays_angle <= np.pi] * np.array((1.0, -1.0, -1.0))
+            rays_axis = np.argmax(np.abs(rays), axis=-1)
+            rays_face = 2 * rays_axis + (np.take_along_axis(rays, rays_axis[:, None], axis=-1)[:, 0] < 0.0)
+            is_face_drawn = np.zeros(6, dtype=np.bool_)
+            is_face_drawn[rays_face] = True
+            max_face_size = min(glGetIntegerv(GL_MAX_CUBE_MAP_TEXTURE_SIZE), glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE))
+            face_size = self.dpscale * int(np.ceil(2.0 * intrinsics[:2].max() / self.dpscale))
+            face_size = min(face_size, max_face_size - max_face_size % self.dpscale)
+            if self._fisheye_layout is None or self._fisheye_layout.face_size != face_size:
+                self._delete_fisheye_textures()
+                # The programs of the passes are those of this renderer, which the compiled passes record (see
+                # 'JITRenderer.load_programs') and which outlive the face renderer
+                self._face_renderer = Renderer(face_size // self.dpscale, face_size // self.dpscale, self.jit)
+                self._face_renderer._program_cache = self._program_cache
+                self._fisheye_color_cube = CubeMapTexture(
+                    face_size,
+                    TexChannels.RGBA,
+                    GL_UNSIGNED_BYTE,
+                    Sampler(mag_filter=GL_LINEAR, min_filter=GL_LINEAR_MIPMAP_LINEAR),
+                )
+                self._fisheye_depth_cube = CubeMapTexture(
+                    face_size, TexChannels.DEPTH, GL_UNSIGNED_INT, Sampler(mag_filter=GL_NEAREST, min_filter=GL_NEAREST)
+                )
+                for cube in (self._fisheye_color_cube, self._fisheye_depth_cube):
+                    cube._add_to_context()
+            self._fisheye_layout = _FisheyeLayout(camera_params, is_face_drawn, face_size)
+        if self._fisheye_fb is None:
+            self._fisheye_fb = glGenFramebuffers(1)
+            self._fisheye_vao = glGenVertexArrays(1)
+
+        # Each face is drawn by a pass of a pinhole camera, then copied into the cube map along with its depth. A face
+        # that the image never reaches holds the background.
+        face_renderer = self._face_renderer
+        face_size = self._fisheye_layout.face_size
+        clear_color = (0.0, 0.0, 0.0, 1.0) if flags & RenderFlags.SEG else scene.bg_color
+        for i_face, is_face_drawn in enumerate(self._fisheye_layout.is_face_drawn):
+            if is_face_drawn:
+                face_renderer._face_rot = CUBE_MAP_FACES_ROT[i_face]
+                if flags & RenderFlags.REFLECTIVE_FLOOR:
+                    face_renderer._floor_pass(scene, flags, env_idx=env_idx)
+                face_flags = flags | RenderFlags.OFFSCREEN | RenderFlags.RET_DEPTH
+                face_renderer._forward_pass(scene, face_flags, seg_node_map=seg_node_map, env_idx=env_idx)
+                face_renderer._resolve_main_framebuffer(face_flags)
+            glBindFramebuffer(GL_FRAMEBUFFER, self._fisheye_fb)
+            self._fisheye_color_cube._bind_as_color_attachment(i_face)
+            self._fisheye_depth_cube._bind_as_depth_attachment(i_face)
+            if is_face_drawn:
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, face_renderer._main_fb)
+                glBlitFramebuffer(
+                    0,
+                    0,
+                    face_size,
+                    face_size,
+                    0,
+                    0,
+                    face_size,
+                    face_size,
+                    GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                    GL_NEAREST,
+                )
+            else:
+                glClearColor(*clear_color)
+                glDepthMask(GL_TRUE)
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
+        # A color image is filtered over the texels that a pixel covers, while the segmentation and the normals keep the
+        # value of a single texel
+        glBindTexture(GL_TEXTURE_CUBE_MAP, self._fisheye_color_cube._texid)
+        if flags & (RenderFlags.SEG | RenderFlags.DEPTH_ONLY | RenderFlags.NORMAL):
+            min_filter = mag_filter = GL_NEAREST
+        else:
+            glGenerateMipmap(GL_TEXTURE_CUBE_MAP)
+            min_filter, mag_filter = GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, min_filter)
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, mag_filter)
+
+        self._configure_forward_pass_viewport(flags)
+        glClearColor(*clear_color)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glDisable(GL_BLEND)
+        glDisable(GL_CULL_FACE)
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+        # The filtering reads across the edges of the faces, which a cube map without seams joins
+        glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS)
+        program = self._program_cache.get_program(vertex_shader="fisheye.vert", fragment_shader="fisheye.frag")
+        if not program._in_context():
+            program._add_to_context()
+        program._bind()
+        for i_unit, cube in enumerate((self._fisheye_color_cube, self._fisheye_depth_cube)):
+            glActiveTexture(GL_TEXTURE0 + i_unit)
+            glBindTexture(GL_TEXTURE_CUBE_MAP, cube._texid)
+        program.set_uniform("color_cube", 0)
+        program.set_uniform("depth_cube", 1)
+        program.set_uniform("intrinsics", intrinsics)
+        program.set_uniform("distortion", camera.distortion)
+        depth_range = (camera.znear, camera.zfar, camera.face_zfar, self.viewport_height)
+        program.set_uniform("depth_range", depth_range)
+        glBindVertexArray(self._fisheye_vao)
+        glDrawArrays(GL_TRIANGLES, 0, 3)
+        glBindVertexArray(0)
+        glActiveTexture(GL_TEXTURE0)
+        program._unbind()
+
     ###########################################################################
     # Camera Matrix Management
     ###########################################################################
@@ -596,8 +764,11 @@ class Renderer:
         assert main_camera_node is not None
         P = main_camera_node.camera.get_projection_matrix(width=self.viewport_width, height=self.viewport_height)
         pose = self._get_camera_pose(scene, env_idx)
-        # The view matrix maps the world frame to the camera frame
+        # The view matrix maps the world frame to the camera frame, then to that of a face of the cube map of a fisheye
+        # camera when one is drawn (see '_fisheye_pass')
         V = np.linalg.inv(pose)
+        if self._face_rot is not None:
+            V[:3] = self._face_rot @ V[:3]
         return V, P
 
     def _get_camera_pose(self, scene, env_idx):
@@ -827,6 +998,18 @@ class Renderer:
             self._floor_texture_depth.delete()
             self._floor_texture_depth = None
 
+    def _delete_fisheye_textures(self):
+        if self._face_renderer is not None:
+            self._face_renderer._delete_main_framebuffer()
+            self._face_renderer._delete_floor_framebuffer()
+            self._face_renderer = None
+        for cube in (self._fisheye_color_cube, self._fisheye_depth_cube):
+            if cube is not None:
+                cube.delete()
+        self._fisheye_color_cube = None
+        self._fisheye_depth_cube = None
+        self._fisheye_layout = None
+
     def _delete_shadow_framebuffer(self):
         if self._shadow_fb is not None:
             glDeleteFramebuffers(1, [self._shadow_fb])
@@ -892,16 +1075,19 @@ class Renderer:
         self._main_db_ms = None
         self._main_fb_dims = (None, None)
 
-    def _read_main_framebuffer(self, scene, flags):
-        width, height = self._main_fb_dims
-
+    def _resolve_main_framebuffer(self, flags):
+        """Resolve the multisampled image of a color pass into the main framebuffer, with its depth if the flags ask."""
         if not (flags & RenderFlags.SEG or flags & RenderFlags.DEPTH_ONLY):
-            # Bind framebuffer and blit buffers
+            width, height = self._main_fb_dims
             glBindFramebuffer(GL_READ_FRAMEBUFFER, self._main_fb_ms)
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, self._main_fb)
             glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_LINEAR)
             if flags & RenderFlags.RET_DEPTH:
                 glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_DEPTH_BUFFER_BIT, GL_NEAREST)
+
+    def _read_main_framebuffer(self, scene, flags):
+        width, height = self._main_fb_dims
+        self._resolve_main_framebuffer(flags)
         glBindFramebuffer(GL_READ_FRAMEBUFFER, self._main_fb)
 
         # Read depth if requested

@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 
-from OpenGL.GL import GL_CLAMP_TO_BORDER, GL_FLOAT, GL_HALF_FLOAT, GL_LINEAR, GL_UNSIGNED_SHORT
+from OpenGL.GL import GL_CLAMP_TO_BORDER, GL_FLOAT, GL_HALF_FLOAT, GL_LINEAR, GL_NEAREST, GL_UNSIGNED_SHORT
 
 from .constants import (
     DIRECTIONAL_SHADOW_TEX_SZ,
@@ -126,10 +126,16 @@ class PointLight(Light):
     shadow_flag = RenderFlags.SHADOWS_POINT
 
     def generate_shadow_texture(self):
-        self.shadow_texture = CubeMapTexture(POINT_SHADOW_TEX_SZ, POINT_SHADOW_TEX_SZ)
-        # The tint of the light varies slowly across a transparent surface, which a coarser map holds
+        # The depth cube map is compared texel by texel, while the tint of the light, which varies slowly across a
+        # transparent surface, is read filtered from a coarser map
+        self.shadow_texture = CubeMapTexture(
+            POINT_SHADOW_TEX_SZ, TexChannels.DEPTH, GL_FLOAT, Sampler(mag_filter=GL_NEAREST, min_filter=GL_NEAREST)
+        )
         self.transmittance_texture = CubeMapTexture(
-            POINT_TRANSMITTANCE_TEX_SZ, POINT_TRANSMITTANCE_TEX_SZ, is_color=True
+            POINT_TRANSMITTANCE_TEX_SZ,
+            TexChannels.RGBA,
+            GL_HALF_FLOAT,
+            Sampler(mag_filter=GL_LINEAR, min_filter=GL_LINEAR),
         )
 
 

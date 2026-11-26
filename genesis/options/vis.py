@@ -2,18 +2,22 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
+import numpy as np
+
 from pydantic import Field, StrictBool, model_validator
 
 import genesis as gs
 from genesis.datatypes import List
 from genesis.typing import (
     IArrayType,
+    Matrix3x3Type,
     PositiveFloat,
     PositiveInt,
     PositiveVec2IType,
     UnitIntervalVec3Type,
     ValidFloat,
     Vec3FType,
+    Vec4FType,
 )
 from genesis.utils.serialization import ignore_invalid_load
 
@@ -213,6 +217,40 @@ class ThinLens(Options):
     aperture: PositiveFloat = 2.8
     focal_len: PositiveFloat = 0.05
     focus_dist: PositiveFloat | None = None
+
+
+class FisheyeLens(Options):
+    """
+    The calibrated lens of a fisheye camera, following the Kannala-Brandt model of the fisheye module of OpenCV.
+
+    A ray making an angle theta with the line of sight reaches the image at the distance
+    theta * (1 + k1 theta^2 + k2 theta^4 + k3 theta^6 + k4 theta^8) from the principal point, in units of the focal
+    lengths. The model holds beyond a right angle, so that a camera may see more than the half space in front of it.
+    The calibration of a camera with OpenCV gives both parameters, for the resolution it was calibrated at.
+
+    Parameters
+    ----------
+    intrinsics : array_like, shape (3, 3)
+        The camera matrix: the focal lengths fx and fy on its diagonal and the principal point (cx, cy) in its last
+        column, in pixels from the top-left corner of the image, the rows going down.
+    distortion : array_like, shape (4,), optional
+        The distortion coefficients (k1, k2, k3, k4). Defaults to zeros, an equidistant projection.
+    """
+
+    intrinsics: Matrix3x3Type
+    distortion: Vec4FType = (0.0, 0.0, 0.0, 0.0)
+
+    @model_validator(mode="after")
+    def _validate_intrinsics(self):
+        (fx, skew, _), (zero_10, fy, _), last_row = self.intrinsics
+        if fx <= 0.0 or fy <= 0.0:
+            gs.raise_exception(f"The focal lengths of a fisheye lens must be positive, got fx={fx} and fy={fy}.")
+        if not np.allclose((skew, zero_10, *last_row), (0.0, 0.0, 0.0, 0.0, 1.0), atol=gs.EPS):
+            gs.raise_exception(
+                "The camera matrix of a fisheye lens holds the focal lengths on its diagonal, the principal point in "
+                f"its last column, and (0, 0, 1) in its last row, got {self.intrinsics}."
+            )
+        return self
 
 
 class EntityVisOptions(Options):

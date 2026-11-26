@@ -2897,3 +2897,43 @@ def qd_hash01(k0, k1, k2, k3):
     h = h * qd.u32(0x2C1B3C6D)
     h = h ^ (h >> qd.u32(12))
     return qd.cast(h >> qd.u32(8), gs.qd_float) * (1.0 / 16777216.0)
+
+
+def fisheye_pixels_to_rays(pixels, intrinsics, distortion):
+    """Return the rays that pixels of a fisheye camera see, following the Kannala-Brandt model of OpenCV.
+
+    A ray making an angle theta with the line of sight reaches the image at the distance
+    theta * (1 + k1 theta^2 + k2 theta^4 + k3 theta^6 + k4 theta^8) from the principal point, in units of the focal
+    lengths. The angle is the root of that polynomial, which a few Newton iterations reach for the small coefficients of
+    a calibrated lens.
+
+    Parameters
+    ----------
+    pixels : (..., 2) float
+        The positions (u, v) in the image, in pixels from its top-left corner, the rows going down.
+    intrinsics : (4,) float
+        The focal lengths and the principal point (fx, fy, cx, cy), in pixels.
+    distortion : (4,) float
+        The distortion coefficients (k1, k2, k3, k4).
+
+    Returns
+    -------
+    rays : (..., 3) float
+        The unit direction of the ray of each pixel, in the frame of the camera of OpenCV: z along the line of sight, x
+        to the right and y down the image.
+    angles : (...,) float
+        The angle of each ray to the line of sight, beyond pi for a position that no ray reaches.
+    """
+    fx, fy, cx, cy = intrinsics
+    k1, k2, k3, k4 = distortion
+    xy = (pixels - np.array((cx, cy))) / np.array((fx, fy))
+    theta_d = np.linalg.norm(xy, axis=-1)
+    theta = theta_d.copy()
+    for _ in range(10):
+        theta2 = theta * theta
+        residual = theta * (1.0 + theta2 * (k1 + theta2 * (k2 + theta2 * (k3 + theta2 * k4)))) - theta_d
+        slope = 1.0 + theta2 * (3.0 * k1 + theta2 * (5.0 * k2 + theta2 * (7.0 * k3 + theta2 * 9.0 * k4)))
+        theta -= residual / slope
+    radial = np.divide(xy, theta_d[..., None], out=np.zeros_like(xy), where=theta_d[..., None] > 0.0)
+    rays = np.concatenate((radial * np.sin(theta)[..., None], np.cos(theta)[..., None]), axis=-1)
+    return rays, theta

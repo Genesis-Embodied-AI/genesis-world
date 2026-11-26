@@ -12,6 +12,7 @@ from .camera import OrthographicCamera, PerspectiveCamera
 from .constants import BufFlags, LightType, MAX_N_LIGHTS, ProgramFlags, RenderFlags, TexChannels, TexFlags, ViewFlags
 from .light import PointLight, SpotLight
 from .numba_gl_wrapper import GLWrapper
+from .sampler import Sampler
 from .scene import CORNER_INDICES
 from .texture import CubeMapTexture, Texture
 from .utils import transform_box
@@ -1414,8 +1415,12 @@ class JITRenderer:
             self._placeholder_textures = (
                 Texture(source=np.full((1, 1, 4), 255, np.uint8), source_channels=TexChannels.RGBA),
                 Texture(width=1, height=1, source_channels=TexChannels.DEPTH, data_format=GL.GL_UNSIGNED_SHORT),
-                CubeMapTexture(1, 1),
-                CubeMapTexture(1, 1, is_color=True),
+                CubeMapTexture(
+                    1, TexChannels.DEPTH, GL.GL_FLOAT, Sampler(mag_filter=GL.GL_NEAREST, min_filter=GL.GL_NEAREST)
+                ),
+                CubeMapTexture(
+                    1, TexChannels.RGBA, GL.GL_HALF_FLOAT, Sampler(mag_filter=GL.GL_LINEAR, min_filter=GL.GL_LINEAR)
+                ),
             )
             for texture in self._placeholder_textures:
                 texture._add_to_context()
