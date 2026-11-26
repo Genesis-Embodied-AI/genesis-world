@@ -66,10 +66,10 @@ from genesis.utils.simt import (
     ExactSums,
     func_exact_sum_add,
     func_exact_sum_take,
-    requires_deterministic_accumulation,
     qd_block_max,
     qd_block_min,
     qd_block_sum,
+    requires_deterministic_accumulation,
 )
 
 if TYPE_CHECKING:
@@ -1561,22 +1561,31 @@ def kernel_fem_surface_force(
 def func_sweep_particle_box(
     pos_start: qd.types.vector(3), pos_end: qd.types.vector(3), half_size: qd.types.vector(3), radius: float, eps: float
 ):
-    """Sweep a particle sphere in the box frame. Return the endpoint distance to the first contact plane and its normal,
-    or the radius and a zero normal on a miss.
+    """
+    Sweep a particle sphere along a segment in the box frame.
+
+    Return the endpoint's signed distance to the first contact plane and its outward normal. A miss or a center starting
+    on or inside the box returns the radius and a zero normal so the caller uses the endpoint contact query.
     """
     delta = pos_end - pos_start
     bounds = half_size + radius
-    time = ray_aabb_intersection(pos_start, delta, -bounds, bounds, eps)
+    time = ray_aabb_intersection(pos_start, delta, aabb_min=-bounds, aabb_max=bounds, eps=eps)
+    pos_min = qd.min(pos_start, pos_end)
+    pos_max = qd.max(pos_start, pos_end)
     signed_dist = radius
     normal = qd.Vector.zero(gs.qd_float, 3)
-    while 0.0 <= time < 1.0:
+    # The segment crosses each of the six face planes of the box at most once
+    for _ in range(7):
+        if time < 0.0 or time >= 1.0:
+            break
         # Between successive box face planes the closest feature stays the same, so the offset from the box varies
         # linearly. Its squared length reaches the squared particle radius at the first contact with that feature.
         time_next = gs.qd_float(1.0)
         for axis in qd.static(range(3)):
-            if delta[axis] != 0.0:
-                for side in qd.static((-1, 1)):
-                    time_face = (side * half_size[axis] - pos_start[axis]) / delta[axis]
+            for side in qd.static((-1, 1)):
+                pos_face = side * half_size[axis]
+                if pos_min[axis] < pos_face < pos_max[axis]:
+                    time_face = (pos_face - pos_start[axis]) / delta[axis]
                     if time_face > time:
                         time_next = qd.min(time_next, time_face)
         pos = pos_start + time * delta
@@ -1586,13 +1595,6 @@ def func_sweep_particle_box(
         delta_offset = offset_next - offset
         approach = -offset.dot(delta_offset)
         if approach <= 0.0:
-            # A center starting on a bare face has zero offset even when it travels straight through that face
-            if time == 0.0 and offset.norm_sqr() == 0.0:
-                for axis in qd.static(range(3)):
-                    if qd.abs(pos[axis]) == half_size[axis] and pos[axis] * delta[axis] < 0.0:
-                        normal = qd.Vector.zero(gs.qd_float, 3)
-                        normal[axis] = qd.math.sign(pos[axis])
-                        signed_dist = normal[axis] * pos_end[axis] - half_size[axis]
             break
         gap_sq = offset.norm_sqr() - radius * radius
         discriminant = approach * approach - delta_offset.norm_sqr() * gap_sq
