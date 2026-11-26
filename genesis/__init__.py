@@ -322,10 +322,11 @@ def init(
         )
 
     # A loop sized at run time launches every block of the grid whatever its size, so the grid holds two waves of
-    # blocks, a wave being as many blocks as the compute units of the GPU run at once. A single wave leaves the largest
-    # loops no block to start while the slowest blocks of the wave finish.
-    # FIXME: quadrants#929 - the grid of such a loop ignores its bound, and the default grid of Quadrants spans four
-    # waves, which small loops spend scheduling empty blocks.
+    # blocks, a wave being as many blocks as the compute units of the GPU run at once. Small batches and small scenes,
+    # whose loops hold far fewer items than a wave, then spend far less of each launch scheduling empty blocks, while
+    # large batches, whose loops fill the GPU anyway, run as fast as with a larger grid. A single wave would slow them
+    # down, leaving no block to start while the slowest blocks of the wave finish.
+    # FIXME: quadrants#929 - such a grid ignores the bound of its loop, and the default of Quadrants spans four waves.
     if backend in (_gs_backend.cuda, _gs_backend.amdgpu):
         device_props = torch.cuda.get_device_properties()
         threads_per_wave = device_props.multi_processor_count * device_props.max_threads_per_multi_processor

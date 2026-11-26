@@ -300,7 +300,7 @@ jobs:
       GENESIS_IMAGE_VER: ${{ needs.setup.outputs.GENESIS_IMAGE_VER }}
       GS_ENABLE_NDARRAY: ${{ matrix.GS_ENABLE_NDARRAY }}
       # A push to the default branch was validated by its pull request already.
-      HAS_UNIT_TESTS: false
+      HAS_UNIT_TESTS: ${{ github.event_name != 'push' }}
       # A value chosen by a caller reaches the scripts as a variable, since one inserted in their text by an expression
       # could end a quoted string or a heredoc and run commands on the runner.
       UNIT_TESTS_MARKEXPR: ${{ inputs.unit_tests_markexpr }}
