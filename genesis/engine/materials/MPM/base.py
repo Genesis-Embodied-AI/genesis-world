@@ -94,10 +94,6 @@ class Base(Material["MPMEntity"]):
 
         `actu` is the actuation of the particle and `m_dir` the direction of its muscle fibers.
         """
-        return self._update_stress_corotated(U, V, F_new, J)
-
-    @qd.func
-    def _update_stress_corotated(self, U, V, F_new, J):
         stress = 2 * self.mu * (F_new - U @ V.transpose()) @ F_new.transpose() + qd.Matrix.identity(
             gs.qd_float, 3
         ) * self.lam * J * (J - 1)
