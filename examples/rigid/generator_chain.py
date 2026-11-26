@@ -3,6 +3,7 @@
 'Chain' subclasses gs.morphs.Generator: it holds the options of the chain alone, and the function registered with
 gs.register_generator builds its geometry as the entity is added, here an inline MJCF model of capsule links joined by
 ball joints, the first one hanging from the anchor. The pose of the generator morph places and tilts the whole chain.
+With the viewer, a panel edits the options of the chain and rebuilds the scene, which generates the chain again.
 """
 
 import argparse
@@ -10,7 +11,7 @@ import os
 import xml.etree.ElementTree as ET
 
 import genesis as gs
-from genesis.vis.keybindings import Key, KeyAction, Keybind
+from genesis.ext.pyrender.overlay import ImGuiOverlayPlugin
 
 
 class Chain(gs.morphs.Generator, specs=(gs.entities.Rigid,)):
@@ -58,7 +59,9 @@ def generate_chain(morph: Chain, context: gs.engine.generators.GeneratorContext)
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--steps", type=int, default=300, help="Number of simulation steps")
-    parser.add_argument("-v", "--vis", action="store_true", help="Open the interactive viewer, dragging with the mouse")
+    parser.add_argument(
+        "-v", "--vis", action="store_true", help="Open the interactive viewer, with a panel generating the chain"
+    )
     parser.add_argument("-r", "--record", action="store_true", help="Record the swing to 'out/generator_chain.mp4'")
     args = parser.parse_args()
 
@@ -73,6 +76,7 @@ def main():
         viewer_options=gs.options.ViewerOptions(
             camera_pos=camera_pos,
             camera_lookat=camera_lookat,
+            enable_gui=args.vis,
         ),
         show_viewer=args.vis,
     )
@@ -80,12 +84,14 @@ def main():
         gs.morphs.Plane(),
     )
     # The chain hangs from 1.3 m and starts tilted 70 degrees from the vertical, swinging towards +x
+    chain = Chain(
+        pos=(0.0, 0.0, 1.3),
+        euler=(0.0, -70.0, 0.0),
+    )
     scene.add_entity(
         spec=gs.entities.Rigid(
-            morph=Chain(
-                pos=(0.0, 0.0, 1.3),
-                euler=(0.0, -70.0, 0.0),
-            ),
+            morph=chain,
+            name="chain",
         ),
     )
     box_size = 0.1
@@ -113,14 +119,32 @@ def main():
     scene.build()
 
     if args.vis:
-        is_running = True
+        overlay = next(plugin for plugin in scene.viewer.plugins if isinstance(plugin, ImGuiOverlayPlugin))
 
-        def stop():
-            nonlocal is_running
-            is_running = False
+        def chain_panel(imgui):
+            nonlocal chain
+            imgui.text("Chain generator")
+            # The sliders edit the options of the chain to generate next, the chain in the scene staying as built
+            _, n_links = imgui.slider_int("Links", chain.n_links, 1, 20)
+            _, link_length = imgui.slider_float("Link length", chain.link_length, 0.02, 0.3)
+            _, link_radius = imgui.slider_float("Link radius", chain.link_radius, 0.005, 0.05)
+            _, weight_radius = imgui.slider_float("Weight radius", chain.weight_radius, 0.01, 0.15)
+            chain = chain.model_copy(
+                update=dict(
+                    n_links=n_links,
+                    link_length=link_length,
+                    link_radius=link_radius,
+                    weight_radius=weight_radius,
+                )
+            )
+            if imgui.button("Generate"):
+                # Every other entity keeps the spec it was built from, so that the rebuild reuses its description
+                entities_kwargs = {entity.name: {"spec": entity.spec} for entity in scene.entities}
+                entities_kwargs["chain"] = {"spec": gs.entities.Rigid(morph=chain, name="chain")}
+                overlay.interactive_scene.rebuild(entities_kwargs=entities_kwargs)
 
-        scene.viewer.register_keybinds(Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=stop))
-        while is_running:
+        overlay.register_panel(chain_panel)
+        while scene.viewer.is_alive():
             scene.step()
         return
 
