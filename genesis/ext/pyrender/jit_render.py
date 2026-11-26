@@ -152,13 +152,15 @@ def set_uniform_4fv(pid, name, value, gl):
 
 
 @nb.jit(nopython=True, cache=True)
-def bind_lighting(pid, flags, light, shadow_map, light_matrix, ambient_light, placeholder_tex, gl):
+def bind_lighting(pid, flags, light, shadow_map, transmittance_map, light_matrix, ambient_light, placeholder_tex, gl):
     n = len(light)
     set_uniform_3fv(pid, "ambient_light", ambient_light, gl)
     n_dir, n_pt, n_spot = 0, 0, 0
     active_texture = 0
     depth_tex = -1
     cube_tex = -1
+    transmittance_tex = -1
+    transmittance_cube_tex = -1
 
     for i in range(n):
         if abs(light[i, 7] - 0.0) < 0.1:
@@ -175,6 +177,11 @@ def bind_lighting(pid, flags, light, shadow_map, light_matrix, ambient_light, pl
                 set_uniform_matrix_4fv(pid, b + "light_matrix", light_matrix[i, 0], gl)
                 depth_tex = active_texture
                 active_texture += 1
+                gl.glActiveTexture(GL_TEXTURE0 + active_texture)
+                gl.glBindTexture(GL_TEXTURE_2D, transmittance_map[i])
+                set_uniform_1i(pid, b + "transmittance_map", active_texture, gl)
+                transmittance_tex = active_texture
+                active_texture += 1
             n_dir += 1
         elif abs(light[i, 7] - 1.0) < 0.1:
             b = "point_lights[" + str(n_pt) + "]."
@@ -188,6 +195,11 @@ def bind_lighting(pid, flags, light, shadow_map, light_matrix, ambient_light, pl
                 gl.glBindTexture(GL_TEXTURE_CUBE_MAP, shadow_map[i])
                 set_uniform_1i(pid, b + "shadow_map", active_texture, gl)
                 cube_tex = active_texture
+                active_texture += 1
+                gl.glActiveTexture(GL_TEXTURE0 + active_texture)
+                gl.glBindTexture(GL_TEXTURE_CUBE_MAP, transmittance_map[i])
+                set_uniform_1i(pid, b + "transmittance_map", active_texture, gl)
+                transmittance_cube_tex = active_texture
                 active_texture += 1
             n_pt += 1
 
@@ -208,10 +220,15 @@ def bind_lighting(pid, flags, light, shadow_map, light_matrix, ambient_light, pl
             active_texture += 1
             gl.glActiveTexture(GL_TEXTURE0 + depth_tex)
             gl.glBindTexture(GL_TEXTURE_2D, placeholder_tex[1])
+            transmittance_tex = active_texture
+            active_texture += 1
+            gl.glActiveTexture(GL_TEXTURE0 + transmittance_tex)
+            gl.glBindTexture(GL_TEXTURE_2D, placeholder_tex[0])
 
-        for i in range(n_dir, MAX_N_LIGHTS):
+        for i in range(n_dir, max(n_dir, 1)):
             b = "directional_lights[" + str(i) + "]."
             set_uniform_1i(pid, b + "shadow_map", depth_tex, gl)
+            set_uniform_1i(pid, b + "transmittance_map", transmittance_tex, gl)
 
     if flags & RenderFlags_SHADOWS_POINT:
         if cube_tex < 0:
@@ -221,10 +238,15 @@ def bind_lighting(pid, flags, light, shadow_map, light_matrix, ambient_light, pl
             active_texture += 1
             gl.glActiveTexture(GL_TEXTURE0 + cube_tex)
             gl.glBindTexture(GL_TEXTURE_CUBE_MAP, placeholder_tex[2])
+            transmittance_cube_tex = active_texture
+            active_texture += 1
+            gl.glActiveTexture(GL_TEXTURE0 + transmittance_cube_tex)
+            gl.glBindTexture(GL_TEXTURE_CUBE_MAP, placeholder_tex[3])
 
-        for i in range(n_pt, MAX_N_LIGHTS):
+        for i in range(n_pt, max(n_pt, 1)):
             b = "point_lights[" + str(i) + "]."
             set_uniform_1i(pid, b + "shadow_map", cube_tex, gl)
+            set_uniform_1i(pid, b + "transmittance_map", transmittance_cube_tex, gl)
 
     return active_texture
 
@@ -447,6 +469,7 @@ class JITRenderer:
                 light._generate_shadow_texture()
             if light.shadow_texture is not None:
                 shadow_textures.add(light.shadow_texture)
+                shadow_textures.add(light.transmittance_texture)
 
         # Add new textures to context
         for texture in shadow_textures - self._shadow_textures:
@@ -495,6 +518,7 @@ class JITRenderer:
         # point:       color <- 3, position <- 3, intensity, 1
         self.light = np.zeros((n, 8), np.float32)
         self.shadow_map = np.zeros(n, np.int32)
+        self.transmittance_map = np.zeros(n, np.int32)
         self.light_matrix = np.zeros((n, 6, 4, 4), np.float32)
 
         self.ambient_light = np.array(ambient_light, np.float32)
@@ -514,8 +538,9 @@ class JITRenderer:
                 self.light[i, 7] = 0
 
                 if light.shadow_texture:
-                    if light.shadow_texture._in_context():
+                    if light.shadow_texture._in_context() and light.transmittance_texture._in_context():
                         self.shadow_map[i] = light.shadow_texture._texid
+                        self.transmittance_map[i] = light.transmittance_texture._texid
                     else:
                         all_textures_ready = False
 
@@ -534,8 +559,9 @@ class JITRenderer:
                 self.light[i, 7] = 1
 
                 if light.shadow_texture:
-                    if light.shadow_texture._in_context():
+                    if light.shadow_texture._in_context() and light.transmittance_texture._in_context():
                         self.shadow_map[i] = light.shadow_texture._texid
+                        self.transmittance_map[i] = light.transmittance_texture._texid
                     else:
                         all_textures_ready = False
 
@@ -800,6 +826,7 @@ class JITRenderer:
                 nb.int32[:],
                 nb.float32[:, :],
                 nb.int32[:],
+                nb.int32[:],
                 nb.float32[:, :, :, :],
                 nb.float32[:],
                 nb.float32[:, :],
@@ -840,6 +867,7 @@ class JITRenderer:
             n_indices,
             light,
             shadow_map,
+            transmittance_map,
             light_matrix,
             ambient_light,
             mat_V,
@@ -900,7 +928,15 @@ class JITRenderer:
                                 RenderFlags_SHADOWS_DIRECTIONAL | RenderFlags_SHADOWS_SPOT | RenderFlags_SHADOWS_POINT
                             )
                         lighting_texture = bind_lighting(
-                            pid, light_flags, light, shadow_map, light_matrix, ambient_light, placeholder_tex, gl
+                            pid,
+                            light_flags,
+                            light,
+                            shadow_map,
+                            transmittance_map,
+                            light_matrix,
+                            ambient_light,
+                            placeholder_tex,
+                            gl,
                         )
                         set_uniform_3fv(pid, "cam_pos", cam_pos, gl)
                         set_uniform_matrix_4fv(pid, "reflection_mat", reflection_mat, gl)
@@ -1127,6 +1163,7 @@ class JITRenderer:
                 nb.float32[:, :, :],
                 nb.float32[:],
                 nb.boolean,
+                nb.boolean,
                 nb.int8[:, :],
                 nb.int32,
                 nb.int32[:],
@@ -1155,6 +1192,7 @@ class JITRenderer:
             light_matrix,
             light_pos,
             is_point,
+            is_transmittance,
             render_flags,
             env_idx,
             model_buffer_id,
@@ -1174,6 +1212,9 @@ class JITRenderer:
                 # Markers cast no shadow, and neither does a translucent color drawn without a transparent shadow (see
                 # TRANSPARENT_SHADOW in renderer.py)
                 if render_flags[id, 6] or (render_flags[id, 9] and not render_flags[id, 3]):
+                    continue
+                # The transmittance map holds the transparent surfaces alone (see '_transmittance_pass' in renderer.py)
+                if is_transmittance and not render_flags[id, 5]:
                     continue
 
                 pid = program_id[id]
@@ -1204,6 +1245,8 @@ class JITRenderer:
                 if render_flags[id, 5] or tf & (8 << 8):
                     set_uniform_4fv(pid, "base_color_factor", pbr_mat[id, :4], gl)
                     set_uniform_1f(pid, "transmission_factor", pbr_mat[id, 9], gl)
+                    if is_transmittance:
+                        set_uniform_1f(pid, "ior", pbr_mat[id, 10], gl)
                     if tf & 8:
                         gl.glActiveTexture(GL_TEXTURE0)
                         gl.glBindTexture(GL_TEXTURE_2D_ARRAY if tf & (8 << 8) else GL_TEXTURE_2D, textures[id, 4])
@@ -1212,9 +1255,14 @@ class JITRenderer:
                         if is_layer_set and env_idx >= 0:
                             set_uniform_1f(pid, "base_color_layer", texture_layers[i_layers, env_idx, 0], gl)
 
-                gl.glEnable(GL_CULL_FACE)
-                gl.glCullFace(GL_BACK)
-                gl.glDisable(GL_BLEND)
+                # Both faces of a transparent surface filter the light, and blend into the transmittance map
+                if is_transmittance:
+                    gl.glDisable(GL_CULL_FACE)
+                    gl.glEnable(GL_BLEND)
+                else:
+                    gl.glEnable(GL_CULL_FACE)
+                    gl.glCullFace(GL_BACK)
+                    gl.glDisable(GL_BLEND)
                 gl.glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
                 gl.glDisable(GL_PROGRAM_POINT_SIZE)
 
@@ -1378,14 +1426,30 @@ class JITRenderer:
         if self._forward_pass is None:
             self.gen_func_ptr()
         if self._placeholder_textures is None:
-            # A 2D color texture, a 2D depth texture compared as a shadow map, and a depth cube map (see bind_lighting)
+            # A white 2D color texture, a 2D depth texture compared as a shadow map, a depth cube map and a white color
+            # cube map, the colors letting a light through untinted (see bind_lighting)
             self._placeholder_textures = (
                 Texture(source=np.full((1, 1, 4), 255, np.uint8), source_channels="RGBA"),
                 Texture(width=1, height=1, source_channels="D", data_format=GL.GL_UNSIGNED_SHORT),
                 CubeMapTexture(1, 1),
+                CubeMapTexture(1, 1, is_color=True),
             )
             for texture in self._placeholder_textures:
                 texture._add_to_context()
+            GL.glBindTexture(GL.GL_TEXTURE_CUBE_MAP, self._placeholder_textures[3]._texid)
+            for i_face in range(6):
+                GL.glTexSubImage2D(
+                    GL.GL_TEXTURE_CUBE_MAP_POSITIVE_X + i_face,
+                    0,
+                    0,
+                    0,
+                    1,
+                    1,
+                    GL.GL_RGBA,
+                    GL.GL_HALF_FLOAT,
+                    np.ones((1, 1, 4), np.float16),
+                )
+            GL.glBindTexture(GL.GL_TEXTURE_CUBE_MAP, 0)
             self.placeholder_tex = np.array([texture._texid for texture in self._placeholder_textures], np.int32)
         # Temporarily hide markers for non-debug offscreen cameras by setting their
         # index count to 0, so draw calls render nothing for these nodes.
@@ -1429,6 +1493,7 @@ class JITRenderer:
                 self.n_indices,
                 self.light,
                 self.shadow_map,
+                self.transmittance_map,
                 self.light_matrix,
                 self.ambient_light,
                 np.ascontiguousarray(V, dtype=np.float32),
@@ -1459,7 +1524,18 @@ class JITRenderer:
         if markers_only:
             self.n_indices[non_marker_mask] = saved_non_marker_indices
 
-    def shadow_mapping_pass(self, renderer, V, P, flags, program_flags, env_idx=-1, light_matrix=None, light_pos=None):
+    def shadow_mapping_pass(
+        self,
+        renderer,
+        V,
+        P,
+        flags,
+        program_flags,
+        env_idx=-1,
+        light_matrix=None,
+        light_pos=None,
+        is_transmittance=False,
+    ):
         """Render the shadow map of a light, the depth seen from it or for a point light its distance to the scene.
 
         Parameters
@@ -1480,6 +1556,8 @@ class JITRenderer:
             The view-projection matrix of each face of the cube map of a point light. Defaults to None.
         light_pos : (3,) float | None, optional
             The position of a point light, None for any other light. Defaults to None.
+        is_transmittance : bool, optional
+            Whether the pass renders the transmittance map of the light rather than its shadow map. Defaults to False.
         """
         self.load_programs(renderer, flags, program_flags)
         if self._shadow_mapping_pass is None:
@@ -1499,6 +1577,7 @@ class JITRenderer:
                 np.ascontiguousarray(light_matrix, dtype=np.float32) if is_point else identity[None],
                 np.ascontiguousarray(light_pos, dtype=np.float32) if is_point else identity[0, :3],
                 is_point,
+                is_transmittance,
                 self.render_flags,
                 env_idx,
                 self.model_buffer_id,

@@ -2332,8 +2332,8 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
     # Alphas that 8-bit texels store exactly, so that every source gives the same opacity
     RED = (1.0, 0.0, 0.0, red_alpha_u8 / 255)
     BLUE = (0.0, 0.0, 1.0, 128 / 255)
-    # The gray whose linear value is one half, so that a glass of that color lets through half of the light
-    GLASS_GRAY = 1.055 * 0.5 ** (1.0 / 2.4) - 0.055
+    # The linear color of a glass, which lets through that share of each color of the light at each of its faces
+    GLASS_LINEAR = np.array([0.8, 0.4, 0.1])
     # The dynamic texture of the blue box shows an opaque image in environment 0 when there are several, which the
     # translucent image of environment 1 must leave as it is
     blues_color = [BLUE] if alpha_source != "dynamic_texture" or n_envs == 0 else [(0.0, 0.0, 1.0, 1.0), BLUE]
@@ -2445,7 +2445,7 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
             size=(0.2, 0.2, 0.2),
         ),
         surface=gs.surfaces.Glass(
-            color=(GLASS_GRAY, GLASS_GRAY, GLASS_GRAY),
+            color=tuple(1.055 * GLASS_LINEAR ** (1.0 / 2.4) - 0.055),
         ),
     )
     cam = scene.add_camera(
@@ -2498,8 +2498,9 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
     patch_pair_across = centre_patch((0.6, 0.0, 0.5), (-0.6, 0.0, 0.5))
     assert_allclose(patch_pair_across, patch_blue_across + (1.0 - blues_alpha) * patch_red_across, atol=1.0)
 
-    # A surface blocks the share of the light that its opacity gives, its shadow ranging from none when transparent to
-    # that of an opaque box of the same shape. The share holds in linear light.
+    # Each face of a translucent color blocks the share of the light that its alpha covers, its shadow ranging from none
+    # when transparent to that of an opaque box of the same shape, and tints the rest by its linear color as much as its
+    # alpha covers. The light crosses the two faces of the box, and the shares hold in linear light.
     def floor_patch(pos_red, pos_occluder):
         # The scene is rendered as it stands when no position is given
         if pos_red is not None:
@@ -2513,7 +2514,8 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
     floor_lit = floor_patch(PARKED, PARKED)
     floor_dark = floor_patch(PARKED, (0.6, 0.0, 0.5))
     floor_shadowed = floor_patch((0.6, 0.0, 0.5), PARKED)
-    assert_allclose((floor_lit - floor_shadowed) / (floor_lit - floor_dark), RED[3], atol=0.02)
+    red_passed = ((1.0 - RED[3]) * ((1.0 - RED[3]) + RED[3] * np.array(RED[:3]))) ** 2
+    assert_allclose((floor_lit - floor_shadowed) / (floor_lit - floor_dark), 1.0 - red_passed, atol=0.02)
 
     # The shadow of a dynamic texture follows the variant shown, as soon as it is shown
     if alpha_source == "dynamic_texture":
@@ -2522,10 +2524,13 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
         red.set_texture(variant=1)
         assert_allclose(floor_patch(None, None), floor_shadowed, atol=0.02)
 
-    # A glass blocks the share of the light that its linear color holds back
+    # Each of the two faces of a glass box lets through each color of the light as its linear color gives, less what its
+    # interface reflects head-on, which its index of refraction gives
     glass.set_pos((0.6, 0.0, 0.5))
     floor_glass = floor_patch(PARKED, PARKED)
-    assert_allclose((floor_lit - floor_glass) / (floor_lit - floor_dark), 0.5, atol=0.02)
+    f0 = ((glass.surface.ior - 1.0) / (glass.surface.ior + 1.0)) ** 2
+    transmitted = ((1.0 - f0) * GLASS_LINEAR) ** 2
+    assert_allclose((floor_lit - floor_glass) / (floor_lit - floor_dark), 1.0 - transmitted, atol=0.02)
 
 
 @pytest.mark.required

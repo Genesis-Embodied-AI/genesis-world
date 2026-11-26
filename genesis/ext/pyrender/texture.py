@@ -295,26 +295,30 @@ class Texture(object):
         glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_S, self.sampler.wrapS)
         glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_T, self.sampler.wrapT)
         border_color = np.full((4,), fill_value=255, dtype=np.uint8)
-        if fmt == GL_DEPTH_COMPONENT or self.data_format == GL_FLOAT:
+        # A texture of floating-point values reads its border as given, while the others scale it to [0, 1]
+        if fmt == GL_DEPTH_COMPONENT or self.data_format in (GL_FLOAT, GL_HALF_FLOAT):
             border_color = np.ones((4,), dtype=np.float32)
         glTexParameterfv(self.tex_type, GL_TEXTURE_BORDER_COLOR, border_color)
 
         if fmt == GL_DEPTH_COMPONENT:
             # A depth texture is a shadow map read through a sampler2DShadow: a fetch compares the fragment depth
             # against the texels and blends the comparisons bilinearly, further from the light counting as shadowed.
-            # The border depth of 1.0 leaves fragments beyond the map lit. A shadow map takes no anisotropic filtering,
-            # whose depth comparisons differ between GPUs and software renderers at grazing angles.
+            # The border depth of 1.0 leaves fragments beyond the map lit.
             glTexParameteri(self.tex_type, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE)
             glTexParameteri(self.tex_type, GL_TEXTURE_COMPARE_FUNC, GL_GREATER)
             glTexParameteri(self.tex_type, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
             glTexParameteri(self.tex_type, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
             glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER)
             glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER)
-        elif texture_filter_anisotropic.glInitTextureFilterAnisotropicEXT():
-            max_aniso = glGetFloat(texture_filter_anisotropic.GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT)
-            glTexParameterf(GL_TEXTURE_2D, texture_filter_anisotropic.GL_TEXTURE_MAX_ANISOTROPY_EXT, max_aniso)
-        else:
-            gs.logger.debug("Current OpenGL context does not support anisotropic filtering. Disabling it...")
+
+        # Anisotropic filtering serves the images of surfaces seen at grazing angles. A texture that a pass renders into
+        # is read in light or screen space, where anisotropic lookups differ between GPUs and software renderers.
+        if self.source is not None:
+            if texture_filter_anisotropic.glInitTextureFilterAnisotropicEXT():
+                max_aniso = glGetFloat(texture_filter_anisotropic.GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT)
+                glTexParameterf(GL_TEXTURE_2D, texture_filter_anisotropic.GL_TEXTURE_MAX_ANISOTROPY_EXT, max_aniso)
+            else:
+                gs.logger.debug("Current OpenGL context does not support anisotropic filtering. Disabling it...")
 
         # Unbind texture
         glBindTexture(self.tex_type, 0)
@@ -348,15 +352,16 @@ class Texture(object):
 
 class CubeMapTexture(object):
     """
-    Cube map depth texture for point light shadow.
+    Cube map texture for point light shadow: the depth, or with 'is_color' the color of what the light passes through.
     """
 
-    def __init__(self, width=None, height=None):
+    def __init__(self, width=None, height=None, is_color=False):
         self.width = width
         self.height = height
+        self.is_color = is_color
 
         self.tex_type = GL_TEXTURE_CUBE_MAP
-        self.data_format = GL_FLOAT
+        self.data_format = GL_HALF_FLOAT if is_color else GL_FLOAT
         self._texid = None
 
     @property
@@ -390,7 +395,10 @@ class CubeMapTexture(object):
             return
             # raise ValueError('Texture already loaded into OpenGL context')
 
-        fmt = GL_DEPTH_COMPONENT
+        fmt = GL_RGBA if self.is_color else GL_DEPTH_COMPONENT
+        internal_fmt = GL_RGBA16F if self.is_color else GL_DEPTH_COMPONENT
+        # A color cube map is read filtered, the depth one compared texel by texel
+        tex_filter = GL_LINEAR if self.is_color else GL_NEAREST
 
         # Generate the OpenGL texture
         self._texid = glGenTextures(1)
@@ -402,10 +410,12 @@ class CubeMapTexture(object):
 
         # Bind texture and generate mipmaps
         for i in range(6):
-            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, fmt, width, height, 0, fmt, self.data_format, None)
+            glTexImage2D(
+                GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, internal_fmt, width, height, 0, fmt, self.data_format, None
+            )
 
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, tex_filter)
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, tex_filter)
         glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
         glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
         glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE)
@@ -434,3 +444,6 @@ class CubeMapTexture(object):
 
     def _bind_as_depth_attachment(self):
         glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, self._texid, 0)
+
+    def _bind_as_color_attachment(self):
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, self._texid, 0)

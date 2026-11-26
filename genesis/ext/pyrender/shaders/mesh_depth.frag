@@ -16,6 +16,9 @@ in vec4 color_multiplier;
 
 uniform vec4 base_color_factor;
 uniform float transmission_factor;
+#ifdef TRANSMITTANCE
+uniform float ior;
+#endif
 #ifdef HAS_BASE_COLOR_TEX
 #ifdef TEXCOORD_0_LOC
 #ifdef BASE_COLOR_TEX_ARRAY
@@ -27,8 +30,6 @@ uniform sampler2D base_color_texture;
 #endif
 #endif
 
-// 4x4 ordered dithering thresholds
-const float BAYER[16] = float[](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
 #endif
 
 out vec4 frag_color;
@@ -56,17 +57,36 @@ void main()
 #ifdef COLOR_0_LOC
     base_color *= color_multiplier;
 #endif
-    // A surface blocks the share of the light that it neither lets through its transparent texels nor transmits, the
-    // light it transmits being tinted by its linear color (see srgb_to_linear in mesh.frag). The shadow map keeps that
-    // share of its fragments in an ordered pattern, which the filtering of the shadow lookups averages into a partial
-    // shadow.
-    vec3 tint_linear = pow((base_color.rgb + 0.055) / 1.055, vec3(2.4));
-    tint_linear = mix(base_color.rgb / 12.92, tint_linear, step(0.04045, base_color.rgb));
-    float opacity = base_color.a * (1.0 - transmission_factor * dot(tint_linear, vec3(1.0 / 3.0)));
-    ivec2 pixel = ivec2(gl_FragCoord.xy) % 4;
-    if (opacity <= (BAYER[4 * pixel.y + pixel.x] + 0.5) / 16.0) {
+    // A surface blocks the share of the light that it neither lets through its transparent texels nor transmits. The
+    // shadow map holds the texels blocking all of it, sharp at its full resolution, and the transmittance map what the
+    // others let through, which multiplies over the surfaces a ray of the light crosses (see '_transmittance_pass' in
+    // renderer.py).
+    float opacity = base_color.a * (1.0 - transmission_factor);
+    bool is_opaque = opacity > 0.999;
+#ifdef TRANSMITTANCE
+    if (is_opaque) {
         discard;
     }
+    // The light past the covered share of the surface is tinted by its linear color (see srgb_to_linear in mesh.frag)
+    // as much as its alpha covers, and the light its material transmits by its color alone, less what its interface
+    // reflects head-on. The alpha keeps the depth of the nearest surface.
+    vec3 tint_linear = pow((base_color.rgb + 0.055) / 1.055, vec3(2.4));
+    tint_linear = mix(base_color.rgb / 12.92, tint_linear, step(0.04045, base_color.rgb));
+    float ior_ratio = (ior - 1.0) / (ior + 1.0);
+    vec3 passed = (1.0 - base_color.a) * mix(vec3(1.0), tint_linear, base_color.a);
+    vec3 transmitted = base_color.a * transmission_factor * (1.0 - ior_ratio * ior_ratio) * tint_linear;
+#ifdef POINT_SHADOW
+    float depth = length(frag_pos - light_pos) / 25.0;
+#else
+    float depth = gl_FragCoord.z;
+#endif
+    frag_color = vec4(passed + transmitted, depth);
+    return;
+#else
+    if (!is_opaque) {
+        discard;
+    }
+#endif
 #endif
 #ifdef POINT_SHADOW
     gl_FragDepth = length(frag_pos - light_pos) / 25.0;

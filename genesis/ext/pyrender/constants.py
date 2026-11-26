@@ -11,6 +11,8 @@ UINT_SZ = 4  # Byte size of GL uint32
 SHADOW_TEX_SZ = 8192  # Width and Height of Shadow Textures
 DIRECTIONAL_SHADOW_TEX_SZ = 4096  # Width and Height of the shadow textures of directional lights
 POINT_SHADOW_TEX_SZ = 2048  # Width and Height of each face of the shadow cube maps of point lights
+TRANSMITTANCE_TEX_SZ = 1024  # Width and Height of the light a directional light passes through transparent surfaces
+POINT_TRANSMITTANCE_TEX_SZ = 512  # Width and Height of each face of the same for point lights
 TEXT_PADDING = 20  # Width of padding for rendering text (px)
 FONT_SIZE = 26  # Default font size for rendering text (px)
 FONT_COLOR_LIGHTMODE = (0.0, 0.0, 0.0, 0.85)  # Default font color for light background color
@@ -181,6 +183,7 @@ class ProgramFlags:
     POINT_SHADOW = 8
     DOUBLE_SIDED = 16
     SHADOW = 32
+    TRANSMITTANCE = 64
 
 
 __all__ = ["RenderFlags", "TextAlign", "GLTF"]

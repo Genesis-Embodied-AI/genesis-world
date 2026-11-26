@@ -25,6 +25,8 @@ struct DirectionalLight {
 
     #ifdef DIRECTIONAL_LIGHT_SHADOWS
     sampler2DShadow shadow_map;
+    // The share of each color of the light that transparent surfaces let through, and the depth of the nearest one
+    sampler2D transmittance_map;
     mat4 light_matrix;
     #endif
 };
@@ -37,6 +39,8 @@ struct PointLight {
 
     #ifdef POINT_LIGHT_SHADOWS
     samplerCube shadow_map;
+    // The share of each color of the light that transparent surfaces let through, and the distance of the nearest one
+    samplerCube transmittance_map;
     #endif
 };
 
@@ -315,25 +319,30 @@ float PCF(sampler2DShadow shadow_map, vec3 coords){
     return result / 9.0;
 }
 
+// The coordinates of the fragment in the shadow map of a light, its depth moved toward the light by the bias
+vec3 shadow_coords(mat4 light_matrix, float nl)
+{
+    vec4 proj_coords = light_matrix * vec4(frag_position, 1.0);
+    vec3 light_coords = proj_coords.xyz / proj_coords.w * 0.5 + 0.5;
+    light_coords.z -= max(0.001 * (1.0 - nl), 0.0001) / proj_coords.w;
+    return light_coords;
+}
+
 float shadow_calc(mat4 light_matrix, sampler2DShadow shadow_map, float nl)
 {
-    // Compute light texture UV coords
-    vec4 proj_coords = vec4(light_matrix * vec4(frag_position.xyz, 1.0));
-    vec3 light_coords = proj_coords.xyz / proj_coords.w;
-    light_coords = light_coords * 0.5 + 0.5;
-    float current_depth = light_coords.z;
-    float bias = max(0.001 * (1.0 - nl), 0.0001) / proj_coords.w;
-    float compare = (current_depth - bias);
-    float shadow = PCF(shadow_map, vec3(light_coords.xy, compare));
-    //if (light_coords.z > 1.0) {
-        //shadow = 0.0;
-    //}
-    return shadow;
+    return PCF(shadow_map, shadow_coords(light_matrix, nl));
+}
+
+// The share of each color of the light that reaches the fragment through the transparent surfaces in front of it
+vec3 transmittance_calc(mat4 light_matrix, sampler2D transmittance_map, float nl)
+{
+    vec3 light_coords = shadow_coords(light_matrix, nl);
+    vec4 transmittance = texture(transmittance_map, light_coords.xy);
+    return light_coords.z > transmittance.a ? transmittance.rgb : vec3(1.0);
 }
 
 // Percentage-closer filtering over the 4x4 texels around the fragment, along the axes of the face of the cube map it
-// falls on. The shadow map of a transparent surface keeps an ordered 4x4 pattern of its fragments (see
-// mesh_depth.frag), which these taps average over exactly one period.
+// falls on, which softens the edges of the shadow as the filtering of the other shadow maps does
 float point_PCF(samplerCube shadow_map, vec3 frag_to_light, float bias)
 {
     float dist = length(frag_to_light);
@@ -458,12 +467,11 @@ void main()
         // Compute shadow
 #ifdef DIRECTIONAL_LIGHT_SHADOWS
         float nl = clamp(dot(n,l), 0.0, 1.0);
-        float shadow = shadow_calc(
-            directional_lights[i].light_matrix,
-            directional_lights[i].shadow_map,
-            nl
+        float shadow = shadow_calc(directional_lights[i].light_matrix, directional_lights[i].shadow_map, nl);
+        vec3 transmitted = transmittance_calc(
+            directional_lights[i].light_matrix, directional_lights[i].transmittance_map, nl
         );
-        res = res * (1.0 - shadow);
+        res = res * (1.0 - shadow) * transmitted;
 #endif
         color.xyz += res;
     }
@@ -482,9 +490,11 @@ void main()
                                 f0, c_diff, base_color.rgb, radiance);
 
 #ifdef POINT_LIGHT_SHADOWS
-        float bias = max(0.05 * (1.0 - dot(n, l)), 0.005);  
+        float bias = max(0.05 * (1.0 - dot(n, l)), 0.005);
         float shadow = point_PCF(point_lights[i].shadow_map, frag_position - position, bias);
-        res *= (1.0 - shadow);
+        vec4 transmittance = texture(point_lights[i].transmittance_map, frag_position - position);
+        vec3 transmitted = dist - bias > transmittance.a * 25.0 ? transmittance.rgb : vec3(1.0);
+        res *= (1.0 - shadow) * transmitted;
 #endif
 
         color.xyz += res;

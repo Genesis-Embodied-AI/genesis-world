@@ -16,7 +16,6 @@ from .constants import (
     DEFAULT_Z_FAR,
     DEFAULT_Z_NEAR,
     GLTF,
-    MAX_N_LIGHTS,
     BufFlags,
     ProgramFlags,
     RenderFlags,
@@ -75,6 +74,7 @@ class Renderer(object):
         self._main_db_ms = None
         self._main_fb_dims = (None, None)
         self._shadow_fb = None
+        self._transmittance_fb = None
         self._floor_fb = None
         self._latest_znear = DEFAULT_Z_NEAR
         self._latest_zfar = DEFAULT_Z_FAR
@@ -507,6 +507,9 @@ class Renderer(object):
             light_matrix=light_matrix,
             light_pos=position,
         )
+        self._transmittance_pass(
+            light, flags, ProgramFlags.POINT_SHADOW, env_idx, light_matrix=light_matrix, light_pos=position
+        )
 
     def _shadow_mapping_pass(self, scene, light_node, flags, env_idx=-1):
         light = light_node.light
@@ -518,6 +521,43 @@ class Renderer(object):
         V, P = self._get_light_cam_matrices(scene, light_node, flags)
 
         self.jit.shadow_mapping_pass(self, V, P, flags, ProgramFlags.SHADOW, env_idx=env_idx)
+        self._transmittance_pass(light, flags, ProgramFlags.SHADOW, env_idx, V=V, P=P)
+
+    def _transmittance_pass(
+        self, light, flags, program_flags, env_idx, V=None, P=None, light_matrix=None, light_pos=None
+    ):
+        """Render what transparent surfaces let through of a light into its transmittance map (see mesh_depth.frag)."""
+        if self._transmittance_fb is None:
+            self._transmittance_fb = glGenFramebuffers(1)
+        glBindFramebuffer(GL_FRAMEBUFFER, self._transmittance_fb)
+        light.transmittance_texture._bind_as_color_attachment()
+        glDrawBuffer(GL_COLOR_ATTACHMENT0)
+        glViewport(0, 0, light.transmittance_texture.width, light.transmittance_texture.height)
+        # White lets the light through untinted, behind a transparent surface at the far end of the depth range
+        glClearColor(1.0, 1.0, 1.0, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT)
+        if not self.jit.render_flags[:, 5].any():
+            return
+
+        # The colors multiply over the transparent surfaces that a ray of the light crosses, whatever their order, and
+        # the alpha keeps the depth of the nearest one
+        glDisable(GL_DEPTH_TEST)
+        glBlendFuncSeparate(GL_DST_COLOR, GL_ZERO, GL_ONE, GL_ONE)
+        glBlendEquationSeparate(GL_FUNC_ADD, GL_MIN)
+        self.jit.shadow_mapping_pass(
+            self,
+            V,
+            P,
+            flags,
+            program_flags | ProgramFlags.TRANSMITTANCE,
+            env_idx=env_idx,
+            light_matrix=light_matrix,
+            light_pos=light_pos,
+            is_transmittance=True,
+        )
+        glBlendEquation(GL_FUNC_ADD)
+        glDisable(GL_BLEND)
+        glEnable(GL_DEPTH_TEST)
 
     def _normal_pass(self, scene, flags, env_idx=-1):
         # Set up viewport for render
@@ -745,26 +785,6 @@ class Renderer(object):
 
         return program
 
-    def _compute_max_n_lights(self, flags):
-        max_n_lights = [MAX_N_LIGHTS, MAX_N_LIGHTS, MAX_N_LIGHTS]
-        # n_tex_units = glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS)
-
-        # Reserved texture units: 6
-        #   Normal Map
-        #   Occlusion Map
-        #   Emissive Map
-        #   Base Color or Diffuse Map
-        #   MR or SG Map
-        #   Environment cubemap
-
-        # n_reserved_textures = 6
-        # n_available_textures = n_tex_units - n_reserved_textures
-
-        # if flags & RenderFlags.SHADOWS_DIRECTIONAL and n_available_textures < max_n_lights[0]:
-        #     max_n_lights[0] = n_available_textures
-
-        return max_n_lights
-
     def _get_primitive_program(self, primitive, flags, program_flags):
         vertex_shader = None
         fragment_shader = None
@@ -829,6 +849,8 @@ class Renderer(object):
                     defines["BASE_COLOR_TEX_ARRAY"] = 1
                     if material.baseColorTexture.data_format == GL_HALF_FLOAT:
                         defines["BASE_COLOR_TEX_LINEAR"] = 1
+                if program_flags & ProgramFlags.TRANSMITTANCE:
+                    defines["TRANSMITTANCE"] = 1
 
         # Set up vertex buffer DEFINES
         bf = primitive.buf_flags
@@ -866,10 +888,12 @@ class Renderer(object):
             defines["SPOT_LIGHT_SHADOWS"] = 1
         if flags & RenderFlags.SHADOWS_POINT:
             defines["POINT_LIGHT_SHADOWS"] = 1
-        max_n_lights = self._compute_max_n_lights(flags)
-        defines["MAX_DIRECTIONAL_LIGHTS"] = max_n_lights[0]
-        defines["MAX_SPOT_LIGHTS"] = max_n_lights[1]
-        defines["MAX_POINT_LIGHTS"] = max_n_lights[2]
+        # The light arrays hold the lights of the scene, with one slot at least, so that the samplers of their shadow
+        # and transmittance maps fit in the texture units of every driver along with those of the material
+        lights_type = self.jit.light[:, 7]
+        defines["MAX_DIRECTIONAL_LIGHTS"] = max(np.count_nonzero(lights_type < 0.5), 1)
+        defines["MAX_SPOT_LIGHTS"] = 1
+        defines["MAX_POINT_LIGHTS"] = max(np.count_nonzero(lights_type > 0.5), 1)
 
         # Set up vertex normal defines
         if program_flags & ProgramFlags.VERTEX_NORMALS:
@@ -1032,6 +1056,9 @@ class Renderer(object):
         if self._shadow_fb is not None:
             glDeleteFramebuffers(1, [self._shadow_fb])
             self._shadow_fb = None
+        if self._transmittance_fb is not None:
+            glDeleteFramebuffers(1, [self._transmittance_fb])
+            self._transmittance_fb = None
 
     def _configure_main_framebuffer(self):
         # If mismatch with prior framebuffer, delete it
