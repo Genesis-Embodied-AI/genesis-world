@@ -528,10 +528,11 @@ def compute_sdf_data(mesh, res):
 
 
 # Trimesh materials drawing the image textures, keyed by texture, then by the factors and the index of refraction of the
-# surface, the content of its emission and its normal map. The rasterizer draws every mesh sharing a trimesh material with a single
-# material, made with the factors of the first surface it meets (see 'RasterizerContext._sync_shape_nodes'), so these
-# are part of the key of every material. A weak reference keys the texture, which never matches a later texture reusing
-# the id of a collected one, even while the release of the owned entries is disabled.
+# surface, the content of its emission, its normal map and its occlusion map. The rasterizer draws every mesh sharing a
+# trimesh material with a single material, made with the factors of the first surface it meets (see
+# 'RasterizerContext._sync_shape_nodes'), so these are part of the key of every material. A weak reference keys a
+# texture, which never matches a later texture reusing the id of a collected one, even while the release of the owned
+# entries is disabled.
 _TEXTURE_MATERIALS_CACHE = OwnedCache()
 
 

@@ -2344,9 +2344,9 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
     PARKED = (0.0, 0.0, 1.2)
     CENTRE = slice(RES // 2 - 3, RES // 2 + 3)
 
-    # Lighting the faces that the camera sees head-on keeps them clear of the edge of the shadow of their own box, and the
-    # shadow of each box falls clear of the other box. The point and spot lights stand along the same direction from the
-    # red box, the spot aiming at it, as bright on the slab below it.
+    # Lighting the faces that the camera sees head-on keeps them clear of the edge of the shadow of their own box, and
+    # the shadow of each box falls clear of the other box. The point and spot lights stand along the same direction from
+    # the red box, the spot aiming at it, as bright on the slab below it.
     if light_type == "directional":
         light = gs.options.vis.DirectionalLight(
             dir=(-1.0, -1.0, -2.0),
