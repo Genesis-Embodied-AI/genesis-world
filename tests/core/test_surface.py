@@ -8,7 +8,7 @@ import genesis.utils.mesh as mu
 from genesis.options.surfaces import Surface
 from genesis.options.textures import ColorTexture
 
-from ..utils.assertions import assert_equal
+from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.required
@@ -47,6 +47,8 @@ def test_surface_shortcut_resolution(tmp_path):
         ),
     )
     assert hdr_emit.emissive_texture.image_path == str(hdr_path)
+    # The renderers that read no HDR file draw the emission white
+    assert_allclose(hdr_emit.get_rgba().color, 1.0, tol=gs.EPS)
 
     # Explicit default_roughness wins over the roughness shortcut.
     override = gs.surfaces.Rough(roughness=0.7, default_roughness=0.5)
