@@ -78,7 +78,7 @@ def _n_sample_points_per_link(n_sample_points: int | list | tuple, n_links: int)
         counts = [int(x) for x in n_sample_points]
         if len(counts) != n_links:
             gs.raise_exception(
-                f"Point cloud tactile n_sample_points length must match track_link_idx ({n_links}), got {len(counts)}."
+                f"Point cloud tactile n_sample_points length must match tracked_links ({n_links}), got {len(counts)}."
             )
         if any(c < 0 for c in counts):
             gs.raise_exception("n_sample_points entries must be non-negative.")
@@ -579,7 +579,7 @@ class PointCloudTactileSensorMixin[PointCloudTactileSensorMetadataMixinT: PointC
         pc_start_row = self._shared_metadata.pc_pos_link.shape[0]
         idx_cat, pos_cat, nrm_cat, active_cat = _sample_track_links_point_cloud_tensors(
             self._shared_metadata.solver,
-            np.asarray(self._options.track_link_idx, dtype=gs.np_int),
+            np.asarray(self._options.tracked_links, dtype=gs.np_int),
             self._options.n_sample_points,
             self._options.use_visual_mesh,
         )
@@ -920,7 +920,7 @@ def _collect_collision_geom_idx(solver, track_link_idx: np.ndarray) -> tuple[tor
     for link_idx in track_link_idx:
         link_i = int(link_idx)
         if link_i < 0 or link_i >= len(solver.links):
-            gs.raise_exception(f"ElastomerTaxel track_link_idx contains invalid global link index {link_i}.")
+            gs.raise_exception(f"ElastomerTaxel tracked_links contains invalid global link index {link_i}.")
         link = solver.links[link_i]
         for geom in link.geoms:
             geom_idx.append(int(geom.idx))
@@ -1698,7 +1698,7 @@ class ElastomerTaxelSensor(
             expand=(1,),
         )
 
-        track_link_idx = np.asarray(self._options.track_link_idx, dtype=gs.np_int)
+        track_link_idx = np.asarray(self._options.tracked_links, dtype=gs.np_int)
         geom_start_row = self._shared_metadata.track_geom_idx.shape[0]
         geom_idx, geom_active_envs_mask = _collect_collision_geom_idx(solver, track_link_idx)
         self._shared_metadata.track_geom_idx = concat_with_tensor(

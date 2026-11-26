@@ -3,13 +3,20 @@ from typing import TYPE_CHECKING, Annotated, Any, NamedTuple
 
 import numpy as np
 
-from pydantic import BeforeValidator, Field, StrictBool, ValidatorFunctionWrapHandler, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BeforeValidator,
+    Field,
+    StrictBool,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+    model_validator,
+)
 
 import genesis as gs
 from genesis.typing import (
     FArrayType,
     Grid3DFloatType,
-    IArrayType,
     LaxVec3FType,
     NonNegativeFloat,
     NonNegativeInt,
@@ -73,25 +80,6 @@ def _check_len_match(value, expected_len: int, name: str, ref_name: str):
             f"{name} must have the same length as {ref_name} when {name} is array-like. "
             f"Got {len(value)} {name} and {expected_len} {ref_name}."
         )
-
-
-def _resolve_tracked_links(cls_name: str, data: Any) -> Any:
-    # 'tracked_links' is resolved into 'track_link_idx', so that the options hold indices alone
-    if not isinstance(data, dict) or "tracked_links" not in data:
-        return data
-    if "track_link_idx" in data:
-        gs.logger.warning(
-            f"{cls_name}: Both `tracked_links` and `track_link_idx` were provided, using `tracked_links`."
-        )
-    data = dict(data)
-    links = data.pop("tracked_links")
-    if not is_sequence(links):
-        gs.raise_exception(f"{cls_name}: tracked_links must be a sequence of links, got {type(links).__name__}.")
-    for link in links:
-        if not isinstance(link, gs.engine.entities.rigid_entity.RigidLink):
-            gs.raise_exception(f"{cls_name}: tracked_links holds a {type(link).__name__}, which is no rigid link.")
-    data["track_link_idx"] = tuple(link.idx for link in links)
-    return data
 
 
 class SensorOptions[SensorT: "Sensor"](Options):
@@ -657,28 +645,23 @@ class SurfaceDistanceProbe(
     probe_radius : float | array-like[float]
         Maximum sensing range in meters. When no mesh is within this distance, distance is clamped to the probe
         radius and nearest points is the probe position. Default: 0.5. Also controls the outer debug sphere.
-    tracked_links : Sequence[RigidLink], optional
-        The links of rigid entities whose mesh geoms are used for distance queries. It sets 'track_link_idx', and
-        takes precedence over it when both are given. Defaults to none.
-    track_link_idx : array-like[int], optional
-        Deprecated, use 'tracked_links'. The global indices in the rigid solver of the tracked links. Defaults to none.
+    tracked_links : Sequence[RigidLink | int], optional
+        The links of rigid entities whose mesh geoms are used for distance queries, or their global indices in the
+        rigid solver. The keyword 'track_link_idx' is a deprecated alias. Defaults to none.
     """
 
     probe_radius: PositiveFArrayType | PositiveFloat = 0.5
-    track_link_idx: IArrayType = Field(default_factory=tuple)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _resolve_tracked_links(cls, data: Any) -> Any:
-        return _resolve_tracked_links(cls.__name__, data)
+    tracked_links: OptionalRigidLinksIdx = Field(
+        default=(), validation_alias=AliasChoices("tracked_links", "track_link_idx")
+    )
 
     def _validate(self, sim: "Simulator"):
         super()._validate(sim)
         n_links = sim.rigid_solver.n_links
-        for i, link_idx in enumerate(self.track_link_idx):
+        for i, link_idx in enumerate(self.tracked_links):
             if not (0 <= link_idx < n_links):
                 gs.raise_exception(
-                    f"SurfaceDistanceProbe track_link_idx[{i}]={link_idx} is out of range [0, {n_links})."
+                    f"SurfaceDistanceProbe tracked_links[{i}]={link_idx} is out of range [0, {n_links})."
                 )
 
 

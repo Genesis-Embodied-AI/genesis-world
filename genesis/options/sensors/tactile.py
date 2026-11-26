@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
-from pydantic import Field, StrictBool, model_validator
+from pydantic import AliasChoices, Field, StrictBool
 
 import genesis as gs
 from genesis.typing import (
@@ -22,13 +22,13 @@ from genesis.typing import (
 
 from .options import (
     ContactFilterOptionsMixin,
+    OptionalRigidLinksIdx,
     ProbeSensorOptionsMixin,
     ProbesWithNormalSensorOptionsMixin,
     RigidSensorOptionsMixin,
     SensorOptions,
     SimpleSensorOptions,
     _check_len_match,
-    _resolve_tracked_links,
 )
 
 if TYPE_CHECKING:
@@ -219,13 +219,11 @@ class PointCloudTactileSensorMixin[SensorT: "Sensor"](TactileProbeSensorOptionsM
 
     Parameters
     ----------
-    tracked_links : Sequence[RigidLink], optional
-        The links of rigid entities whose mesh geometry is used to sample a point cloud from. It sets
-        'track_link_idx', and takes precedence over it when both are given. Defaults to none.
-    track_link_idx : array-like[int], optional
-        Deprecated, use 'tracked_links'. The global indices in the rigid solver of the tracked links. Defaults to none.
+    tracked_links : Sequence[RigidLink | int], optional
+        The links of rigid entities whose mesh geometry is used to sample a point cloud from, or their global indices
+        in the rigid solver. The keyword 'track_link_idx' is a deprecated alias. Defaults to none.
     n_sample_points: int | array-like[int]
-        Total FPS samples split across ``track_link_idx``, or one count per tracked link. Per-variant
+        Total FPS samples split across ``tracked_links``, or one count per tracked link. Per-variant
         counts are not supported: when a tracked link belongs to a heterogeneous entity, the per-link
         count is allocated to every variant on that link (so each parallel environment sees the full
         count regardless of which variant is active).
@@ -237,17 +235,14 @@ class PointCloudTactileSensorMixin[SensorT: "Sensor"](TactileProbeSensorOptionsM
         The radius of the debug tracked object point cloud spheres.
     """
 
-    track_link_idx: IArrayType = Field(default_factory=tuple)
+    tracked_links: OptionalRigidLinksIdx = Field(
+        default=(), validation_alias=AliasChoices("tracked_links", "track_link_idx")
+    )
     n_sample_points: IArrayType | NonNegativeInt = 500
     use_visual_mesh: StrictBool = True
 
     debug_point_cloud_color: UnitIntervalVec4Type = (1.0, 0.8, 0.0, 1.0)
     debug_point_cloud_radius: PositiveFloat = 0.002
-
-    @model_validator(mode="before")
-    @classmethod
-    def _resolve_tracked_links(cls, data: Any) -> Any:
-        return _resolve_tracked_links(cls.__name__, data)
 
 
 class ContactHysteresisOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
@@ -443,13 +438,11 @@ class ElastomerTaxel(
     probe_radius : float | array-like[float]
         Probe sensing radius in meters. A scalar is shared by every probe; an array must match the probe count.
         Array entries of 0 mark inactive filler probes (see the grid note above); at least one must be positive.
-    tracked_links : Sequence[RigidLink]
-        The links of rigid entities whose collision geometry is queried by SDF and whose mesh is sampled for shear. It
-        sets 'track_link_idx', and takes precedence over it when both are given.
-    track_link_idx : array-like[int]
-        Deprecated, use 'tracked_links'. The global indices in the rigid solver of the tracked links.
+    tracked_links : Sequence[RigidLink | int]
+        The links of rigid entities whose collision geometry is queried by SDF and whose mesh is sampled for shear, or
+        their global indices in the rigid solver. The keyword 'track_link_idx' is a deprecated alias.
     n_sample_points: int | array-like[int]
-        Total surface samples split across ``track_link_idx``, or one count per tracked link.
+        Total surface samples split across ``tracked_links``, or one count per tracked link.
     compressibility : float
         In-plane dilation kernel as a mix of a local and a global response, in ``[0, 1]``. ``1`` (default) is fully
         compressible: a concentrated *local* bulge from the ``exp(-lambda_d * r^2)`` Gaussian, with no far-field
@@ -518,7 +511,7 @@ class ElastomerTaxel(
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         _validate_filler_probe_radius(self.probe_radius, "ElastomerTaxel")
-        if len(self.track_link_idx) == 0:
+        if len(self.tracked_links) == 0:
             gs.raise_exception("ElastomerTaxel requires at least one tracked link in tracked_links.")
         if self.normal_exponent < 1.0:
             gs.raise_exception(f"normal_exponent must be greater than or equal to 1.0. Got {self.normal_exponent}.")

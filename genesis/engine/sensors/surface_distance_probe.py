@@ -267,7 +267,7 @@ class SurfaceDistanceProbeSensor(
     def build(self):
         super().build()
 
-        track_link_idx = np.asarray(self._options.track_link_idx, dtype=gs.np_int)
+        track_link_idx = np.asarray(self._options.tracked_links, dtype=gs.np_int)
         n_tracked = len(track_link_idx)
         start = (
             int(self._shared_metadata.track_link_flat.shape[0])
