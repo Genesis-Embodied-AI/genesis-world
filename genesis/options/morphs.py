@@ -1330,9 +1330,9 @@ class Terrain(Generator):
     Each subterrain is one of the options classes of ``gs.options.terrain`` (``Flat``, ``Fractal``,
     ``RandomUniform``, ``Sloped``, ``PyramidSloped``, ``DiscreteObstacles``, ``Wave``, ``Stairs``, ``PyramidStairs``,
     ``SteppingStones``), or a kind a user registers with ``gs.register_subterrain``. A single subterrain is repeated
-    over the grid. The deprecated keywords 'subterrain_types', the names of the kinds such as 'wave_terrain', and
-    'subterrain_parameters', their parameters by name, convert to 'subterrains'. Given with 'subterrains', they are
-    ignored.
+    over the grid. The keywords 'subterrain_types', the names of the kinds such as 'wave_terrain' (see
+    ``gs.options.terrain.Subterrain``), and 'subterrain_parameters', their options by name, are also accepted. Prefer
+    'subterrains' instead. Given with 'subterrains', they are ignored.
 
     Note
     ----
@@ -1417,7 +1417,6 @@ class Terrain(Generator):
                 gs.raise_exception("'from_stored' and 'name' cannot both be set to different values.")
 
         if subterrain_types is not None or subterrain_parameters is not None:
-            gs.logger.warning("'subterrain_types' and 'subterrain_parameters' are deprecated. Use 'subterrains'.")
             if data.get("subterrains") is not None:
                 gs.logger.warning(
                     "Both `subterrains` and `subterrain_types` or `subterrain_parameters` were provided, using "
@@ -1425,8 +1424,9 @@ class Terrain(Generator):
                 )
             else:
                 if subterrain_types is None:
+                    names_by_cls = {cls: name for name, cls in terrain.Subterrain.CLS_BY_NAME.items()}
                     subterrain_types = [
-                        [subterrain._NAME for subterrain in row]
+                        [names_by_cls[type(subterrain)] for subterrain in row]
                         for row in type(self).model_fields["subterrains"].default
                     ]
                 rows_name = [[subterrain_types]] if isinstance(subterrain_types, str) else subterrain_types
@@ -1434,11 +1434,11 @@ class Terrain(Generator):
                 for row_name in rows_name:
                     subterrains.append([])
                     for name in row_name:
-                        subterrain_cls = terrain.SUBTERRAIN_CLS_BY_NAME.get(name)
+                        subterrain_cls = terrain.Subterrain.CLS_BY_NAME.get(name)
                         if subterrain_cls is None:
                             gs.raise_exception(
                                 f"Unsupported subterrain type: {name}, should be one of "
-                                f"{list(terrain.SUBTERRAIN_CLS_BY_NAME)}."
+                                f"{list(terrain.Subterrain.CLS_BY_NAME)}."
                             )
                         subterrains[-1].append(subterrain_cls(**(subterrain_parameters or {}).get(name, {})))
                 data["subterrains"] = subterrains[0][0] if isinstance(subterrain_types, str) else subterrains
