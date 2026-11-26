@@ -148,8 +148,8 @@ class SensorManager(BuildableMixin, BatchedMixin):
         super().build(n_envs)
         self._sim.step_timer.add_phases(*(f"sensors/{sensor_cls.__name__}" for sensor_cls in self._sensors_by_type))
 
-        # Sort each class by entity_idx so sensors attached to the same entity occupy a contiguous slice of the class
-        # cache. Static sensors have entity_idx=-1 and group together. Python's sort is stable, so registration order is
+        # Sort each class by entity so sensors attached to the same entity occupy a contiguous slice of the class
+        # cache. Static sensors have entity=-1 and group together. Python's sort is stable, so registration order is
         # preserved within each entity bucket.
         for sensors in self._sensors_by_type.values():
             sensors.sort(key=lambda s: s._options.entity)
