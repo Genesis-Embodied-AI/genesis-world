@@ -114,25 +114,6 @@ dev = [
     # Used for code formatting during commits
     "pre_commit",
 ]
-docs = [
-    # Note that currently sphinx 7 does not work, so we must use v6.2.1. Once fixed we can use a later version.
-    # See https://github.com/kivy/kivy/issues/8230 which tracks this issue.
-    "sphinx==6.2.1",
-    "sphinx-autobuild",
-    "pydata_sphinx_theme",
-    # For spelling
-    "sphinxcontrib.spelling",
-    # Type hints support
-    "sphinx-autodoc-typehints",
-    # Copy button for code snippets
-    "sphinx_copybutton",
-    # Markdown parser
-    "myst-parser",
-    "sphinx-subfigure",
-    "sphinxcontrib-video",
-    "sphinx-togglebutton",
-    "sphinx_design",
-]
 render = [
     "pybind11[global]",
     "open3d",
