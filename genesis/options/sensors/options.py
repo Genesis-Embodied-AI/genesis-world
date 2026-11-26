@@ -80,7 +80,7 @@ def _resolve_tracked_links(cls_name: str, data: Any) -> Any:
     if not isinstance(data, dict) or "tracked_links" not in data:
         return data
     if "track_link_idx" in data:
-        gs.raise_exception(f"{cls_name}: tracked_links sets track_link_idx. Give either of them.")
+        gs.logger.warning(f"{cls_name}: Both tracked_links and track_link_idx were provided, using tracked_links.")
     data = dict(data)
     links = data.pop("tracked_links")
     if not is_sequence(links):
@@ -156,12 +156,12 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
     ----------
     link : KinematicLink | None, optional
         The link to which this sensor is attached, or None for a static sensor. It sets 'entity_idx' and
-        'link_idx_local', so give either 'link' or those two, never both. Defaults to None.
+        'link_idx_local', and takes precedence over them when both are given. Defaults to None.
     entity_idx : Entity | int | None, optional
         Deprecated, use 'link'. The entity to which this sensor is attached, or its index in the scene, or None for a
-        static sensor. It raises if 'link' is also given. Defaults to None.
+        static sensor. Ignored if 'link' is also given. Defaults to None.
     link_idx_local : int, optional
-        Deprecated, use 'link'. The index in 'entity_idx' of the link to which this sensor is attached. It raises if
+        Deprecated, use 'link'. The index in 'entity_idx' of the link to which this sensor is attached. Ignored if
         'link' is also given. Defaults to 0, the base link.
     pos_offset : array-like[float, float, float], optional
         The positional offset of the sensor from the link.
@@ -181,10 +181,15 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
             return data
         if "link" in data:
             if "entity_idx" in data or "link_idx_local" in data:
-                gs.raise_exception(f"{cls.__name__}: link sets entity_idx and link_idx_local. Give either of them.")
+                gs.logger.warning(
+                    f"{cls.__name__}: Both link and entity_idx or link_idx_local were provided, using link."
+                )
             data = dict(data)
             link = data.pop("link")
-            if link is not None:
+            data.pop("link_idx_local", None)
+            if link is None:
+                data["entity_idx"] = None
+            else:
                 if not isinstance(link, gs.engine.entities.rigid_entity.KinematicLink):
                     gs.raise_exception(f"{cls.__name__}: link must be a link, got {type(link).__name__}.")
                 data.update(entity_idx=link.entity.idx, link_idx_local=link.idx_local)
@@ -651,8 +656,8 @@ class SurfaceDistanceProbe(
         Maximum sensing range in meters. When no mesh is within this distance, distance is clamped to the probe
         radius and nearest points is the probe position. Default: 0.5. Also controls the outer debug sphere.
     tracked_links : Sequence[RigidLink], optional
-        The links of rigid entities whose mesh geoms are used for distance queries. It sets 'track_link_idx', so give
-        either of them, never both. Defaults to none.
+        The links of rigid entities whose mesh geoms are used for distance queries. It sets 'track_link_idx', and
+        takes precedence over it when both are given. Defaults to none.
     track_link_idx : array-like[int], optional
         Deprecated, use 'tracked_links'. The global indices in the rigid solver of the tracked links. Defaults to none.
     """

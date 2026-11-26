@@ -74,8 +74,10 @@ def test_surface_distance_sensor_box_sphere(show_viewer, tol, n_envs):
             tracked_links=(sphere2.base_link,),
         )
     )
-    with pytest.raises(gs.GenesisException, match="Give either of them"):
-        gs.sensors.SurfaceDistanceProbe(tracked_links=(sphere2.base_link,), track_link_idx=(sphere2.base_link_idx,))
+    probe_from_both = gs.sensors.SurfaceDistanceProbe(
+        tracked_links=(sphere2.base_link,), track_link_idx=(box.base_link_idx,)
+    )
+    assert probe_from_both.track_link_idx == (sphere2.base_link_idx,)
     box_to_spheres_dist_sensor = scene.add_sensor(
         gs.sensors.SurfaceDistanceProbe(
             entity_idx=box.idx,

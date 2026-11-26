@@ -221,7 +221,7 @@ class PointCloudTactileSensorMixin[SensorT: "Sensor"](TactileProbeSensorOptionsM
     ----------
     tracked_links : Sequence[RigidLink], optional
         The links of rigid entities whose mesh geometry is used to sample a point cloud from. It sets
-        'track_link_idx', so give either of them, never both. Defaults to none.
+        'track_link_idx', and takes precedence over it when both are given. Defaults to none.
     track_link_idx : array-like[int], optional
         Deprecated, use 'tracked_links'. The global indices in the rigid solver of the tracked links. Defaults to none.
     n_sample_points: int | array-like[int]
@@ -445,7 +445,7 @@ class ElastomerTaxel(
         Array entries of 0 mark inactive filler probes (see the grid note above); at least one must be positive.
     tracked_links : Sequence[RigidLink]
         The links of rigid entities whose collision geometry is queried by SDF and whose mesh is sampled for shear. It
-        sets 'track_link_idx', so give either of them, never both.
+        sets 'track_link_idx', and takes precedence over it when both are given.
     track_link_idx : array-like[int]
         Deprecated, use 'tracked_links'. The global indices in the rigid solver of the tracked links.
     n_sample_points: int | array-like[int]
