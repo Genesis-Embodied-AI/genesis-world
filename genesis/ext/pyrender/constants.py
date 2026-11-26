@@ -177,10 +177,9 @@ class BufFlags(object):
 class TexFlags(object):
     NONE = 0
     NORMAL = 1
-    OCCLUSION = 2
-    EMISSIVE = 4
-    BASE_COLOR = 8
-    METALLIC_ROUGHNESS = 16
+    EMISSIVE = 2
+    BASE_COLOR = 4
+    METALLIC_ROUGHNESS = 8
 
 
 class ProgramFlags:

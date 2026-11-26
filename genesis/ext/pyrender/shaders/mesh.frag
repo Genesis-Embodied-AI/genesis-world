@@ -57,9 +57,6 @@ struct Material {
 #ifdef HAS_NORMAL_TEX
     sampler2D normal_texture;
 #endif
-#ifdef HAS_OCCLUSION_TEX
-    sampler2D occlusion_texture;
-#endif
 #ifdef HAS_EMISSIVE_TEX
 #ifdef EMISSIVE_TEX_ARRAY
     sampler2DArray emissive_texture;
@@ -181,34 +178,29 @@ vec4 linear_to_srgb(vec4 linear)
 vec3 get_normal()
 {
 #ifdef HAS_NORMAL_TEX
-
-#ifndef HAS_TANGENTS
+    // The tangent frame comes from the tangents of the mesh when it has some, from the derivatives of the position and
+    // the uvs across the screen otherwise
     vec3 pos_dx = dFdx(frag_position);
     vec3 pos_dy = dFdy(frag_position);
     vec3 tex_dx = dFdx(vec3(uv_0, 0.0));
     vec3 tex_dy = dFdy(vec3(uv_0, 0.0));
     vec3 t = (tex_dy.t * pos_dx - tex_dx.t * pos_dy) / (tex_dx.s * tex_dy.t - tex_dy.s * tex_dx.t);
-
 #ifdef NORMAL_LOC
     vec3 ng = normalize(frag_normal);
 #else
     vec3 ng = cross(pos_dx, pos_dy);
 #endif
-
     t = normalize(t - ng * dot(ng, t));
     vec3 b = normalize(cross(ng, t));
     mat3 tbn_n = mat3(t, b, ng);
-
-#else
-
-    mat3 tbn_n = tbn;
-
+#ifdef TANGENT_LOC
+#ifdef NORMAL_LOC
+    tbn_n = tbn;
+#endif
 #endif
 
-    vec3 n = texture(material.normal_texture, uv_0).rgb;
-    n = normalize(tbn_n * ((2.0 * n - 1.0) * vec3(1.0, 1.0, 1.0)));
-    return n; // TODO NORMAL MAPPING
-
+    // The normal map holds the normal in tangent space, each component from -1 to 1 encoded from 0 to 1
+    return normalize(tbn_n * (2.0 * texture(material.normal_texture, uv_0).rgb - 1.0));
 #else
 
 #ifdef NORMAL_LOC
@@ -536,12 +528,6 @@ void main()
         color.xyz += transmission * fresnel * env;
         transmittance = transmission * (1.0 - fresnel) * base_color.rgb;
     }
-
-    // Apply occlusion
-#ifdef HAS_OCCLUSION_TEX
-    float ao = texture(material.occlusion_texture, uv_0).r;
-    color.xyz *= ao;
-#endif
 
     // Apply emissive map. 'emissive' already folds in the factor, so add it directly rather than scaling by the
     // factor a second time.

@@ -2740,3 +2740,69 @@ def test_plane_reflection(roughness, renderer, show_viewer):
     reflectance = 0.04 * env_ab[0] + env_ab[1]
     radiance = AMBIENT * ((RED + 0.055) / 1.055) ** 2.4
     assert_allclose(floor_mirrored - floor_alone, (reflectance * radiance, 0.0, 0.0), atol=1e-4)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
+def test_normal_map(renderer, show_viewer):
+    TILT = np.deg2rad(40.0)
+    RES = 64
+    CENTRE = slice(RES // 2 - 4, RES // 2 + 4)
+
+    scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            # Lit and seen straight from above, a surface shades by the angle between its normal and the vertical alone
+            lights=[
+                gs.options.vis.DirectionalLight(
+                    dir=(0.0, 0.0, -1.0),
+                    color=(1.0, 1.0, 1.0),
+                    intensity=3.0,
+                ),
+            ],
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -3.0, 2.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        renderer=renderer,
+        show_viewer=show_viewer,
+    )
+    # A floor whose normal map holds the normal of a floor tilted by TILT, its components from -1 to 1 encoded from 0 to
+    # 255, and a floor tilted by as much
+    normal_rgb = np.round((np.array([np.sin(TILT), 0.0, np.cos(TILT)]) + 1.0) * 127.5).astype(np.uint8)
+    for x, normal, normal_texture in (
+        (
+            -1.0,
+            (0.0, 0.0, 1.0),
+            gs.textures.ImageTexture(image_array=np.tile(normal_rgb, (4, 4, 1)), encoding="linear"),
+        ),
+        (1.0, (0.0, -np.sin(TILT), np.cos(TILT)), None),
+    ):
+        scene.add_entity(
+            morph=gs.morphs.Plane(
+                pos=(x, 0.0, 0.0),
+                normal=normal,
+                plane_size=(1.0, 1.0),
+            ),
+            surface=gs.surfaces.Rough(
+                color=(0.6, 0.6, 0.6),
+                normal_texture=normal_texture,
+            ),
+        )
+    # Each floor wholly in view of its camera, since a software renderer misdraws geometry that leaves the view
+    cam_mapped, cam_tilted = (
+        scene.add_camera(
+            res=(RES, RES),
+            pos=(x, 0.0, 2.0),
+            lookat=(x, 0.0, 0.0),
+            up=(0.0, 1.0, 0.0),
+            fov=40,
+        )
+        for x in (-1.0, 1.0)
+    )
+    scene.build()
+
+    patch_mapped, patch_tilted = (
+        tensor_to_array(cam.render()[0])[CENTRE, CENTRE].mean(axis=(0, 1)) for cam in (cam_mapped, cam_tilted)
+    )
+    assert_allclose(patch_mapped, patch_tilted, atol=2.0)

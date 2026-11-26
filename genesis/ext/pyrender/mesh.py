@@ -351,7 +351,6 @@ class Mesh(object):
                 if isinstance(mat, trimesh.visual.texture.PBRMaterial):
                     material = Material(
                         normalTexture=mat.normalTexture,
-                        occlusionTexture=mat.occlusionTexture,
                         emissiveTexture=mat.emissiveTexture,
                         emissiveFactor=mat.emissiveFactor,
                         alphaMode="BLEND",

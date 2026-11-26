@@ -871,8 +871,6 @@ class Renderer(object):
             tf = primitive.material.tex_flags
             if tf & TexFlags.NORMAL:
                 defines["HAS_NORMAL_TEX"] = 1
-            if tf & TexFlags.OCCLUSION:
-                defines["HAS_OCCLUSION_TEX"] = 1
             if tf & TexFlags.EMISSIVE:
                 defines["HAS_EMISSIVE_TEX"] = 1
                 if primitive.material.emissiveTexture.tex_type == GL_TEXTURE_2D_ARRAY:

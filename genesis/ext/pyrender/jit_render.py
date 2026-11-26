@@ -568,7 +568,7 @@ class JITRenderer:
         self.pose = np.zeros((n, 4, 4), np.float32)
         # The textures of each slot of the material, in the order of the bits of 'TexFlags', and the flags of the slots
         # filled, the bit of slot i shifted by 8 marking a texture array
-        self.textures = np.zeros((n, 5), np.int32)
+        self.textures = np.zeros((n, 4), np.int32)
         self.tex_flags = np.zeros(n, np.int32)
         # Row i of texture_layers holds, for each rendered environment, the layer of the base color (0) and emissive (1)
         # texture arrays that a layered primitive samples (see 'Primitive.texture_layers').
@@ -674,7 +674,6 @@ class JITRenderer:
             for i_slot, texture in enumerate(
                 (
                     material.normalTexture,
-                    material.occlusionTexture,
                     material.emissiveTexture,
                     material.baseColorTexture,
                     material.metallicRoughnessTexture,
@@ -1050,7 +1049,6 @@ class JITRenderer:
                     tf = tex_flags[id]
                     texture_list = [
                         "normal_texture",
-                        "occlusion_texture",
                         "emissive_texture",
                         "base_color_texture",
                         "metallic_roughness_texture",
@@ -1059,7 +1057,7 @@ class JITRenderer:
                     # sampler2DArray reading one unit make the draw invalid.
                     if tf >> 8 and active_texture == 0:
                         active_texture = 1
-                    for i in range(5):
+                    for i in range(4):
                         if tf & (1 << i):
                             gl.glActiveTexture(GL_TEXTURE0 + active_texture)
                             is_array = tf & (1 << (i + 8))
@@ -1279,7 +1277,7 @@ class JITRenderer:
                     if tf & TexFlags_BASE_COLOR:
                         gl.glActiveTexture(GL_TEXTURE0)
                         gl.glBindTexture(
-                            GL_TEXTURE_2D_ARRAY if tf & (TexFlags_BASE_COLOR << 8) else GL_TEXTURE_2D, textures[id, 3]
+                            GL_TEXTURE_2D_ARRAY if tf & (TexFlags_BASE_COLOR << 8) else GL_TEXTURE_2D, textures[id, 2]
                         )
                         set_uniform_1i(pid, "base_color_texture", 0, gl)
                         is_layer_set = i_layers >= 0

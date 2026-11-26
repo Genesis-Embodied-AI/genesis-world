@@ -17,8 +17,6 @@ class Material:
     normalTexture : (n, n, 3) float or Texture, optional
         The normal map in tangent space, in linear space, OpenGL conventions (+X right, +Y up, +Z towards the viewer).
         Defaults to None.
-    occlusionTexture : (n, n, 1) float or Texture, optional
-        The ambient occlusion map, in linear space, read from its red channel. Defaults to None.
     emissiveTexture : (n, n, 3) float or Texture, optional
         The emission map, in sRGB space, scaled by 'emissiveFactor'. Defaults to None.
     emissiveFactor : (3,) float, optional
@@ -53,7 +51,6 @@ class Material:
     def __init__(
         self,
         normalTexture=None,
-        occlusionTexture=None,
         emissiveTexture=None,
         emissiveFactor=None,
         alphaMode="OPAQUE",
@@ -68,7 +65,6 @@ class Material:
     ):
         assert alphaMode in ("OPAQUE", "BLEND")
         self.normalTexture = normalTexture
-        self.occlusionTexture = occlusionTexture
         self.emissiveTexture = emissiveTexture
         self.emissiveFactor = (0.0, 0.0, 0.0) if emissiveFactor is None else emissiveFactor
         self.alphaMode = alphaMode
@@ -89,15 +85,6 @@ class Material:
     @normalTexture.setter
     def normalTexture(self, value):
         self._normalTexture = _format_texture(value, "RGB")
-
-    @property
-    def occlusionTexture(self):
-        """Texture : The ambient occlusion map."""
-        return self._occlusionTexture
-
-    @occlusionTexture.setter
-    def occlusionTexture(self, value):
-        self._occlusionTexture = _format_texture(value, "R")
 
     @property
     def emissiveTexture(self):
@@ -168,7 +155,6 @@ class Material:
         tex_flags = TexFlags.NONE
         for texture, flag in (
             (self.normalTexture, TexFlags.NORMAL),
-            (self.occlusionTexture, TexFlags.OCCLUSION),
             (self.emissiveTexture, TexFlags.EMISSIVE),
             (self.baseColorTexture, TexFlags.BASE_COLOR),
             (self.metallicRoughnessTexture, TexFlags.METALLIC_ROUGHNESS),
@@ -182,7 +168,6 @@ class Material:
         """set of Texture : The textures that the material holds."""
         textures = (
             self.normalTexture,
-            self.occlusionTexture,
             self.emissiveTexture,
             self.baseColorTexture,
             self.metallicRoughnessTexture,
