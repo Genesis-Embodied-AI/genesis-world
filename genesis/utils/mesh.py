@@ -4,7 +4,7 @@ import math
 import os
 import weakref
 from collections.abc import Sequence
-from functools import lru_cache, wraps
+from functools import lru_cache, partial, wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -78,6 +78,24 @@ def color_f32_to_u8(color) -> np.ndarray:
 
 def color_u8_to_f32(color) -> np.ndarray:
     return np.asarray(color, dtype=np.uint8).astype(np.float32) / 255.0
+
+
+def color_to_rgba(color: "tuple[float, ...] | np.ndarray") -> np.ndarray:
+    """Return a color of one to four channels as an RGBA color.
+
+    A gray or gray-alpha color spans the three color channels, as an image of one or two channels does, and the alpha
+    is 1.0 for a color without one.
+
+    Parameters
+    ----------
+    color : tuple[float, ...] | np.ndarray
+        The color, gray, gray-alpha, RGB or RGBA, with channels within [0.0, 1.0].
+    """
+    rgba = np.ones(4, dtype=gs.np_float)
+    rgba[:3] = color[:3] if len(color) >= 3 else color[:1]
+    if len(color) in (2, 4):
+        rgba[3] = color[-1]
+    return rgba
 
 
 def hsv_to_rgb(hue: np.ndarray, saturation: float, value: float) -> np.ndarray:
@@ -509,8 +527,10 @@ def compute_sdf_data(mesh, res):
     return sdf_data
 
 
-# Trimesh materials drawing the image textures, by texture and content of their emission, which the rasterizer shares
-# (see 'RasterizerContext.on_rigid'). A weak reference keys the texture, which never matches a later texture reusing
+# Trimesh materials drawing the image textures, keyed by texture, then by the factors and the index of refraction of the
+# surface and the content of its emission. The rasterizer draws every mesh sharing a trimesh material with a single
+# material, made with the factors of the first surface it meets (see 'RasterizerContext._sync_shape_nodes'), so these
+# are part of the key of every material. A weak reference keys the texture, which never matches a later texture reusing
 # the id of a collected one, even while the release of the owned entries is disabled.
 _TEXTURE_MATERIALS_CACHE = OwnedCache()
 
@@ -528,17 +548,12 @@ def texture_to_rgba(
     The diffuse map holds sRGB uint8 values and the emissive map linear float16 values (see
     ``gs.textures.DynamicTexture``). An image is resized to 'resolution', given as (width, height), and converted from
     its own encoding. A color is sRGB where the surface draws the texture as its base color ('as_base_color') and linear
-    where it draws it as its emission, as for a static texture. A gray or gray-alpha color spans the three color
-    channels, as an image of one or two channels does. An 'opacity' texture gives the alpha in place of that of the
-    texture, as the opacity of a surface does.
+    where it draws it as its emission, as for a static texture, and spans the channels as 'color_to_rgba' does. An
+    'opacity' texture gives the alpha in place of that of the texture, as the opacity of a surface does.
     """
     width, height = resolution
     is_image = isinstance(texture, gs.textures.ImageTexture)
-    color = texture.image_color if is_image else texture.color
-    factor = np.ones(4, dtype=gs.np_float)
-    factor[:3] = color[:3] if len(color) >= 3 else color[:1]
-    if len(color) in (2, 4):
-        factor[3] = color[-1]
+    factor = color_to_rgba(texture.image_color if is_image else texture.color)
     if is_image:
         if texture.image_array is None:
             gs.raise_exception(f"A dynamic texture takes no HDR image, got '{texture.image_path}'.")
@@ -570,7 +585,7 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     texture = surface.get_rgba()
 
     # 'trimesh' uses uvs starting from the top-left corner, so flip them to Genesis' convention. The flip runs at the
-    # precision a mesh stores its uvs at, so a mesh drawn from uvs read back from a file matches the one it was built as.
+    # precision of the uvs of the mesh, so a mesh drawn from uvs read back from a file matches the mesh it came from.
     flipped_uvs = None
     if uvs is not None:
         flipped_uvs = uvs.astype(gs.np_float)
@@ -616,12 +631,19 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
             )
         elif isinstance(emission, gs.textures.ColorTexture):
             emissive_kwargs = dict(emissiveFactor=emission.color)
+    # The rasterizer reads a factor left unset as 1.0, as glTF specifies, which renders a fully metallic material
+    pbr_material_factory = partial(
+        trimesh.visual.material.PBRMaterial,
+        metallicFactor=surface.metallic_factor,
+        roughnessFactor=surface.roughness_factor,
+        **emissive_kwargs,
+    )
 
     if texture_seed is not None:
         if flipped_uvs is not None:
             # The images of a dynamic texture may turn transparent, which the blending of a PBR material follows
-            material = trimesh.visual.material.PBRMaterial(
-                baseColorTexture=Image.fromarray(texture_seed), baseColorFactor=(255, 255, 255, 255), **emissive_kwargs
+            material = pbr_material_factory(
+                baseColorTexture=Image.fromarray(texture_seed), baseColorFactor=(255, 255, 255, 255)
             )
             visual = trimesh.visual.TextureVisuals(uv=flipped_uvs, material=material)
         else:
@@ -631,35 +653,42 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
                 vertex_colors=np.tile(texture_seed.mean(axis=(0, 1)) / 255.0, [n_verts, 1])
             )
     elif isinstance(texture, gs.textures.ImageTexture):
+        # The color of an image scales its texels
+        image_rgba = color_to_rgba(texture.image_color)
         if flipped_uvs is not None:
             assert texture.image_array.dtype == np.uint8
             material = _TEXTURE_MATERIALS_CACHE.get(
                 texture,
-                (weakref.ref(texture), get_hashkey(emission) if emissive_kwargs else None),
+                (
+                    weakref.ref(texture),
+                    surface.metallic_factor,
+                    surface.roughness_factor,
+                    surface.base_color_factor,
+                    get_hashkey(emission) if emissive_kwargs else None,
+                ),
                 lambda: (
-                    trimesh.visual.material.PBRMaterial(
+                    pbr_material_factory(
                         baseColorTexture=Image.fromarray(texture.image_array),
-                        baseColorFactor=(255, 255, 255, 255),
-                        **emissive_kwargs,
+                        baseColorFactor=color_f32_to_u8(image_rgba),
                     )
                     if emissive_kwargs
                     else trimesh.visual.material.SimpleMaterial(
-                        image=Image.fromarray(texture.image_array), diffuse=(1.0, 1.0, 1.0, 1.0)
+                        image=Image.fromarray(texture.image_array), diffuse=image_rgba
                     )
                 ),
             )
             visual = trimesh.visual.TextureVisuals(uv=flipped_uvs, material=material)
         else:
-            # fall back to color texture
-            visual = trimesh.visual.ColorVisuals(vertex_colors=np.tile(texture.mean_color, [n_verts, 1]))
+            # A mesh without uvs takes the mean color of the image
+            visual = trimesh.visual.ColorVisuals(
+                vertex_colors=np.tile(color_to_rgba(texture.mean_color) * image_rgba, [n_verts, 1])
+            )
     elif isinstance(texture, gs.textures.ColorTexture):
         if n_verts is None:
             gs.raise_exception("n_verts is required for color texture.")
         if emissive_kwargs:
             # The flat base color applies through a factor, but an image emissive still samples the UVs, so pass them.
-            material = trimesh.visual.material.PBRMaterial(
-                baseColorFactor=color_f32_to_u8(texture.color), **emissive_kwargs
-            )
+            material = pbr_material_factory(baseColorFactor=color_f32_to_u8(texture.color))
             visual = trimesh.visual.TextureVisuals(uv=flipped_uvs, material=material)
         else:
             visual = trimesh.visual.ColorVisuals(vertex_colors=np.tile(np.array(texture.color), [n_verts, 1]))
@@ -1639,7 +1668,8 @@ def create_plane(
 def generate_tetgen_config_from_morph(morph):
     if not isinstance(morph, gs.options.morphs.TetGenMixin):
         raise TypeError(
-            f"Expected an instance of a class that inherits from TetGenMixin, but got an instance of {type(morph).name}."
+            "Expected an instance of a class that inherits from TetGenMixin, but got an instance of "
+            f"{type(morph).name}."
         )
     return dict(
         order=morph.order,

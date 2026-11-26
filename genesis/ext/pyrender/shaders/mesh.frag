@@ -182,7 +182,6 @@ vec4 srgb_to_linear(vec4 srgb)
 #endif
 }
 
-#ifdef BASE_COLOR_TEX_LINEAR
 // The sRGB encoding of IEC 61966-2-1, inverse of srgb_to_linear
 vec4 linear_to_srgb(vec4 linear)
 {
@@ -194,7 +193,6 @@ vec4 linear_to_srgb(vec4 linear)
     return linear;
 #endif
 }
-#endif
 
 // Normal computation
 vec3 get_normal()
@@ -354,8 +352,11 @@ float point_PCF(samplerCube shadow_map, vec3 frag_to_light, float bias)
 void main()
 {
     vec3 reflected_position = (reflection_mat * vec4(frag_position, 1.0)).xyz;
-    if(length(reflected_position - frag_position) > 1e-4 && length(reflected_position-cam_pos)<length(frag_position-cam_pos)) discard;
-    
+    if (length(reflected_position - frag_position) > 1e-4
+        && length(reflected_position - cam_pos) < length(frag_position - cam_pos)) {
+        discard;
+    }
+
     vec4 color = vec4(vec3(0.0), 1.0);
 ///////////////////////////////////////////////////////////////////////////////
 // Handle Metallic Materials
@@ -418,11 +419,11 @@ void main()
 
     // Compute normal
     vec3 n = normalize(get_normal());
+    vec3 v = normalize(cam_pos - frag_position); // Vector towards camera
 
     // Loop over lights
     for (int i = 0; i < n_directional_lights; i++) {
         vec3 direction = directional_lights[i].direction;
-        vec3 v = normalize(cam_pos - frag_position); // Vector towards camera
         vec3 l = normalize(-1.0 * direction);   // Vector towards light
 
         // Compute attenuation and radiance
@@ -448,7 +449,6 @@ void main()
 
     for (int i = 0; i < n_point_lights; i++) {
         vec3 position = point_lights[i].position;
-        vec3 v = normalize(cam_pos - frag_position); // Vector towards camera
         vec3 l = normalize(position - frag_position); // Vector towards light
 
         // Compute attenuation and radiance
@@ -470,7 +470,6 @@ void main()
     }
     for (int i = 0; i < n_spot_lights; i++) {
         vec3 position = spot_lights[i].position;
-        vec3 v = normalize(cam_pos - frag_position); // Vector towards camera
         vec3 l = normalize(position - frag_position); // Vector towards light
 
         // Compute attenuation and radiance
@@ -500,6 +499,26 @@ void main()
     }
     color.xyz += base_color.xyz * ambient_light;
 
+    // The environment that a surface mirrors is a sky above the horizon, as bright as a surface of albedo 0.5 facing up
+    // under the directional lights, and the ambient light below it
+    vec3 sky = ambient_light;
+    for (int i = 0; i < n_directional_lights; i++) {
+        float elevation = max(-directional_lights[i].direction.z, 0.0);
+        sky += 0.5 * directional_lights[i].intensity * directional_lights[i].color * elevation / PI;
+    }
+    vec3 env = mix(ambient_light, sky, smoothstep(-0.1, 0.1, reflect(-v, n).z));
+    float nv_env = clamp(abs(dot(n, v)), 0.0, 1.0);
+
+    // A metal diffuses no light, so away from the highlights of the lights it only shows the environment it mirrors. A
+    // rough metal already spreads the light of the lamps over its whole surface, so the mirrored environment fades with
+    // the roughness. The analytical fit of the environment BRDF integrates the specular lobe for the roughness and the
+    // view angle.
+    vec4 env_r = roughness * vec4(-1.0, -0.0275, -0.572, 0.022) + vec4(1.0, 0.0425, 1.04, -0.04);
+    float env_a = min(env_r.x * env_r.x, exp2(-9.28 * nv_env)) * env_r.x + env_r.y;
+    vec2 env_ab = vec2(-1.04, 1.04) * env_a + env_r.zw;
+    float smoothness = 1.0 - roughness;
+    color.xyz += metallic * smoothness * smoothness * (f0 * env_ab.x + env_ab.y) * env;
+
     // Calculate lighting from environment
 #ifdef USE_IBL
     // TODO
@@ -528,8 +547,7 @@ void main()
 
     if (floor_flag != 0 && length(floor_color) > 1e-4) {
         //color.xyz *= 0;
-        vec3 floor_radiance = pow(floor_color, vec3(2.2));
-        vec3 v = normalize(cam_pos - frag_position); // Vector towards camera
+        vec3 floor_radiance = srgb_to_linear(vec4(floor_color, 1.0)).rgb;
         vec3 l = n * dot(n, v) * 2 - v;
 
         vec3 h = normalize(l+v);
@@ -541,7 +559,7 @@ void main()
     }
     // if (floor_flag != 0) color.xyz = floor_color.xyz;
 
-    frag_color = clamp(vec4(pow(color.xyz, vec3(1.0/2.2)), color.a * base_color.a), 0.0, 1.0);
+    frag_color = clamp(vec4(linear_to_srgb(color).rgb, color.a * base_color.a), 0.0, 1.0);
 
 
 #else
