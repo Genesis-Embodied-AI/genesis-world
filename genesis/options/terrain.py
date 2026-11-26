@@ -14,13 +14,15 @@ class Subterrain(Options):
 
     A user defines a kind of subterrain by subclassing this class and registering the function that fills the height
     field of a tile from its options. A kind declared with a name, as in ``class Ridges(Subterrain, name="ridges"):``,
-    is also accepted by that name in 'subterrain_types' of ``gs.morphs.Terrain``.
+    is also accepted by that name in 'subterrain_types' and 'subterrain_parameters' of ``gs.morphs.Terrain``, which
+    keep the scripts written against those string names working. New code passes the options to 'subterrains'.
     """
 
     # Frozen, since assigning a field skips the validators
     model_config = ConfigDict(frozen=True)
 
-    # The kinds of subterrain declared with a name, which 'subterrain_types' of 'gs.morphs.Terrain' refers to them by
+    # The kinds of subterrain declared with a name. The names exist for backward compatibility alone: they let
+    # 'subterrain_types' and 'subterrain_parameters' of 'gs.morphs.Terrain' keep referring to a kind by string.
     CLS_BY_NAME: ClassVar[dict[str, type["Subterrain"]]] = {}
 
     def __init_subclass__(cls, *, name: str | None = None, **kwargs) -> None:
