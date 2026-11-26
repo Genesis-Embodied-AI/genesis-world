@@ -148,13 +148,13 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
     ----------
     link : KinematicLink | None, optional
         The link to which this sensor is attached, or None for a static sensor. It sets 'entity' and
-        'link_idx_local', and takes precedence over them when both are given. Defaults to None.
+        'link_idx_local', which cannot be given with it. Defaults to None.
     entity : Entity | int | None, optional
         The entity to which this sensor is attached, or its index in the scene, or None for a static sensor. The
-        keyword 'entity_idx' is also accepted. Ignored if 'link' is also given. Defaults to None.
+        keyword 'entity_idx' is also accepted. Defaults to None.
     link_idx_local : int, optional
-        Prefer 'link' instead. The index in 'entity' of the link to which this sensor is attached. Ignored if 'link'
-        is also given. Defaults to 0, the base link.
+        Prefer 'link' instead. The index in 'entity' of the link to which this sensor is attached. Defaults to 0,
+        the base link.
     pos_offset : array-like[float, float, float], optional
         The positional offset of the sensor from the link.
     euler_offset : array-like[float, float, float], optional
@@ -173,8 +173,8 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
             return data
         if "link" in data:
             if any(name in data for name in ("entity", "entity_idx", "link_idx_local")):
-                gs.logger.warning(
-                    f"{cls.__name__}: Both `link` and `entity` or `link_idx_local` were provided, using `link`."
+                gs.raise_exception(
+                    f"{cls.__name__}: `link` sets the entity and the link. Give it without `entity` or `link_idx_local`."
                 )
             data = dict(data)
             link = data.pop("link")
