@@ -401,46 +401,15 @@ class Renderer(object):
 
         floor_tex = self._floor_texture_color._texid if flags & RenderFlags.REFLECTIVE_FLOOR else 0
         screen_size = np.array([self.viewport_width, self.viewport_height], np.float32)
-
-        common_kwargs = dict(env_idx=env_idx)
+        color_list = None
         if flags & RenderFlags.SEG:
-            color_list = np.zeros((len(self.jit.node_list), 3), np.float32)
+            # A primitive missing from the map takes a color below -1, which the pass draws nothing for
+            color_list = np.full((len(self.jit.node_list), 3), -2.0, np.float32)
             for i, node in enumerate(self.jit.node_list):
-                if node not in seg_node_map:
-                    color_list[i, :] = -2.0
-                else:
+                if node in seg_node_map:
                     color_list[i] = seg_node_map[node] / 255.0
-            common_kwargs["color_list"] = color_list
-        else:
-            common_kwargs["floor_tex"] = floor_tex
 
         if flags & (RenderFlags.SEG | RenderFlags.DEPTH_ONLY | RenderFlags.SKIP_MARKERS):
-            # No markers contribute to the output in these modes — single pass.
-            self.jit.forward_pass(self, V, P, cam_pos, flags, ProgramFlags.USE_MATERIAL, screen_size, **common_kwargs)
-        else:
-            # Draw non-marker geometry first so the depth buffer only contains
-            # real geometry when the x-ray pass runs. This way the GL_GREATER
-            # depth test in _marker_xray_pass cannot see marker-on-marker
-            # occlusion (e.g. dark rings at joints of chained debug cylinders)
-            # — it only ghosts markers occluded by real objects.
-            self.jit.forward_pass(
-                self,
-                V,
-                P,
-                cam_pos,
-                flags | RenderFlags.SKIP_MARKERS,
-                ProgramFlags.USE_MATERIAL,
-                screen_size,
-                **common_kwargs,
-            )
-
-            # Render occluded markers as darkened ghosts for depth cues — must
-            # happen before markers themselves are drawn so the depth buffer
-            # used for the GL_GREATER test is free of marker depths.
-            if flags & RenderFlags.MARKER_XRAY:
-                self._marker_xray_pass(V, P, cam_pos, flags, screen_size, env_idx)
-
-            # Now draw opaque markers on top
             self.jit.forward_pass(
                 self,
                 V,
@@ -449,9 +418,29 @@ class Renderer(object):
                 flags,
                 ProgramFlags.USE_MATERIAL,
                 screen_size,
-                markers_only=True,
-                **common_kwargs,
+                color_list,
+                floor_tex=floor_tex,
+                env_idx=env_idx,
             )
+        else:
+            # The markers are drawn last, so that the depth buffer holds the rest of the scene alone when the X-ray pass
+            # tests it, which ghosts the markers that real objects hide and none that another marker hides (dark rings
+            # at the joints of chained debug cylinders otherwise)
+            for markers_only in (False, True):
+                if markers_only and flags & RenderFlags.MARKER_XRAY:
+                    self._marker_xray_pass(V, P, cam_pos, flags, screen_size, env_idx)
+                self.jit.forward_pass(
+                    self,
+                    V,
+                    P,
+                    cam_pos,
+                    flags if markers_only else flags | RenderFlags.SKIP_MARKERS,
+                    ProgramFlags.USE_MATERIAL,
+                    screen_size,
+                    floor_tex=floor_tex,
+                    env_idx=env_idx,
+                    markers_only=markers_only,
+                )
 
         # If doing offscreen render, copy result from framebuffer and return
         if flags & RenderFlags.OFFSCREEN:

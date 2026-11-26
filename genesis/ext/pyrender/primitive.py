@@ -126,6 +126,8 @@ class Primitive(object):
         self._bounds = None
         self._bounds_0 = None
         self._vaid = None
+        # The first attribute location of the instance transforms, set as the primitive is added to the context
+        self._inst_attr_start = None
         self._buffers = {}
         self._is_transparent = None
         self._buf_flags = None

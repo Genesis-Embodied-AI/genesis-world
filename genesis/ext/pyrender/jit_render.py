@@ -91,29 +91,17 @@ def get_uniform_location(pid, name, gl):
 
 @nb.jit(nopython=True, cache=True)
 def set_uniform_matrix_4fv(pid, name, value, gl):
-    loc = get_uniform_location(pid, name, gl)
-    if loc >= 0:
-        gl.glUniformMatrix4fv(loc, 1, GL_TRUE, address_to_ptr(value.ctypes.data))
-    else:
-        print("uniform not found:", name)
+    gl.glUniformMatrix4fv(get_uniform_location(pid, name, gl), 1, GL_TRUE, address_to_ptr(value.ctypes.data))
 
 
 @nb.jit(nopython=True, cache=True)
 def set_uniform_1i(pid, name, value, gl):
-    loc = get_uniform_location(pid, name, gl)
-    if loc >= 0:
-        gl.glUniform1i(loc, value)
-    else:
-        print("uniform not found:", name)
+    gl.glUniform1i(get_uniform_location(pid, name, gl), value)
 
 
 @nb.jit(nopython=True, cache=True)
 def set_uniform_1f(pid, name, value, gl):
-    loc = get_uniform_location(pid, name, gl)
-    if loc >= 0:
-        gl.glUniform1f(loc, value)
-    else:
-        print("uniform not found:", name)
+    gl.glUniform1f(get_uniform_location(pid, name, gl), value)
 
 
 @nb.jit(nopython=True, cache=True)
@@ -127,29 +115,17 @@ def set_texture_layers(pid, tex_flags, layers, gl):
 
 @nb.jit(nopython=True, cache=True)
 def set_uniform_2f(pid, name, value1, value2, gl):
-    loc = get_uniform_location(pid, name, gl)
-    if loc >= 0:
-        gl.glUniform2f(loc, value1, value2)
-    else:
-        print("uniform not found:", name)
+    gl.glUniform2f(get_uniform_location(pid, name, gl), value1, value2)
 
 
 @nb.jit(nopython=True, cache=True)
 def set_uniform_3fv(pid, name, value, gl):
-    loc = get_uniform_location(pid, name, gl)
-    if loc >= 0:
-        gl.glUniform3fv(loc, 1, address_to_ptr(value.ctypes.data))
-    else:
-        print("uniform not found:", name)
+    gl.glUniform3fv(get_uniform_location(pid, name, gl), 1, address_to_ptr(value.ctypes.data))
 
 
 @nb.jit(nopython=True, cache=True)
 def set_uniform_4fv(pid, name, value, gl):
-    loc = get_uniform_location(pid, name, gl)
-    if loc >= 0:
-        gl.glUniform4fv(loc, 1, address_to_ptr(value.ctypes.data))
-    else:
-        print("uniform not found:", name)
+    gl.glUniform4fv(get_uniform_location(pid, name, gl), 1, address_to_ptr(value.ctypes.data))
 
 
 @nb.jit(nopython=True, cache=True)
@@ -727,7 +703,7 @@ class JITRenderer:
             self.n_indices[i] = primitive.indices.size if primitive.indices is not None else -len(primitive.positions)
             self.model_buffer_id[i] = primitive._buffers.get("model", 0)
             self.inst_tint_buffer_id[i] = primitive._buffers.get("inst_tint", 0)
-            self.inst_attr_start[i] = getattr(primitive, "_inst_attr_start", 0)
+            self.inst_attr_start[i] = primitive._inst_attr_start
 
         self.update_texture_layers([primitive_list[i] for i in np.flatnonzero(is_layered)])
 
@@ -798,7 +774,7 @@ class JITRenderer:
     def gen_func_ptr(self):
         self.gl = GLWrapper()
 
-        IS_OPENGL_42_AVAILABLE = hasattr(self.gl.wrapper_instance, "glDrawElementsInstancedBaseInstance")
+        IS_OPENGL_42_AVAILABLE = "glDrawElementsInstancedBaseInstance" in self.gl.gl_funcs
 
         @nb.jit(
             nb.none(
