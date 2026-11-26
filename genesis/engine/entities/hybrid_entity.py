@@ -10,10 +10,10 @@ import trimesh
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.urdf as uu
+from genesis.engine.materials.base import Material
 from genesis.ext.urdfpy.urdf import URDF
 from genesis.options.surfaces import Surface
 from genesis.utils.hybrid import (
-    check_graph,
     compute_graph_attribute,
     gel_graph_to_nx_graph,
     graph_to_tree,
@@ -419,18 +419,6 @@ def augment_link_world_coords(part_rigid):
                 )
 
 
-def _visualize_muscle_group(positions, muscle_group):
-    import open3d as o3d
-
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(positions)
-    colors = np.zeros((positions.shape[0], 3))
-    for gii, group_id in enumerate(np.unique(muscle_group)):
-        colors[muscle_group == group_id] = np.random.uniform(0, 1, (3,))
-    pcd.colors = o3d.utility.Vector3dVector(colors)
-    o3d.visualization.draw([pcd])
-
-
 # ------------------------------------------------------------------------------------
 # ----------------------------- default instantiation --------------------------------
 # ------------------------------------------------------------------------------------
@@ -452,7 +440,6 @@ def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, m
 
         # can also do link.init_verts here and it seems to have more indices than geom.init_verts (but there is no idx_offset_vert)
         verts = geom.init_verts
-        assert hasattr(geom, "init_normals")
         inner_mesh = trimesh.Trimesh(
             vertices=verts,  # NOTE: scale is already applied here
             faces=geom.init_faces,
@@ -466,11 +453,6 @@ def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, m
         meshes.append(mesh)
         trans_local_to_global.append(trans)
         euler_local_to_global.append(euler)
-
-    rm_cross_link_overlap_mesh = False
-    if rm_cross_link_overlap_mesh:
-        for i, mesh in enumerate(meshes[:-1]):  # remove cross-link overlapping area
-            meshes[i] = trimesh.boolean.difference([mesh] + meshes[i + 1 :])
 
     part_soft = scene.add_entity(
         material=material_soft,
@@ -486,14 +468,20 @@ def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, m
     return part_soft
 
 
-def default_func_instantiate_rigid_from_soft(scene, mesh, morph, material_rigid, material_hybrid, surface):
+def default_func_instantiate_rigid_from_soft(
+    scene: "Scene",
+    mesh: trimesh.Trimesh,
+    morph: gs.morphs.Mesh,
+    material_rigid: Material,
+    material_hybrid: gs.materials.Hybrid,
+    surface: Surface,
+) -> Entity:
     # skeletonization
     gelmesh = trimesh_to_gelmesh(mesh)
     graph_gel = skeletonization(gelmesh)
 
     # convert to nxgraph
     graph_nx = gel_graph_to_nx_graph(graph_gel)
-    check_graph(graph_nx)
 
     # compute graph attribute
     graph_pos = graph_gel.positions()
@@ -501,7 +489,6 @@ def default_func_instantiate_rigid_from_soft(scene, mesh, morph, material_rigid,
 
     # reduce nxgraph
     graph_nx_reduced = reduce_graph(graph_nx, straight_thresh=60)
-    check_graph(graph_nx_reduced)
 
     # to URDF
     G = graph_nx_reduced
@@ -553,7 +540,7 @@ def default_func_instantiate_rigid_soft_association_from_soft(part_rigid, part_s
     geom_idcs = []
     trans_local_to_global = []
     quat_local_to_global = []
-    for i, link in enumerate(part_rigid.links):
+    for link in part_rigid.links:
         geom = link.geoms[0]
         link_end_x_pos = (
             gu.transform_by_trans_quat(np.zeros((3,)), trans=geom.init_pos * 2, quat=geom.init_quat) + link.init_x_pos

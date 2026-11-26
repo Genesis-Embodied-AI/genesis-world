@@ -1962,14 +1962,6 @@ class SAPCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC)
             self.sap_data.errno,
         )
 
-    # ------------------------------------------------------------------------------------
-    # ----------------------------------- Properties -------------------------------------
-    # ------------------------------------------------------------------------------------
-    @property
-    def active_solvers(self):
-        """All the active solvers managed by the scene's simulator."""
-        return self.sim.active_solvers
-
 
 # ------------------------------------------------------------------------------------
 # ---------------------------------- Pressure fields ---------------------------------

@@ -57,6 +57,11 @@ POSE_EPS = 1e-9
 # Resolution of the signed distance field of a primitive, which resolves its shape exactly whatever its size
 PRIMITIVE_SDF_MAX_RES = 32
 
+# Friction coefficients of a geom whose options and asset both leave them unset
+DEFAULT_FRICTION = 1.0
+DEFAULT_FRICTION_TORSIONAL = 0.005
+DEFAULT_FRICTION_ROLLING = 0.0001
+
 
 @dataclass(kw_only=True)
 class BaseRigidGeomDescription:
@@ -1773,9 +1778,9 @@ class RigidEntityDescription(KinematicEntityDescription):
             )
             patches_values = [patch.options.model_dump() for patch in patches]
             default_coefficients = {
-                "friction": gu.default_friction,
-                "friction_torsional": gu.default_friction_torsional,
-                "friction_rolling": gu.default_friction_rolling,
+                "friction": DEFAULT_FRICTION,
+                "friction_torsional": DEFAULT_FRICTION_TORSIONAL,
+                "friction_rolling": DEFAULT_FRICTION_ROLLING,
             }
             for name, geoms_patch_idx in fields_patch_idx.items():
                 for i_g in np.flatnonzero(geoms_patch_idx >= 0):
@@ -1795,7 +1800,7 @@ class RigidEntityDescription(KinematicEntityDescription):
                     else:
                         # The coefficient of the asset, or the solver default when it states none
                         asset_value = geoms_asset_values[i_g][name]
-                        g_info[name] = default_coefficients[name]() if asset_value is None else asset_value
+                        g_info[name] = default_coefficients[name] if asset_value is None else asset_value
         super()._resolve_geoms_values(morph, links_path, links_g_infos, resolution)
 
     def _resolve_inertial(
@@ -1827,7 +1832,7 @@ class RigidEntityDescription(KinematicEntityDescription):
         ]
         return inertial_info._replace(hint=compose_inertial_from_g_infos(dynamics_g_infos, rho))
 
-    def _describe_geoms(self, cg_infos):
+    def _describe_geoms(self, cg_infos: list[dict]) -> list[RigidGeomDescription]:
         """Resolve what a parse stated about each collision geom into the description the geom is built from.
 
         A coefficient comes from the parsed geom (see '_resolve_geoms_values'), else the material, else the default.
@@ -1839,12 +1844,12 @@ class RigidEntityDescription(KinematicEntityDescription):
         for g_info in cg_infos:
             coefficients = []
             for name, material_coefficient, default_coefficient in (
-                ("friction", self.spec.material.friction, gu.default_friction),
-                ("friction_torsional", self.spec.material.friction_torsional, gu.default_friction_torsional),
-                ("friction_rolling", self.spec.material.friction_rolling, gu.default_friction_rolling),
+                ("friction", self.spec.material.friction, DEFAULT_FRICTION),
+                ("friction_torsional", self.spec.material.friction_torsional, DEFAULT_FRICTION_TORSIONAL),
+                ("friction_rolling", self.spec.material.friction_rolling, DEFAULT_FRICTION_ROLLING),
             ):
                 coefficient = g_info.get(name, material_coefficient)
-                coefficients.append(default_coefficient() if coefficient is None else coefficient)
+                coefficients.append(default_coefficient if coefficient is None else coefficient)
             friction, friction_torsional, friction_rolling = coefficients
             cg_descs.append(
                 RigidGeomDescription(

@@ -19,7 +19,7 @@ def main():
         mpm_options=gs.options.MPMOptions(
             lower_bound=(0.0, 0.0, -0.1),
             upper_bound=(1.0, 1.0, 1.0),
-            vis=gs.options.ParticleVisOptions(
+            vis=gs.options.MPMVisOptions(
                 boundary=True,
             ),
         ),

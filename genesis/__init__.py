@@ -35,7 +35,8 @@ except ImportError as e:
 import numpy as np
 
 from .constants import backend as _gs_backend
-from .logging import Logger
+from .logging import GenesisFormatter
+from .styles import THEME, style
 from .utils import ZeroCopyMode, get_device, redirect_libc_stderr, set_environ, set_random_seed
 from .version import __version__
 
@@ -54,7 +55,9 @@ _initialized: bool = False
 _torch_settings: _TorchSettings | None = None
 _scene_registry: list[weakref.ReferenceType["Scene"]] = []
 _module_registry: set[tuple[Callable[[], None], Callable[[], None]]] = set()
-logger: Logger | None = None
+logger: _logging.Logger | None = None
+# The handler printing the records of the logger, which 'destroy' removes
+_logger_handler: _logging.StreamHandler | None = None
 device: torch.device | None = None
 backend: _gs_backend | None = None
 use_ndarray: bool | None = None
@@ -111,11 +114,25 @@ def init(
     if precision not in ("32", "64"):
         raise_exception(f"Unsupported precision type: ~<{precision}>~")
 
-    # Initialize the logger
-    global logger
+    # Initialize the logger. The theme is set before the formatter is created, which reads the colors of its levels once
+    # and for all.
+    global logger, _logger_handler
     if logging_level is None:
         logging_level = _logging.DEBUG if debug else _logging.INFO
-    logger = Logger(logging_level, logger_verbose_time, theme)
+    elif isinstance(logging_level, str):
+        logging_level = logging_level.upper()
+    if theme not in THEME:
+        raise_exception(f"Unsupported theme: ~<{theme}>~")
+    style.theme = THEME(theme)
+    logger = _logging.getLogger("genesis")
+    logger.setLevel(logging_level)
+    # Records are already printed by the handler added below. Propagating them to the root logger would print them a
+    # second time, unformatted, whenever the application configures root logging (e.g. 'logging.basicConfig').
+    logger.propagate = False
+    _logger_handler = _logging.StreamHandler(sys.stdout)
+    _logger_handler.setLevel(logging_level)
+    _logger_handler.setFormatter(GenesisFormatter(logger_verbose_time))
+    logger.addHandler(_logger_handler)
 
     # Get device and backend
     global device
@@ -387,7 +404,36 @@ def init(
     if backend == _gs_backend.amdgpu:
         logger.debug("[Quadrants] Beware AMD GPU backend is still experimental and may be unstable.")
 
-    logger.banner(device_name, backend, total_mem, seed, debug, precision, performance_mode)
+    # The greeting banner, followed by the device and the options. The raw theme leaves out the box and the emojis.
+    is_decorated = style.theme is not THEME.raw
+    if is_decorated:
+        try:
+            columns, _lines = os.get_terminal_size()
+        except OSError:
+            columns = 80
+        wave_width = (columns - _logger_handler.formatter.INFO_length - 11) // 2
+        if wave_width % 2 == 0:
+            wave_width -= 1
+        wave_width = max(0, min(38, wave_width))
+        bar_width = wave_width * 2 + 9
+        wave = ("┈┉" * wave_width)[:wave_width]
+        logger.info(f"~<╭{'─' * (bar_width)}╮>~")
+        logger.info(f"~<│{wave}>~ ~~~~<Genesis>~~~~ ~<{wave}│>~")
+        logger.info(f"~<╰{'─' * (bar_width)}╯>~")
+    logger.info(f"Running on ~<[{device_name}]>~ with backend ~<{backend}>~. Device memory: ~<{total_mem:.2f}>~ GB.")
+    msg_options = ", ".join(
+        f"{f'{emoji} ' if is_decorated else ''}{name}: ~<{val}>~"
+        for emoji, name, val in (
+            ("🔖", "version", __version__),
+            ("🎨", "theme", style.theme.name),
+            ("🌱", "seed", seed),
+            ("🐛", "debug", bool(debug)),
+            ("📏", "precision", precision),
+            ("🔥", "performance", bool(performance_mode)),
+            ("💬", "verbose", _logging.getLevelName(logger.level)),
+        )
+    )
+    logger.info(f"{'🚀 ' if is_decorated else ''}Genesis initialized. {msg_options}")
 
     if _use_zerocopy is None:
         logger.warning(
@@ -440,9 +486,9 @@ def destroy():
     atexit.unregister(destroy)
 
     # Display any buffered error message if logger is configured
-    global logger
+    global logger, _logger_handler
     if logger:
-        logger.shutdown()
+        logger.info(f"{'💤 ' if style.theme is not THEME.raw else ''}Exiting Genesis and caching compiled kernels...")
 
     # Destroy all scenes. A weakref that no longer resolves means the scene was already garbage-collected (and its
     # resources released), so there is nothing left to destroy - skip it rather than asserting.
@@ -475,7 +521,8 @@ def destroy():
         setattr(qd._logging, qd_name, qd._logging._get_logging(qd_level))
 
     # Delete logger
-    logger.removeHandler(logger.handler)
+    logger.removeHandler(_logger_handler)
+    _logger_handler = None
     logger = None
 
     # Clear global state

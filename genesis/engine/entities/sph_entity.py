@@ -56,33 +56,6 @@ class SPHEntity(ParticleEntity):
             spec=spec,
         )
 
-    def init_sampler(self):
-        """
-        Initialize the particle sampler based on the material's sampling method.
-
-        Raises
-        ------
-        GenesisException
-            If the sampler is not one of the supported types: 'regular', 'pbs', or 'pbs-sdf_res'.
-        """
-        self.sampler = self.material.sampler
-
-        match self.sampler.split("-"):
-            case ["regular"]:
-                pass
-            case ["random"]:
-                pass
-            case ["pbs"]:
-                # using default sdf_res=32
-                self.sampler += "-32"
-            case ["pbs", num] if num.isnumeric():
-                pass
-            case _:
-                gs.raise_exception(
-                    "Only one of the following samplers is supported: [`regular`, `random`, `pbs`, `pbs-sdf_res`]. "
-                    f"Got: {self.sampler}."
-                )
-
     def _add_particles_to_solver(self):
         self._solver.add_particles(self.active, self._particle_start, self.material, self._particles)
 

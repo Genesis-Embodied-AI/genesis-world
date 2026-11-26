@@ -20,7 +20,7 @@ def main():
             grid_density=64,
             lower_bound=(-0.45, -0.65, -0.01),
             upper_bound=(0.45, 0.65, 1.0),
-            vis=gs.options.ParticleVisOptions(
+            vis=gs.options.MPMVisOptions(
                 boundary=True,
             ),
         ),

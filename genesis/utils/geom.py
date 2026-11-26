@@ -2369,20 +2369,6 @@ def z_to_quat(v_a: np.ndarray) -> np.ndarray:
     return out
 
 
-def compute_camera_angle(camera_pos, camera_lookat):
-    camera_dir = np.asarray(camera_lookat) - np.asarray(camera_pos)
-
-    # rotation around vertical (y) axis
-    angle_x = np.arctan2(-camera_dir[0], -camera_dir[2])
-
-    # rotation w.r.t horizontal plane
-    angle_y = np.arctan2(camera_dir[1], np.linalg.norm([camera_dir[0], camera_dir[2]]))
-
-    angle_z = 0.0
-
-    return np.array([angle_x, angle_y, angle_z])
-
-
 def transform_inertia_by_T(inertia_tensor, T, mass):
     """
     Transform the inertia tensor to the new reference frame.
@@ -2596,18 +2582,6 @@ def default_solver_params():
     Reference: https://mujoco.readthedocs.io/en/latest/modeling.html#solver-parameters
     """
     return np.array([0.0, 1.0, 9.0e-01, 9.5e-01, 1.0e-03, 5.0e-01, 2.0])
-
-
-def default_friction():
-    return 1.0
-
-
-def default_friction_torsional():
-    return 0.005
-
-
-def default_friction_rolling():
-    return 0.0001
 
 
 def default_dofs_kp(n=6):

@@ -12,7 +12,7 @@ scene = gs.Scene(
     mpm_options=gs.options.MPMOptions(
         lower_bound=(-0.5, -1.0, 0.0),
         upper_bound=(0.5, 1.0, 1),
-        vis=gs.options.ParticleVisOptions(
+        vis=gs.options.MPMVisOptions(
             boundary=True,
         ),
     ),

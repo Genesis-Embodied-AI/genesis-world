@@ -13,7 +13,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
-import genesis.utils.particle as pu
+from genesis.engine.materials.base import SAMPLER_PATTERN
 from genesis.options.surfaces import Surface
 from genesis.utils.misc import broadcast_tensor
 
@@ -122,31 +122,14 @@ class ParticleEntity(Entity):
         self.active = False
 
     def init_sampler(self):
-        """
-        Initialize the particle sampling strategy based on the material's sampler field.
-
-        Raises
-        ------
-        GenesisException
-            If the specified sampler is not supported or incorrectly formatted.
-        """
-        self.sampler = self.material.sampler
-
-        match self.sampler.split("-"):
-            case ["regular"]:
-                pass
-            case ["random"]:
-                pass
-            case ["pbs"]:
-                # using default sdf_res=32
-                self.sampler += "-32"
-            case ["pbs", num] if num.isnumeric():
-                pass
-            case _:
-                gs.raise_exception(
-                    "Only one of the following samplers is supported: [`regular`, `random`, `pbs`, `pbs-sdf_res`]. "
-                    f"Got: {self.sampler}."
-                )
+        """Resolve the particle sampler of the material, a bare 'pbs' taking a resolution of 32."""
+        # The material validates its sampler on construction alone, which an assignment or a copy bypasses
+        if not isinstance(self.material.sampler, str) or not SAMPLER_PATTERN.fullmatch(self.material.sampler):
+            gs.raise_exception(
+                "The sampler should be 'pbs', 'pbs-<res>' with a positive resolution, 'random', or 'regular'. "
+                f"Got: {self.material.sampler!r}."
+            )
+        self.sampler = "pbs-32" if self.material.sampler == "pbs" else self.material.sampler
 
     def _add_to_solver(self):
         # For nowhere entity, it will be activated when particles are later added.
@@ -185,7 +168,7 @@ class ParticleEntity(Entity):
             particles = self._vmesh.particlize(self._particle_size, self.sampler)
             particles = particles.astype(gs.np_float, order="C", copy=False)
         elif isinstance(self._morph, gs.options.morphs.Nowhere):
-            particles = pu.nowhere_particles(self._morph.n_particles)
+            particles = np.tile(gu.nowhere(), (self._morph.n_particles, 1))
         else:
             gs.raise_exception(f"Unsupported morph: {self._morph}.")
 

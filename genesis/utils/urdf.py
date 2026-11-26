@@ -132,7 +132,9 @@ def order_links_depth_first(l_infos, j_infos, links_g_infos=None):
     return new_l_infos, new_j_infos, links_g_infos, ordered_links_idx
 
 
-def parse_urdf(morph, surface):
+def parse_urdf(
+    morph: "gs.morphs.URDF | gs.morphs.Drone", surface: "gs.surfaces.Surface"
+) -> tuple[list[dict], list[list[dict]], list[list[dict]], list[dict]]:
     if morph.is_format(XACRO_FORMAT):
         # Expanded by the parser reading it, so the morph keeps the file provided by the user (see 'parse_xml' in mjcf.py)
         parent_dir = os.getcwd()
@@ -308,7 +310,6 @@ def parse_urdf(morph, surface):
                     "quat": gu.R_to_quat(geom_prop.origin[:3, :3]),
                     "contype": 1 if geom_is_col else 0,
                     "conaffinity": 1 if geom_is_col else 0,
-                    "friction": gu.default_friction(),
                     "sol_params": gu.default_solver_params(),
                 }
                 link_g_infos.append(g_info)
@@ -547,11 +548,6 @@ def translate_inertia(I, m, dist):
     return I + translation_matrix
 
 
-def rotate_inertia(I, R):
-    """Rotate inertia tensor I by rotation matrix R."""
-    return R @ I @ R.T
-
-
 def principal_axes_rot(I, tol=1e-3):
     """Return rotation matrix R whose columns are the (unsorted) principal axes of inertia I."""
     I = 0.5 * (I + I.T)
@@ -626,17 +622,18 @@ def compose_inertial_properties(mass1, com1, inertia1, mass2, com2, inertia2):
         combined_com: Combined center of mass (3,) array
         combined_inertia: Combined inertia tensor (3,3) array
     """
+    if mass1 < 0.0 or mass2 < 0.0:
+        gs.raise_exception(f"The mass of a body cannot be negative, got {mass1} and {mass2}.")
     combined_mass = mass1 + mass2
-    if combined_mass <= 0.0:
-        gs.raise_exception("Combined mass is zero")
-    combined_com = (mass1 * com1 + mass2 * com2) / combined_mass
+    # Two massless bodies have no center of mass, the one of the first body standing for it
+    combined_com = (mass1 * com1 + mass2 * com2) / combined_mass if combined_mass > 0.0 else com1
     inertia1_new = translate_inertia(inertia1, mass1, combined_com - com1)
     inertia2_new = translate_inertia(inertia2, mass2, combined_com - com2)
     combined_inertia = inertia1_new + inertia2_new
     return combined_mass, combined_com, combined_inertia
 
 
-def merge_inertia(link1, link2):
+def merge_inertia(link1: urdfpy.Link, link2: urdfpy.Link) -> None:
     """Combine two links with fixed joint."""
     if link2.inertial is None:
         return
@@ -649,42 +646,22 @@ def merge_inertia(link1, link2):
     elif link1.inertial.origin is None:
         link1.inertial.origin = np.eye(4, dtype=np.float64)
 
-    m1 = link1.inertial.mass
-    m2 = link2.inertial.mass
-
-    com1, R1 = link1.inertial.origin[:3, 3], link1.inertial.origin[:3, :3]
-    com2, R2 = link2.inertial.origin[:3, 3], link2.inertial.origin[:3, :3]
-
-    combined_mass = m1 + m2
-    if combined_mass > 0.0:
-        combined_com = (m1 * com1 + m2 * com2) / combined_mass
-    else:
-        combined_com = com1
-
-    # Rotate and translate inertia tensors to the new center of mass
-    inertia1_rotated = rotate_inertia(link1.inertial.inertia, R1)
-    inertia2_rotated = rotate_inertia(link2.inertial.inertia, R2)
-
-    inertia1_new = translate_inertia(inertia1_rotated, m1, combined_com - com1)
-    inertia2_new = translate_inertia(inertia2_rotated, m2, combined_com - com2)
-
-    # Combine the inertia tensors
-    combined_inertia = inertia1_new + inertia2_new
+    R1, R2 = link1.inertial.origin[:3, :3], link2.inertial.origin[:3, :3]
+    # The combined inertia is expressed in the frame of the combined center of mass, axes aligned with the link
+    combined_mass, combined_com, combined_inertia = compose_inertial_properties(
+        link1.inertial.mass,
+        link1.inertial.origin[:3, 3],
+        R1 @ link1.inertial.inertia @ R1.T,
+        link2.inertial.mass,
+        link2.inertial.origin[:3, 3],
+        R2 @ link2.inertial.inertia @ R2.T,
+    )
 
     # Set the properties of the combined link
     link1.inertial.mass = combined_mass
     link1.inertial.origin[:3, 3] = combined_com
     link1.inertial.origin[:3, :3] = np.eye(3)  # Reset rotation to identity since it's now aligned
     link1.inertial.inertia = combined_inertia
-
-
-def transform_inertial(inertial, transform):
-    if inertial is None:
-        return None
-
-    new_origin = transform @ inertial
-
-    return urdfpy.Inertial(origin=new_origin, mass=inertial.mass, inertia=inertial.inertia)
 
 
 def update_subtree(links, joints, root_name, transform):

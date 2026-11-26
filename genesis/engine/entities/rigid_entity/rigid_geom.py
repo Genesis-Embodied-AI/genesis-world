@@ -79,10 +79,6 @@ class RigidGeom(BuildableMixin, RBC):
         self._surface = mesh.surface
         self._metadata = mesh.metadata
 
-        self._init_center_pos = np.repeat(
-            self._init_verts.mean(0, keepdims=True), repeats=self._init_verts.shape[0], axis=0
-        )
-
         # The solver reads a row of fixed width, so copy the described shape data into one
         self._data = np.zeros([7])
         if desc.data is not None:
@@ -468,13 +464,6 @@ class RigidGeom(BuildableMixin, RBC):
         Get the initial normals of the geom.
         """
         return self._init_normals
-
-    @property
-    def init_center_pos(self):
-        """
-        Get the initial center position of the geom.
-        """
-        return self._init_center_pos
 
     @property
     def uvs(self):

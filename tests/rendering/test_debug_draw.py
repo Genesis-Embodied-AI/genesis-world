@@ -3,11 +3,12 @@ import sys
 
 import numpy as np
 import pytest
+import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
-from genesis.engine.render_context import Points
+from genesis.engine.render_context import LABELS_HUE_STEP, Points
 from genesis.engine.solvers.rigid.rigid_solver import HIBERNATION_TINT
 from genesis.utils.misc import qd_to_torch
 
@@ -541,3 +542,69 @@ def test_islands_colors_single_tree(renderer, show_viewer):
     assert qd_to_torch(scene.rigid_solver.dyn_state.links.is_hibernated)[1:].all()
     chroma_asleep = get_box_chroma()
     assert (np.abs(chroma_asleep - 1.0 / 3.0).max(axis=-1) < np.abs(chroma_awake - 1.0 / 3.0).max(axis=-1)).all()
+
+
+@pytest.mark.required
+def test_muscle_groups_colors(renderer):
+    RES = (160, 120)
+    MUSCLE_COLOR = (0.5, 0.5, 0.5)
+
+    scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            # Ambient light alone shades every particle with its exact color, which is read back pixel by pixel
+            ambient_light=(1.0, 1.0, 1.0),
+            lights=[],
+            debug=True,
+            split_envs=True,
+        ),
+        renderer=renderer,
+        show_viewer=False,
+    )
+    muscle = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.15),
+            size=(0.2, 0.2, 0.2),
+        ),
+        material=gs.materials.MPM.Muscle(
+            sampler="regular",
+            n_groups=2,
+        ),
+        surface=gs.surfaces.Default(
+            color=MUSCLE_COLOR,
+        ),
+    )
+    cam = scene.add_camera(
+        res=RES,
+        pos=(0.0, -0.8, 0.15),
+        lookat=(0.0, 0.0, 0.15),
+        fov=40,
+        debug=True,
+    )
+    scene.build(n_envs=2)
+
+    # The camera looks along +y, so that the left half of the image shows the particles on the side of negative x
+    is_particle_right = muscle.get_particles_pos()[0, :, 0] > 0.0
+    groups_rgb = 255.0 * mu.hsv_to_rgb(np.array([0.0, LABELS_HUE_STEP]), saturation=0.8, value=0.95)
+
+    def get_sides_color():
+        rgb, _, seg, _ = cam.render(rgb=True, segmentation=True, force_render=True)
+        rgb = rgb.reshape((2, RES[1], RES[0], 3))
+        seg = seg.reshape((2, RES[1], RES[0]))
+        is_muscle = seg == next(idxc for idxc, key in scene.segmentation_idx_dict.items() if key == muscle.idx)
+        # The median over the pixels of each side leaves the antialiased edges and the middle column out
+        return np.array(
+            [
+                [
+                    np.median(rgb_env[:, cols][is_muscle_env[:, cols]], axis=0)
+                    for cols in (slice(0, 70), slice(90, None))
+                ]
+                for rgb_env, is_muscle_env in zip(rgb, is_muscle)
+            ]
+        )
+
+    # A single muscle group draws the muscle in the color of its surface
+    assert_allclose(get_sides_color(), 255.0 * np.array(MUSCLE_COLOR), atol=5.0)
+    # Several groups draw each side in the color of its group in every environment, following the groups at runtime
+    for groups_side in ((0, 1), (1, 0)):
+        muscle.set_muscle_group(torch.where(is_particle_right, groups_side[1], groups_side[0]))
+        assert_allclose(get_sides_color(), np.broadcast_to(groups_rgb[list(groups_side)], (2, 2, 3)), atol=5.0)

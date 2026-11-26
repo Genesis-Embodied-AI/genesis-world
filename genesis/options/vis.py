@@ -225,7 +225,7 @@ class VisOptions(Options):
     ambient_light : tuple of float, shape (3,)
         The color of the scene's ambient light.
     visualize_mpm_boundary : bool
-        Deprecated: use ``MPMOptions(vis=ParticleVisOptions(boundary=True))``. Whether to draw the boundary of
+        Deprecated: use ``MPMOptions(vis=MPMVisOptions(boundary=True))``. Whether to draw the boundary of
         the MPM solver.
     visualize_sph_boundary : bool
         Deprecated: use ``SPHOptions(vis=ParticleVisOptions(boundary=True))``. Whether to draw the boundary of
@@ -244,8 +244,8 @@ class VisOptions(Options):
         Deprecated: use ``RigidOptions(vis=RigidVisOptions(contact_force_scale=...))``. The length of the arrow of a
         contact force per newton, in meters.
     n_support_neighbors : int
-        Deprecated: use ``n_support_neighbors`` of ``ParticleVisOptions``, the ``vis`` options of the MPM and PBD
-        solvers.
+        Deprecated: use ``n_support_neighbors`` of ``MPMVisOptions`` or ``PBDVisOptions``, the ``vis`` options of the
+        MPM and PBD solvers.
     rendered_envs_idx : list, optional
         Indices of the environments that will be rendered. If not provided, all the environments will be considered.
         Defaults to None.
@@ -302,10 +302,14 @@ class VisOptions(Options):
             ("show_link_frame", "'RigidOptions(vis=RigidVisOptions(link_frames={}))'"),
             ("link_frame_size", "'RigidOptions(vis=RigidVisOptions(link_frame_size={}))'"),
             ("contact_force_scale", "'RigidOptions(vis=RigidVisOptions(contact_force_scale={}))'"),
-            ("visualize_mpm_boundary", "'MPMOptions(vis=ParticleVisOptions(boundary={}))'"),
+            ("visualize_mpm_boundary", "'MPMOptions(vis=MPMVisOptions(boundary={}))'"),
             ("visualize_sph_boundary", "'SPHOptions(vis=ParticleVisOptions(boundary={}))'"),
             ("visualize_pbd_boundary", "'PBDOptions(vis=PBDVisOptions(boundary={}))'"),
-            ("n_support_neighbors", "'MPMOptions(vis=ParticleVisOptions(n_support_neighbors={}))'"),
+            (
+                "n_support_neighbors",
+                "'MPMOptions(vis=MPMVisOptions(n_support_neighbors={0}))' or "
+                "'PBDOptions(vis=PBDVisOptions(n_support_neighbors={0}))'",
+            ),
         ):
             value = data.get(name)
             if value is not None:

@@ -3,8 +3,7 @@ from typing import Any, Self
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 import genesis as gs
-import genesis.utils.repr as ru
-from genesis.repr_base import RBC
+from genesis.repr_base import RBC, brief
 from genesis.styles import colors, formats
 
 
@@ -138,7 +137,7 @@ class Options(RBC, BaseModel):
             )
             formatted_str = f"{name_color}'{attr}'{formats.RESET}"
 
-            content = ru.brief(value)
+            content = brief(value)
             idx = content.find(">")
             formatted_content = (
                 f"{value_color}{formats.ITALIC}{content[: idx + 1]}{formats.RESET}"

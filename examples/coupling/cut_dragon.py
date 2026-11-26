@@ -20,7 +20,7 @@ def main():
             enable_CPIC=True,
             lower_bound=(-1.0, -1.0, -0.01),
             upper_bound=(1.0, 1.0, 2.0),
-            vis=gs.options.ParticleVisOptions(
+            vis=gs.options.MPMVisOptions(
                 boundary=True,
             ),
         ),

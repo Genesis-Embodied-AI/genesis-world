@@ -124,7 +124,6 @@ def main():
 
         # forward pass
         print("forward")
-        timer = gs.tools.Timer()
         loss = 0.0
         for i, v_i in enumerate(v_list):
             stick.set_dofs_velocity(v_i, dofs_idx_local=slice(0, 3))
@@ -143,11 +142,9 @@ def main():
                 goal = torch.tensor([0.5, 0.8, 0.05], dtype=gs.tc_float, device=gs.device)
                 loss += torch.pow(obj1.get_particles_pos() - goal, 2).sum()
 
-        timer.stamp("forward took: ")
         # backward pass
         print("backward")
         loss.backward()  # this lets gradient flow all the way back to tensor input
-        timer.stamp("backward took: ")
         for v_i in v_list:
             print(v_i.grad)
             v_i.grad = None

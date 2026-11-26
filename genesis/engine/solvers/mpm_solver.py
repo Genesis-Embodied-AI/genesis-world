@@ -9,11 +9,19 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+import genesis.utils.mesh as mu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
-from genesis.engine.render_context import ScopedRenderContext
+from genesis.engine.render_context import (
+    LABELS_HUE_STEP,
+    Points,
+    ScopedRenderContext,
+    Shape,
+    ShapeRoles,
+    select_view_shapes,
+)
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.abd.misc import func_add_external_wrench
 from genesis.engine.solvers.rigid.data import GEOMS, GeomsInfo, GeomsState, LinksState, RigidData, RigidInfo
@@ -36,7 +44,7 @@ from genesis.utils.data import (
     opt_in,
 )
 from genesis.utils.geom import PARTICLES, SpatialHashGrid, func_sort_particles_by_slot, hash_grid_sizes
-from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_torch, qd_zero_grad
+from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_torch, qd_zero_grad, tensor_to_array
 from genesis.utils.sdf import SDFInfo
 from genesis.utils.simt import requires_deterministic_accumulation
 
@@ -1737,6 +1745,75 @@ def func_backward_svd(
 
 
 class MPMScopedRenderContext(ParticleScopedRenderContext, ScopedRenderContext[MPMSolver]):
-    """The particles of the MPM solver as drawn (see 'ParticleScopedRenderContext')."""
+    """The particles of the MPM solver as drawn (see 'ParticleScopedRenderContext'). In its debug representation, a
+    muscle holding several muscle groups draws the particles of each group in a color of its own, as the visual options
+    of the solver ask (see 'MPMVisOptions.muscle_groups')."""
 
     boundary_color = (1.0, 1.0, 0.0, 1.0)
+
+    def build(self) -> None:
+        super().build()
+        solver = self.owner
+        # The muscles by their rank among the entities of the solver, and the particles of each of their muscle groups
+        # met so far, which stand for the particles of the muscle in its debug representation while it holds several
+        self._muscles: list[tuple[int, MPMEntity]] = []
+        if solver.options.vis.muscle_groups:
+            self._muscles = [
+                (i_e, entity) for i_e, entity in enumerate(solver.entities) if isinstance(entity.material, MPM.Muscle)
+            ]
+        self._muscle_groups_points: dict[tuple[int, int], Points] = {}
+        self._muscle_groups_shown: tuple[Points, ...] = ()
+        # The particles of a muscle follow the writes of its muscle groups too, a change of the model, so that the
+        # shapes are refreshed as the groups change
+        invalidated_by = {solver: (StateChange.GEOMETRY, StateChange.DYNAMICS, StateChange.MODEL)}
+        shapes = list(self._shapes)
+        for i_e, _entity in self._muscles:
+            i_s = shapes.index(self._entities_points[i_e])
+            shapes[i_s] = shapes[i_s].fork(invalidated_by=invalidated_by)
+        self._shapes = tuple(shapes)
+
+    def update_shapes(self, envs_idx: torch.Tensor | None, view: str) -> tuple[Shape, ...]:
+        if envs_idx is not None and self._muscles:
+            solver = self.owner
+            # The muscle groups are shared by every environment and change at runtime (see 'set_particles_muscle_group')
+            particles_group = solver.get_particles_muscle_group()
+            particles_is_active = qd_to_torch(solver._particles_is_active, envs_idx, transpose=True)
+            shapes = list(self._shapes)
+            groups_points = []
+            for i_e, entity in self._muscles:
+                particles_slice = slice(entity.particle_start, entity.particle_start + entity.n_particles)
+                entity_particles_group = particles_group[particles_slice]
+                groups = tensor_to_array(torch.unique(entity_particles_group)).tolist()
+                is_grouped = len(groups) > 1
+                # The particles of the entity leave its debug representation to those of its groups, as a fork keeping
+                # their identity
+                i_s = shapes.index(self._entities_points[i_e])
+                points = shapes[i_s]
+                if points.roles.is_debug[0] == is_grouped:
+                    roles = ShapeRoles.of(entity.idx, is_looks=points.roles.is_looks, is_debug=not is_grouped)
+                    shapes[i_s] = points.fork(roles=roles)
+                if not is_grouped:
+                    continue
+                for group in groups:
+                    group_points = self._muscle_groups_points.get((entity.idx, group))
+                    if group_points is None:
+                        group_rgb = mu.hsv_to_rgb(
+                            np.array([(group * LABELS_HUE_STEP) % 1.0]), saturation=0.8, value=0.95
+                        )
+                        group_points = points.fork(
+                            uid=gs.UID(),
+                            surface=gs.surfaces.Default(color=tuple(group_rgb[0].tolist())),
+                            is_active=torch.zeros(
+                                (solver.n_envs_, entity.n_particles), dtype=gs.tc_bool, device=gs.device
+                            ),
+                            roles=ShapeRoles.of(entity.idx, is_looks=False, is_debug=True),
+                            invalidated_by=points.invalidated_by,
+                        )
+                        self._muscle_groups_points[(entity.idx, group)] = group_points
+                    group_points.is_active[envs_idx] = torch.logical_and(
+                        particles_is_active[:, particles_slice], entity_particles_group == group
+                    )
+                    groups_points.append(group_points)
+            self._shapes = tuple(shapes)
+            self._muscle_groups_shown = tuple(groups_points)
+        return (*super().update_shapes(envs_idx, view), *select_view_shapes(self._muscle_groups_shown, view))

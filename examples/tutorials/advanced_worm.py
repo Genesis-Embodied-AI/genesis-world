@@ -18,7 +18,7 @@ scene = gs.Scene(
         dt=5e-5,
         lower_bound=(-1.0, -1.0, -0.2),
         upper_bound=(1.0, 1.0, 1.0),
-        vis=gs.options.ParticleVisOptions(
+        vis=gs.options.MPMVisOptions(
             boundary=True,
         ),
     ),

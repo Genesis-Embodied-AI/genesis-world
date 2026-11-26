@@ -494,6 +494,27 @@ class ParticleVisOptions(Options):
         return value
 
 
+class MPMVisOptions(ParticleVisOptions):
+    """
+    Options configuring how the entities of the MPM solver are drawn.
+
+    Parameters
+    ----------
+    boundary : bool, optional
+        See ``ParticleVisOptions``.
+    recon_backend : str, optional
+        See ``ParticleVisOptions``.
+    n_support_neighbors : int, optional
+        See ``ParticleVisOptions``.
+    muscle_groups : bool, optional
+        Whether a muscle holding several muscle groups draws the particles of each group in a color of its own in its
+        debug representation, in place of the color of its surface. The groups are read back from the device at each frame
+        drawn while the scene holds a muscle. Defaults to True.
+    """
+
+    muscle_groups: StrictBool = True
+
+
 class PBDVisOptions(ParticleVisOptions):
     """
     Options configuring how the entities of the PBD solver are drawn.
@@ -812,8 +833,8 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
         This option is deprecated.
     leaf_block_size : int, optional
         This option is deprecated.
-    vis : gs.options.ParticleVisOptions, optional
-        How the entities of the solver are drawn and the markers it draws (see ``gs.options.ParticleVisOptions``).
+    vis : gs.options.MPMVisOptions, optional
+        How the entities of the solver are drawn and the markers it draws (see ``gs.options.MPMVisOptions``).
     """
 
     particle_size: PositiveFloat | None = None  # in meters. Will be computed automatically if it's None.
@@ -823,7 +844,7 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
     # These will later be converted to discrete grid bound. The actual grid boundary could be slightly tighter.
     lower_bound: Vec3FType = (-1.0, -1.0, 0.0)
     upper_bound: Vec3FType = (1.0, 1.0, 1.0)
-    vis: ParticleVisOptions = Field(default_factory=ParticleVisOptions)
+    vis: MPMVisOptions = Field(default_factory=MPMVisOptions)
 
     def __init__(self, *, use_sparse_grid: bool = False, leaf_block_size: int = 8, **data):
         super().__init__(**data)

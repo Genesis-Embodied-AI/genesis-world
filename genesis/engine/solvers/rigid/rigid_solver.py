@@ -22,6 +22,7 @@ from genesis.engine.render_context import (
     CONSTRAINT_LINE_RADIUS,
     CONSTRAINT_POINT_RADIUS,
     DEBUG,
+    LABELS_HUE_STEP,
     NORMAL,
     ArrayRef,
     Arrows,
@@ -419,8 +420,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             is_backward=False,
         )
 
-        self._init_collider()
-        self._init_constraint_solver()
+        self.collider = Collider(self)
+        self.constraint_solver = ConstraintSolver(self)
         collider_info = self.collider.collider_info
         self.register_errors(
             self._errno,
@@ -1364,12 +1365,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.rigid_config,
             )
 
-    def _init_collider(self):
-        self.collider = Collider(self)
-
-    def _init_constraint_solver(self):
-        self.constraint_solver = ConstraintSolver(self)
-
     # Its launches compute the derived arrays the next ones read, so they go untracked, the substep recording what it
     # wrote at once (see 'untracked_launches').
     @untracked_launches()
@@ -1541,14 +1536,19 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.collider.clear()
         self.collider.detection()
 
-    def detect_collision(self, env_idx=0):
+    def detect_collision(self, env_idx: int = 0) -> np.ndarray:
         # TODO: support batching
         self._kernel_detect_collision()
 
-        n_collision = qd_to_numpy(self.collider.collider_state.n_contacts)[env_idx]
+        collider_state = self.collider.collider_state
+        n_collision = qd_to_numpy(collider_state.n_contacts, env_idx, keepdim=False, transpose=True)
         collision_pairs = np.empty((n_collision, 2), dtype=np.int32)
-        collision_pairs[:, 0] = qd_to_numpy(self.collider.collider_state.contact_data.geom_a)[:n_collision, env_idx]
-        collision_pairs[:, 1] = qd_to_numpy(self.collider.collider_state.contact_data.geom_b)[:n_collision, env_idx]
+        collision_pairs[:, 0] = qd_to_numpy(
+            collider_state.contact_data.geom_a, env_idx, slice(0, n_collision), keepdim=False, transpose=True
+        )
+        collision_pairs[:, 1] = qd_to_numpy(
+            collider_state.contact_data.geom_b, env_idx, slice(0, n_collision), keepdim=False, transpose=True
+        )
 
         return collision_pairs
 
@@ -3533,9 +3533,6 @@ def kernel_substep_post(
 # The colors of the arrows of the force and of the normal of a contact
 CONTACT_FORCE_COLOR = (0.0, 0.9, 0.8, 1.0)
 CONTACT_NORMAL_COLOR = (0.9, 0.0, 0.8, 1.0)
-# The hue of the color of an island steps by the golden ratio conjugate from one link to the next (see
-# 'RigidScopedRenderContext.update_shapes'). This way, the links of one entity, whose indices are close, get distant hues.
-ISLANDS_HUE_STEP = 0.618034
 # The tint of a sleeping link: a grey, weighted by the alpha. A sleeping link colored by its island blends that color
 # toward the grey by the same weight.
 HIBERNATION_TINT = (0.35, 0.35, 0.38, 0.7)
@@ -3636,7 +3633,8 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
         # an island takes from its smallest link (see 'update_shapes').
         self._is_islands_shown = solver.options.vis.islands
         self._is_hibernation_shown = solver.options.vis.hibernation
-        links_hue = (np.arange(solver.n_links) * ISLANDS_HUE_STEP) % 1.0
+        # The links of one entity, whose indices are close, get distant hues (see 'LABELS_HUE_STEP')
+        links_hue = (np.arange(solver.n_links) * LABELS_HUE_STEP) % 1.0
         self._links_island_color = torch.as_tensor(
             mu.hsv_to_rgb(links_hue, saturation=0.8, value=0.95), dtype=gs.tc_float, device=gs.device
         )
