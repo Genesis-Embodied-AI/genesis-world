@@ -3104,8 +3104,19 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         potential_energy = -torch.sum(links_mass * g_dot_p, dim=-1)
 
         # `dofs.pos` holds the deflection `qpos - qpos0` that the spring force is proportional to, so the elastic
-        # energy integrates directly against it whatever the neutral configuration.
-        dofs_pos = qd_to_torch(self.dyn_state.dofs.pos, envs_idx, dofs_idx, transpose=True)
+        # energy integrates directly against it whatever the neutral configuration. A ball joint holds Euler angles
+        # there instead, while its spring pulls along the rotation vector of its orientation (see
+        # func_torque_and_passive_force), which is the deflection its energy integrates against.
+        dofs_pos = qd_to_torch(self.dyn_state.dofs.pos, envs_idx, transpose=True, copy=True)
+        joints_spherical = [joint for joint in self.joints if joint.type == gs.JOINT_TYPE.SPHERICAL]
+        if joints_spherical:
+            qs_idx = torch.tensor([joint.qs_idx for joint in joints_spherical], device=gs.device)
+            dofs_spherical_idx = torch.tensor([joint.dofs_idx for joint in joints_spherical], device=gs.device)
+            quat = qd_to_torch(self.rigid_info.qpos, envs_idx, transpose=True)[..., qs_idx]
+            quat_vec_norm = torch.linalg.vector_norm(quat[..., 1:], dim=-1, keepdim=True)
+            angle = 2.0 * torch.atan2(quat_vec_norm, quat[..., :1].abs())
+            dofs_pos[..., dofs_spherical_idx] = angle / quat_vec_norm.clamp(min=gs.EPS) * quat[..., 1:]
+        dofs_pos = dofs_pos[indices_to_mask(None, dofs_idx)]
         stiffness = self.get_dofs_stiffness(dofs_idx, envs_idx if self._options.batch_dofs_info else None)
         spring_energy = 0.5 * torch.sum(stiffness * dofs_pos * dofs_pos, dim=-1)
         if self.n_envs == 0:
