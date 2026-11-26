@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     NonNegativeUnboundedFloat = float
     LaxNonNegativeUnboundedVec3FType = Vec3FType | float
     EntityIdx = Entity | int
+    RigidLinksIdx = Sequence[RigidLink | int]
     OptionalRigidLinksIdx = Sequence[RigidLink | int]
 else:
     NonNegativeUnboundedFloat = Annotated[float, Field(ge=0, strict=False)]
@@ -68,6 +69,7 @@ else:
     ]
     # The classes are looked up lazily, since the engine imports these options before defining them
     EntityIdx = objects_idx_type(lambda: gs.engine.entities.Entity, many=False, allow_int=True)
+    RigidLinksIdx = objects_idx_type(lambda: gs.engine.entities.rigid_entity.RigidLink, many=True, allow_int=True)
     OptionalRigidLinksIdx = objects_idx_type(
         lambda: gs.engine.entities.rigid_entity.RigidLink, many=True, allow_empty=True, allow_int=True
     )
@@ -649,15 +651,13 @@ class SurfaceDistanceProbe(
     probe_radius : float | array-like[float]
         Maximum sensing range in meters. When no mesh is within this distance, distance is clamped to the probe
         radius and nearest points is the probe position. Default: 0.5. Also controls the outer debug sphere.
-    tracked_links : Sequence[RigidLink | int], optional
+    tracked_links : Sequence[RigidLink | int]
         The links of rigid entities whose mesh geoms are used for distance queries, or their global indices in the
-        rigid solver. The keyword 'track_link_idx' is a deprecated alias. Defaults to none.
+        rigid solver. The keyword 'track_link_idx' is a deprecated alias.
     """
 
     probe_radius: PositiveFArrayType | PositiveFloat = 0.5
-    tracked_links: OptionalRigidLinksIdx = Field(
-        default=(), validation_alias=AliasChoices("tracked_links", "track_link_idx")
-    )
+    tracked_links: RigidLinksIdx = Field(default=(), validation_alias=AliasChoices("tracked_links", "track_link_idx"))
 
     def _validate(self, sim: "Simulator"):
         super()._validate(sim)

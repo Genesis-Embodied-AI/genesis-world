@@ -22,9 +22,9 @@ from genesis.typing import (
 
 from .options import (
     ContactFilterOptionsMixin,
-    OptionalRigidLinksIdx,
     ProbeSensorOptionsMixin,
     ProbesWithNormalSensorOptionsMixin,
+    RigidLinksIdx,
     RigidSensorOptionsMixin,
     SensorOptions,
     SimpleSensorOptions,
@@ -219,9 +219,9 @@ class PointCloudTactileSensorMixin[SensorT: "Sensor"](TactileProbeSensorOptionsM
 
     Parameters
     ----------
-    tracked_links : Sequence[RigidLink | int], optional
+    tracked_links : Sequence[RigidLink | int]
         The links of rigid entities whose mesh geometry is used to sample a point cloud from, or their global indices
-        in the rigid solver. The keyword 'track_link_idx' is a deprecated alias. Defaults to none.
+        in the rigid solver. The keyword 'track_link_idx' is a deprecated alias.
     n_sample_points: int | array-like[int]
         Total FPS samples split across ``tracked_links``, or one count per tracked link. Per-variant
         counts are not supported: when a tracked link belongs to a heterogeneous entity, the per-link
@@ -235,9 +235,7 @@ class PointCloudTactileSensorMixin[SensorT: "Sensor"](TactileProbeSensorOptionsM
         The radius of the debug tracked object point cloud spheres.
     """
 
-    tracked_links: OptionalRigidLinksIdx = Field(
-        default=(), validation_alias=AliasChoices("tracked_links", "track_link_idx")
-    )
+    tracked_links: RigidLinksIdx = Field(default=(), validation_alias=AliasChoices("tracked_links", "track_link_idx"))
     n_sample_points: IArrayType | NonNegativeInt = 500
     use_visual_mesh: StrictBool = True
 
@@ -511,8 +509,6 @@ class ElastomerTaxel(
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         _validate_filler_probe_radius(self.probe_radius, "ElastomerTaxel")
-        if len(self.tracked_links) == 0:
-            gs.raise_exception("ElastomerTaxel requires at least one tracked link in `tracked_links`.")
         if self.normal_exponent < 1.0:
             gs.raise_exception(f"normal_exponent must be greater than or equal to 1.0. Got {self.normal_exponent}.")
         if self.compressibility > 1.0:
