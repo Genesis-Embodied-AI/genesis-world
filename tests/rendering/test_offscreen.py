@@ -2328,12 +2328,14 @@ def test_video_recording_lifecycle(tmp_path, monkeypatch, renderer, show_viewer)
     "alpha_source, n_envs", [("color", 2), ("image_texture", 2), ("dynamic_texture", 0), ("dynamic_texture", 2)]
 )
 @pytest.mark.parametrize("red_alpha_u8", [0, 128])
-def test_transparent_surfaces_show_what_lies_behind_them(
+def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
     alpha_source, n_envs, red_alpha_u8, translucent_box_obj, renderer, show_viewer
 ):
     # Alphas that 8-bit texels store exactly, so that every source gives the same opacity
     RED = (1.0, 0.0, 0.0, red_alpha_u8 / 255)
     BLUE = (0.0, 0.0, 1.0, 128 / 255)
+    # The gray whose linear value is one half, so that a glass of that color lets through half of the light
+    GLASS_GRAY = 1.055 * 0.5 ** (1.0 / 2.4) - 0.055
     # The dynamic texture of the blue box shows an opaque image in environment 0 when there are several, which the
     # translucent image of environment 1 must leave as it is
     blues_color = [BLUE] if alpha_source != "dynamic_texture" or n_envs == 0 else [(0.0, 0.0, 1.0, 1.0), BLUE]
@@ -2350,11 +2352,15 @@ def test_transparent_surfaces_show_what_lies_behind_them(
             gravity=(0.0, 0.0, 0.0),
         ),
         vis_options=gs.options.VisOptions(
-            shadow=False,
             # One image per environment, each holding its own pair of boxes
             split_envs=True,
             # Black leaves each surface worth exactly its own contribution, so the composite below needs no offset
             background_color=(0.0, 0.0, 0.0),
+            # Lighting the faces that the camera sees head-on keeps them clear of the edge of the shadow of their own
+            # box, and the shadow of each box falls clear of the other box
+            lights=[
+                {"type": "directional", "dir": (-1.0, -1.0, -2.0), "color": (1.0, 1.0, 1.0), "intensity": 5.0},
+            ],
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.5, 0.0, 0.5),
@@ -2363,7 +2369,7 @@ def test_transparent_surfaces_show_what_lies_behind_them(
         renderer=renderer,
         show_viewer=show_viewer,
     )
-    # The red box of a dynamic texture shows its variant from build, and the blue one an opaque variant until its
+    # The red box of a dynamic texture shows an opaque variant from build, and the blue one an opaque variant until its
     # translucent image is written between two renders.
     if alpha_source == "color":
         surfaces = [
@@ -2386,12 +2392,24 @@ def test_transparent_surfaces_show_what_lies_behind_them(
             gs.surfaces.Default(
                 diffuse_texture=gs.textures.DynamicTexture(
                     resolution=(4, 4),
-                    variants=(gs.textures.ColorTexture(color=color),),
+                    variants=tuple(gs.textures.ColorTexture(color=color) for color in colors),
                     is_batched=is_batched,
                 ),
             )
-            for color, is_batched in ((RED, False), (BLUE[:3], True))
+            for colors, is_batched in (((RED[:3], RED), False), ((BLUE[:3],), True))
         ]
+    # A slab receiving the shadow of the red box, wholly in view of every camera: software rendering backends
+    # misrasterize geometry straddling the edge of the view
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.35, -0.25, 0.1),
+            size=(0.4, 0.4, 0.02),
+            fixed=True,
+        ),
+        surface=gs.surfaces.Rough(
+            color=(0.3, 0.3, 0.3),
+        ),
+    )
     # Same size and lined up along the axis the camera sits on, so that the nearer one covers the farther one
     red = scene.add_entity(
         gs.morphs.Mesh(
@@ -2409,12 +2427,42 @@ def test_transparent_surfaces_show_what_lies_behind_them(
         ),
         surface=surfaces[1],
     )
+    # An opaque box of the size of the red one, whose shadow is the darkest that the red one can cast
+    occluder = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=PARKED,
+            size=(0.2, 0.2, 0.2),
+        ),
+        surface=gs.surfaces.Rough(
+            color=(0.5, 0.5, 0.5),
+        ),
+    )
+    # A glass box of the size of the red one
+    glass = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=PARKED,
+            size=(0.2, 0.2, 0.2),
+        ),
+        surface=gs.surfaces.Glass(
+            color=(GLASS_GRAY, GLASS_GRAY, GLASS_GRAY),
+        ),
+    )
     cam = scene.add_camera(
         res=(RES, RES),
         pos=(2.5, 0.0, 0.5),
         lookat=(0.0, 0.0, 0.5),
     )
+    # Looking at the shadow of the red box on the slab
+    cam_floor = scene.add_camera(
+        res=(RES, RES),
+        pos=(0.4, -1.1, 0.7),
+        lookat=(0.4, -0.2, 0.11),
+    )
     scene.build(n_envs=n_envs)
+    # The red box of a dynamic texture is drawn opaque first, then shows its translucent variant
+    if alpha_source == "dynamic_texture":
+        cam_floor.render()
+        red.set_texture(variant=1)
 
     def centre_patch(pos_red, pos_blue):
         red.set_pos(pos_red)
@@ -2448,6 +2496,35 @@ def test_transparent_surfaces_show_what_lies_behind_them(
     patch_blue_across = centre_patch(PARKED, (-0.6, 0.0, 0.5))
     patch_pair_across = centre_patch((0.6, 0.0, 0.5), (-0.6, 0.0, 0.5))
     assert_allclose(patch_pair_across, patch_blue_across + (1.0 - blues_alpha) * patch_red_across, atol=1.0)
+
+    # A surface blocks the share of the light that its opacity gives, its shadow ranging from none when transparent to
+    # that of an opaque box of the same shape. The share holds in linear light.
+    def floor_patch(pos_red, pos_occluder):
+        # The scene is rendered as it stands when no position is given
+        if pos_red is not None:
+            red.set_pos(pos_red)
+            occluder.set_pos(pos_occluder)
+            scene.step()
+        rgb = tensor_to_array(cam_floor.render()[0])[..., CENTRE, CENTRE, :].mean(axis=(-3, -2)) / 255.0
+        return np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+
+    blue.set_pos(PARKED)
+    floor_lit = floor_patch(PARKED, PARKED)
+    floor_dark = floor_patch(PARKED, (0.6, 0.0, 0.5))
+    floor_shadowed = floor_patch((0.6, 0.0, 0.5), PARKED)
+    assert_allclose((floor_lit - floor_shadowed) / (floor_lit - floor_dark), RED[3], atol=0.02)
+
+    # The shadow of a dynamic texture follows the variant shown, as soon as it is shown
+    if alpha_source == "dynamic_texture":
+        red.set_texture(variant=0)
+        assert_allclose(floor_patch(None, None), floor_dark, atol=0.02)
+        red.set_texture(variant=1)
+        assert_allclose(floor_patch(None, None), floor_shadowed, atol=0.02)
+
+    # A glass blocks the share of the light that its linear color holds back
+    glass.set_pos((0.6, 0.0, 0.5))
+    floor_glass = floor_patch(PARKED, PARKED)
+    assert_allclose((floor_lit - floor_glass) / (floor_lit - floor_dark), 0.5, atol=0.02)
 
 
 @pytest.mark.required

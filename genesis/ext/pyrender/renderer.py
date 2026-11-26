@@ -503,7 +503,7 @@ class Renderer(object):
         # Set up camera matrices
         V, P = self._get_light_cam_matrices(scene, light_node, flags)
 
-        self.jit.shadow_mapping_pass(self, V, P, flags, ProgramFlags.NONE, env_idx=env_idx)
+        self.jit.shadow_mapping_pass(self, V, P, flags, ProgramFlags.SHADOW, env_idx=env_idx)
 
     def _normal_pass(self, scene, flags, env_idx=-1):
         # Set up viewport for render
@@ -793,6 +793,26 @@ class Renderer(object):
         else:
             vertex_shader = "mesh_depth.vert"
             fragment_shader = "mesh_depth.frag"
+            # A transparent surface casts a shadow as dark as it is opaque (see mesh_depth.frag). The layer that a
+            # texture array shows may change after the program is built, so a texture array always samples its alpha.
+            material = primitive.material
+            is_base_color_array = (
+                isinstance(material, MetallicRoughnessMaterial)
+                and material.tex_flags & TexFlags.BASE_COLOR
+                and material.baseColorTexture.tex_type == GL_TEXTURE_2D_ARRAY
+            )
+            if (
+                program_flags & ProgramFlags.SHADOW
+                and isinstance(material, MetallicRoughnessMaterial)
+                and (primitive.is_transparent or is_base_color_array)
+            ):
+                defines["TRANSPARENT_SHADOW"] = 1
+                if material.tex_flags & TexFlags.BASE_COLOR:
+                    defines["HAS_BASE_COLOR_TEX"] = 1
+                if is_base_color_array:
+                    defines["BASE_COLOR_TEX_ARRAY"] = 1
+                    if material.baseColorTexture.data_format == GL_HALF_FLOAT:
+                        defines["BASE_COLOR_TEX_LINEAR"] = 1
 
         # Set up vertex buffer DEFINES
         bf = primitive.buf_flags

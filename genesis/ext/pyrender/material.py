@@ -511,8 +511,8 @@ class MetallicRoughnessMaterial(Material):
         return tex_flags
 
     def _compute_transparency(self, include_textures=True):
-        # The background shows through a transmissive material, which is drawn after the opaque geometry and casts no
-        # shadow as a translucent color does
+        # The background shows through a transmissive material, so it is drawn after the opaque geometry, and its shadow
+        # is that of a translucent color (see mesh_depth.frag)
         if self.is_transmissive:
             return True
         if self.alphaMode == "OPAQUE":

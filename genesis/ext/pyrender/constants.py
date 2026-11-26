@@ -180,6 +180,7 @@ class ProgramFlags:
     FACE_NORMALS = 4
     POINT_SHADOW = 8
     DOUBLE_SIDED = 16
+    SHADOW = 32
 
 
 __all__ = ["RenderFlags", "TextAlign", "GLTF"]

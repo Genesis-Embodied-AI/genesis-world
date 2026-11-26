@@ -683,8 +683,8 @@ class JITRenderer:
             self.render_flags[i, 4] = primitive.is_floor and not floor_existed
             self.render_flags[i, 5] = node_list[i].mesh.is_transparent
             self.render_flags[i, 6] = node_list[i].mesh.is_marker
-            # The shadow maps sample no texture, so a mesh made transparent by the alpha of its texels alone casts the
-            # shadow of its whole surface
+            # The shadow cube maps of the point lights sample no texture, so a mesh made transparent by the alpha of its
+            # texels alone casts the shadow of its whole surface there, and a mesh of translucent color none
             self.render_flags[i, 9] = node_list[i].mesh.has_translucent_color
             self.render_flags[i, 10] = isinstance(material, MetallicRoughnessMaterial) and material.is_transmissive
             self.views[i] = node_list[i].mesh.views
@@ -1115,6 +1115,10 @@ class JITRenderer:
                 nb.float32,
                 nb.boolean[:],
                 nb.int32,
+                nb.int32[:, :],
+                nb.float32[:, :],
+                nb.float32[:, :, :],
+                nb.int32[:],
                 self.gl.wrapper_type,
             ),
             cache=True,
@@ -1136,12 +1140,17 @@ class JITRenderer:
             env_offset_scale,
             is_env_instanced,
             env_offset_buffer,
+            textures,
+            pbr_mat,
+            texture_layers,
+            texture_layers_idx,
             gl,
         ):
             last_pid = -1
             for id in range(len(vao_id)):
-                # Do not render shadows for markers and meshes of translucent color
-                if render_flags[id, 9] or render_flags[id, 6]:
+                # Markers cast no shadow, and neither does a translucent color drawn without a transparent shadow (see
+                # TRANSPARENT_SHADOW in renderer.py)
+                if render_flags[id, 6] or (render_flags[id, 9] and not render_flags[id, 3]):
                     continue
 
                 pid = program_id[id]
@@ -1157,6 +1166,23 @@ class JITRenderer:
                 set_uniform_matrix_4fv(pid, "M", pose[id], gl)
                 gl.glBindVertexArray(vao_id[id])
 
+                # A transparent surface casts a shadow as dark as it is opaque (see mesh_depth.frag), and so does a
+                # texture array whatever the layer shown (see TRANSPARENT_SHADOW in renderer.py). A texture array is
+                # sampled at the layer of the environment drawn.
+                i_layers = texture_layers_idx[id]
+                is_layer_set = False
+                tf = textures[id, 0]
+                if render_flags[id, 5] or tf & (8 << 8):
+                    set_uniform_4fv(pid, "base_color_factor", pbr_mat[id, :4], gl)
+                    set_uniform_1f(pid, "transmission_factor", pbr_mat[id, 9], gl)
+                    if tf & 8:
+                        gl.glActiveTexture(GL_TEXTURE0)
+                        gl.glBindTexture(GL_TEXTURE_2D_ARRAY if tf & (8 << 8) else GL_TEXTURE_2D, textures[id, 4])
+                        set_uniform_1i(pid, "base_color_texture", 0, gl)
+                        is_layer_set = i_layers >= 0
+                        if is_layer_set and env_idx >= 0:
+                            set_uniform_1f(pid, "base_color_layer", texture_layers[i_layers, env_idx, 0], gl)
+
                 gl.glEnable(GL_CULL_FACE)
                 gl.glCullFace(GL_BACK)
                 gl.glDisable(GL_BLEND)
@@ -1164,12 +1190,15 @@ class JITRenderer:
                 gl.glDisable(GL_PROGRAM_POINT_SIZE)
 
                 if render_flags[id, 7] or env_idx == -1:
-                    if render_flags[id, 8] and env_idx == -1:
+                    if (render_flags[id, 8] or is_layer_set) and env_idx == -1:
                         # Combined draw-all of a heterogeneous variant: shadow only the environments it is active in,
-                        # otherwise the variant would cast a shadow in every environment's instance.
+                        # otherwise the variant would cast a shadow in every environment's instance. A primitive
+                        # sampling a texture array casts the shadow of one environment at a time, each at its own layer.
                         for k in range(n_instances[id]):
                             if not env_active[id, k]:
                                 continue
+                            if is_layer_set:
+                                set_uniform_1f(pid, "base_color_layer", texture_layers[i_layers, k, 0], gl)
                             if IS_OPENGL_42_AVAILABLE:
                                 if n_indices[id] > 0:
                                     gl.glDrawElementsInstancedBaseInstance(
@@ -1551,6 +1580,10 @@ class JITRenderer:
                 0.0 if is_env_pass(flags) else 1.0,
                 self.is_env_instanced,
                 self.env_offset_buffer if self.env_offset_buffer is not None else 0,
+                self.textures,
+                self.pbr_mat,
+                self.texture_layers,
+                self.texture_layers_idx,
                 self.gl.wrapper_instance,
             )
 
@@ -1602,11 +1635,19 @@ class JITRenderer:
             The primitives whose layers changed. Those that this renderer does not draw are skipped.
         """
         meshes = set()
+        is_shadow_changed = False
         for primitive in primitives:
             i = self._primitive_index.get(primitive)
             if i is not None:
                 self.texture_layers[self.texture_layers_idx[i]] = primitive.texture_layers
                 meshes.add(self.node_list[i].mesh)
+                if self.textures[i, 0] & (8 << 8):
+                    is_shadow_changed = True
+        # The shadow of a base color texture array follows the layers shown (see TRANSPARENT_SHADOW in renderer.py),
+        # while a shadow map is rendered again only once the scene changed
+        if is_shadow_changed:
+            for light_node in self._scene.light_nodes:
+                light_node.light.shadow_map_revision = None
         # The alpha of the layers shown decides whether a mesh is drawn with the transparent ones, a flag that every
         # primitive of the mesh carries. It is evaluated once per mesh, since it reads every primitive of the mesh.
         for mesh in meshes:
