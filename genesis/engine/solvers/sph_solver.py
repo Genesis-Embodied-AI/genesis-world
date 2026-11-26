@@ -109,14 +109,11 @@ class SPHEnvsSolve(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     and takes the same steps from one run to the next.
     """
 
-    # One slot per sum: the relative density error summed over the active particles (the projected gradient of the
-    # objective) scaled by 'err_scale', the preconditioned norms of the chopped gradient and of the reduced free
-    # gradient, the product of the preconditioned free gradient with the operator times the search direction, then the
-    # dot products of the search direction with its product with the operator and with the gradient. The slots that a
-    # stage adds or takes are contiguous, so that it does so in a loop around a single inlined call.
+    # One slot per sum: the preconditioned norms of the chopped gradient and of the reduced free gradient, the product
+    # of the preconditioned free gradient with the operator times the search direction, then the dot products of the
+    # search direction with its product with the operator and with the gradient. The slots that a stage adds or takes
+    # are contiguous, so that it does so in a loop around a single inlined call.
     sums: ExactSums
-    # The number of active particles, over which the error is averaged
-    n_active: qd.Tensor = field(int)
     is_solving: qd.Tensor = field(bool)
     # Whether the environment recomputes the gradient of its objective from the pressures, after an expansion step or
     # at the start of the solve, takes a proportioning step along the chopped gradient, or expands the active set
@@ -130,6 +127,9 @@ class SPHEnvsSolve(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     step: qd.Tensor = field(float)
     dir_prod_norm: qd.Tensor = field(float)
     dir_coef: qd.Tensor = field(float)
+    # The largest relative density error of the particles, the largest entry of the projected gradient of the
+    # objective, which a maximum keeps the same whatever the order of the particles
+    err_max: qd.Tensor = field(float)
 
 
 class SPHSolveLoop(Data, kind=DataKind.SCRATCH, shape=()):
@@ -210,11 +210,8 @@ class SPHInfo(Data, kind=DataKind.CONSTANT):
     viscosity_eps: qd.Tensor = field(float, shape=())
     # The magnitude of the color gradient that regularizes its unit normal in the surface tension
     surface_normal_min: qd.Tensor = field(float, shape=())
-    # The average relative density error that ends the pressure solve
+    # The largest relative density error of a particle that ends the pressure solve
     density_err_tol: qd.Tensor = field(float, shape=())
-    # The power of two that scales the relative density errors in the exact sums of the pressure solve, which gives
-    # them the bins of the dot products at the tolerance (see SPHEnvsSolve)
-    err_scale: qd.Tensor = field(float, shape=())
     # The share of the density excess of a particle at the start of the substep that the substep corrects
     drift_relaxation: qd.Tensor = field(float, shape=())
     # The fixed step of the projected steepest descent of an expansion step, below twice the inverse of the largest
@@ -258,7 +255,9 @@ class SPHSolver(ParticleSolver):
 
         self._support_radius = options._support_radius
 
-        self._density_err_tol = 0.01 * options.max_density_error_percent
+        self._density_err_tol = options.max_density_error
+        if self._density_err_tol is None:
+            self._density_err_tol = 1e-5 if gs.qd_float == qd.f32 else 1e-6
         self._n_pressure_iters_max = options.max_density_solver_iterations
 
         # The samplers place one particle per cube of the particle size, the spacing over which the kernel sums to one
@@ -284,7 +283,7 @@ class SPHSolver(ParticleSolver):
             sizes=dict(
                 sizes,
                 # Each sum of an environment takes one slot, its terms spanning 96 bits (see SPHEnvsSolve)
-                exact_sum_slots=6,
+                exact_sum_slots=5,
                 exact_sum_bins=3,
                 **hash_grid_sizes(math.prod(self._hash_grid_res)),
             ),
@@ -300,12 +299,10 @@ class SPHSolver(ParticleSolver):
         if self.is_active:
             # The lowest bin of the sums resolves 2^-20 of their terms at the tolerance, the bins 2^32 apart (see
             # ExactSums). The dot products weigh squared density errors by the inverse diagonal of the operator, which
-            # the kernel gradients of the lattice of the samplers set to about 2.5 * rho0 * (particle_size / dt)^2. The
-            # relative density errors take the same bins once scaled by a power of two, which keeps their sum exact.
+            # the kernel gradients of the lattice of the samplers set to about 2.5 * rho0 * (particle_size / dt)^2.
             density0_min = min(entity.material.rho for entity in self._entities)
             diag_inv_min = 2.5 * density0_min * (self._particle_size / self.substep_dt) ** 2
             exp_prod = math.floor(math.log2(self._density_err_tol**2 * diag_inv_min))
-            err_scale = 2.0 ** (exp_prod - math.floor(math.log2(self._density_err_tol)))
             exp_min = exp_prod - 20
             bins_unit = 2.0 ** np.array([exp_min, exp_min + 32.0, exp_min + 64.0], dtype=gs.np_float)
             self.sph_state.envs_solve.sums.bins_unit.from_numpy(bins_unit)
@@ -330,7 +327,6 @@ class SPHSolver(ParticleSolver):
                 # whose direction would add surface energy in the bulk (see func_task_compute_non_pressure_forces)
                 surface_normal_min=0.2 / self._support_radius,
                 density_err_tol=self._density_err_tol,
-                err_scale=err_scale,
                 # Correcting the whole density excess at once kicks the liquid by the velocity that removes it within a
                 # substep, which the pressure solve turns into kinetic energy
                 drift_relaxation=0.2,
@@ -1056,9 +1052,6 @@ def kernel_compute_rho_and_diag(sph_state: SPHState, sph_info: SPHInfo, sph_conf
 
     The pressure solve takes the inverse of the diagonal of its operator as preconditioner (see kernel_solve_pressure).
     """
-    for i_b in range(sph_state.particles_reordered.pos.shape[1]):
-        sph_state.envs_solve.n_active[i_b] = 0
-
     # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_interactions)
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
     n_particles, n_envs = sph_state.particles_reordered.pos.shape
@@ -1095,7 +1088,6 @@ def kernel_compute_rho_and_diag(sph_state: SPHState, sph_info: SPHInfo, sph_conf
                         ret.surfaces_grad[i_s, i_d], sph_config.log2_neighbor_lanes
                     )
         if is_active and i_lane == 0:
-            qd.atomic_add(sph_state.envs_solve.n_active[i_b], 1)
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
             # The particle itself weighs into its density by the kernel at distance 0
             kernel_self = func_kernel(0.0, sph_info.support_radius[None], sph_info.kernel_norm[None])
@@ -1351,6 +1343,7 @@ def kernel_compute_rhs(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.te
         sph_state.envs_solve.is_proportioning[i_b] = False
         sph_state.envs_solve.is_expanding[i_b] = False
         sph_state.envs_solve.step_max[i_b] = gs.qd_float(float("inf"))
+        sph_state.envs_solve.err_max[i_b] = 0.0
 
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
     n_particles, n_envs = sph_state.particles_reordered.pos.shape
@@ -1455,7 +1448,7 @@ def func_pressure_product(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd
                 )
                 # The slots of the dot products of the search direction (see SPHEnvsSolve)
                 for i_s in range(2):
-                    func_exact_sum_add(4 + i_s, i_b, terms[i_s], sph_state.envs_solve.sums)
+                    func_exact_sum_add(3 + i_s, i_b, terms[i_s], sph_state.envs_solve.sums)
                 # The longest step that keeps every pressure non-negative
                 if direction > 0.0:
                     qd.atomic_min(
@@ -1534,7 +1527,7 @@ def func_pressure_step(sph_state: SPHState):
             # The slots of the dot products of the search direction (see SPHEnvsSolve)
             sums = qd.Vector.zero(gs.qd_float, 2)
             for i_s in range(2):
-                sums[i_s] = func_exact_sum_take(4 + i_s, i_b, sph_state.envs_solve.sums)
+                sums[i_s] = func_exact_sum_take(3 + i_s, i_b, sph_state.envs_solve.sums)
             dir_prod_sum, grad_dir_sum = sums[0], sums[1]
             step = gs.qd_float(0.0)
             if dir_prod_sum > 0.0:
@@ -1625,15 +1618,11 @@ def func_pressure_update(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.
                 if not sph_state.envs_solve.is_recomputing[i_b]:
                     free_prod = (diags_inv * grads_free * dir_prods).sum()
                 terms = qd.Vector(
-                    [
-                        sph_info.err_scale[None] * qd.abs(grads_free + grads_chopped).sum(),
-                        (diags_inv * grads_chopped**2).sum(),
-                        (diags_inv * grads_reduced * grads_free).sum(),
-                        free_prod,
-                    ]
+                    [(diags_inv * grads_chopped**2).sum(), (diags_inv * grads_reduced * grads_free).sum(), free_prod]
                 )
-                for i_s in range(4):
+                for i_s in range(3):
                     func_exact_sum_add(i_s, i_b, terms[i_s], sph_state.envs_solve.sums)
+                qd.atomic_max(sph_state.envs_solve.err_max[i_b], qd.abs(grads_free + grads_chopped).max())
             sph_state.particles_reordered.p[i_p, i_b] = pressures[0]
             sph_state.pressure_solve.p_contacts[i_p, i_b] = qd.Vector([pressures[1], pressures[2], pressures[3]])
             sph_state.pressure_solve.grad[i_p, i_b] = grads[0]
@@ -1645,8 +1634,9 @@ def func_pressure_next(n_iters_max: int, sph_state: SPHState, sph_info: SPHInfo)
     """
     Stop the pressure solve of the environments that converged, and choose the next step of the others.
 
-    Each environment stops once the average projected gradient of its particles, their relative density error, meets
-    the tolerance, so that its result is the same whatever the other environments simulate alongside it. The next step
+    Each environment stops once the largest relative density error of its particles, the largest entry of the
+    projected gradient, meets the tolerance, so that its result is the same whatever the other environments simulate
+    alongside it. The next step
     is a conjugate gradient step while the chopped gradient is small against the reduced free gradient, and a
     proportioning step along the chopped gradient otherwise (modified proportioning with reduced gradient projections,
     MPRGP). The loop runs on as long as an environment iterates on, for `n_iters_max` iterations at most.
@@ -1659,11 +1649,12 @@ def func_pressure_next(n_iters_max: int, sph_state: SPHState, sph_info: SPHInfo)
                 if sph_state.solve_loop.n_passes[None] < n_iters_max:
                     sph_state.solve_loop.is_looping[()] = 1
             else:
-                sums = qd.Vector.zero(gs.qd_float, 4)
-                for i_s in range(4):
+                sums = qd.Vector.zero(gs.qd_float, 3)
+                for i_s in range(3):
                     sums[i_s] = func_exact_sum_take(i_s, i_b, sph_state.envs_solve.sums)
-                err = sums[0] / sph_info.err_scale[None]
-                chopped_norm, reduced_norm, free_prod_sum = sums[1], sums[2], sums[3]
+                chopped_norm, reduced_norm, free_prod_sum = sums[0], sums[1], sums[2]
+                err_max = sph_state.envs_solve.err_max[i_b]
+                sph_state.envs_solve.err_max[i_b] = 0.0
                 is_conjugating = not (
                     sph_state.envs_solve.is_recomputing[i_b] or sph_state.envs_solve.is_proportioning[i_b]
                 )
@@ -1674,7 +1665,7 @@ def func_pressure_next(n_iters_max: int, sph_state: SPHState, sph_info: SPHInfo)
                 sph_state.envs_solve.dir_coef[i_b] = dir_coef
                 sph_state.envs_solve.is_proportioning[i_b] = is_proportioning
                 sph_state.envs_solve.is_recomputing[i_b] = False
-                if err <= sph_info.density_err_tol[None] * sph_state.envs_solve.n_active[i_b]:
+                if err_max <= sph_info.density_err_tol[None]:
                     sph_state.envs_solve.is_solving[i_b] = False
                 elif sph_state.solve_loop.n_passes[None] < n_iters_max:
                     sph_state.solve_loop.is_looping[()] = 1

@@ -892,12 +892,14 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
         Size of the spatially-repetitive spatial hashing grid in meters. If none, it will be computed automatically. Defaults to None.
     hash_grid_cell_size : float, optional
         Size of the lattic cell of the spatial hashing grid in meters. This should be at least 2 * `particle_size`. If none, it will be computed automatically. Defaults to None.
-    max_density_error_percent : float, optional
-        Average density error that the pressure solve allows at the end of a substep, in percent of the rest density,
-        so 0.1 means 0.1%. A lower value keeps the liquid closer to incompressible and conserves its energy better, at
-        the cost of more solver iterations per substep. A larger value saves iterations, but the density error it leaves
-        is corrected in the next substeps by pushing the particles apart, which feeds energy into the liquid and can
-        keep a liquid at rest moving. Defaults to 1e-4.
+    max_density_error : float, optional
+        Largest density error of a particle that the pressure solve allows at the end of a substep, relative to the rest
+        density, so 1e-3 means 0.1%. A lower value keeps the liquid closer to incompressible and conserves its energy
+        better, at the cost of about ten more solver iterations per substep for each tenfold reduction. A larger value
+        saves iterations, but the density error it leaves is corrected in the next substeps by pushing the particles
+        apart, which feeds energy into the liquid and can keep a liquid at rest moving. If None, resolved based on the
+        floating-point precision selected via `gs.init(precision=...)`: 1e-5 for single precision ("32") and 1e-6 for
+        double precision ("64"). Defaults to None.
     max_density_solver_iterations : int, optional
         Maximum number of iterations of the pressure solve per substep. Defaults to 100.
     vis : gs.options.ParticleVisOptions, optional
@@ -914,7 +916,7 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
     hash_grid_cell_size: PositiveFloat | None = None  # size of the cubic cell in meters
 
     # Pressure solve parameters
-    max_density_error_percent: PositiveFloat = 1e-4
+    max_density_error: PositiveFloat | None = None
     max_density_solver_iterations: PositiveInt = 100
 
     vis: ParticleVisOptions = Field(default_factory=ParticleVisOptions)
