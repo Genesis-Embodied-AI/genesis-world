@@ -52,9 +52,9 @@ class BaseCameraOptions[SensorT: "Sensor"](KinematicSensorOptionsMixin[SensorT])
         'link_idx_local', and takes precedence over them when both are given. Defaults to None.
     entity : Entity | int | None, optional
         The entity to which this sensor is attached, or its index in the scene, or None for a static sensor. The
-        keyword 'entity_idx' is a deprecated alias. Ignored if 'link' is also given. Defaults to None.
+        keyword 'entity_idx' is also accepted. Ignored if 'link' is also given. Defaults to None.
     link_idx_local : int, optional
-        Deprecated, use 'link'. The index in 'entity' of the link to which this sensor is attached. Ignored if 'link'
+        Prefer 'link' instead. The index in 'entity' of the link to which this sensor is attached. Ignored if 'link'
         is also given. Defaults to 0, the base link.
     """
 

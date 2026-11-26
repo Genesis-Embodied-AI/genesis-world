@@ -47,7 +47,7 @@ class JointTorqueSensor(SimpleSensor[JointTorqueOptions, None, JointTorqueSensor
         # Resolve dofs_idx_local=None to the full DOF range before super().__init__(), because _get_return_format() is
         # called inside the base constructor and needs the final DOF count.
         if options.dofs_idx_local is None:
-            entity = manager.sim.entities[options.entity]
+            entity = manager.sim.entities[options.entity_idx]
             options.dofs_idx_local = tuple(range(entity.n_dofs))
         super().__init__(options, idx, shared_context, shared_metadata, manager)
 
@@ -65,7 +65,7 @@ class JointTorqueSensor(SimpleSensor[JointTorqueOptions, None, JointTorqueSensor
         if self._shared_metadata.solver is None:
             self._shared_metadata.solver = self._manager.sim.rigid_solver
 
-        entity = self._manager.sim.entities[self._options.entity]
+        entity = self._manager.sim.entities[self._options.entity_idx]
         dofs_idx = torch.tensor(
             [entity.dof_start + i for i in self._options.dofs_idx_local],
             dtype=gs.tc_int,

@@ -614,7 +614,7 @@ class KinematicSensorMetadataMixin:
     Shared metadata for sensors attached to a KinematicEntity (or any subclass, including RigidEntity).
 
     Sensors are bucketed at build time into per-solver ``_SolverLinkGroup`` entries so the per-step gather is one bulk
-    read per solver. Static sensors (``entity<0``) are not bucketed and keep an identity link pose, leaving the
+    read per solver. Static sensors (no entity) are not bucketed and keep an identity link pose, leaving the
     kernel to apply ``pos_offset`` / ``euler_offset`` in world frame.
     """
 
@@ -689,8 +689,8 @@ class _LinkAttachedSensorMixin(BuildableMixin):
         super().build()
 
         batch_size = self._manager.n_envs_
-        if self._options.entity >= 0:
-            entity = self._manager.sim.entities[self._options.entity]
+        if self._options.entity_idx >= 0:
+            entity = self._manager.sim.entities[self._options.entity_idx]
             self._link = entity.links[self._options.link_idx_local]
             link_idx = self._options.link_idx_local + entity.link_start
             self._register_link(entity, link_idx)
@@ -727,7 +727,7 @@ class RigidSensorMixin[RigidSensorMetadataMixinT: RigidSensorMetadataMixin](_Lin
         super().build()
         # A sensor attached to no entity takes link -1, which the kernels read as the world frame at rest, see
         # 'func_sensor_link_pose'.
-        if self._options.entity < 0:
+        if self._options.entity_idx < 0:
             self._register_link(entity=None, link_idx=-1)
 
     def _register_link(self, entity, link_idx: int):

@@ -111,11 +111,11 @@ class SensorOptions[SensorT: "Sensor"](Options):
     jitter: NonNegativeFloat = 0.0
     draw_debug: StrictBool = False
     # -1 means not link-attached, so that SensorManager can sort uniformly
-    entity: EntityIdx | None = Field(default=None, validation_alias=AliasChoices("entity", "entity_idx"))
+    entity_idx: EntityIdx | None = Field(default=None, validation_alias=AliasChoices("entity", "entity_idx"))
 
-    @field_validator("entity", mode="wrap")
+    @field_validator("entity_idx", mode="wrap")
     @classmethod
-    def _normalize_entity(cls, value: Any, handler: ValidatorFunctionWrapHandler) -> int:
+    def _normalize_entity_idx(cls, value: Any, handler: ValidatorFunctionWrapHandler) -> int:
         entity_idx = -1 if value is None else handler(value)
         if entity_idx < -1:
             gs.raise_exception(f"{cls.__name__}: entity must be an entity, an index >= 0 or None, got {value}.")
@@ -151,9 +151,9 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
         'link_idx_local', and takes precedence over them when both are given. Defaults to None.
     entity : Entity | int | None, optional
         The entity to which this sensor is attached, or its index in the scene, or None for a static sensor. The
-        keyword 'entity_idx' is a deprecated alias. Ignored if 'link' is also given. Defaults to None.
+        keyword 'entity_idx' is also accepted. Ignored if 'link' is also given. Defaults to None.
     link_idx_local : int, optional
-        Deprecated, use 'link'. The index in 'entity' of the link to which this sensor is attached. Ignored if 'link'
+        Prefer 'link' instead. The index in 'entity' of the link to which this sensor is attached. Ignored if 'link'
         is also given. Defaults to 0, the base link.
     pos_offset : array-like[float, float, float], optional
         The positional offset of the sensor from the link.
@@ -178,28 +178,28 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
                 )
             data = dict(data)
             link = data.pop("link")
-            for name in ("entity_idx", "link_idx_local"):
+            for name in ("entity", "entity_idx", "link_idx_local"):
                 data.pop(name, None)
             if link is None:
-                data["entity"] = None
+                data["entity_idx"] = None
             else:
                 if not isinstance(link, gs.engine.entities.rigid_entity.KinematicLink):
                     gs.raise_exception(f"{cls.__name__}: link must be a link, got {type(link).__name__}.")
-                data.update(entity=link.entity.idx, link_idx_local=link.idx_local)
+                data.update(entity_idx=link.entity.idx, link_idx_local=link.idx_local)
         return data
 
     def _validate(self, sim: "Simulator"):
         from genesis.engine.entities import KinematicEntity
 
         super()._validate(sim)
-        if self.entity >= 0:
-            if self.entity >= len(sim.entities):
-                gs.raise_exception(f"Invalid entity index {self.entity}.")
-            entity = sim.entities[self.entity]
+        if self.entity_idx >= 0:
+            if self.entity_idx >= len(sim.entities):
+                gs.raise_exception(f"Invalid entity index {self.entity_idx}.")
+            entity = sim.entities[self.entity_idx]
             if not isinstance(entity, KinematicEntity):
-                gs.raise_exception(f"Entity at index {self.entity} is not a KinematicEntity.")
+                gs.raise_exception(f"Entity at index {self.entity_idx} is not a KinematicEntity.")
             if self.link_idx_local >= entity.n_links:
-                gs.raise_exception(f"Invalid link index {self.link_idx_local} for entity {self.entity}.")
+                gs.raise_exception(f"Invalid link index {self.link_idx_local} for entity {self.entity_idx}.")
 
 
 class RigidSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMixin[SensorT]):
@@ -214,17 +214,17 @@ class RigidSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMixin[Sen
         from genesis.engine.entities import RigidEntity
 
         super()._validate(sim)
-        if self.entity >= 0:
-            entity = sim.entities[self.entity]
+        if self.entity_idx >= 0:
+            entity = sim.entities[self.entity_idx]
             if not isinstance(entity, RigidEntity):
-                gs.raise_exception(f"Entity at index {self.entity} is not a RigidEntity.")
+                gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
 
 
 class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[SensorT]):
     """
     Options for a sensor that measures nothing without a RigidEntity.
 
-    The attachment is mandatory: entity must refer to an existing RigidEntity, static sensors are not allowed. Such
+    The attachment is mandatory: entity_idx must refer to an existing RigidEntity, static sensors are not allowed. Such
     are the joint-space sensors, bound to a whole entity, and the sensors measuring a quantity of their link (contacts,
     contact force, temperature).
 
@@ -233,8 +233,8 @@ class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[S
 
     def _validate(self, sim: "Simulator"):
         super()._validate(sim)
-        if self.entity < 0:
-            gs.raise_exception(f"{type(self).__name__} requires an entity, got {self.entity}.")
+        if self.entity_idx < 0:
+            gs.raise_exception(f"{type(self).__name__} requires an entity, got {self.entity_idx}.")
 
 
 class ContactFilterOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[SensorT]):
@@ -249,21 +249,21 @@ class ContactFilterOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[Senso
         Links of rigid entities, or their global indices in the rigid solver. Contacts with the sensor link whose other
         participant is one of these links are ignored: the sensor behaves as if those counterparts were not touching.
         Use it to scope a reading to a chosen set of contacts (e.g. force on a foot from the ground, excluding
-        self-contact). The keyword 'filter_link_idx' is a deprecated alias. Default is empty, so every contact with the
+        self-contact). The keyword 'filter_link_idx' is also accepted. Default is empty, so every contact with the
         sensor link counts.
     """
 
-    filtered_links: OptionalRigidLinksIdx = Field(
+    filter_link_idx: OptionalRigidLinksIdx = Field(
         default=(), validation_alias=AliasChoices("filtered_links", "filter_link_idx")
     )
 
     def _validate(self, sim: "Simulator"):
         super()._validate(sim)
-        if self.filtered_links:
+        if self.filter_link_idx:
             n_links = sim.rigid_solver.n_links
-            if np.any(np.array(self.filtered_links) < 0) or np.any(np.array(self.filtered_links) >= n_links):
+            if np.any(np.array(self.filter_link_idx) < 0) or np.any(np.array(self.filter_link_idx) >= n_links):
                 gs.raise_exception(
-                    f"{type(self).__name__}: filtered_links must be in [0, {n_links}). Got {self.filtered_links}."
+                    f"{type(self).__name__}: filter_link_idx must be in [0, {n_links}). Got {self.filter_link_idx}."
                 )
 
 
@@ -381,7 +381,7 @@ class JointTorque(RigidEntitySensorOptionsMixin["JointTorqueSensor"], SimpleSens
     Parameters
     ----------
     entity : RigidEntity | int
-        The rigid entity to sense, or its index in the scene. The keyword 'entity_idx' is a deprecated alias.
+        The rigid entity to sense, or its index in the scene. The keyword 'entity_idx' is also accepted.
     dofs_idx_local : array-like[int] | None, optional
         Local DOF indices within the entity. ``None`` (default) selects all DOFs.
     """
@@ -390,9 +390,9 @@ class JointTorque(RigidEntitySensorOptionsMixin["JointTorqueSensor"], SimpleSens
 
     def _validate(self, sim: "Simulator"):
         super()._validate(sim)
-        entity = sim.entities[self.entity]
+        entity = sim.entities[self.entity_idx]
         if entity.n_dofs == 0:
-            gs.raise_exception(f"JointTorque: entity at index {self.entity} has no DOFs.")
+            gs.raise_exception(f"JointTorque: entity at index {self.entity_idx} has no DOFs.")
         if self.dofs_idx_local is not None and any(i < 0 or i >= entity.n_dofs for i in self.dofs_idx_local):
             gs.raise_exception(
                 f"JointTorque: dofs_idx_local contains out-of-range indices for entity with {entity.n_dofs} DOFs."
@@ -653,19 +653,19 @@ class SurfaceDistanceProbe(
         radius and nearest points is the probe position. Default: 0.5. Also controls the outer debug sphere.
     tracked_links : Sequence[RigidLink | int]
         The links of rigid entities whose mesh geoms are used for distance queries, or their global indices in the
-        rigid solver. The keyword 'track_link_idx' is a deprecated alias.
+        rigid solver. The keyword 'track_link_idx' is also accepted.
     """
 
     probe_radius: PositiveFArrayType | PositiveFloat = 0.5
-    tracked_links: RigidLinksIdx = Field(default=(), validation_alias=AliasChoices("tracked_links", "track_link_idx"))
+    track_link_idx: RigidLinksIdx = Field(default=(), validation_alias=AliasChoices("tracked_links", "track_link_idx"))
 
     def _validate(self, sim: "Simulator"):
         super()._validate(sim)
         n_links = sim.rigid_solver.n_links
-        for i, link_idx in enumerate(self.tracked_links):
+        for i, link_idx in enumerate(self.track_link_idx):
             if not (0 <= link_idx < n_links):
                 gs.raise_exception(
-                    f"SurfaceDistanceProbe tracked_links[{i}]={link_idx} is out of range [0, {n_links})."
+                    f"SurfaceDistanceProbe track_link_idx[{i}]={link_idx} is out of range [0, {n_links})."
                 )
 
 

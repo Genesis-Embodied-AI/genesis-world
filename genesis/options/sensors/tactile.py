@@ -221,7 +221,7 @@ class PointCloudTactileSensorMixin[SensorT: "Sensor"](TactileProbeSensorOptionsM
     ----------
     tracked_links : Sequence[RigidLink | int]
         The links of rigid entities whose mesh geometry is used to sample a point cloud from, or their global indices
-        in the rigid solver. The keyword 'track_link_idx' is a deprecated alias.
+        in the rigid solver. The keyword 'track_link_idx' is also accepted.
     n_sample_points: int | array-like[int]
         Total FPS samples split across ``tracked_links``, or one count per tracked link. Per-variant
         counts are not supported: when a tracked link belongs to a heterogeneous entity, the per-link
@@ -235,7 +235,7 @@ class PointCloudTactileSensorMixin[SensorT: "Sensor"](TactileProbeSensorOptionsM
         The radius of the debug tracked object point cloud spheres.
     """
 
-    tracked_links: RigidLinksIdx = Field(default=(), validation_alias=AliasChoices("tracked_links", "track_link_idx"))
+    track_link_idx: RigidLinksIdx = Field(default=(), validation_alias=AliasChoices("tracked_links", "track_link_idx"))
     n_sample_points: IArrayType | NonNegativeInt = 500
     use_visual_mesh: StrictBool = True
 
@@ -438,7 +438,7 @@ class ElastomerTaxel(
         Array entries of 0 mark inactive filler probes (see the grid note above); at least one must be positive.
     tracked_links : Sequence[RigidLink | int]
         The links of rigid entities whose collision geometry is queried by SDF and whose mesh is sampled for shear, or
-        their global indices in the rigid solver. The keyword 'track_link_idx' is a deprecated alias.
+        their global indices in the rigid solver. The keyword 'track_link_idx' is also accepted.
     n_sample_points: int | array-like[int]
         Total surface samples split across ``tracked_links``, or one count per tracked link.
     compressibility : float

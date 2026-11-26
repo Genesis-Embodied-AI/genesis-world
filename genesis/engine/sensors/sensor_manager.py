@@ -56,7 +56,7 @@ class SensorManager(BuildableMixin, BatchedMixin):
         # history reads.
         self._hist_idx_by_class: dict[type["Sensor"], torch.Tensor] = {}
         self._cache_slices_by_type: dict[type["Sensor"], slice] = {}
-        # (sensor class, entity_idx) -> slice within the class cache. entity_idx == -1 means static sensors.
+        # (sensor class, entity_idx) -> slice within the class cache. Static sensors (no entity) share the key -1.
         self._entity_slice_in_class: dict[type["Sensor"], dict[int, slice]] = {}
         self._max_history_by_class: dict[type["Sensor"], int] = {}
 
@@ -148,11 +148,11 @@ class SensorManager(BuildableMixin, BatchedMixin):
         super().build(n_envs)
         self._sim.step_timer.add_phases(*(f"sensors/{sensor_cls.__name__}" for sensor_cls in self._sensors_by_type))
 
-        # Sort each class by entity so sensors attached to the same entity occupy a contiguous slice of the class
-        # cache. Static sensors have entity=-1 and group together. Python's sort is stable, so registration order is
-        # preserved within each entity bucket.
+        # Sort each class by entity_idx so sensors attached to the same entity occupy a contiguous slice of the class
+        # cache. Static sensors (no entity) group together. Python's sort is stable, so registration order is preserved
+        # within each entity bucket.
         for sensors in self._sensors_by_type.values():
-            sensors.sort(key=lambda s: s._options.entity)
+            sensors.sort(key=lambda s: s._options.entity_idx)
             for new_idx, sensor in enumerate(sensors):
                 sensor._idx = new_idx
 
@@ -190,7 +190,7 @@ class SensorManager(BuildableMixin, BatchedMixin):
                         max_history_per_dtype.get(intermediate_dtype, 0), hist
                     )
                     cls_max_history = max(cls_max_history, hist)
-                eid = sensor._options.entity
+                eid = sensor._options.entity_idx
                 if eid in entity_offsets:
                     entity_offsets[eid][1] = cls_offset + sensor._cache_size
                 else:
@@ -453,7 +453,7 @@ class SensorManager(BuildableMixin, BatchedMixin):
         ----------
         entity_idx : int | None
             - None (default): include every sensor in the scene.
-            - k >= 0: include only sensors attached to the entity of index k.
+            - k >= 0: include only sensors whose `entity_idx == k`.
             - -1: include only static sensors (those not attached to any entity).
         envs_idx : array-like | int | slice | None
             Environment selection. Defaults to all environments.
@@ -507,7 +507,7 @@ class SensorManager(BuildableMixin, BatchedMixin):
             sensor
             for sensor_list in self._sensors_by_type.values()
             for sensor in sensor_list
-            if sensor._options.entity == target_eid
+            if sensor._options.entity_idx == target_eid
         )
 
     @property
