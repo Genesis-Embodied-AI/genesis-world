@@ -9,14 +9,13 @@ from ..utils.assertions import assert_allclose
 
 
 @pytest.mark.required
-def test_particles_stay_on_entry_side_of_fixed_box(show_viewer):
+def test_particles_stay_on_entry_side_of_fixed_box(show_viewer, tol):
     DT = 0.01
     PLATE_ANGLE = 30.0
     PLATE_POS = (0.0, 0.0, 0.5)
     PLATE_THICKNESS = 0.01
     PLATE_WIDTH = 0.5
     PARTICLE_SIZE = 0.01
-    POSITION_TOL = 1e-6
     CUBE_SIZE = 0.06
     CUBE_GAP = 0.01
     # Per step, the slow cubes travel half the thickness of the plate and the fast one several times its thickness
@@ -92,6 +91,7 @@ def test_particles_stay_on_entry_side_of_fixed_box(show_viewer):
         probe.set_velocity(-FAST_SPEED * normal)
     pos_probe_start = torch.stack([probe.get_particles_pos() for probe in probes])
     clearance = 0.5 * PLATE_THICKNESS + radius
+    position_tol = tol * PARTICLE_SIZE
     faces = ((cube_above, 1), (cube_below, -1))
     for cube, side in faces:
         assert (side * ((cube.get_particles_pos() - center) @ normal) > clearance + 0.25 * CUBE_GAP).all()
@@ -108,7 +108,7 @@ def test_particles_stay_on_entry_side_of_fixed_box(show_viewer):
             dy_edge, dy_corner, dy_miss = (pos_probe - pos_probe_start)[..., 1]
             assert (dy_edge > radius).all()
             assert (dy_corner < -radius).all()
-            assert_allclose(dy_miss, 0.0, atol=POSITION_TOL)
+            assert_allclose(dy_miss, 0.0, atol=position_tol)
             assert ((pos_probe[2] - center) @ normal < -clearance).all()
-    assert_allclose(torch.stack(distances).amin(0), clearance, atol=POSITION_TOL)
+    assert_allclose(torch.stack(distances).amin(0), clearance, atol=position_tol)
     assert ((cube_beside.get_particles_pos() - center) @ normal < -0.5 * PLATE_THICKNESS).all()
