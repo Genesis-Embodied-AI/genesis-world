@@ -453,7 +453,7 @@ class SensorManager(BuildableMixin, BatchedMixin):
         ----------
         entity_idx : int | None
             - None (default): include every sensor in the scene.
-            - k >= 0: include only sensors whose `entity_idx == k`.
+            - k >= 0: include only sensors attached to the entity of index k.
             - -1: include only static sensors (those not attached to any entity).
         envs_idx : array-like | int | slice | None
             Environment selection. Defaults to all environments.

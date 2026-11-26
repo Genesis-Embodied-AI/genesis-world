@@ -198,7 +198,7 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
             entity = sim.entities[self.entity]
             if not isinstance(entity, KinematicEntity):
                 gs.raise_exception(f"Entity at index {self.entity} is not a KinematicEntity.")
-            if not 0 <= self.link_idx_local < entity.n_links:
+            if self.link_idx_local >= entity.n_links:
                 gs.raise_exception(f"Invalid link index {self.link_idx_local} for entity {self.entity}.")
 
 
