@@ -988,7 +988,12 @@ def test_color_overwrite(overwrite, urdf_with_external_assets, show_viewer):
         visual = vgeom.vmesh.trimesh.visual
         assert visual.defined
         if overwrite:
-            color = np.unique(visual.vertex_colors, axis=0)
+            # The color of the surface replaces that of the asset, while the normal map of the asset stays drawn
+            if vgeom.vmesh.surface.normal_texture is not None:
+                assert visual.material.normalTexture is not None
+                color = visual.material.baseColorFactor
+            else:
+                color = np.unique(visual.vertex_colors, axis=0)
             assert_equal(color, (255, 0, 0, 255))
 
     texture_path = ET.fromstring(urdf_with_external_assets).find("material/texture").get("filename")
