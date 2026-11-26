@@ -116,10 +116,24 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
         )
     )
 
+    force_sensor_by_link = scene.add_sensor(
+        gs.sensors.ContactForce(
+            link=box.base_link,
+        )
+    )
+    force_sensor_floor_filtered = scene.add_sensor(
+        gs.sensors.ContactForce(
+            entity_idx=box.idx,
+            filter_link_idx=(floor.base_link,),
+        )
+    )
+
     with pytest.raises(gs.GenesisException, match="requires entity_idx >= 0"):
         scene.add_sensor(gs.sensors.Contact())
     with pytest.raises(gs.GenesisException, match="requires entity_idx >= 0"):
         scene.add_sensor(gs.sensors.ContactForce())
+    with pytest.raises(gs.GenesisException, match="Give either of them"):
+        gs.sensors.ContactForce(link=box.base_link, entity_idx=box.idx)
     scene.build(n_envs=n_envs)
 
     # Move CoM to get unbalanced forces on each contact points
@@ -165,6 +179,8 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
     assert_allclose(
         gu.transform_by_quat(force_sensor.read_ground_truth(), box.get_quat()), (0.0, 0.0, -GRAVITY), tol=tol
     )
+    assert_allclose(force_sensor_by_link.read(), force_sensor.read(), tol=gs.EPS)
+    assert_allclose(force_sensor_floor_filtered.read(), 0.0, tol=gs.EPS)
 
     # FIXME: Adding CoM offset on box is disturbing contact force computations on box_2 for some reason...
     assert_allclose(force_sensor_box_2.read_ground_truth(), (-0.8 * GRAVITY, 0.0, 0.0), tol=1e-2)

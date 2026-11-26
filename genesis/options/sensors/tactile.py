@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
-from pydantic import Field, StrictBool
+from pydantic import StrictBool
 
 import genesis as gs
 from genesis.typing import (
@@ -22,6 +22,7 @@ from genesis.typing import (
 
 from .options import (
     ContactFilterOptionsMixin,
+    OptionalRigidLinksIdx,
     ProbeSensorOptionsMixin,
     ProbesWithNormalSensorOptionsMixin,
     RigidSensorOptionsMixin,
@@ -218,8 +219,9 @@ class PointCloudTactileSensorMixin[SensorT: "Sensor"](TactileProbeSensorOptionsM
 
     Parameters
     ----------
-    track_link_idx : array-like[int]
-        Global link indices whose mesh geometry is used to sample a point cloud from.
+    track_link_idx : Sequence[RigidLink | int]
+        The links of rigid entities whose mesh geometry is used to sample a point cloud from, or their global indices
+        in the rigid solver.
     n_sample_points: int | array-like[int]
         Total FPS samples split across ``track_link_idx``, or one count per tracked link. Per-variant
         counts are not supported: when a tracked link belongs to a heterogeneous entity, the per-link
@@ -233,7 +235,7 @@ class PointCloudTactileSensorMixin[SensorT: "Sensor"](TactileProbeSensorOptionsM
         The radius of the debug tracked object point cloud spheres.
     """
 
-    track_link_idx: IArrayType = Field(default_factory=tuple)
+    track_link_idx: OptionalRigidLinksIdx = ()
     n_sample_points: IArrayType | NonNegativeInt = 500
     use_visual_mesh: StrictBool = True
 
@@ -434,8 +436,9 @@ class ElastomerTaxel(
     probe_radius : float | array-like[float]
         Probe sensing radius in meters. A scalar is shared by every probe; an array must match the probe count.
         Array entries of 0 mark inactive filler probes (see the grid note above); at least one must be positive.
-    track_link_idx : array-like[int]
-        Global rigid link indices whose collision geometry is queried by SDF and whose mesh is sampled for shear.
+    track_link_idx : Sequence[RigidLink | int]
+        The links of rigid entities, or their global indices in the rigid solver, whose collision geometry is queried
+        by SDF and whose mesh is sampled for shear.
     n_sample_points: int | array-like[int]
         Total surface samples split across ``track_link_idx``, or one count per tracked link.
     compressibility : float

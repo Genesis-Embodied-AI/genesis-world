@@ -3,13 +3,12 @@ from typing import TYPE_CHECKING, Annotated, Any, NamedTuple
 
 import numpy as np
 
-from pydantic import BeforeValidator, Field, StrictBool, StrictInt, field_validator
+from pydantic import BeforeValidator, Field, StrictBool, ValidatorFunctionWrapHandler, field_validator, model_validator
 
 import genesis as gs
 from genesis.typing import (
     FArrayType,
     Grid3DFloatType,
-    IArrayType,
     LaxVec3FType,
     NonNegativeFloat,
     NonNegativeInt,
@@ -31,12 +30,15 @@ from genesis.typing import (
     Vec3FType,
     Vec4FType,
     is_sequence,
+    objects_idx_type,
 )
 
 from ..options import Options
 from .raycaster import DepthCameraPattern, RaycastPattern
 
 if TYPE_CHECKING:
+    from genesis.engine.entities import Entity
+    from genesis.engine.entities.rigid_entity import RigidLink
     from genesis.engine.simulator import Simulator
     from genesis.engine.sensors.base_sensor import Sensor
     from genesis.engine.sensors.contact_force import ContactForceSensor, ContactSensor
@@ -47,6 +49,8 @@ if TYPE_CHECKING:
 
     NonNegativeUnboundedFloat = float
     LaxNonNegativeUnboundedVec3FType = Vec3FType | float
+    EntityIdx = Entity | int
+    OptionalRigidLinksIdx = Sequence[RigidLink | int]
 else:
     NonNegativeUnboundedFloat = Annotated[float, Field(ge=0, strict=False)]
     LaxNonNegativeUnboundedVec3FType = Annotated[
@@ -54,6 +58,10 @@ else:
         BeforeValidator(lambda v: v if is_sequence(v) else (v,) * 3),
         Field(strict=False),
     ]
+    EntityIdx = objects_idx_type(lambda: gs.engine.entities.Entity, many=False, allow_int=True)
+    OptionalRigidLinksIdx = objects_idx_type(
+        lambda: gs.engine.entities.rigid_entity.RigidLink, many=True, allow_empty=True, allow_int=True
+    )
 CrossCouplingAxisType = RotationMatrixType | UnitIntervalVec3Type | float
 
 
@@ -91,13 +99,16 @@ class SensorOptions[SensorT: "Sensor"](Options):
     delay: NonNegativeFloat = 0.0
     jitter: NonNegativeFloat = 0.0
     draw_debug: StrictBool = False
-    # -1 means not link-attached. None is accepted from users and normalized to -1 so SensorManager can sort uniformly.
-    entity_idx: StrictInt = Field(default=-1, ge=-1)
+    # -1 means not link-attached, so that SensorManager can sort uniformly
+    entity_idx: EntityIdx | None = None
 
-    @field_validator("entity_idx", mode="before")
+    @field_validator("entity_idx", mode="wrap")
     @classmethod
-    def _normalize_entity_idx(cls, value):
-        return -1 if value is None else value
+    def _normalize_entity_idx(cls, value: Any, handler: ValidatorFunctionWrapHandler) -> int:
+        entity_idx = -1 if value is None else handler(value)
+        if entity_idx < -1:
+            gs.raise_exception(f"{cls.__name__}: entity_idx must be an entity, an index >= 0 or None, got {value}.")
+        return entity_idx
 
     def model_post_init(self, context: Any) -> None:
         if self.jitter > self.delay:
@@ -124,10 +135,15 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
 
     Parameters
     ----------
-    entity_idx : int
-        The global entity index of the entity to which this sensor is attached. -1 or None for static sensors.
+    link : KinematicLink | None, optional
+        The link to which this sensor is attached, or None for a static sensor. It sets 'entity_idx' and
+        'link_idx_local', so give either 'link' or those two, never both. Defaults to None.
+    entity_idx : Entity | int | None, optional
+        Deprecated, use 'link'. The entity to which this sensor is attached, or its index in the scene, or None for a
+        static sensor. It raises if 'link' is also given. Defaults to None.
     link_idx_local : int, optional
-        The local index of the link of the entity to which this sensor is attached.
+        Deprecated, use 'link'. The index in 'entity_idx' of the link to which this sensor is attached. It raises if
+        'link' is also given. Defaults to 0, the base link.
     pos_offset : array-like[float, float, float], optional
         The positional offset of the sensor from the link.
     euler_offset : array-like[float, float, float], optional
@@ -137,6 +153,23 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
     link_idx_local: NonNegativeInt = 0
     pos_offset: Vec3FType = (0.0, 0.0, 0.0)
     euler_offset: Vec3FType = (0.0, 0.0, 0.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_link(cls, data: Any) -> Any:
+        # 'link' is resolved into the index fields, so that the options hold indices alone
+        if not isinstance(data, dict):
+            return data
+        if "link" in data:
+            if "entity_idx" in data or "link_idx_local" in data:
+                gs.raise_exception(f"{cls.__name__}: link sets entity_idx and link_idx_local. Give either of them.")
+            data = dict(data)
+            link = data.pop("link")
+            if link is not None:
+                if not isinstance(link, gs.engine.entities.rigid_entity.KinematicLink):
+                    gs.raise_exception(f"{cls.__name__}: link must be a link, got {type(link).__name__}.")
+                data.update(entity_idx=link.entity.idx, link_idx_local=link.idx_local)
+        return data
 
     def _validate(self, sim: "Simulator"):
         from genesis.engine.entities import KinematicEntity
@@ -148,7 +181,7 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
             entity = sim.entities[self.entity_idx]
             if not isinstance(entity, KinematicEntity):
                 gs.raise_exception(f"Entity at index {self.entity_idx} is not a KinematicEntity.")
-            if self.link_idx_local >= entity.n_links:
+            if not 0 <= self.link_idx_local < entity.n_links:
                 gs.raise_exception(f"Invalid link index {self.link_idx_local} for entity {self.entity_idx}.")
 
 
@@ -195,14 +228,14 @@ class ContactFilterOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[Senso
 
     Parameters
     ----------
-    filter_link_idx : array-like[int], optional
-        Global rigid link indices (solver link space). Contacts with the sensor link whose other participant is one
-        of these links are ignored: the sensor behaves as if those counterparts were not touching. Use it to scope a
-        reading to a chosen set of contacts (e.g. force on a foot from the ground, excluding self-contact). Default
-        is empty, so every contact with the sensor link counts.
+    filter_link_idx : Sequence[RigidLink | int], optional
+        Links of rigid entities, or their global indices in the rigid solver. Contacts with the sensor link whose other
+        participant is one of these links are ignored: the sensor behaves as if those counterparts were not touching.
+        Use it to scope a reading to a chosen set of contacts (e.g. force on a foot from the ground, excluding
+        self-contact). Default is empty, so every contact with the sensor link counts.
     """
 
-    filter_link_idx: OptionalIArrayType = Field(default_factory=tuple)
+    filter_link_idx: OptionalRigidLinksIdx = ()
 
     def _validate(self, sim: "Simulator"):
         super()._validate(sim)
@@ -327,8 +360,8 @@ class JointTorque(RigidEntitySensorOptionsMixin["JointTorqueSensor"], SimpleSens
 
     Parameters
     ----------
-    entity_idx : int
-        Scene-level index of the RigidEntity to sense. Must be >= 0.
+    entity_idx : RigidEntity | int
+        The rigid entity to sense, or its index in the scene.
     dofs_idx_local : array-like[int] | None, optional
         Local DOF indices within the entity. ``None`` (default) selects all DOFs.
     """
@@ -598,12 +631,13 @@ class SurfaceDistanceProbe(
     probe_radius : float | array-like[float]
         Maximum sensing range in meters. When no mesh is within this distance, distance is clamped to the probe
         radius and nearest points is the probe position. Default: 0.5. Also controls the outer debug sphere.
-    track_link_idx : array-like[int]
-        Global link indices (solver link space) whose mesh geoms are used for distance queries.
+    track_link_idx : Sequence[RigidLink | int]
+        The links of rigid entities whose mesh geoms are used for distance queries, or their global indices in the
+        rigid solver.
     """
 
     probe_radius: PositiveFArrayType | PositiveFloat = 0.5
-    track_link_idx: IArrayType = Field(default_factory=tuple)
+    track_link_idx: OptionalRigidLinksIdx = ()
 
     def _validate(self, sim: "Simulator"):
         super()._validate(sim)
