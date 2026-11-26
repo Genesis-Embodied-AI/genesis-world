@@ -321,6 +321,20 @@ def init(
             offline_cache_max_size_of_files=2**31 - 1,
         )
 
+    # A loop sized at run time launches every block of the grid whatever its size, so the grid holds two waves of
+    # blocks, a wave being as many blocks as the compute units of the GPU run at once. Small batches and small scenes,
+    # whose loops hold far fewer items than a wave, then spend far less of each launch scheduling empty blocks, while
+    # large batches, whose loops fill the GPU anyway, run as fast as with a larger grid. A single wave would slow them
+    # down, leaving no block to start while the slowest blocks of the wave finish.
+    # FIXME: quadrants#929 - such a grid ignores the bound of its loop, and the default of Quadrants spans four waves.
+    if backend in (_gs_backend.cuda, _gs_backend.amdgpu) and "QD_SATURATING_GRID_DIM" not in os.environ:
+        device_props = torch.cuda.get_device_properties()
+        threads_per_wave = device_props.multi_processor_count * device_props.max_threads_per_multi_processor
+        block_dim = int(os.environ.get("QD_DEFAULT_GPU_BLOCK_DIM", qd.lang.impl.default_cfg().default_gpu_block_dim))
+        qd_init_kwargs.update(
+            saturating_grid_dim=2 * threads_per_wave // block_dim,
+        )
+
     # Environment variables read by Quadrants while initializing, set for the duration of its initialization only.
     # FIXME: quadrants#983 - Buffers from the HIP memory pool fault on their first write on RDNA4 GPUs (gfx12), so
     # Quadrants allocates through plain hipMalloc there, at the cost of reserving its device memory budget at init.
