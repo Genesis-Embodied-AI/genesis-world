@@ -41,6 +41,7 @@ from genesis.typing import (
     UnitVec4FType,
     Vec2IType,
     Vec3FType,
+    objects_idx_type,
 )
 from genesis.utils import serialization
 
@@ -1334,6 +1335,36 @@ class Generator(Morph):
     def specs(cls) -> tuple[type, ...]:
         """The entity specs the generator is generated for, every spec if empty."""
         return cls._SPECS() if callable(cls._SPECS) else cls._SPECS
+
+
+class LinkShellGenerator(Generator, specs=lambda: (gs.entities.MPM,)):
+    """A soft volume grown around the collision geoms of rigid links, one member of a mesh set per geom.
+
+    Each member is the collision mesh of a geom with every vertex pushed outward along its vertex normal by
+    'thickness', so a flat face meeting other faces at sharp edges moves out by less than 'thickness'. The members
+    stand where the links stand at the neutral configuration of their entities, so the generator takes no pose of its
+    own. The members of geoms that meet, such as the links on both sides of a joint, overlap.
+
+    Parameters
+    ----------
+    links : Sequence[RigidLink]
+        The links of rigid entities to grow the volume around, each holding at least one collision geom. The links of
+        a heterogeneous entity are refused.
+    thickness : float
+        The distance (m) each vertex of the collision meshes moves out along its vertex normal.
+    """
+
+    # The class is looked up lazily, since the engine imports these options before defining it
+    links: objects_idx_type(get_cls=lambda: gs.engine.entities.rigid_entity.RigidLink, many=True, allow_int=True)
+    thickness: PositiveFloat
+
+    def __init__(self, **data: Any) -> None:
+        fields_name = [name for name in Morph.model_fields if name in data]
+        if fields_name:
+            gs.raise_exception(
+                f"gs.morphs.{type(self).__name__} stands where its links stand and takes no {fields_name}."
+            )
+        super().__init__(**data)
 
 
 class Terrain(Generator, specs=lambda: (gs.entities.Rigid,)):

@@ -3,9 +3,14 @@
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, NamedTuple
 
+import trimesh
+
 import genesis as gs
+import genesis.utils.geom as gu
 import genesis.utils.terrain as tu
-from genesis.options.morphs import Generator, Morph, Terrain
+from genesis.engine.entities.rigid_entity import RigidEntity
+from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
+from genesis.options.morphs import Generator, LinkShellGenerator, MeshSet, Morph, Terrain
 
 if TYPE_CHECKING:
     from genesis.engine.entities import Entity
@@ -53,6 +58,38 @@ def _generate_terrain(morph: Terrain, context: GeneratorContext) -> Terrain:
     if morph.height_field is not None:
         return morph
     return morph.model_copy(update={"height_field": tu.generate_height_field(morph)})
+
+
+@register_generator(LinkShellGenerator)
+def _generate_link_shell(morph: LinkShellGenerator, context: GeneratorContext) -> MeshSet:
+    rigid_entities = [entity for entity in context.entities if isinstance(entity, RigidEntity)]
+    rigid_links = [link for entity in rigid_entities for link in entity.links]
+    # The volume stands around the links at the neutral configuration of their entities. A heterogeneous entity holds
+    # the geoms of every variant on its links, which no single volume fits.
+    links = [rigid_links[i_l] for i_l in morph.links]
+    for link in links:
+        if link.entity.desc.variants:
+            gs.raise_exception(
+                f"gs.morphs.LinkShellGenerator grows no volume around link '{link.name}' of a heterogeneous entity."
+            )
+        if not link.geoms:
+            gs.raise_exception(f"Link '{link.name}' has no collision geom to grow a volume around.")
+    links_pos, links_quat, *_ = compute_forward_kinematics(rigid_entities, n_envs=1)
+    meshes, poss, eulers = [], [], []
+    for link in links:
+        for geom in link.geoms:
+            pos, quat = gu.transform_pos_quat_by_trans_quat(
+                geom.init_pos, geom.init_quat, links_pos[0, link.idx], links_quat[0, link.idx]
+            )
+            verts = geom.init_verts + geom.init_normals * morph.thickness
+            meshes.append(trimesh.Trimesh(vertices=verts, faces=geom.init_faces))
+            poss.append(tuple(pos))
+            eulers.append(tuple(gu.quat_to_xyz(quat, rpy=True, degrees=True)))
+    return MeshSet(
+        files=meshes,
+        poss=poss,
+        eulers=eulers,
+    )
 
 
 def generate(morph: Generator, context: GeneratorContext) -> Morph:

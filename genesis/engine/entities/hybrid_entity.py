@@ -462,41 +462,10 @@ def augment_link_world_coords(part_rigid):
 
 
 def default_func_instantiate_soft_from_rigid(part_rigid, material_soft, material_hybrid, surface):
-    meshes = []
-    trans_local_to_global = []
-    euler_local_to_global = []
-    for link in part_rigid.links:
-        if len(link.geoms) < 1:  # no collision geom
-            continue
-
-        geom = link.geoms[0]  # NOTE: collision geom is always the prior one based on the URDF parser
-        trans, quat = gu.transform_pos_quat_by_trans_quat(
-            geom.init_pos, geom.init_quat, link.init_x_pos, link.init_x_quat
-        )
-        euler = gu.quat_to_xyz(quat, rpy=True, degrees=True)
-
-        # can also do link.init_verts here and it seems to have more indices than geom.init_verts (but there is no idx_offset_vert)
-        verts = geom.init_verts
-        inner_mesh = trimesh.Trimesh(
-            vertices=verts,  # NOTE: scale is already applied here
-            faces=geom.init_faces,
-            vertex_normals=geom.init_normals,
-        )
-        outer_verts = verts + inner_mesh.vertex_normals * material_hybrid.thickness
-        outer_mesh = trimesh.Trimesh(vertices=outer_verts, faces=geom.init_faces)
-        # mesh = trimesh.boolean.difference([outer_mesh, inner_mesh]) # wrap around the rigid link
-        mesh = outer_mesh  # FIXME: hack to avoid `ValueError: No backends available for boolean operations!`
-
-        meshes.append(mesh)
-        trans_local_to_global.append(trans)
-        euler_local_to_global.append(euler)
-
     return gs.entities.MPM(
-        morph=gs.morphs.MeshSet(
-            files=meshes,
-            poss=trans_local_to_global,
-            eulers=euler_local_to_global,
-            scale=1,  # scale is already handled in geom.init_verts
+        morph=gs.morphs.LinkShellGenerator(
+            links=[link for link in part_rigid.links if link.geoms],
+            thickness=material_hybrid.thickness,
         ),
         material=material_soft,
         surface=surface,
@@ -546,19 +515,17 @@ def default_func_instantiate_rigid_soft_association_from_rigid(part_rigid, part_
     geom_idcs = []
     trans_local_to_global = []
     quat_local_to_global = []
+    # One muscle group per collision geom, in the order of the members that 'gs.morphs.LinkShellGenerator' generates
     for link in part_rigid.links:
-        if len(link.geoms) < 1:  # no collision geom
-            continue
+        for geom in link.geoms:
+            trans, quat = gu.transform_pos_quat_by_trans_quat(
+                geom.init_pos, geom.init_quat, link.init_x_pos, link.init_x_quat
+            )
 
-        geom = link.geoms[0]  # NOTE: collision geom is always the prior one based on the URDF parser
-        trans, quat = gu.transform_pos_quat_by_trans_quat(
-            geom.init_pos, geom.init_quat, link.init_x_pos, link.init_x_quat
-        )
-
-        link_idcs.append(link.idx)
-        geom_idcs.append(geom.idx)
-        trans_local_to_global.append(trans)
-        quat_local_to_global.append(quat)
+            link_idcs.append(link.idx)
+            geom_idcs.append(geom.idx)
+            trans_local_to_global.append(trans)
+            quat_local_to_global.append(quat)
 
     return muscle_group, link_idcs, geom_idcs, trans_local_to_global, quat_local_to_global
 
