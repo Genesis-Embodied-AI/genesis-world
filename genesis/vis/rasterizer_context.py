@@ -945,14 +945,14 @@ class RasterizerContext(BuildableMixin):
         for light in self.lights:
             self.add_light(light)
 
-    def update(self, force_render: bool = False):
+    def update(self):
         """
         Sync the nodes with the state of the scene.
 
         The nodes of a shape are updated once the render context refreshed it, after a change of state of its solver.
         """
         # Early return if already updated previously
-        if not force_render and self._t >= self.scene.sim.cur_step_global:
+        if self._t >= self.scene.sim.cur_step_global:
             return
 
         # The interactive viewer draws from its own thread whatever is uploaded here
@@ -961,7 +961,7 @@ class RasterizerContext(BuildableMixin):
             self._t = self.scene.sim.cur_step_global
 
             # Force updating rendering-only quantities that are not updated automatically during simulation
-            self.visualizer.update_cameras(force_render)
+            self.visualizer.update_cameras()
 
             # Reset scene bounds to trigger recomputation. They are involved in shadow map.
             self._scene._bounds = None

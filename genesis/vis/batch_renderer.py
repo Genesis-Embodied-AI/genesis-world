@@ -345,10 +345,10 @@ class BatchRenderer(BuildableMixin, RBC):
         )
         self._is_built = True
 
-    def update_scene(self, force_render: bool = False):
-        self._visualizer._context.update(force_render)
+    def update_scene(self):
+        self._visualizer._context.update()
 
-    def render(self, rgb=True, depth=False, segmentation=False, normal=False, antialiasing=False, force_render=False):
+    def render(self, rgb=True, depth=False, segmentation=False, normal=False, antialiasing=False):
         """
         Render all cameras in the batch.
 
@@ -364,8 +364,6 @@ class BatchRenderer(BuildableMixin, RBC):
             Whether to render the normal image.
         antialiasing : bool, optional
             Whether to apply anti-aliasing.
-        force_render : bool, optional
-            Whether to force render the scene.
 
         Returns
         -------
@@ -379,8 +377,8 @@ class BatchRenderer(BuildableMixin, RBC):
             The sequence of normal images associated with each camera.
         """
 
-        # Clear cache if requested or necessary
-        if force_render or self._t < self._visualizer.scene.sim.cur_step_global:
+        # The images are rendered again once the scene or one of the cameras changed (see 'reset')
+        if self._t < self._visualizer.scene.sim.cur_step_global:
             self._data_cache.clear()
 
         # Fetch available cached data
@@ -396,7 +394,7 @@ class BatchRenderer(BuildableMixin, RBC):
             return tuple(arr if req else None for req, arr in zip(request, cached))
 
         # Update scene
-        self.update_scene(force_render)
+        self.update_scene()
 
         # Render only what is needed (flags still passed to renderer)
         cameras_pos = torch.stack([torch.atleast_2d(camera.get_pos()) for camera in self._cameras], dim=1)

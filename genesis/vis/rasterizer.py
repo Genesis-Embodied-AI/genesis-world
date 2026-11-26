@@ -160,8 +160,8 @@ class Rasterizer(BuildableMixin, RBC):
             normal_arr = retval[int(rgb + depth)]
         return rgb_arr, depth_arr, seg_idxc_arr, normal_arr
 
-    def update_scene(self, force_render: bool = False):
-        self._context.update(force_render)
+    def update_scene(self):
+        self._context.update()
 
     def destroy(self):
         for node in self._camera_nodes.values():

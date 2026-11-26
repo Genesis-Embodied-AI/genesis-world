@@ -209,7 +209,7 @@ class Visualizer(BuildableMixin, RBC):
 
         if self._viewer is not None:
             # The window draws its first frames as it builds, which show the scene once its nodes exist
-            self._context.update(force_render=True)
+            self._context.update()
             self._viewer.build(self._scene)
             self.viewer_lock = self._viewer.lock
 
@@ -222,7 +222,8 @@ class Visualizer(BuildableMixin, RBC):
 
         # The nodes of the shared renderers are made once every view drawn from them is known, so that they hold the
         # representations these views show alone (see 'RasterizerContext.add_view').
-        self._context.update(force_render=True)
+        self._context.reset()
+        self._context.update()
 
         # Batch renderer needs to be built after cameras are built
         if self._batch_renderer is not None:
@@ -250,11 +251,10 @@ class Visualizer(BuildableMixin, RBC):
         self._t = -1
         # Without 'ViewerOptions.update_on_setters', a setter leaves the window alone, so that the caller decides how
         # often the window refreshes ('update_visualizer' of 'Scene.step').
+        self._context.reset()
         if self._viewer is not None and self._viewer.update_on_setters:
-            self._context.update(force_render=True)
+            self._context.update()
             self._viewer.update()
-        else:
-            self._context.reset()
 
     def update_on_sim_step(self, advanced, auto=None):
         """Show a simulation step: refresh the viewer when due, run its per-step callbacks and pace the loop.
@@ -278,9 +278,9 @@ class Visualizer(BuildableMixin, RBC):
         else:
             self.update_on_sim_step(advanced=True, auto=auto)
 
-    def update_cameras(self, force_render: bool = False) -> None:
-        """Move the cameras attached to a link or following an entity, once per step unless forced to."""
-        if not force_render and self._t >= self.scene.sim.cur_step_global:
+    def update_cameras(self) -> None:
+        """Move the cameras attached to a link or following an entity, once per step or after a setter."""
+        if self._t >= self.scene.sim.cur_step_global:
             return
         self._t = self._scene.sim.cur_step_global
 

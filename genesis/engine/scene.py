@@ -1570,7 +1570,6 @@ class Scene(BuildableMixin, RBC):
         colorize_seg=False,
         normal=False,
         antialiasing=False,
-        force_render=False,
     ):
         """
         Render the scene for all cameras using the batch renderer.
@@ -1587,8 +1586,6 @@ class Scene(BuildableMixin, RBC):
             Whether to render the normal image.
         antialiasing : bool, optional
             Whether to apply anti-aliasing.
-        force_render : bool, optional
-            Whether to force render the scene.
 
         Returns:
             A tuple of tensors of shape (n_envs, H, W, 3) if rgb is not None,
@@ -1599,7 +1596,7 @@ class Scene(BuildableMixin, RBC):
             gs.raise_exception("Method only supported by 'BatchRenderer'")
 
         rgb_out, depth_out, seg_out, normal_out = self._visualizer.batch_renderer.render(
-            rgb, depth, segmentation, normal, antialiasing, force_render
+            rgb, depth, segmentation, normal, antialiasing
         )
         if segmentation and colorize_seg:
             seg_out = tuple(self._visualizer.batch_renderer.colorize_seg_idxc_arr(seg) for seg in seg_out)
