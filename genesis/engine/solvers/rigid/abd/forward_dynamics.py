@@ -1803,7 +1803,32 @@ def func_torque_and_passive_force(
                 I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
                 joint_type = dyn_info.joints.type[I_j]
 
-                if joint_type != gs.JOINT_TYPE.FREE and joint_type != gs.JOINT_TYPE.FIXED:
+                if joint_type == gs.JOINT_TYPE.SPHERICAL:
+                    # dofs_state.pos holds the Euler angles of a ball joint, and a spring pulling them back would be
+                    # non-conservative and diverge near gimbal lock. The spring pulls along the rotation vector of the
+                    # joint orientation, the gradient of 0.5 * stiffness * |rotvec|^2 (see get_potential_energy).
+                    dof_start = dyn_info.links.dof_start[I_l]
+                    q_start = dyn_info.joints.q_start[I_j]
+                    rotvec = gu.qd_quat_to_rotvec(
+                        qd.Vector(
+                            [
+                                rigid_info.qpos[q_start, i_b],
+                                rigid_info.qpos[q_start + 1, i_b],
+                                rigid_info.qpos[q_start + 2, i_b],
+                                rigid_info.qpos[q_start + 3, i_b],
+                            ],
+                            dt=gs.qd_float,
+                        )
+                    )
+                    for j_d in qd.static(range(3)):
+                        I_d = [dof_start + j_d, i_b] if qd.static(rigid_config.batch_dofs_info) else dof_start + j_d
+                        func_add_safe_backward(
+                            [dof_start + j_d, i_b],
+                            -rotvec[j_d] * dyn_info.dofs.stiffness[I_d],
+                            dyn_state.dofs.qf_passive,
+                            BW,
+                        )
+                elif joint_type != gs.JOINT_TYPE.FREE and joint_type != gs.JOINT_TYPE.FIXED:
                     dof_start = dyn_info.links.dof_start[I_l]
                     dof_end = dyn_info.links.dof_end[I_l]
 

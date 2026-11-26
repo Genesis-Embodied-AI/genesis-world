@@ -12,7 +12,7 @@
     <body name="seg0" pos="0 0 0.2" euler="45 45 45">
       <geom name="seg0_geom" class="/" type="capsule" size="0.02 0.05" rgba="1 0 0 1" fromto="-0 0 0 0.1 0 0"/>
       <body name="seg1" pos="0.1 0 0">
-        <joint name="ball1" class="/" type="ball" stiffness="0"/>
+        <joint name="ball1" class="/" type="ball" stiffness="0.05"/>
         <geom name="seg1_geom" class="/" type="capsule" size="0.02 0.05" rgba="0 1 0 1" fromto="-0 0 0 0.1 0 0"/>
       </body>
     </body>

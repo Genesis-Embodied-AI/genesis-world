@@ -225,7 +225,17 @@ def test_one_ball_joint(gs_sim, mj_sim, tol):
     # FIXME: Mujoco is detecting collision for some reason...
     mj_sim.model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
 
+    # The energies are compared from their initial value, MuJoCo counting the weight of the body welded to the world.
+    # The bound covers the centers of mass of both models, which agree up to the tolerance of their consistency check.
+    (gs_robot,) = gs_sim.entities
+    mj_sim.model.opt.enableflags |= mujoco.mjtEnableBit.mjENBL_ENERGY
+    init_paired_simulators(gs_sim, mj_sim)
+    gs_energy_init, mj_energy_init = gs_robot.get_total_energy(), mj_sim.data.energy.sum()
+
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=600, tol=tol)
+    mujoco.mj_forward(mj_sim.model, mj_sim.data)
+    gs_energy_delta = gs_robot.get_total_energy() - gs_energy_init
+    assert_allclose(gs_energy_delta, mj_sim.data.energy.sum() - mj_energy_init, atol=1e-8)
 
 
 @pytest.mark.required("sparse")
