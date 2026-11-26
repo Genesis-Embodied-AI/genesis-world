@@ -32,6 +32,8 @@ from genesis.utils.simt import (
     ExactSums,
     func_exact_sum_add,
     func_exact_sum_take,
+    qd_block_scan,
+    qd_block_shuffle,
     qd_block_sum,
 )
 
@@ -309,18 +311,9 @@ class SPHSolver(ParticleSolver):
             self.sph_state.envs_solve.sums.bins_unit.from_numpy(bins_unit)
         self.sph_config = SPHConfig(
             has_boundary=self.is_active and is_opted_in(SPHState.boundary),
-            # The lanes of a tile stride the particles of each neighbor cell of the hash grid, so a tile takes one lane per
-            # particle a cell holds at rest, within a block of the subgroup helpers
-            log2_neighbor_lanes=(
-                max(
-                    0,
-                    min(
-                        BLOCK_LOG2_LANES, math.floor(math.log2((self._hash_grid_cell_size / self._particle_size) ** 3))
-                    ),
-                )
-                if 0 < self._n_particles * self.n_envs_ <= get_gpu_core_count()
-                else 0
-            ),
+            # A block of the subgroup helpers takes each particle when the particles leave cores idle, its lanes sharing
+            # the particles met (see func_for_all_interactions)
+            log2_neighbor_lanes=BLOCK_LOG2_LANES if 0 < self._n_particles * self.n_envs_ <= get_gpu_core_count() else 0,
         )
         info_values = {}
         viscosity_eps = 0.01 * self._support_radius**2
@@ -638,8 +631,7 @@ def func_for_all_interactions(
         The environment.
     i_lane : int
         The lane of the subgroup tile that takes the particle, among `n_lanes`. With `n_lanes` above one, the lanes of
-        the tile take the particle together, each lane taking every `n_lanes`-th particle of each cell of the hash grid,
-        and their shares of `ret` sum up after.
+        the tile take the particle together, sharing the particles it meets, and their shares of `ret` sum up after.
     ret : qd.template()
         The result `task` accumulates, which holds the position of the particle `ret.pos_i` and the image transform:
         before each call of `task`, `ret.image_rot` and `ret.image_shift` take the second particle to its image at
@@ -656,10 +648,11 @@ def func_for_all_interactions(
         The task, which takes the indices of both particles, the environment, `ret`, the state and the info, in this
         order, and accumulates its result in `ret`.
     n_lanes : qd.template()
-        The number of lanes of the subgroup tile that take the particle together.
+        The number of lanes of the subgroup tile that take the particle together, 1 or 32.
     """
-    # The particle itself, then its reflections across the walls, then across the surfaces of the moving boundaries
-    N_QUERIES = qd.static(27 + (3 if sph_config.has_boundary else 0))
+    # The queries are the particle itself and its reflections across the walls it is near, enumerated in mixed radix
+    # by the choice along each axis (stay, or reflect across each wall it is near), then its reflections across the
+    # surfaces of the moving boundaries it meets, enumerated by the set bits of a mask.
     pos_i = sph_state.particles_reordered.pos[i_p, i_b]
     ret.pos_i = pos_i
     support_radius = sph_info.support_radius[None]
@@ -667,58 +660,109 @@ def func_for_all_interactions(
     is_near_lower = pos_i - lower < support_radius
     is_near_upper = upper - pos_i < support_radius
     i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
-    n_cells = func_hash_n_cells(3, sph_state.hash_grid)
-    cell_size = sph_state.hash_grid.cell_size[None]
-    for i_query in range(N_QUERIES):
-        ret.i_surface = -1
-        ret.image_rot = qd.Matrix.identity(gs.qd_float, 3)
-        ret.image_shift = qd.Vector.zero(gs.qd_float, 3)
-        ret.image_vel = qd.Vector.zero(gs.qd_float, 3)
-        pos_query = pos_i
-        is_query = False
-        if i_query < 27:
-            # Each axis takes the base-3 digit of its reflection: 0 none, 1 across the lower wall, 2 across the upper
-            digits = qd.Vector([i_query % 3, i_query // 3 % 3, i_query // 9], dt=gs.qd_int)
-            is_lower, is_upper = digits == 1, digits == 2
-            is_query = ((~is_lower | is_near_lower) & (~is_upper | is_near_upper)).all()
-            sign = qd.select(is_lower | is_upper, -1.0, 1.0)
-            ret.image_rot = qd.Matrix([[sign[0], 0.0, 0.0], [0.0, sign[1], 0.0], [0.0, 0.0, sign[2]]])
-            ret.image_shift = qd.select(is_lower, 2.0 * lower, qd.select(is_upper, 2.0 * upper, 0.0))
-            pos_query = ret.image_rot @ pos_i + ret.image_shift
-        else:
-            if qd.static(sph_config.has_boundary):
-                i_s = i_query - 27
-                if sph_state.boundary.surfaces_key[i_o, i_s, i_b] >= 0:
-                    normal = sph_state.boundary.surfaces_normal[i_o, i_s, i_b]
-                    dist = normal.dot(pos_i) - sph_state.boundary.surfaces_offset[i_o, i_s, i_b]
-                    if dist < support_radius:
-                        is_query = True
-                        ret.i_surface = i_s
-                        pos_query = pos_i - 2.0 * dist * normal
+    n_reflections = 1 + qd.cast(is_near_lower, gs.qd_int) + qd.cast(is_near_upper, gs.qd_int)
+    n_reflections_xy = n_reflections[0] * n_reflections[1]
+    n_wall_queries = n_reflections_xy * n_reflections[2]
+    n_queries = n_wall_queries
+    surfaces_mask = 0
+    if qd.static(sph_config.has_boundary):
+        for i_s in range(3):
+            if sph_state.boundary.surfaces_key[i_o, i_s, i_b] >= 0:
+                normal = sph_state.boundary.surfaces_normal[i_o, i_s, i_b]
+                if normal.dot(pos_i) - sph_state.boundary.surfaces_offset[i_o, i_s, i_b] < support_radius:
+                    surfaces_mask = surfaces_mask | (1 << i_s)
+                    n_queries = n_queries + 1
 
-        if is_query:
+    # Each lane looks up the particles of one cell around one query, as many pairs of a query and a cell at a time as
+    # lanes, and the lanes number the particles of these cells as one run with a prefix sum over the subgroup, a
+    # particle finding its pair by bisection over it. The lanes thus share the particles met by all the queries evenly,
+    # whereas striding the particles of each cell would leave idle the lanes beyond the few particles a cell holds.
+    n_cells = func_hash_n_cells(3, sph_state.hash_grid)
+    n_cells_yz = n_cells[1] * n_cells[2]
+    n_cells_all = n_cells[0] * n_cells_yz
+    cell_size = sph_state.hash_grid.cell_size[None]
+    n_pairs = n_queries * n_cells_all
+    for i_chunk_ in range((n_pairs + n_lanes - 1) // n_lanes):
+        i_pair = i_chunk_ * n_lanes + i_lane
+        i_query = 0
+        slot_start = 0
+        slot_size = 0
+        if i_pair < n_pairs:
+            i_k = i_pair // n_cells_all
+            i_cell = i_pair % n_cells_all
+            pos_query = pos_i
+            if i_k < n_wall_queries:
+                # The choice along each axis: 0 to stay, 1 to reflect across the lower wall if near it and across the
+                # upper wall otherwise, 2 to reflect across the upper wall. The query is numbered by the base-3 digits
+                # of its reflections: 0 for none, 1 across the lower wall, 2 across the upper one.
+                choices = qd.Vector(
+                    [i_k % n_reflections[0], i_k % n_reflections_xy // n_reflections[0], i_k // n_reflections_xy]
+                )
+                is_lower = (choices == 1) & is_near_lower
+                is_upper = (choices == 2) | ((choices == 1) & ~is_near_lower)
+                pos_query = qd.select(is_lower, 2.0 * lower - pos_i, qd.select(is_upper, 2.0 * upper - pos_i, pos_i))
+                digits = qd.select(is_lower, 1, qd.select(is_upper, 2, 0))
+                i_query = digits[0] + 3 * digits[1] + 9 * digits[2]
+            else:
+                if qd.static(sph_config.has_boundary):
+                    # The surface whose rank among the set bits of the mask is that of the query
+                    n_skipped = i_k - n_wall_queries
+                    i_s_query = -1
+                    for i_s in range(3):
+                        if i_s_query < 0 and ((surfaces_mask >> i_s) & 1) == 1:
+                            if n_skipped == 0:
+                                i_s_query = i_s
+                            n_skipped = n_skipped - 1
+                    normal = sph_state.boundary.surfaces_normal[i_o, i_s_query, i_b]
+                    dist = normal.dot(pos_i) - sph_state.boundary.surfaces_offset[i_o, i_s_query, i_b]
+                    pos_query = pos_i - 2.0 * dist * normal
+                    i_query = 27 + i_s_query
+            # The cells beyond the support radius of the query are skipped. Along an axis whose run of cells wraps into
+            # fewer than three slots, every cell counts as touching the query.
             cell_query = func_hash_pos_to_grid(pos_query, sph_state.hash_grid)
-            base = func_hash_wrap_cell(cell_query - 1, sph_state.hash_grid)
-            # The distance from the query to the lower and upper faces of its cell, along each axis
+            offset = qd.Vector([i_cell // n_cells_yz, i_cell // n_cells[2] % n_cells[1], i_cell % n_cells[2]])
             dist_lower = pos_query - cell_query * cell_size
             dist_upper = cell_size - dist_lower
-            for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
-                # The cells beyond the support radius of the query are skipped. Along an axis whose run of cells wraps
-                # into fewer than three slots, every cell counts as touching the query.
-                dist_cell = qd.select(
-                    n_cells < 3, 0.0, qd.select(offset == 0, dist_lower, qd.select(offset == 2, dist_upper, 0.0))
-                )
-                slot_size = 0
-                slot_start = 0
-                if dist_cell.norm_sqr() < support_radius**2:
-                    i_c = func_hash_cell_to_slot(base + offset, sph_state.hash_grid)
-                    slot_start = sph_state.hash_grid.slot_start[i_c, i_b]
-                    slot_size = sph_state.hash_grid.slot_size[i_c, i_b]
-                for j_p_ in range((slot_size + n_lanes - 1) // n_lanes):
-                    j_p = slot_start + j_p_ * n_lanes + i_lane
-                    if j_p < slot_start + slot_size:
-                        if func_is_interacting(i_p, j_p, i_b, i_query, ret, sph_state, sph_info, sph_config):
-                            task(i_p, j_p, i_b, ret, sph_state, sph_info)
+            dist_cell = qd.select(
+                n_cells < 3, 0.0, qd.select(offset == 0, dist_lower, qd.select(offset == 2, dist_upper, 0.0))
+            )
+            if dist_cell.norm_sqr() < support_radius**2:
+                cell = func_hash_wrap_cell(cell_query - 1, sph_state.hash_grid) + offset
+                i_c = func_hash_cell_to_slot(cell, sph_state.hash_grid)
+                slot_start = sph_state.hash_grid.slot_start[i_c, i_b]
+                slot_size = sph_state.hash_grid.slot_size[i_c, i_b]
+        slots_end = slot_size
+        n_run = slot_size
+        if qd.static(n_lanes > 1):
+            slots_end, n_run = qd_block_scan(slot_size)
+        for i_run_ in range((n_run + n_lanes - 1) // n_lanes):
+            i_run = i_run_ * n_lanes + i_lane
+            j_p = slot_start + i_run
+            i_query_run = i_query
+            if qd.static(n_lanes > 1):
+                i_pair_lane = 0
+                for i_step in qd.static(range(5)):
+                    if qd_block_shuffle(slots_end, i_pair_lane + (16 >> i_step) - 1) <= i_run:
+                        i_pair_lane = i_pair_lane + (16 >> i_step)
+                pair_slots_end = qd_block_shuffle(slots_end, i_pair_lane)
+                pair_slot_size = qd_block_shuffle(slot_size, i_pair_lane)
+                j_p = qd_block_shuffle(slot_start, i_pair_lane) + i_run - (pair_slots_end - pair_slot_size)
+                i_query_run = qd_block_shuffle(i_query, i_pair_lane)
+            if i_run < n_run:
+                ret.i_surface = -1
+                ret.image_rot = qd.Matrix.identity(gs.qd_float, 3)
+                ret.image_shift = qd.Vector.zero(gs.qd_float, 3)
+                ret.image_vel = qd.Vector.zero(gs.qd_float, 3)
+                if i_query_run < 27:
+                    digits = qd.Vector([i_query_run % 3, i_query_run // 3 % 3, i_query_run // 9])
+                    is_lower, is_upper = digits == 1, digits == 2
+                    sign = qd.select(is_lower | is_upper, -1.0, 1.0)
+                    ret.image_rot = qd.Matrix([[sign[0], 0.0, 0.0], [0.0, sign[1], 0.0], [0.0, 0.0, sign[2]]])
+                    ret.image_shift = qd.select(is_lower, 2.0 * lower, qd.select(is_upper, 2.0 * upper, 0.0))
+                else:
+                    ret.i_surface = i_query_run - 27
+                if func_is_interacting(i_p, j_p, i_b, i_query_run, ret, sph_state, sph_info, sph_config):
+                    task(i_p, j_p, i_b, ret, sph_state, sph_info)
     ret.i_surface = -1
     ret.image_rot = qd.Matrix.identity(gs.qd_float, 3)
     ret.image_shift = qd.Vector.zero(gs.qd_float, 3)
