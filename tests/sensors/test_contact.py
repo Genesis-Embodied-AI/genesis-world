@@ -4,7 +4,7 @@ import pytest
 import genesis as gs
 import genesis.utils.geom as gu
 
-from ..utils.assertions import assert_allclose, assert_equal
+from ..utils.assertions import assert_allclose
 
 
 @pytest.mark.required
@@ -89,7 +89,7 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
     )
     force_sensor = scene.add_sensor(
         gs.sensors.ContactForce(
-            entity_idx=box.idx,
+            link=box.base_link,
         )
     )
     force_sensor_box_2 = scene.add_sensor(
@@ -116,23 +116,10 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
         )
     )
 
-    force_sensor_by_link = scene.add_sensor(
-        gs.sensors.ContactForce(
-            link=box.base_link,
-        )
-    )
-    force_sensor_floor_filtered = scene.add_sensor(
-        gs.sensors.ContactForce(
-            entity_idx=box.idx,
-            filtered_links=(floor.base_link,),
-        )
-    )
-
     with pytest.raises(gs.GenesisException, match="requires entity_idx >= 0"):
         scene.add_sensor(gs.sensors.Contact())
     with pytest.raises(gs.GenesisException, match="requires entity_idx >= 0"):
         scene.add_sensor(gs.sensors.ContactForce())
-    assert gs.sensors.ContactForce(link=box.base_link, entity_idx=box_2.idx).entity_idx == box.idx
     scene.build(n_envs=n_envs)
 
     # Move CoM to get unbalanced forces on each contact points
@@ -178,8 +165,6 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
     assert_allclose(
         gu.transform_by_quat(force_sensor.read_ground_truth(), box.get_quat()), (0.0, 0.0, -GRAVITY), tol=tol
     )
-    assert_equal(force_sensor_by_link.read(), force_sensor.read())
-    assert_equal(force_sensor_floor_filtered.read(), 0.0)
 
     # FIXME: Adding CoM offset on box is disturbing contact force computations on box_2 for some reason...
     assert_allclose(force_sensor_box_2.read_ground_truth(), (-0.8 * GRAVITY, 0.0, 0.0), tol=1e-2)
@@ -233,7 +218,7 @@ def test_filter_link_idx(show_viewer, tol):
     force_sensor_filtered = scene.add_sensor(
         gs.sensors.ContactForce(
             entity_idx=box_on_floor.idx,
-            filter_link_idx=(floor.link_start,),
+            filtered_links=(floor.base_link,),
         )
     )
     scene.build(n_envs=2)
