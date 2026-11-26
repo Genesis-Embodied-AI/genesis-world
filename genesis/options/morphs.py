@@ -7,6 +7,7 @@ rigid object / MPM object / FEM object.
 
 import os
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal, Self
 
@@ -1315,10 +1316,27 @@ class Generator(Morph):
     exported scene stores what was generated and loading it generates nothing again. The spec given to the scene stays
     as it was. A user defines a generator by subclassing this class and registering the function generating its
     geometry with ``gs.register_generator`` (see ``gs.morphs.Terrain`` for a built-in one).
+
+    The kinds of entity a generator is generated for are declared as a class keyword, ``class Chain(Generator,
+    specs=(gs.entities.Rigid,)):``, and a spec of another kind refuses it. A generator declaring none is accepted by every
+    spec. A generator defined before the entity specs, as the built-in ones are, gives a function returning them.
     """
 
+    # The entity specs the generator is generated for, or a function returning them, every spec if empty
+    _SPECS: ClassVar["tuple[type, ...] | Callable[[], tuple[type, ...]]"] = ()
 
-class Terrain(Generator):
+    def __init_subclass__(cls, *, specs: "tuple[type, ...] | Callable[[], tuple[type, ...]] | None" = None, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if specs is not None:
+            cls._SPECS = specs
+
+    @classmethod
+    def specs(cls) -> tuple[type, ...]:
+        """The entity specs the generator is generated for, every spec if empty."""
+        return cls._SPECS() if callable(cls._SPECS) else cls._SPECS
+
+
+class Terrain(Generator, specs=lambda: (gs.entities.Rigid,)):
     """
     Morph for creating a rigid terrain. This can be instantiated from two choices:
     1) a grid of subterrains generated from their options (see ``gs.options.terrain``)

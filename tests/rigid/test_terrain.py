@@ -276,6 +276,9 @@ def test_subterrain_parameters(show_viewer):
 
     assert_allclose((height_ref * 2.0), height_test, tol=gs.EPS)
 
+    with pytest.raises(gs.GenesisException, match="takes no gs.morphs.Terrain"):
+        gs.entities.Kinematic(morph=gs.morphs.Terrain())
+
 
 def test_mesh_to_heightfield(tmp_path, show_viewer):
     horizontal_scale = 2.0

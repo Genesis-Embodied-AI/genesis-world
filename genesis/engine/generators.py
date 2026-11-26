@@ -47,6 +47,7 @@ def register_generator(morph_cls: type[Generator]) -> Callable[[Callable], Calla
     return _register
 
 
+# The generated terrain is its generator with the height field set, so it holds every option of it and records none
 @register_generator(Terrain)
 def _generate_terrain(morph: Terrain, context: GeneratorContext) -> Terrain:
     if morph.height_field is not None:

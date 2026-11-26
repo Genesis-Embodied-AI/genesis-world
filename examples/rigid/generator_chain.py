@@ -13,7 +13,7 @@ import genesis as gs
 from genesis.vis.keybindings import Key, KeyAction, Keybind
 
 
-class Chain(gs.morphs.Generator):
+class Chain(gs.morphs.Generator, specs=(gs.entities.Rigid,)):
     """A chain of capsule links hanging along -z from its origin, each joined to the previous one by a ball joint."""
 
     n_links: int = 8

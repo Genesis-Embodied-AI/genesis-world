@@ -13,7 +13,7 @@ from genesis.engine.materials.base import Material
 from genesis.repr_base import get_public_name
 
 from . import indices
-from .morphs import Morph
+from .morphs import Generator, Morph
 from .options import Options
 from .patches import Geom, Patch, Vertex, VGeom
 from .surfaces import DynamicVertices, Surface
@@ -176,6 +176,12 @@ class Spec(Options, Generic[EntityT]):
             gs.raise_exception(
                 f"An entity of gs.entities.{type(self).__name__} is created from one morph, got {len(self.morph)}."
             )
+        for morph in self.morphs:
+            if isinstance(morph, Generator) and morph.specs() and not isinstance(self, morph.specs()):
+                gs.raise_exception(
+                    f"gs.entities.{type(self).__name__} takes no gs.morphs.{type(morph).__name__}. It is generated for "
+                    f"{', '.join(f'gs.{get_public_name(spec_cls)}' for spec_cls in morph.specs())}."
+                )
         if self.vis is not None:
             self._check_vis(self.vis)
         if self.surface is not None:
