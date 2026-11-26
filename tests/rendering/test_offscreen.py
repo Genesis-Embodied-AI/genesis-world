@@ -2904,7 +2904,6 @@ def test_fisheye_camera(renderer, show_viewer):
             morph=gs.morphs.Sphere(
                 pos=sphere_pos,
                 radius=RADIUS,
-                fixed=True,
             ),
         )
         for sphere_pos in spheres_pos
@@ -2970,3 +2969,10 @@ def test_fisheye_camera(renderer, show_viewer):
     )
     verts_angle = np.arctan2(np.linalg.norm(verts[:, :2], axis=-1), -verts[:, 2])
     assert_allclose(verts_angle.max(), corners_angle.max(), tol=1e-5)
+
+    # The frustum of the camera bends as its view does, reaching the same ray at its far clipping distance
+    frustum = scene.draw_debug_frustum(cam_calibrated)
+    verts = tensor_to_array(frustum.geometries[0].verts)
+    verts_far = verts[np.linalg.norm(verts, axis=-1) > 0.999 * cam_calibrated.far]
+    verts_far_angle = np.arctan2(np.linalg.norm(verts_far[:, :2], axis=-1), -verts_far[:, 2])
+    assert_allclose(verts_far_angle.max(), corners_angle.max(), tol=1e-5)

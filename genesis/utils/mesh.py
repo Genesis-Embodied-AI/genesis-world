@@ -1316,36 +1316,36 @@ def create_camera_frustum(camera: "Camera", color: np.ndarray | Sequence[float])
     camera_mesh.apply_translation([0.0, 0.0, 1.0])
     camera_mesh.apply_scale(0.05)
 
-    # frustum
-    near_half_height = camera.near * np.tan(np.deg2rad(camera.fov / 2))
-    near_half_width = near_half_height * camera.aspect_ratio
-    far_half_height = camera.far * np.tan(np.deg2rad(camera.fov / 2))
-    far_half_width = far_half_height * camera.aspect_ratio
-
-    # Define the vertices of the frustum
-    vertices = np.array(
-        [
-            [0, 0, 0],  # apex
-            [-near_half_width, -near_half_height, -camera.near],  # near bottom left
-            [near_half_width, -near_half_height, -camera.near],  # near bottom right
-            [near_half_width, near_half_height, -camera.near],  # near top right
-            [-near_half_width, near_half_height, -camera.near],  # near top left
-            [-far_half_width, -far_half_height, -camera.far],  # far bottom left
-            [far_half_width, -far_half_height, -camera.far],  # far bottom right
-            [far_half_width, far_half_height, -camera.far],  # far top right
-            [-far_half_width, far_half_height, -camera.far],  # far top left
-        ]
+    # The frustum, through the boundary of the image between the clipping distances: rays from the pixels along the
+    # edges of the image, from its bottom-left corner around it, in pixels from its top-left corner with the rows going
+    # down. The rays of a pinhole camera span planes between the corners, those of a fisheye camera bend along each
+    # edge, at distances from the camera along each ray.
+    width, height = camera.res
+    (fx, _, cx), (_, fy, cy), _ = camera.intrinsics
+    n_side = 16 if camera.model == "fisheye" else 1
+    sides_pos = np.linspace(0.0, 1.0, n_side, endpoint=False)
+    sides_end = np.ones_like(sides_pos)
+    image_boundary = np.concatenate(
+        (
+            np.stack((width * sides_pos, height * sides_end), axis=-1),
+            np.stack((width * sides_end, height * (1.0 - sides_pos)), axis=-1),
+            np.stack((width * (1.0 - sides_pos), 0.0 * sides_end), axis=-1),
+            np.stack((0.0 * sides_end, height * sides_pos), axis=-1),
+        )
     )
+    if camera.model == "fisheye":
+        rays, _ = gu.fisheye_pixels_to_rays(image_boundary, (fx, fy, cx, cy), camera.distortion)
+    else:
+        rays = np.concatenate(((image_boundary - (cx, cy)) / (fx, fy), np.ones((len(image_boundary), 1))), axis=-1)
+    # From the frame of the camera of OpenCV to that of the camera, which looks along -z with y up
+    rays[:, 1:] *= -1.0
+    vertices = np.concatenate((np.zeros((1, 3)), camera.near * rays, camera.far * rays))
 
-    # Define the side faces of the frustum, leaving it open at its near and far ends
-    faces = np.array(
-        [
-            [2, 1, 5, 6],
-            [3, 2, 6, 7],
-            [4, 3, 7, 8],
-            [1, 4, 8, 5],
-        ]
-    )
+    # The side faces of the frustum, between consecutive rays, leaving it open at its near and far ends
+    n_boundary = len(image_boundary)
+    i_v = 1 + np.arange(n_boundary)
+    i_v_next = 1 + (np.arange(n_boundary) + 1) % n_boundary
+    faces = np.stack((i_v_next, i_v, i_v + n_boundary, i_v_next + n_boundary), axis=-1)
 
     # Create the frustum mesh
     frustum_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)

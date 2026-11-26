@@ -151,7 +151,7 @@ class Camera(BuildableMixin, RBC):
             width, height = res
             edges_pixel = ((cx, 0.0), (cx, height)) if height <= width else ((0.0, cy), (width, cy))
             _, edges_angle = gu.fisheye_pixels_to_rays(np.array(edges_pixel), (fx, fy, cx, cy), lens.distortion)
-            self._fov = float(np.rad2deg(edges_angle.sum()))
+            self._fov = np.rad2deg(edges_angle.sum())
 
         # A fisheye camera without calibration is equidistant
         if model == "fisheye" and lens is None:
