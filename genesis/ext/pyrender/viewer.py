@@ -1119,7 +1119,7 @@ class Viewer(pyglet.window.Window):
 
         if self.render_flags["shadows"]:
             flags |= RenderFlags.SHADOWS_ALL
-        if self.render_flags["plane_reflection"] and not self._is_software:
+        if self.render_flags["plane_reflection"]:
             flags |= RenderFlags.REFLECTIVE_FLOOR
         if self.render_flags.get("split_envs", False):
             flags |= RenderFlags.ENV_SEPARATE
@@ -1360,9 +1360,7 @@ class Viewer(pyglet.window.Window):
 
         gs.logger.debug(f"Using interactive viewer OpenGL device: {renderer}")
         if self._is_software:
-            gs.logger.info(
-                "Software rendering context detected. Plane reflection not supported. Beware rendering will be slow."
-            )
+            gs.logger.info("Software rendering context detected. Beware rendering will be slow.")
 
         if auto_refresh:
             is_invalid = False

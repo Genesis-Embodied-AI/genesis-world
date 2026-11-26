@@ -114,7 +114,7 @@ class OffscreenRenderer(object):
         if depth and not (rgb or seg):
             flags |= RenderFlags.DEPTH_ONLY
 
-        if plane_reflection and not self._is_software:
+        if plane_reflection:
             flags |= RenderFlags.REFLECTIVE_FLOOR
 
         if split_envs:
@@ -220,9 +220,7 @@ class OffscreenRenderer(object):
         except Exception:
             pass
         if self._is_software:
-            gs.logger.info(
-                "Software rendering context detected. Plane reflection not supported. Beware rendering will be slow."
-            )
+            gs.logger.info("Software rendering context detected. Beware rendering will be slow.")
         self._platform.make_uncurrent()
 
     def __del__(self):
