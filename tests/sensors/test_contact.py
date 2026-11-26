@@ -124,7 +124,7 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
     force_sensor_floor_filtered = scene.add_sensor(
         gs.sensors.ContactForce(
             entity_idx=box.idx,
-            filter_link_idx=(floor.base_link,),
+            filtered_links=(floor.base_link,),
         )
     )
 

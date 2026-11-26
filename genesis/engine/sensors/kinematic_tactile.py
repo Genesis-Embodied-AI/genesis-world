@@ -717,7 +717,7 @@ class KinematicTactileSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadat
     @gs.assert_unbuilt
     def build(self):
         super().build()
-        self._shared_metadata.append_filter(self._options.filter_link_idx)
+        self._shared_metadata.append_filter(self._options.filtered_links)
         # The candidate geoms of each sensor are its contacts, scattered every step (see
         # _kernel_build_sensor_candidate_geom_mask)
         n_sensors = len(self._manager._sensors_by_type[type(self)])

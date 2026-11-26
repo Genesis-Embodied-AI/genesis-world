@@ -242,22 +242,25 @@ class ContactFilterOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[Senso
 
     Parameters
     ----------
-    filter_link_idx : Sequence[RigidLink | int], optional
+    filtered_links : Sequence[RigidLink | int], optional
         Links of rigid entities, or their global indices in the rigid solver. Contacts with the sensor link whose other
         participant is one of these links are ignored: the sensor behaves as if those counterparts were not touching.
         Use it to scope a reading to a chosen set of contacts (e.g. force on a foot from the ground, excluding
-        self-contact). Default is empty, so every contact with the sensor link counts.
+        self-contact). The keyword 'filter_link_idx' is a deprecated alias. Default is empty, so every contact with the
+        sensor link counts.
     """
 
-    filter_link_idx: OptionalRigidLinksIdx = ()
+    filtered_links: OptionalRigidLinksIdx = Field(
+        default=(), validation_alias=AliasChoices("filtered_links", "filter_link_idx")
+    )
 
     def _validate(self, sim: "Simulator"):
         super()._validate(sim)
-        if self.filter_link_idx:
+        if self.filtered_links:
             n_links = sim.rigid_solver.n_links
-            if np.any(np.array(self.filter_link_idx) < 0) or np.any(np.array(self.filter_link_idx) >= n_links):
+            if np.any(np.array(self.filtered_links) < 0) or np.any(np.array(self.filtered_links) >= n_links):
                 gs.raise_exception(
-                    f"{type(self).__name__}: filter_link_idx must be in [0, {n_links}). Got {self.filter_link_idx}."
+                    f"{type(self).__name__}: filtered_links must be in [0, {n_links}). Got {self.filtered_links}."
                 )
 
 
