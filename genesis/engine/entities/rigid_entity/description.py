@@ -2010,21 +2010,26 @@ class RigidEntityDescription(KinematicEntityDescription):
 
 @dataclass
 class TerrainEntityDescription(RigidEntityDescription):
-    """Describe one terrain, which is a rigid entity beside the height field its surface is made of.
+    """Describe one terrain, which is a rigid entity whose surface is the height field of its morph.
 
-    The field holds the elevation of every grid cell in meters, vertical scale applied, and the scale gives the
-    horizontal size of a cell and the vertical factor. The collider reads them at build and the height query reads
-    them at runtime. They stand here because no link describes them.
+    The spec holds the height field its generation produced (see 'gs.morphs.Generator'), from which the elevation and
+    the scale of the grid derive, so that an exported scene stores the grid once. The collider reads them at build and
+    the height query at runtime.
     """
 
-    terrain_hf: np.ndarray | None = None
-    terrain_scale: np.ndarray | None = None
+    @property
+    def terrain_hf(self) -> np.ndarray:
+        """The elevation of every grid cell in meters, the vertical scale applied."""
+        return self.spec.morph.height_field.astype(gs.np_float) * self.terrain_scale[1]
+
+    @property
+    def terrain_scale(self) -> np.ndarray:
+        """The horizontal size of a grid cell in meters, and the factor the elevation is scaled by."""
+        return np.array((self.spec.morph.horizontal_scale, self.spec.morph.vertical_scale), dtype=gs.np_float)
 
     def _load_morph(self, morph, resolution: Resolution):
-        """Load the height field a terrain morph describes, with its scales and the meshes standing for it."""
-        vmesh, mesh, terrain_hf = tu.parse_terrain(morph, self.surface)
-        self.terrain_scale = np.array((morph.horizontal_scale, morph.vertical_scale), dtype=gs.np_float)
-        self.terrain_hf = terrain_hf * self.terrain_scale[1]
+        """Load the meshes standing for the height field of a terrain morph."""
+        vmesh, mesh = tu.parse_terrain(morph, self.surface)
 
         g_infos = []
         if morph.visualization:

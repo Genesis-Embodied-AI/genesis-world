@@ -265,9 +265,10 @@ def test_subterrain_parameters(show_viewer):
             n_subterrains=(2, 2),
             subterrain_size=(12.0, 12.0),
             horizontal_scale=0.25,
-            subterrain_types="wave_terrain",
+            subterrains=gs.options.terrain.Wave(
+                amplitude=0.2,
+            ),
             name="wave_terrain",
-            subterrain_parameters={"wave_terrain": {"amplitude": 0.2}},
         )
     )
 

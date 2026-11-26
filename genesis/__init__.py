@@ -633,6 +633,8 @@ from .datatypes import List
 from .engine import states, materials, force_fields
 from .engine.mesh import Mesh
 from .engine.scene import Scene
+from .engine.generators import register_generator
+from .utils.terrain import register_subterrain
 
 from . import recorders
 

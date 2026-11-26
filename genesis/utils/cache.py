@@ -289,18 +289,9 @@ def get_gsd_path(verts, faces, sdf_res, sdf_cell_size):
     return os.path.join(get_gsd_cache_dir(), f"{hashkey}.gsd")
 
 
-def get_gnd_path(
-    name, subterrain_types, subterrain_size, horizontal_scale, vertical_scale, n_subterrains, subterrain_parameters
-):
+def get_gnd_path(name, subterrains, subterrain_size, horizontal_scale, vertical_scale, n_subterrains):
     hashkey = get_hashkey(
-        name,
-        subterrain_types,
-        subterrain_size,
-        horizontal_scale,
-        vertical_scale,
-        n_subterrains,
-        subterrain_parameters,
-        CACHE_FORMAT_VERSION,
+        name, subterrains, subterrain_size, horizontal_scale, vertical_scale, n_subterrains, CACHE_FORMAT_VERSION
     )
     return os.path.join(get_gnd_cache_dir(), f"{hashkey}.gnd")
 
