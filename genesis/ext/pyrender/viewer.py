@@ -13,7 +13,12 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 
 import OpenGL
-from OpenGL.GL import *
+from OpenGL.GL import (
+    ArgumentError,
+    GL_COLOR_BUFFER_BIT,
+    GL_DEPTH_BUFFER_BIT,
+    glClear,
+)
 import pyglet
 
 import genesis as gs
@@ -1279,7 +1284,7 @@ class Viewer(pyglet.window.Window):
                         # capped by the refresh_rate gate, so vsync is unnecessary there.
                         vsync=bool(self._run_in_thread),
                     )
-                except xlib_exceptions as e:
+                except xlib_exceptions:
                     # Trying again without UTF8 support as a fallback.
                     # See: https://github.com/pyglet/pyglet/issues/1024
                     if pyglet.window.xlib._have_utf8:

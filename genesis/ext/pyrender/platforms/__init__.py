@@ -2,5 +2,3 @@
 
 Author: Matthew Matl
 """
-
-from .base import Platform

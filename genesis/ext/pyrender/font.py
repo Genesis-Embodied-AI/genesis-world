@@ -8,7 +8,41 @@ import numpy as np
 import os
 
 import OpenGL
-from OpenGL.GL import *
+from OpenGL.GL import (
+    GL_ARRAY_BUFFER,
+    GL_BLEND,
+    GL_CLAMP_TO_EDGE,
+    GL_DEPTH_TEST,
+    GL_DYNAMIC_DRAW,
+    GL_FALSE,
+    GL_FILL,
+    GL_FLOAT,
+    GL_FRONT_AND_BACK,
+    GL_LINEAR,
+    GL_NEAREST,
+    GL_ONE_MINUS_SRC_ALPHA,
+    GL_SRC_ALPHA,
+    GL_TEXTURE0,
+    GL_TRIANGLES,
+    GL_UNPACK_ALIGNMENT,
+    ctypes,
+    glActiveTexture,
+    glBindBuffer,
+    glBindVertexArray,
+    glBlendFunc,
+    glBufferData,
+    glDeleteBuffers,
+    glDeleteVertexArrays,
+    glDisable,
+    glDrawArrays,
+    glEnable,
+    glEnableVertexAttribArray,
+    glGenBuffers,
+    glGenVertexArrays,
+    glPixelStorei,
+    glPolygonMode,
+    glVertexAttribPointer,
+)
 
 from .constants import TextAlign, FLOAT_SZ
 from .texture import Texture

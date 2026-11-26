@@ -6,7 +6,26 @@ Author: Matthew Matl
 
 import numba as nb
 import numpy as np
-from OpenGL.GL import *
+from OpenGL.GL import (
+    GL_ARRAY_BUFFER,
+    GL_ELEMENT_ARRAY_BUFFER,
+    GL_FALSE,
+    GL_FLOAT,
+    GL_STATIC_DRAW,
+    GL_STREAM_DRAW,
+    OpenGL,
+    ctypes,
+    glBindBuffer,
+    glBindVertexArray,
+    glBufferData,
+    glDeleteBuffers,
+    glDeleteVertexArrays,
+    glEnableVertexAttribArray,
+    glGenBuffers,
+    glGenVertexArrays,
+    glVertexAttribDivisor,
+    glVertexAttribPointer,
+)
 
 from .constants import FLOAT_SZ, GLTF, UINT_SZ, BufFlags
 from .material import Material

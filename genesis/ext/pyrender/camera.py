@@ -5,7 +5,6 @@ Author: Matthew Matl
 """
 
 import abc
-import sys
 from abc import ABCMeta
 
 import numpy as np

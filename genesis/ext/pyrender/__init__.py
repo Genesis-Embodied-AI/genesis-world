@@ -1,17 +1,16 @@
 from .camera import Camera, PerspectiveCamera, OrthographicCamera
+from .constants import RenderFlags, TextAlign, GLTF, ViewFlags
 from .light import Light, PointLight, DirectionalLight, SpotLight
-from .sampler import Sampler
-from .texture import Texture
 from .material import Material
-from .primitive import Primitive
 from .mesh import Mesh
 from .node import Node
-from .scene import Scene
-from .renderer import Renderer
-from .viewer import Viewer
 from .offscreen import OffscreenRenderer
-from .version import __version__
-from .constants import RenderFlags, TextAlign, GLTF, ViewFlags
+from .primitive import Primitive
+from .renderer import Renderer
+from .sampler import Sampler
+from .scene import Scene
+from .texture import Texture
+from .viewer import Viewer
 
 __all__ = [
     "Camera",
@@ -31,7 +30,6 @@ __all__ = [
     "Renderer",
     "Viewer",
     "OffscreenRenderer",
-    "__version__",
     "RenderFlags",
     "ViewFlags",
     "TextAlign",

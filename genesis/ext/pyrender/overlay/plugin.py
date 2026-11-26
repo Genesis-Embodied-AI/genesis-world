@@ -6,7 +6,7 @@ Requires the ``render`` optional extras: ``pip install 'genesis-world[render]'``
 
 import os
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -20,7 +20,6 @@ from genesis.utils.misc import tensor_to_array
 from genesis.vis.viewer_plugins import EVENT_HANDLE_STATE, EVENT_HANDLED, MouseInteractionPlugin, ViewerPlugin
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.rigid_entity import RigidEntity
     from genesis.engine.scene import Scene
     from genesis.ext.pyrender.viewer import Viewer
 
@@ -263,9 +262,9 @@ class ImGuiOverlayPlugin(ViewerPlugin):
             except ImportError:
                 pass
         except ImportError:
-            print("ImGuiOverlayPlugin: imgui-bundle not found. Install with: pip install imgui-bundle")
+            gs.logger.warning("The ImGui overlay needs 'imgui-bundle'. Install it with 'pip install imgui-bundle'.")
         except Exception as e:
-            print(f"ImGuiOverlayPlugin: Failed to initialize ImGui: {e}")
+            gs.logger.warning(f"The ImGui overlay failed to initialize: {e}")
 
     def _cache_entity_data(self):
         """Cache static joint metadata from all rigid and kinematic entities.

@@ -1,8 +1,6 @@
 """Material of the primitives, following the metallic-roughness model of glTF 2.0 and its transmission and index of
 refraction extensions."""
 
-import numpy as np
-
 from .constants import TexFlags
 from .texture import Texture
 from .utils import format_color_vector, format_texture_source

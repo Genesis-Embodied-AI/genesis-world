@@ -7,10 +7,42 @@ import re
 import numpy as np
 
 import OpenGL
-from OpenGL.GL import *
-from OpenGL.GL import shaders as gl_shader_utils
-
-func = None
+from OpenGL.GL import (
+    GL_FRAGMENT_SHADER,
+    GL_GEOMETRY_SHADER,
+    GL_TRUE,
+    GL_VERTEX_SHADER,
+    glBindVertexArray,
+    glDeleteProgram,
+    glDeleteVertexArrays,
+    glGenVertexArrays,
+    glGetUniformLocation,
+    glUniform1f,
+    glUniform1fv,
+    glUniform1i,
+    glUniform1iv,
+    glUniform1ui,
+    glUniform1uiv,
+    glUniform2fv,
+    glUniform2iv,
+    glUniform2uiv,
+    glUniform3fv,
+    glUniform3iv,
+    glUniform3uiv,
+    glUniform4fv,
+    glUniform4iv,
+    glUniform4uiv,
+    glUniformMatrix2fv,
+    glUniformMatrix2x3fv,
+    glUniformMatrix2x4fv,
+    glUniformMatrix3x2fv,
+    glUniformMatrix3x4fv,
+    glUniformMatrix4fv,
+    glUniformMatrix4x2fv,
+    glUniformMatrix4x3fv,
+    glUseProgram,
+)
+from OpenGL.GL import shaders
 
 
 class ShaderProgramCache(object):
@@ -110,12 +142,12 @@ class ShaderProgram(object):
         shader_ids = []
 
         # Load vert shader
-        shader_ids.append(gl_shader_utils.compileShader(self._load(self.vertex_shader), GL_VERTEX_SHADER))
+        shader_ids.append(shaders.compileShader(self._load(self.vertex_shader), GL_VERTEX_SHADER))
         # Load frag shader
-        shader_ids.append(gl_shader_utils.compileShader(self._load(self.fragment_shader), GL_FRAGMENT_SHADER))
+        shader_ids.append(shaders.compileShader(self._load(self.fragment_shader), GL_FRAGMENT_SHADER))
         # Load geometry shader
         if self.geometry_shader is not None:
-            shader_ids.append(gl_shader_utils.compileShader(self._load(self.geometry_shader), GL_GEOMETRY_SHADER))
+            shader_ids.append(shaders.compileShader(self._load(self.geometry_shader), GL_GEOMETRY_SHADER))
 
         # Bind empty VAO PYOPENGL BUG
         if self._vao_id is None:
@@ -123,7 +155,7 @@ class ShaderProgram(object):
         glBindVertexArray(self._vao_id)
 
         # Compile program
-        self._program_id = gl_shader_utils.compileProgram(*shader_ids, validate=False)
+        self._program_id = shaders.compileProgram(*shader_ids, validate=False)
 
         # Unbind empty VAO PYOPENGL BUG
         glBindVertexArray(0)

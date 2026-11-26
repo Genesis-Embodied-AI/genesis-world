@@ -6,7 +6,13 @@ Author: Matthew Matl
 import os
 import sys
 
-from OpenGL.GL import *
+from OpenGL.GL import (
+    GL_COLOR_BUFFER_BIT,
+    GL_DEPTH_BUFFER_BIT,
+    GL_RENDERER,
+    glClear,
+    glGetString,
+)
 
 import genesis as gs
 
@@ -207,8 +213,6 @@ class OffscreenRenderer(object):
 
         self._platform.make_current()
         try:
-            from OpenGL.GL import glGetString, GL_RENDERER
-
             renderer = glGetString(GL_RENDERER).decode()
             gs.logger.debug(f"Using offscreen rendering OpenGL device: {renderer}")
             self._is_software = any(e in renderer for e in ("llvmpipe", "Apple Software Renderer"))

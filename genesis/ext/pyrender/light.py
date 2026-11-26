@@ -9,7 +9,12 @@ from abc import ABCMeta
 
 import numpy as np
 
-from OpenGL.GL import *
+from OpenGL.GL import (
+    GL_CLAMP_TO_BORDER,
+    GL_HALF_FLOAT,
+    GL_LINEAR,
+    GL_UNSIGNED_SHORT,
+)
 
 from .utils import format_color_vector
 from .texture import Texture, CubeMapTexture

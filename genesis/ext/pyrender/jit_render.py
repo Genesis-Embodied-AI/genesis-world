@@ -960,7 +960,7 @@ class JITRenderer:
                 if pid != last_pid:
                     gl.glUseProgram(pid)
                     if is_rgba and not flags & RenderFlags_NORMAL:
-                        # Strip shadow flags for markers — their programs have no shadow uniforms
+                        # The programs of the markers receive no shadow (see 'load_programs')
                         light_flags = flags
                         if is_marker[id]:
                             light_flags &= ~(
