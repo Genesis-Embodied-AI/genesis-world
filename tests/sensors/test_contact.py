@@ -116,9 +116,9 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
         )
     )
 
-    with pytest.raises(gs.GenesisException, match="requires entity_idx >= 0"):
+    with pytest.raises(gs.GenesisException, match="requires an entity"):
         scene.add_sensor(gs.sensors.Contact())
-    with pytest.raises(gs.GenesisException, match="requires entity_idx >= 0"):
+    with pytest.raises(gs.GenesisException, match="requires an entity"):
         scene.add_sensor(gs.sensors.ContactForce())
     scene.build(n_envs=n_envs)
 

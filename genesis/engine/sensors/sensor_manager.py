@@ -152,7 +152,7 @@ class SensorManager(BuildableMixin, BatchedMixin):
         # cache. Static sensors have entity_idx=-1 and group together. Python's sort is stable, so registration order is
         # preserved within each entity bucket.
         for sensors in self._sensors_by_type.values():
-            sensors.sort(key=lambda s: s._options.entity_idx)
+            sensors.sort(key=lambda s: s._options.entity)
             for new_idx, sensor in enumerate(sensors):
                 sensor._idx = new_idx
 
@@ -190,7 +190,7 @@ class SensorManager(BuildableMixin, BatchedMixin):
                         max_history_per_dtype.get(intermediate_dtype, 0), hist
                     )
                     cls_max_history = max(cls_max_history, hist)
-                eid = sensor._options.entity_idx
+                eid = sensor._options.entity
                 if eid in entity_offsets:
                     entity_offsets[eid][1] = cls_offset + sensor._cache_size
                 else:
@@ -507,7 +507,7 @@ class SensorManager(BuildableMixin, BatchedMixin):
             sensor
             for sensor_list in self._sensors_by_type.values()
             for sensor in sensor_list
-            if sensor._options.entity_idx == target_eid
+            if sensor._options.entity == target_eid
         )
 
     @property

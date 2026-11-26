@@ -689,8 +689,8 @@ class _LinkAttachedSensorMixin(BuildableMixin):
         super().build()
 
         batch_size = self._manager.n_envs_
-        if self._options.entity_idx >= 0:
-            entity = self._manager.sim.entities[self._options.entity_idx]
+        if self._options.entity >= 0:
+            entity = self._manager.sim.entities[self._options.entity]
             self._link = entity.links[self._options.link_idx_local]
             link_idx = self._options.link_idx_local + entity.link_start
             self._register_link(entity, link_idx)
@@ -727,7 +727,7 @@ class RigidSensorMixin[RigidSensorMetadataMixinT: RigidSensorMetadataMixin](_Lin
         super().build()
         # A sensor attached to no entity takes link -1, which the kernels read as the world frame at rest, see
         # 'func_sensor_link_pose'.
-        if self._options.entity_idx < 0:
+        if self._options.entity < 0:
             self._register_link(entity=None, link_idx=-1)
 
     def _register_link(self, entity, link_idx: int):

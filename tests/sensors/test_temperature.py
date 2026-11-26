@@ -73,7 +73,7 @@ def test_grid_sensor_contact_and_reset(show_viewer, tol, n_envs):
             },
         )
     )
-    with pytest.raises(gs.GenesisException, match="requires entity_idx >= 0"):
+    with pytest.raises(gs.GenesisException, match="requires an entity"):
         scene.add_sensor(gs.sensors.TemperatureGrid())
     scene.build(n_envs=n_envs)
 
