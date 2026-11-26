@@ -241,14 +241,10 @@ class VideoEncoder:
                 self._is_encoding_over = False
                 self._thread = threading.Thread(target=self._encode_loop)
                 self._thread.start()
-                try:
-                    # Same private threading atexit as 'RecorderManager.build' uses, and for the same reason: functions
-                    # registered through 'atexit.register' run after 'threading._shutdown', which deadlocks on
-                    # non-daemon threads. It also finalizes the video when the interpreter exits before teardown
-                    # had a chance to run.
-                    threading._register_atexit(self.close)
-                except AttributeError:
-                    pass
+                # Same private threading atexit as 'RecorderManager.build' uses, and for the same reason: functions
+                # registered through 'atexit.register' run after 'threading._shutdown', which deadlocks on non-daemon
+                # threads. It also finalizes the video when the interpreter exits before teardown had a chance to run.
+                threading._register_atexit(self.close)
             self._enqueue(frame)
         else:
             self._encode(frame)
