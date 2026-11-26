@@ -120,6 +120,64 @@ class LightType:
     SPOT = 2
 
 
+LIGHTS_UNIFORM = ("directional_lights", "point_lights", "spot_lights")
+"""The uniform array of the lights of each kind, in the order of the values of 'LightType'."""
+LIGHT_FIELDS = (
+    "color",
+    "intensity",
+    "position",
+    "direction",
+    "light_angle_scale",
+    "light_angle_offset",
+    "shadow_map",
+    "transmittance_map",
+    "light_matrix",
+)
+"""The fields of the uniform of a light that the compiled passes set."""
+UNIFORMS_NAME = (
+    "M",
+    "V",
+    "P",
+    "cam_pos",
+    "ambient_light",
+    "reflection_mat",
+    "debug_view",
+    "env_offset_scale",
+    "floor_tex",
+    "screen_size",
+    "normal_magnitude",
+    "color",
+    "n_directional_lights",
+    "n_point_lights",
+    "n_spot_lights",
+    "material.base_color_factor",
+    "material.metallic_factor",
+    "material.roughness_factor",
+    "material.emissive_factor",
+    "material.transmission_factor",
+    "material.ior",
+    "material.base_color_layer",
+    "material.emissive_layer",
+    "material.normal_texture",
+    "material.emissive_texture",
+    "material.base_color_texture",
+    "material.metallic_roughness_texture",
+    "material.occlusion_texture",
+    "light_matrix",
+    "light_pos",
+    "base_color_factor",
+    "transmission_factor",
+    "ior",
+    "base_color_texture",
+    "base_color_layer",
+) + tuple(f"{lights}[{i}].{field}" for lights in LIGHTS_UNIFORM for i in range(MAX_N_LIGHTS) for field in LIGHT_FIELDS)
+"""The uniforms that the compiled passes set, whose location each program resolves once (see 'ShaderProgram').
+
+The texture samplers of a material follow the order of the bits of 'TexFlags', and the fields of the lights come last,
+one block of 'LIGHT_FIELDS' per slot of each array of 'LIGHTS_UNIFORM'.
+"""
+
+
 class ViewFlags:
     """Which views draw a mesh, as a bitwise or of the flags below (see 'Mesh.views').
 

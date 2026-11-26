@@ -23,6 +23,8 @@ from OpenGL.GL import (
     shaders,
 )
 
+from .constants import UNIFORMS_NAME
+
 SHADER_DIR = os.path.join(os.path.dirname(__file__), "shaders")
 
 
@@ -104,6 +106,9 @@ class ShaderProgram:
         self.defines = {} if defines is None else defines
         self._program_id = None
         self._vao_id = None
+        # The location of each uniform of 'UNIFORMS_NAME', -1 for one the program lacks or leaves unused. The compiled
+        # passes set the uniforms by location, since a lookup by name on every draw costs more than setting the value.
+        self.uniforms_loc = None
 
     def _add_to_context(self):
         assert self._program_id is None
@@ -124,6 +129,9 @@ class ShaderProgram:
 
         self._program_id = shaders.compileProgram(*shader_ids, validate=False)
         glBindVertexArray(0)
+        self.uniforms_loc = np.array(
+            [glGetUniformLocation(self._program_id, name) for name in UNIFORMS_NAME], dtype=np.int32
+        )
 
     def _in_context(self):
         return self._program_id is not None
@@ -137,6 +145,7 @@ class ShaderProgram:
                 pass
             self._program_id = None
             self._vao_id = None
+            self.uniforms_loc = None
 
     def _load(self, shader_filename):
         with open(shader_filename) as f:
