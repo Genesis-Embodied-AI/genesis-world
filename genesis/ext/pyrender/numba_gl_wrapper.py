@@ -2,7 +2,6 @@ import ctypes
 
 import numpy as np
 
-import OpenGL.GL as GL
 from numba import typeof, types
 from numba.core import cgutils
 from numba.extending import (
@@ -14,7 +13,7 @@ from numba.extending import (
     typeof_impl,
     unbox,
 )
-from OpenGL._bytes import as_8_bit
+import OpenGL.GL as GL
 from OpenGL.GL import (
     GLboolean,
     GLenum,
@@ -75,7 +74,7 @@ class GLWrapper:
                 try:
                     self.gl_funcs[func_name] = GL.platform.ctypesloader.buildFunction(func_type, func_name, dll)
                 except AttributeError:
-                    pointer = GL.platform.PLATFORM.getExtensionProcedure(as_8_bit(func_name))
+                    pointer = GL.platform.PLATFORM.getExtensionProcedure(func_name.encode())
                     self.gl_funcs[func_name] = func_type(pointer)
             except AttributeError:
                 # An OpenGL version older than the one introducing the function, which the passes do without
@@ -107,7 +106,7 @@ class GLWrapper:
         glfunc_type = GLFuncType()
 
         @typeof_impl.register(GLFunc)
-        def typeof_index(val, c):
+        def typeof_glfunc(val, c):
             return glfunc_type
 
         as_numba_type.register(GLFunc, glfunc_type)

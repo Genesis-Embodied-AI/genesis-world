@@ -1,5 +1,6 @@
 from typing import TYPE_CHECKING
 
+from genesis.ext.pyrender.constants import WireframeMode
 from genesis.vis.keybindings import Key, Keybind
 
 from ..base import ViewerPlugin
@@ -53,24 +54,23 @@ class DefaultControlsPlugin(ViewerPlugin):
         )
 
     def _toggle_cam_rotation(self):
-        self.viewer.viewer_flags["rotate"] = not self.viewer.viewer_flags["rotate"]
-        if self.viewer.viewer_flags["rotate"]:
+        self.viewer.is_rotating = not self.viewer.is_rotating
+        if self.viewer.is_rotating:
             self.viewer.set_message_text("Rotation On")
         else:
             self.viewer.set_message_text("Rotation Off")
 
     def _toggle_fullscreen(self):
-        self.viewer.viewer_flags["fullscreen"] = not self.viewer.viewer_flags["fullscreen"]
-        self.viewer.set_fullscreen(self.viewer.viewer_flags["fullscreen"])
+        self.viewer.set_fullscreen(not self.viewer.fullscreen)
         self.viewer.activate()
-        if self.viewer.viewer_flags["fullscreen"]:
+        if self.viewer.fullscreen:
             self.viewer.set_message_text("Fullscreen On")
         else:
             self.viewer.set_message_text("Fullscreen Off")
 
     def _toggle_shadow(self):
-        self.viewer.render_flags["shadows"] = not self.viewer.render_flags["shadows"]
-        if self.viewer.render_flags["shadows"]:
+        self.viewer.shadow = not self.viewer.shadow
+        if self.viewer.shadow:
             self.viewer.set_message_text("Shadows On")
         else:
             self.viewer.set_message_text("Shadows Off")
@@ -102,15 +102,15 @@ class DefaultControlsPlugin(ViewerPlugin):
             self.viewer.set_message_text("Camera Frustum Off")
 
     def _toggle_face_normals(self):
-        self.viewer.render_flags["face_normals"] = not self.viewer.render_flags["face_normals"]
-        if self.viewer.render_flags["face_normals"]:
+        self.viewer.show_face_normals = not self.viewer.show_face_normals
+        if self.viewer.show_face_normals:
             self.viewer.set_message_text("Face Normals On")
         else:
             self.viewer.set_message_text("Face Normals Off")
 
     def _toggle_vertex_normals(self):
-        self.viewer.render_flags["vertex_normals"] = not self.viewer.render_flags["vertex_normals"]
-        if self.viewer.render_flags["vertex_normals"]:
+        self.viewer.show_vertex_normals = not self.viewer.show_vertex_normals
+        if self.viewer.show_vertex_normals:
             self.viewer.set_message_text("Vert Normals On")
         else:
             self.viewer.set_message_text("Vert Normals Off")
@@ -119,40 +119,17 @@ class DefaultControlsPlugin(ViewerPlugin):
         self.viewer.toggle_recording()
 
     def _save_image(self):
-        self.viewer._save_image()
+        self.viewer.save_image()
 
     def _toggle_projection_mode(self):
-        vf = self.viewer.viewer_flags
-        vf["use_perspective_cam"] = not vf["use_perspective_cam"]
-        node = self.viewer._camera_node
-        if vf["use_perspective_cam"]:
-            node.camera = self.viewer._default_persp_cam
-            self.viewer.set_message_text("Perspective camera")
-        else:
-            node.camera = self.viewer._default_orth_cam
-            self.viewer.set_message_text("Orthographic camera")
+        self.viewer.is_perspective = not self.viewer.is_perspective
+        self.viewer.set_message_text("Perspective camera" if self.viewer.is_perspective else "Orthographic camera")
 
     def _toggle_wireframe(self):
-        if self.viewer.render_flags["flip_wireframe"]:
-            self.viewer.render_flags["flip_wireframe"] = False
-            self.viewer.render_flags["all_wireframe"] = True
-            self.viewer.render_flags["all_solid"] = False
-            self.viewer.set_message_text("All Wireframe")
-        elif self.viewer.render_flags["all_wireframe"]:
-            self.viewer.render_flags["flip_wireframe"] = False
-            self.viewer.render_flags["all_wireframe"] = False
-            self.viewer.render_flags["all_solid"] = True
-            self.viewer.set_message_text("All Solid")
-        elif self.viewer.render_flags["all_solid"]:
-            self.viewer.render_flags["flip_wireframe"] = False
-            self.viewer.render_flags["all_wireframe"] = False
-            self.viewer.render_flags["all_solid"] = False
-            self.viewer.set_message_text("Default Wireframe")
-        else:
-            self.viewer.render_flags["flip_wireframe"] = True
-            self.viewer.render_flags["all_wireframe"] = False
-            self.viewer.render_flags["all_solid"] = False
-            self.viewer.set_message_text("Flip Wireframe")
+        self.viewer.wireframe_mode = WireframeMode((self.viewer.wireframe_mode + 1) % len(WireframeMode))
+        self.viewer.set_message_text(
+            ("Default Wireframe", "Flip Wireframe", "All Wireframe", "All Solid")[self.viewer.wireframe_mode]
+        )
 
     def _reset_camera(self):
         self.viewer._reset_view()

@@ -1,5 +1,6 @@
 include README.md
 include LICENSE
 recursive-include genesis/assets *
+include genesis/ext/pyrender/LICENSE
 recursive-include genesis/ext/pyrender/fonts *
 recursive-include genesis/ext/pyrender/shaders *

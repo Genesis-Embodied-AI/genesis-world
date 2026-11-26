@@ -1,118 +1,89 @@
 import numpy as np
 from PIL import Image
 
+from .constants import TexChannels
+
 
 def format_color_vector(value, length):
-    """Format a color vector."""
-    if isinstance(value, int):
-        value = value / 255.0
-    if isinstance(value, float):
-        value = np.repeat(value, length)
-    if isinstance(value, list) or isinstance(value, tuple):
-        value = np.array(value)
-    if isinstance(value, np.ndarray):
-        value = value.squeeze()
-        if np.issubdtype(value.dtype, np.integer):
-            value = (value / 255.0).astype(np.float32)
-        if value.ndim != 1:
-            raise ValueError("Format vector takes only 1-D vectors")
-        if length > value.shape[0]:
-            value = np.hstack((value, np.ones(length - value.shape[0])))
-        elif length < value.shape[0]:
-            value = value[:length]
-    else:
-        raise ValueError("Invalid vector data type")
+    """Return a color as a vector of float32 channels within [0, 1].
 
-    return np.ascontiguousarray(value.squeeze(), dtype=np.float32)
-
-
-def format_color_array(value, shape):
-    """Format an array of colors."""
-    # Convert uint8 to floating
-    value = np.asanyarray(value)
+    Parameters
+    ----------
+    value : float or array_like
+        The color, a scalar standing for every channel. Integer channels hold 8-bit values. Missing channels are filled
+        with 1.0 and extra ones dropped.
+    length : int
+        The number of channels.
+    """
+    value = np.array(value)
     if np.issubdtype(value.dtype, np.integer):
-        value = (value / 255.0).astype(np.float32)
-
-    # Match up shapes
-    if value.ndim == 1:
-        value = np.tile(value, (shape[0], 1))
-    if value.shape[1] < shape[1]:
-        nc = shape[1] - value.shape[1]
-        value = np.column_stack((value, np.ones((value.shape[0], nc))))
-    elif value.shape[1] > shape[1]:
-        value = value[:, : shape[1]]
+        value = value / 255.0
+    if value.ndim == 0:
+        value = np.full(length, value)
+    assert value.ndim == 1
+    value = np.concatenate((value[:length], np.ones(max(length - len(value), 0))))
     return np.ascontiguousarray(value, dtype=np.float32)
 
 
-def format_texture_source(texture, target_channels="RGB"):
-    """Format a texture as a float32 np array."""
+def format_color_array(value, shape):
+    """Return an array of colors as float32 channels within [0, 1].
 
-    # Pass through None
-    if texture is None:
-        return None
+    Parameters
+    ----------
+    value : array_like
+        The colors, one per row, or a single color for every row. Integer channels hold 8-bit values. Missing channels
+        are filled with 1.0 and extra ones dropped.
+    shape : tuple of int
+        The number of colors and of channels.
+    """
+    value = np.array(value)
+    if np.issubdtype(value.dtype, np.integer):
+        value = value / 255.0
+    if value.ndim == 1:
+        value = np.tile(value, (shape[0], 1))
+    n_missing = shape[1] - value.shape[1]
+    value = np.column_stack((value[:, : shape[1]], np.ones((len(value), max(n_missing, 0)))))
+    return np.ascontiguousarray(value, dtype=np.float32)
 
-    # Convert PIL images into numpy arrays
+
+def format_texture_source(texture, channels):
+    """Return the image of a texture as uint8 values holding some channels.
+
+    Parameters
+    ----------
+    texture : (h, w) or (h, w, c) uint8 or float or PIL.Image.Image
+        The image, floats within [0, 1].
+    channels : TexChannels
+        The channels to hold. A gray image spans the color channels, a missing alpha is opaque, and green and blue are
+        taken from the first channel of a gray image.
+    """
     if isinstance(texture, Image.Image):
-        if texture.mode == "P" and target_channels in ("RGB", "RGBA"):
-            texture = np.array(texture.convert(target_channels))
-        else:
-            texture = np.array(texture)
-
-    # Format numpy arrays
-    if isinstance(texture, np.ndarray):
-        if np.issubdtype(texture.dtype, np.floating):
-            texture = np.array(texture * 255.0, dtype=np.uint8)
-        elif np.issubdtype(texture.dtype, np.integer):
-            texture = texture.astype(np.uint8)
-        else:
-            raise TypeError("Invalid type {} for texture".format(type(texture)))
-
-        # Format array by picking out correct texture channels or padding
-        if texture.ndim == 2:
-            texture = texture[:, :, np.newaxis]
-        if target_channels == "R":
-            texture = texture[:, :, 0]
-            texture = texture.squeeze()
-        elif target_channels == "RG":
-            if texture.shape[2] == 1:
-                texture = np.repeat(texture, 2, axis=2)
-            else:
-                texture = texture[:, :, (0, 1)]
-        elif target_channels == "GB":
-            if texture.shape[2] == 1:
-                texture = np.repeat(texture, 2, axis=2)
-            elif texture.shape[2] > 2:
-                texture = texture[:, :, (1, 2)]
-        elif target_channels == "RGB":
-            if texture.shape[2] == 1:
-                texture = np.repeat(texture, 3, axis=2)
-            elif texture.shape[2] == 2:
-                # Convert 2-channel texture to grayscale RGB by duplicating the first channel
-                texture = texture[:, :, (0, 0, 0)]
-            else:
-                texture = texture[:, :, (0, 1, 2)]
-        elif target_channels == "RGBA":
-            if texture.shape[2] == 1:
-                texture = np.repeat(texture, 4, axis=2)
-                texture[:, :, 3] = 255
-            elif texture.shape[2] == 2:
-                # Convert 2-channel texture (luminance + alpha) to RGBA by duplicating luminance to RGB
-                luminance = texture[:, :, :1]
-                alpha = texture[:, :, 1]
-                texture = np.empty((*texture.shape[:2], 4), dtype=texture.dtype)
-                texture[:, :, :3] = luminance
-                texture[:, :, 3] = alpha
-            elif texture.shape[2] == 3:
-                tx = np.empty((*texture.shape[:2], 4), dtype=np.uint8)
-                tx[:, :, :3] = texture
-                tx[:, :, 3] = 255
-                texture = tx
-        else:
-            raise ValueError("Invalid texture channel specification: {}".format(target_channels))
+        # The texels of a palette image are indices into its palette
+        if texture.mode == "P":
+            texture = texture.convert("RGBA")
+        texture = np.array(texture)
+    if np.issubdtype(texture.dtype, np.floating):
+        texture = (texture * 255.0).astype(np.uint8)
     else:
-        raise TypeError("Invalid type {} for texture".format(type(texture)))
+        assert np.issubdtype(texture.dtype, np.integer)
+        texture = texture.astype(np.uint8)
+    if texture.ndim == 2:
+        texture = texture[:, :, np.newaxis]
 
-    return texture
+    n_channels = texture.shape[2]
+    if channels == TexChannels.R:
+        return texture[:, :, 0]
+    if channels == TexChannels.GB:
+        if n_channels == 1:
+            return np.repeat(texture, 2, axis=2)
+        return texture if n_channels == 2 else texture[:, :, 1:3]
+    # A gray image, with or without alpha, spans the three color channels
+    rgb = texture[:, :, (0, 0, 0)] if n_channels < 3 else texture[:, :, :3]
+    if channels == TexChannels.RGB:
+        return np.ascontiguousarray(rgb)
+    assert channels == TexChannels.RGBA
+    alpha = texture[:, :, n_channels - 1 : n_channels] if n_channels in (2, 4) else np.full_like(rgb[:, :, :1], 255)
+    return np.concatenate((rgb, alpha), axis=2)
 
 
 def transform_box(box, poses):

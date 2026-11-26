@@ -320,9 +320,9 @@ class Visualizer(BuildableMixin, RBC):
             return False
         if self._viewer is not None:
             assert self._viewer._pyrender_viewer is not None
-            return self._viewer._pyrender_viewer._is_software
+            return self._viewer._pyrender_viewer.is_software
         assert self._rasterizer is not None and self._rasterizer._renderer is not None
-        return self._rasterizer._renderer._is_software
+        return self._rasterizer._renderer.is_software
 
     @property
     def batch_renderer(self):

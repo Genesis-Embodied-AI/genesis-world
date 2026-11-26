@@ -70,7 +70,8 @@ class OSMesaPlatform(Platform):
         self._buffer = arrays.GLubyteArray.zeros((1, 1, 4))
 
     def make_current(self):
-        assert OSMesaMakeCurrent(self._context, self._buffer, gl.GL_UNSIGNED_BYTE, 1, 1)
+        if not OSMesaMakeCurrent(self._context, self._buffer, gl.GL_UNSIGNED_BYTE, 1, 1):
+            gs.raise_exception("Unable to make the OSMesa context current.")
 
     def make_uncurrent(self):
         OSMesaMakeCurrent(None, None, gl.GL_UNSIGNED_BYTE, 0, 0)

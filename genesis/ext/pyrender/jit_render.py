@@ -8,8 +8,9 @@ import numba as nb
 import OpenGL.GL as GL
 import OpenGL.constant as GL_constant
 
-from .constants import BufFlags, LightType, MAX_N_LIGHTS, RenderFlags, TexFlags, ViewFlags
-from .light import DirectionalLight, PointLight, SpotLight
+from .camera import OrthographicCamera, PerspectiveCamera
+from .constants import BufFlags, LightType, MAX_N_LIGHTS, ProgramFlags, RenderFlags, TexChannels, TexFlags, ViewFlags
+from .light import PointLight, SpotLight
 from .numba_gl_wrapper import GLWrapper
 from .scene import CORNER_INDICES
 from .texture import CubeMapTexture, Texture
@@ -18,12 +19,23 @@ from .utils import transform_box
 
 _DISABLE_OFFSCREEN_MARKERS = "GS_DISABLE_OFFSCREEN_MARKERS" in os.environ
 
+# The rotation from the world frame to the camera frame of each face of a cube map, in the order of the faces of OpenGL
+# (+x, -x, +y, -y, +z, -z). The camera looks along its -z axis, and its y axis follows the orientation of the faces that
+# OpenGL cube maps define.
+_CUBE_MAP_FACES_DIR = np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]], np.float64)
+_CUBE_MAP_FACES_UP = np.array([[0, -1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, -1, 0]], np.float64)
+CUBE_MAP_FACES_ROT = np.stack(
+    (np.cross(_CUBE_MAP_FACES_UP, -_CUBE_MAP_FACES_DIR), _CUBE_MAP_FACES_UP, -_CUBE_MAP_FACES_DIR), axis=1
+)
+
 
 class PlacedGroup(NamedTuple):
     """Primitives placed through instance transforms that share an instance count, so that their poses stack."""
 
     idx: np.ndarray
+    """The indices of the primitives of the group."""
     n_instances: int
+    """The number of instances of each primitive of the group."""
 
 
 def load_const(const_name):
@@ -32,9 +44,8 @@ def load_const(const_name):
         return float(c)
     if isinstance(c, GL_constant.IntConstant) or isinstance(c, GL_constant.LongConstant):
         return int(c)
-    if isinstance(c, GL_constant.StringConstant):
-        return str(c, "utf-8")
-    raise TypeError("Unknown OpenGL constant type")
+    assert isinstance(c, GL_constant.StringConstant)
+    return str(c, "utf-8")
 
 
 GL_TRUE = load_const("GL_TRUE")
@@ -47,7 +58,6 @@ GL_SRC_ALPHA = load_const("GL_SRC_ALPHA")
 GL_ONE_MINUS_SRC_ALPHA = load_const("GL_ONE_MINUS_SRC_ALPHA")
 GL_ONE = load_const("GL_ONE")
 GL_SRC1_COLOR = load_const("GL_SRC1_COLOR")
-GL_ZERO = load_const("GL_ZERO")
 GL_FRONT_AND_BACK = load_const("GL_FRONT_AND_BACK")
 GL_LINE = load_const("GL_LINE")
 GL_FILL = load_const("GL_FILL")
@@ -56,7 +66,6 @@ GL_BACK = load_const("GL_BACK")
 GL_FRONT = load_const("GL_FRONT")
 GL_PROGRAM_POINT_SIZE = load_const("GL_PROGRAM_POINT_SIZE")
 GL_UNSIGNED_INT = load_const("GL_UNSIGNED_INT")
-GL_RGBA = load_const("GL_RGBA")
 GL_RGB = load_const("GL_RGB")
 GL_DEPTH_COMPONENT = load_const("GL_DEPTH_COMPONENT")
 GL_UNSIGNED_BYTE = load_const("GL_UNSIGNED_BYTE")
@@ -69,10 +78,10 @@ RenderFlags_SEG = RenderFlags.SEG
 RenderFlags_FLIP_WIREFRAME = RenderFlags.FLIP_WIREFRAME
 RenderFlags_ALL_WIREFRAME = RenderFlags.ALL_WIREFRAME
 RenderFlags_ALL_SOLID = RenderFlags.ALL_SOLID
-RenderFlags_SKIP_CULL_FACES = RenderFlags.SKIP_CULL_FACES
 RenderFlags_SHADOWS_DIRECTIONAL = RenderFlags.SHADOWS_DIRECTIONAL
 RenderFlags_SHADOWS_SPOT = RenderFlags.SHADOWS_SPOT
 RenderFlags_SHADOWS_POINT = RenderFlags.SHADOWS_POINT
+RenderFlags_SHADOWS_ALL = RenderFlags.SHADOWS_ALL
 RenderFlags_SKIP_FLOOR = RenderFlags.SKIP_FLOOR
 RenderFlags_OFFSCREEN = RenderFlags.OFFSCREEN
 RenderFlags_REFLECTIVE_FLOOR = RenderFlags.REFLECTIVE_FLOOR
@@ -258,20 +267,21 @@ def address_to_ptr(typingctx, src):
 
 
 def is_env_pass(flags):
-    """Whether a pass draws one environment where it is, for a camera bound to it, rather than every environment side
-    by side on the grid as the viewer window does. The window draws the grid whatever the separation setting: the
-    setting picks how its cameras render (see 'JITRenderer.env_offset_buffer')."""
+    """Tell whether a pass draws one environment where it is, rather than every environment side by side on the grid.
+
+    A camera bound to an environment draws it alone. The viewer window draws the grid whatever the separation setting,
+    which picks how its cameras render (see 'JITRenderer.env_offset_buffer').
+    """
     return bool(flags & RenderFlags.ENV_SEPARATE and flags & RenderFlags.OFFSCREEN)
 
 
 class JITRenderer:
-    def __init__(self, scene, node_list, primitive_list, envs_offset):
+    def __init__(self, scene, envs_offset):
+        self.gl = None
         self._forward_pass = None
         self._shadow_mapping_pass = None
         self._read_depth_buf = None
         self._read_color_buf = None
-        self._update_normal_flat = None
-        self._update_normal_smooth = None
         self._update_buffer_fn = None
         self._buffer = dict()
         self._scene = scene
@@ -298,8 +308,8 @@ class JITRenderer:
         self._placeholder_textures = None
         self.placeholder_tex = None
         self._context_revision = None
-        self.set_primitive(scene, node_list, primitive_list)
-        self.set_light(scene, scene.light_nodes, scene.ambient_light)
+        self.set_primitive([], [])
+        self.set_light()
         self.reflection_mat = np.identity(4, np.float32)
 
     def _update_instances(self):
@@ -338,18 +348,17 @@ class JITRenderer:
         self.grid_offset_bounds[idx, 0] = offsets.min(axis=1)
         self.grid_offset_bounds[idx, 1] = offsets.max(axis=1)
 
-    def update(self, scene):
-        if scene.meshes_updated:
+    def update(self):
+        """Gather the primitives and the poses of the scene that changed since the last call."""
+        scene = self._scene
+        if scene.has_meshes_changed:
             node_list, primitive_list = [], []
             for node in scene.sorted_mesh_nodes():
-                mesh = node.mesh
-                if not mesh.is_visible:
-                    continue
-                for primitive in mesh.primitives:
+                for primitive in node.mesh.primitives:
                     node_list.append(node)
                     primitive_list.append(primitive)
-            self.set_primitive(scene, node_list, primitive_list)
-            scene.reset_meshes_updated()
+            self.set_primitive(node_list, primitive_list)
+            scene.has_meshes_changed = False
         elif self._scene_revision != scene.revision:
             # A node moves through Scene.set_pose, which advances the revision. Its own transform setters leave it
             # alone.
@@ -378,18 +387,29 @@ class JITRenderer:
                     self.scene_bounds[is_grid] = np.stack((corners.min(axis=0), corners.max(axis=0)), axis=0)
         self._scene_revision = scene.revision
 
-    def set_lighting(self, scene, is_grid):
+    def set_lighting(self, is_grid):
         """Set up the lights for a pass, and tell whether every shadow texture was found in the context.
 
         The setup follows the scene: the light poses and the bounds the directional shadow frustum is fitted to, which
         the grid pass has its own of. It stays unsettled while a shadow texture is missing from the context, so the next
         render tries again.
+
+        Parameters
+        ----------
+        is_grid : bool
+            Whether the pass draws the environments side by side (see 'is_env_pass').
+
+        Returns
+        -------
+        is_lighting_ready : bool
+            Whether every shadow texture was found in the context.
         """
+        scene = self._scene
         if self.scene_bounds[is_grid] is not None:
             scene.bounds = self.scene_bounds[is_grid]
         lights_revision = (scene.revision, is_grid)
         if self._lights_revision != lights_revision:
-            self._is_lighting_ready = self.set_light(scene, scene.light_nodes, scene.ambient_light)
+            self._is_lighting_ready = self.set_light()
             self._lights_revision = lights_revision if self._is_lighting_ready else None
         return self._is_lighting_ready
 
@@ -405,13 +425,18 @@ class JITRenderer:
             GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
         primitive._add_to_context(self.env_offset_buffer)
 
-    def update_context(self, scene, flags):
+    def update_context(self, flags):
         """Add to the GL context the meshes and textures the scene holds and free the ones it dropped.
 
-        Runs once per scene revision. The shadow flags decide which lights get a shadow texture, so they are part of
-        the key.
+        Runs once per scene revision and set of shadow flags, which decide the lights given a shadow texture.
+
+        Parameters
+        ----------
+        flags : int
+            The render flags of the pass (see RenderFlags).
         """
-        shadow_flags = flags & (RenderFlags.SHADOWS_DIRECTIONAL | RenderFlags.SHADOWS_POINT | RenderFlags.SHADOWS_SPOT)
+        scene = self._scene
+        shadow_flags = flags & RenderFlags.SHADOWS_ALL
         if self._context_revision == (scene.revision, shadow_flags):
             return
         self._context_revision = (scene.revision, shadow_flags)
@@ -451,17 +476,8 @@ class JITRenderer:
 
         shadow_textures = set()
         for light in scene.lights:
-            # Create if needed
-            active = False
-            if isinstance(light, DirectionalLight) and flags & RenderFlags.SHADOWS_DIRECTIONAL:
-                active = True
-            elif isinstance(light, PointLight) and flags & RenderFlags.SHADOWS_POINT:
-                active = True
-            elif isinstance(light, SpotLight) and flags & RenderFlags.SHADOWS_SPOT:
-                active = True
-
-            if active and light.shadow_texture is None:
-                light._generate_shadow_texture()
+            if flags & light.shadow_flag and light.shadow_texture is None:
+                light.generate_shadow_texture()
             if light.shadow_texture is not None:
                 shadow_textures.add(light.shadow_texture)
                 shadow_textures.add(light.transmittance_texture)
@@ -502,10 +518,13 @@ class JITRenderer:
                 pass
             self.env_offset_buffer = None
 
-    def set_light(self, scene, light_nodes, ambient_light):
+    def set_light(self):
+        """Gather the lights of the scene, and tell whether every shadow texture was found in the context."""
+        scene = self._scene
+        light_nodes = scene.light_nodes
         n = len(light_nodes)
-        if n > MAX_N_LIGHTS:
-            raise ValueError("Number of lights exceeds limit.")
+        # The shaders bind the maps of every light along with the material textures, within the units of every driver
+        assert n <= MAX_N_LIGHTS
 
         self.lights_type = np.zeros(n, np.int32)
         self.lights_color = np.zeros((n, 3), np.float32)
@@ -517,48 +536,63 @@ class JITRenderer:
         self.lights_angle_offset = np.zeros(n, np.float32)
         self.shadow_map = np.zeros(n, np.int32)
         self.transmittance_map = np.zeros(n, np.int32)
-        self.light_matrix = np.zeros((n, 6, 4, 4), np.float32)
+        # The view-projection matrix of the shadow camera of each light, one per face of the cube map of a point light
+        self.lights_matrix = np.zeros((n, 6, 4, 4), np.float32)
+        self.lights_idx_by_node = {}
 
-        self.ambient_light = np.array(ambient_light, np.float32)
+        self.ambient_light = np.array(scene.ambient_light, np.float32)
 
-        all_textures_ready = True
+        is_textures_ready = True
 
         for i, node in enumerate(light_nodes):
             light = node.light
             pose = scene.get_pose(node)
+            self.lights_idx_by_node[node] = i
             self.lights_color[i] = light.color
             self.lights_intensity[i] = light.intensity
             self.lights_pos[i] = pose[:3, 3]
             self.lights_dir[i] = -pose[:3, 2]
 
-            if light.shadow_texture:
+            if light.shadow_texture is not None:
                 if light.shadow_texture._in_context() and light.transmittance_texture._in_context():
                     self.shadow_map[i] = light.shadow_texture._texid
                     self.transmittance_map[i] = light.transmittance_texture._texid
                 else:
-                    all_textures_ready = False
+                    is_textures_ready = False
 
-            camera = light._get_shadow_camera(scene.scale)
-            P = camera.get_projection_matrix()
+            self.lights_type[i] = light.light_type
             if isinstance(light, PointLight):
-                self.lights_type[i] = LightType.POINT
-                self.light_matrix[i] = P @ light._get_view_matrices(self.lights_pos[i])
+                # Each face of the cube map sees a right angle of the scene from the light
+                P = PerspectiveCamera(yfov=np.pi / 2, znear=0.1, zfar=25.0, aspect_ratio=1.0).get_projection_matrix()
+                faces_view = np.tile(np.eye(4), (6, 1, 1))
+                faces_view[:, :3, :3] = CUBE_MAP_FACES_ROT
+                faces_view[:, :3, 3] = -CUBE_MAP_FACES_ROT @ self.lights_pos[i]
+                self.lights_matrix[i] = P @ faces_view
                 continue
+            scene_scale = scene.scale if scene.scale > 1e-6 else 1.0
             if isinstance(light, SpotLight):
-                self.lights_type[i] = LightType.SPOT
-                cos_outer = np.cos(light.outerConeAngle)
-                self.lights_angle_scale[i] = 1.0 / max(0.001, np.cos(light.innerConeAngle) - cos_outer)
+                cos_outer = np.cos(light.cone_angle)
+                self.lights_angle_scale[i] = 1.0 / max(0.001, 1.0 - cos_outer)
                 self.lights_angle_offset[i] = -cos_outer * self.lights_angle_scale[i]
+                camera = PerspectiveCamera(
+                    yfov=min(2 * light.cone_angle + np.pi / 16.0, np.pi),
+                    znear=0.01 * scene_scale,
+                    zfar=10 * scene_scale,
+                    aspect_ratio=1.0,
+                )
             else:
-                self.lights_type[i] = LightType.DIRECTIONAL
-                # The shadow camera of a directional light looks at the scene from outside its bounds
+                # The shadow camera of a directional light looks at the scene from outside its bounds. Its map spans the
+                # bounding sphere of the scene, whose radius is half the diagonal. Every shadow lies inside it, since a
+                # shadow falls where the light meets a caster first, and every caster lies inside the sphere.
                 pose = pose.copy()
-                pose[:3, 3] = scene.centroid - self.lights_dir[i] * scene.scale
-            self.light_matrix[i, 0] = P @ np.linalg.inv(pose)
+                pose[:3, 3] = scene.centroid - self.lights_dir[i] * scene_scale
+                radius = 0.5 * scene_scale
+                camera = OrthographicCamera(xmag=radius, ymag=radius, znear=0.01 * scene_scale, zfar=10 * scene_scale)
+            self.lights_matrix[i, 0] = camera.get_projection_matrix() @ np.linalg.inv(pose)
 
-        return all_textures_ready
+        return is_textures_ready
 
-    def set_primitive(self, scene, node_list, primitive_list):
+    def set_primitive(self, node_list, primitive_list):
         self.node_list = node_list
         self.primitive_list = primitive_list
 
@@ -568,7 +602,7 @@ class JITRenderer:
         self.pose = np.zeros((n, 4, 4), np.float32)
         # The textures of each slot of the material, in the order of the bits of 'TexFlags', and the flags of the slots
         # filled, the bit of slot i shifted by 8 marking a texture array
-        self.textures = np.zeros((n, 4), np.int32)
+        self.textures = np.zeros((n, 5), np.int32)
         self.tex_flags = np.zeros(n, np.int32)
         # Row i of texture_layers holds, for each rendered environment, the layer of the base color (0) and emissive (1)
         # texture arrays that a layered primitive samples (see 'Primitive.texture_layers').
@@ -594,10 +628,12 @@ class JITRenderer:
         self.is_transmissive = np.zeros(n, np.bool_)
         self.mode = np.zeros(n, np.int32)
         self.n_instances = np.zeros(n, np.int32)
-        # Per-(primitive, env) visibility used only when a primitive is env filtered (see 'is_env_filtered'). n_env spans the per-env instance poses.
+        # The visibility of each primitive in each environment, which an env filtered primitive alone reads (see
+        # 'is_env_filtered'). Its environments are those of the instance poses.
         n_env = max((len(p.poses) for p in primitive_list if p.poses is not None), default=1)
         self.env_active = np.ones((n, n_env), np.bool_)
-        self.n_indices = np.zeros(n, np.int32)  # positive: indices, negative: positions
+        # The number of indices of each primitive, or minus its number of positions for a primitive without indices
+        self.n_indices = np.zeros(n, np.int32)
         # The views drawing each primitive (see 'Mesh.views')
         self.views = np.zeros(n, np.int8)
         self.model_buffer_id = np.zeros(n, np.int32)
@@ -636,13 +672,13 @@ class JITRenderer:
         self.corners = {False: None, True: None}
         self._primitive_index = {primitive: i for i, primitive in enumerate(primitive_list)}
 
-        floor_existed = False
+        has_floor = False
 
         for i, primitive in enumerate(primitive_list):
             if primitive._vaid is None:
                 self._add_primitive_to_context(primitive)
             self.vao_id[i] = primitive._vaid
-            self.pose[i] = scene.get_pose(node_list[i])
+            self.pose[i] = self._scene.get_pose(node_list[i])
             # An instance transform is what places a primitive, and it moves with the simulation, so the centre has to
             # go through it and be refreshed. That holds for the lone instance shared by every environment just as much
             # as for one instance per environment. A cloud of instances sharing a primitive - particles - has no single
@@ -671,30 +707,23 @@ class JITRenderer:
             self._set_instance_bounds(np.array([i]), poses[np.newaxis])
 
             material = primitive.material
-            for i_slot, texture in enumerate(
-                (
-                    material.normalTexture,
-                    material.emissiveTexture,
-                    material.baseColorTexture,
-                    material.metallicRoughnessTexture,
-                )
-            ):
+            for i_slot, texture in enumerate(material.slots_texture):
                 if texture is not None:
                     self.textures[i, i_slot] = texture._texid
                     self.tex_flags[i] |= 1 << i_slot
                     if texture.tex_type == GL_TEXTURE_2D_ARRAY:
                         self.tex_flags[i] |= 1 << (i_slot + 8)
 
-            self.base_color_factor[i] = material.baseColorFactor
-            self.metallic_factor[i] = material.metallicFactor
-            self.roughness_factor[i] = material.roughnessFactor
-            self.emissive_factor[i] = material.emissiveFactor
-            self.transmission_factor[i] = material.transmissionFactor
+            self.base_color_factor[i] = material.base_color_factor
+            self.metallic_factor[i] = material.metallic_factor
+            self.roughness_factor[i] = material.roughness_factor
+            self.emissive_factor[i] = material.emissive_factor
+            self.transmission_factor[i] = material.transmission_factor
             self.ior[i] = material.ior
 
-            self.is_blended[i] = material.alphaMode == "BLEND"
+            self.is_blended[i] = material.is_blended
             self.is_wireframe[i] = material.wireframe
-            self.is_reflective_floor[i] = primitive.is_floor and not floor_existed
+            self.is_reflective_floor[i] = primitive.is_floor and not has_floor
             self.is_transparent[i] = node_list[i].mesh.is_transparent
             self.is_marker[i] = node_list[i].mesh.is_marker
             self.is_transmissive[i] = material.is_transmissive
@@ -706,13 +735,13 @@ class JITRenderer:
                 self.env_active[i, : len(primitive.envs)] = primitive.envs
 
             if primitive.is_floor:
-                floor_existed = True
+                has_floor = True
 
             self.mode[i] = primitive.mode
             self.n_instances[i] = len(primitive.poses) if primitive.poses is not None else 1
             self.n_indices[i] = primitive.indices.size if primitive.indices is not None else -len(primitive.positions)
-            self.model_buffer_id[i] = primitive._buffers.get("model", 0)
-            self.inst_tint_buffer_id[i] = primitive._buffers.get("inst_tint", 0)
+            self.model_buffer_id[i] = primitive.buffers_id.get("model", 0)
+            self.inst_tint_buffer_id[i] = primitive.buffers_id.get("inst_tint", 0)
             self.inst_attr_start[i] = primitive._inst_attr_start
 
         self.update_texture_layers([primitive_list[i] for i in np.flatnonzero(is_layered)])
@@ -733,35 +762,36 @@ class JITRenderer:
         self._update_instances()
 
     @contextlib.contextmanager
-    def _env_filtered_culling(self, env_idx, view_proj=None, is_grid=False):
-        # Temporarily zero the index count of the primitives this pass does not draw, so their draw renders nothing.
-        # These are the primitives absent from env_idx (heterogeneous variants, and those standing in another
-        # environment) and those the kind of view drawn leaves out (see 'view'). Given the view-projection matrix of a
-        # camera, they also include the primitives whose bounds lie outside its view volume. Mirrors the SKIP_MARKERS
-        # approach used in forward_pass.
-        inactive = (self.views & self.view) == 0
+    def _culled(self, env_idx, view_proj=None, is_grid=False):
+        """Zero the index count of the primitives that a pass leaves out while it runs, so that their draw is empty.
+
+        These are the primitives absent from the environment drawn (heterogeneous variants, and those standing in
+        another environment), those that the kind of view drawn leaves out (see 'view'), and, given the view-projection
+        matrix of a camera, those whose bounds lie outside its view volume.
+        """
+        is_culled = (self.views & self.view) == 0
         corners = self.corners[is_grid]
         if view_proj is not None and corners is not None:
             # A box lies outside the view volume when its 8 corners lie outside one of its planes. A point inside has
             # clip coordinates with -w <= x, y, z <= w.
             clip = corners @ view_proj[:, :3].T + view_proj[:, 3]
             coords, w = clip[..., :3], clip[..., 3:]
-            inactive |= ((coords > w).all(axis=1) | (coords < -w).all(axis=1)).any(axis=-1)
+            is_culled |= ((coords > w).all(axis=1) | (coords < -w).all(axis=1)).any(axis=-1)
         if env_idx >= 0 and self._has_env_filtered:
-            inactive |= (self.env_row >= 0) & (self.env_row != env_idx)
+            is_culled |= (self.env_row >= 0) & (self.env_row != env_idx)
             # Only the env filtered primitives carry one visibility per environment. Primitives standing in a single
             # environment (env_row) alone may leave 'env_active' narrower than the rendered environments.
             if self.is_env_filtered.any():
-                inactive[self.is_env_filtered] |= ~self.env_active[self.is_env_filtered, env_idx]
-        if not inactive.any():
+                is_culled[self.is_env_filtered] |= ~self.env_active[self.is_env_filtered, env_idx]
+        if not is_culled.any():
             yield
             return
-        saved = self.n_indices[inactive].copy()
-        self.n_indices[inactive] = 0
+        n_indices_culled = self.n_indices[is_culled].copy()
+        self.n_indices[is_culled] = 0
         try:
             yield
         finally:
-            self.n_indices[inactive] = saved
+            self.n_indices[is_culled] = n_indices_culled
 
     def load_programs(self, renderer, flags, program_flags):
         if (flags, program_flags) not in self.program_id:
@@ -771,9 +801,7 @@ class JITRenderer:
                 # Markers are excluded from scene bounds, so shadow maps may not cover them. Disable shadow
                 # reception while keeping full lighting.
                 if self.is_marker[i]:
-                    prim_flags &= ~(
-                        RenderFlags.SHADOWS_DIRECTIONAL | RenderFlags.SHADOWS_SPOT | RenderFlags.SHADOWS_POINT
-                    )
+                    prim_flags &= ~RenderFlags.SHADOWS_ALL
                 # A single floor mirrors the scene, the one the reflection is set up for (see 'reflection_mat')
                 if not self.is_reflective_floor[i]:
                     prim_flags &= ~RenderFlags.REFLECTIVE_FLOOR
@@ -782,6 +810,9 @@ class JITRenderer:
             self.program_id[(flags, program_flags)] = program_id
 
     def gen_func_ptr(self):
+        """Compile the passes of the renderer, once, with the OpenGL functions of the current context."""
+        if self.gl is not None:
+            return
         self.gl = GLWrapper()
 
         IS_OPENGL_42_AVAILABLE = "glDrawElementsInstancedBaseInstance" in self.gl.gl_funcs
@@ -967,6 +998,15 @@ class JITRenderer:
             # A pass drawing the normals draws them alone, as lines of a single color (see vertex_normals.geom)
             is_normal_pass = flags & RenderFlags_NORMALS
             is_rgba = not (flags & RenderFlags_DEPTH_ONLY or flags & RenderFlags_SEG or is_normal_pass)
+            # A pass of the color image shades the surfaces with their material and the lights
+            is_shaded = is_rgba and not flags & RenderFlags_NORMAL
+            texture_list = [
+                "normal_texture",
+                "emissive_texture",
+                "base_color_texture",
+                "metallic_roughness_texture",
+                "occlusion_texture",
+            ]
 
             # Every sampler left unset reads unit 0, which holds a placeholder until a material binds a texture there
             # (see bind_lighting). This also unbinds the mirror image that a floor pass draws into.
@@ -977,29 +1017,27 @@ class JITRenderer:
             last_pid = -1
             lighting_texture = 0
 
-            for id in draw_order:
+            for i_p in draw_order:
                 # Only render markers on the main graphical window, while skipping plane-reflection. A primitive this
                 # pass hides has no index to draw, and its state setup costs the driver as much as a draw.
                 if (
-                    n_indices[id] == 0
-                    or ((is_reflective_floor[id] or is_marker[id]) and flags & RenderFlags_SKIP_FLOOR)
+                    n_indices[i_p] == 0
+                    or ((is_reflective_floor[i_p] or is_marker[i_p]) and flags & RenderFlags_SKIP_FLOOR)
                     or (
-                        is_marker[id]
+                        is_marker[i_p]
                         and (not is_rgba or (flags & RenderFlags_OFFSCREEN and _DISABLE_OFFSCREEN_MARKERS))
                     )
                 ):
                     continue
 
-                pid = program_id[id]
+                pid = program_id[i_p]
                 if pid != last_pid:
                     gl.glUseProgram(pid)
-                    if is_rgba and not flags & RenderFlags_NORMAL:
+                    if is_shaded:
                         # The programs of the markers receive no shadow (see 'load_programs')
                         light_flags = flags
-                        if is_marker[id]:
-                            light_flags &= ~(
-                                RenderFlags_SHADOWS_DIRECTIONAL | RenderFlags_SHADOWS_SPOT | RenderFlags_SHADOWS_POINT
-                            )
+                        if is_marker[i_p]:
+                            light_flags &= ~RenderFlags_SHADOWS_ALL
                         lighting_texture = bind_lighting(
                             pid,
                             light_flags,
@@ -1020,7 +1058,7 @@ class JITRenderer:
                         set_uniform_3fv(pid, "cam_pos", cam_pos, gl)
                         set_uniform_matrix_4fv(pid, "reflection_mat", reflection_mat, gl)
                         # The instance tints show in the debug views alone (see 'Primitive.inst_tints')
-                        if inst_tint_buffer_id[id]:
+                        if inst_tint_buffer_id[i_p]:
                             set_uniform_1i(pid, "debug_view", debug_view, gl)
 
                     set_uniform_matrix_4fv(pid, "V", mat_V, gl)
@@ -1032,54 +1070,47 @@ class JITRenderer:
                 active_texture = lighting_texture
 
                 # The program of a reflective floor samples the mirror image (see REFLECTIVE_FLOOR in renderer.py)
-                if flags & RenderFlags_REFLECTIVE_FLOOR and is_reflective_floor[id]:
+                if flags & RenderFlags_REFLECTIVE_FLOOR and is_reflective_floor[i_p]:
                     gl.glActiveTexture(GL_TEXTURE0 + active_texture)
                     gl.glBindTexture(GL_TEXTURE_2D, floor_tex)
                     set_uniform_1i(pid, "floor_tex", active_texture, gl)
                     set_uniform_2f(pid, "screen_size", screen_size[0], screen_size[1], gl)
                     active_texture += 1
 
-                set_uniform_matrix_4fv(pid, "M", pose[id], gl)
+                set_uniform_matrix_4fv(pid, "M", pose[i_p], gl)
                 if is_normal_pass:
-                    set_uniform_1f(pid, "normal_magnitude", normal_magnitude[id], gl)
-                gl.glBindVertexArray(vao_id[id])
+                    set_uniform_1f(pid, "normal_magnitude", normal_magnitude[i_p], gl)
+                gl.glBindVertexArray(vao_id[i_p])
 
-                is_culled = not flags & RenderFlags_SKIP_CULL_FACES
-                if is_rgba and not flags & RenderFlags_NORMAL:
-                    tf = tex_flags[id]
-                    texture_list = [
-                        "normal_texture",
-                        "emissive_texture",
-                        "base_color_texture",
-                        "metallic_roughness_texture",
-                    ]
+                if is_shaded:
+                    tf = tex_flags[i_p]
                     # An unset sampler reads unit 0. Keep texture arrays off unit 0, since a sampler2D and a
                     # sampler2DArray reading one unit make the draw invalid.
                     if tf >> 8 and active_texture == 0:
                         active_texture = 1
-                    for i in range(4):
+                    for i in range(len(texture_list)):
                         if tf & (1 << i):
                             gl.glActiveTexture(GL_TEXTURE0 + active_texture)
                             is_array = tf & (1 << (i + 8))
-                            gl.glBindTexture(GL_TEXTURE_2D_ARRAY if is_array else GL_TEXTURE_2D, textures[id, i])
+                            gl.glBindTexture(GL_TEXTURE_2D_ARRAY if is_array else GL_TEXTURE_2D, textures[i_p, i])
                             set_uniform_1i(pid, "material." + texture_list[i], active_texture, gl)
                             active_texture += 1
 
-                    set_uniform_4fv(pid, "material.base_color_factor", base_color_factor[id], gl)
-                    set_uniform_1f(pid, "material.metallic_factor", metallic_factor[id], gl)
-                    set_uniform_1f(pid, "material.roughness_factor", roughness_factor[id], gl)
-                    set_uniform_3fv(pid, "material.emissive_factor", emissive_factor[id], gl)
-                    set_uniform_1f(pid, "material.transmission_factor", transmission_factor[id], gl)
-                    set_uniform_1f(pid, "material.ior", ior[id], gl)
+                    set_uniform_4fv(pid, "material.base_color_factor", base_color_factor[i_p], gl)
+                    set_uniform_1f(pid, "material.metallic_factor", metallic_factor[i_p], gl)
+                    set_uniform_1f(pid, "material.roughness_factor", roughness_factor[i_p], gl)
+                    set_uniform_3fv(pid, "material.emissive_factor", emissive_factor[i_p], gl)
+                    set_uniform_1f(pid, "material.transmission_factor", transmission_factor[i_p], gl)
+                    set_uniform_1f(pid, "material.ior", ior[i_p], gl)
 
-                    if is_transmissive[id]:
+                    if is_transmissive[i_p]:
                         # A transmissive material adds the light it reflects to the background, which its second output
                         # attenuates by the light it lets through (see 'frag_transmittance' in mesh.frag)
                         gl.glEnable(GL_BLEND)
                         gl.glBlendFunc(GL_ONE, GL_SRC1_COLOR)
-                    elif is_blended[id]:
-                        # FIXME: Note that enabling GL_BLEND yield non-deterministic results on Nvidia GPU.
-                        # As a result, it must only be enabled if absolutely necessary rather than systematically.
+                    elif is_blended[i_p]:
+                        # Blending is enabled where needed alone, since it makes the results of Nvidia GPUs
+                        # non-deterministic
                         gl.glEnable(GL_BLEND)
                         # The alpha accumulates the coverage of the fragments, which the mirror image of a floor reads
                         # (see REFLECTIVE_FLOOR in mesh.frag)
@@ -1087,78 +1118,72 @@ class JITRenderer:
                     else:
                         gl.glDisable(GL_BLEND)
 
-                    wf = is_wireframe[id] and not flags & RenderFlags_ALL_SOLID
+                    is_wireframe_drawn = is_wireframe[i_p] and not flags & RenderFlags_ALL_SOLID
                     if flags & RenderFlags_FLIP_WIREFRAME:
-                        wf = not wf
-                    if wf or flags & RenderFlags_ALL_WIREFRAME:
+                        is_wireframe_drawn = not is_wireframe_drawn
+                    if is_wireframe_drawn or flags & RenderFlags_ALL_WIREFRAME:
                         gl.glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
                     else:
                         gl.glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-
-                    if is_culled:
-                        gl.glEnable(GL_CULL_FACE)
-                        gl.glCullFace(GL_BACK if det_reflection > 0 else GL_FRONT)
-                    else:
-                        gl.glDisable(GL_CULL_FACE)
                 else:
-                    gl.glEnable(GL_CULL_FACE)
-                    gl.glCullFace(GL_BACK if det_reflection > 0 else GL_FRONT)
                     gl.glDisable(GL_BLEND)
                     gl.glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+                gl.glEnable(GL_CULL_FACE)
+                gl.glCullFace(GL_BACK if det_reflection > 0 else GL_FRONT)
 
                 gl.glDisable(GL_PROGRAM_POINT_SIZE)
 
                 if flags & RenderFlags_SEG:
-                    if color_list[id, 0] < -1:
+                    if color_list[i_p, 0] < -1:
                         gl.glBindVertexArray(0)
                         continue
-                    set_uniform_3fv(pid, "color", color_list[id], gl)
+                    set_uniform_3fv(pid, "color", color_list[i_p], gl)
 
                 # A texture array is sampled at the layer of the environment drawn
-                i_layers = texture_layers_idx[id]
-                is_layer_set = i_layers >= 0 and is_rgba and not flags & RenderFlags_NORMAL
+                i_layers = texture_layers_idx[i_p]
+                is_layer_set = i_layers >= 0 and is_shaded
                 if is_layer_set and env_idx >= 0:
-                    set_texture_layers(pid, tex_flags[id], texture_layers[i_layers, env_idx], gl)
+                    set_texture_layers(pid, tex_flags[i_p], texture_layers[i_layers, env_idx], gl)
 
                 # A single-sided transmissive surface is drawn twice, back faces first and front faces over them, so
                 # that the far side of a glass or of a body of water shows through its near side
-                n_face_passes = 2 if is_rgba and is_transmissive[id] and is_culled else 1
+                n_face_passes = 2 if is_rgba and is_transmissive[i_p] else 1
                 for i_face_pass in range(n_face_passes):
                     if n_face_passes == 2:
                         is_front_culled = (i_face_pass == 0) == (det_reflection > 0)
                         gl.glCullFace(GL_FRONT if is_front_culled else GL_BACK)
-                    if (is_env_filtered[id] or is_layer_set) and env_idx == -1:
+                    if (is_env_filtered[i_p] or is_layer_set) and env_idx == -1:
                         # Combined draw-all of a heterogeneous variant: draw only the environments it is active in,
                         # otherwise the variant would be drawn in every environment's instance. A primitive sampling a
                         # texture array is drawn one environment at a time too, each at its own layer.
-                        for k in range(n_instances[id]):
-                            if not env_active[id, k]:
+                        for k in range(n_instances[i_p]):
+                            if not env_active[i_p, k]:
                                 continue
                             if is_layer_set:
-                                set_texture_layers(pid, tex_flags[id], texture_layers[i_layers, k], gl)
+                                set_texture_layers(pid, tex_flags[i_p], texture_layers[i_layers, k], gl)
                             draw_instances(
-                                mode[id],
-                                n_indices[id],
-                                n_instances[id],
+                                mode[i_p],
+                                n_indices[i_p],
+                                n_instances[i_p],
                                 k,
-                                model_buffer_id[id],
-                                inst_attr_start[id],
+                                model_buffer_id[i_p],
+                                inst_attr_start[i_p],
                                 env_offset_buffer,
-                                inst_tint_buffer_id[id],
-                                is_env_instanced[id],
+                                inst_tint_buffer_id[i_p],
+                                is_env_instanced[i_p],
                                 gl,
                             )
                     else:
                         draw_instances(
-                            mode[id],
-                            n_indices[id],
-                            n_instances[id],
-                            env_idx if is_env_instanced[id] else -1,
-                            model_buffer_id[id],
-                            inst_attr_start[id],
+                            mode[i_p],
+                            n_indices[i_p],
+                            n_instances[i_p],
+                            env_idx if is_env_instanced[i_p] else -1,
+                            model_buffer_id[i_p],
+                            inst_attr_start[i_p],
                             env_offset_buffer,
-                            inst_tint_buffer_id[id],
-                            is_env_instanced[id],
+                            inst_tint_buffer_id[i_p],
+                            is_env_instanced[i_p],
                             gl,
                         )
 
@@ -1174,8 +1199,6 @@ class JITRenderer:
                 nb.int32[:],
                 nb.int32[:],
                 nb.int32[:],
-                nb.float32[:, :],
-                nb.float32[:, :],
                 nb.float32[:, :, :],
                 nb.float32[:],
                 nb.boolean,
@@ -1209,8 +1232,6 @@ class JITRenderer:
             mode,
             n_instances,
             n_indices,
-            mat_V,
-            mat_P,
             light_matrix,
             light_pos,
             is_point,
@@ -1236,15 +1257,15 @@ class JITRenderer:
             gl,
         ):
             last_pid = -1
-            for id in range(len(vao_id)):
+            for i_p in range(len(vao_id)):
                 # Markers cast no shadow
-                if is_marker[id]:
+                if is_marker[i_p]:
                     continue
-                # The transmittance map holds the transparent surfaces alone (see '_transmittance_pass' in renderer.py)
-                if is_transmittance and not is_transparent[id]:
+                # The transmittance map holds the transparent surfaces alone (see '_shadow_mapping_pass' in renderer.py)
+                if is_transmittance and not is_transparent[i_p]:
                     continue
 
-                pid = program_id[id]
+                pid = program_id[i_p]
                 if pid != last_pid:
                     gl.glUseProgram(pid)
 
@@ -1254,30 +1275,29 @@ class JITRenderer:
                             set_uniform_matrix_4fv(pid, "light_matrix[" + str(i) + "]", light_matrix[i], gl)
                         set_uniform_3fv(pid, "light_pos", light_pos, gl)
                     else:
-                        set_uniform_matrix_4fv(pid, "V", mat_V, gl)
-                        set_uniform_matrix_4fv(pid, "P", mat_P, gl)
+                        set_uniform_matrix_4fv(pid, "light_matrix", light_matrix[0], gl)
                     set_uniform_1f(pid, "env_offset_scale", env_offset_scale, gl)
 
                     last_pid = pid
 
-                set_uniform_matrix_4fv(pid, "M", pose[id], gl)
-                gl.glBindVertexArray(vao_id[id])
+                set_uniform_matrix_4fv(pid, "M", pose[i_p], gl)
+                gl.glBindVertexArray(vao_id[i_p])
 
                 # A transparent surface casts a shadow as dark as it is opaque (see mesh_depth.frag), and so does a
                 # texture array whatever the layer shown (see TRANSPARENT_SHADOW in renderer.py). A texture array is
                 # sampled at the layer of the environment drawn.
-                i_layers = texture_layers_idx[id]
+                i_layers = texture_layers_idx[i_p]
                 is_layer_set = False
-                tf = tex_flags[id]
-                if is_transparent[id] or tf & (TexFlags_BASE_COLOR << 8):
-                    set_uniform_4fv(pid, "base_color_factor", base_color_factor[id], gl)
-                    set_uniform_1f(pid, "transmission_factor", transmission_factor[id], gl)
+                tf = tex_flags[i_p]
+                if is_transparent[i_p] or tf & (TexFlags_BASE_COLOR << 8):
+                    set_uniform_4fv(pid, "base_color_factor", base_color_factor[i_p], gl)
+                    set_uniform_1f(pid, "transmission_factor", transmission_factor[i_p], gl)
                     if is_transmittance:
-                        set_uniform_1f(pid, "ior", ior[id], gl)
+                        set_uniform_1f(pid, "ior", ior[i_p], gl)
                     if tf & TexFlags_BASE_COLOR:
                         gl.glActiveTexture(GL_TEXTURE0)
                         gl.glBindTexture(
-                            GL_TEXTURE_2D_ARRAY if tf & (TexFlags_BASE_COLOR << 8) else GL_TEXTURE_2D, textures[id, 2]
+                            GL_TEXTURE_2D_ARRAY if tf & (TexFlags_BASE_COLOR << 8) else GL_TEXTURE_2D, textures[i_p, 2]
                         )
                         set_uniform_1i(pid, "base_color_texture", 0, gl)
                         is_layer_set = i_layers >= 0
@@ -1295,38 +1315,38 @@ class JITRenderer:
                 gl.glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
                 gl.glDisable(GL_PROGRAM_POINT_SIZE)
 
-                if (is_env_filtered[id] or is_layer_set) and env_idx == -1:
+                if (is_env_filtered[i_p] or is_layer_set) and env_idx == -1:
                     # Combined draw-all of a heterogeneous variant: shadow only the environments it is active in,
                     # otherwise the variant would cast a shadow in every environment's instance. A primitive sampling a
                     # texture array casts the shadow of one environment at a time, each at its own layer.
-                    for k in range(n_instances[id]):
-                        if not env_active[id, k]:
+                    for k in range(n_instances[i_p]):
+                        if not env_active[i_p, k]:
                             continue
                         if is_layer_set:
                             set_uniform_1f(pid, "base_color_layer", texture_layers[i_layers, k, 0], gl)
                         draw_instances(
-                            mode[id],
-                            n_indices[id],
-                            n_instances[id],
+                            mode[i_p],
+                            n_indices[i_p],
+                            n_instances[i_p],
                             k,
-                            model_buffer_id[id],
-                            inst_attr_start[id],
+                            model_buffer_id[i_p],
+                            inst_attr_start[i_p],
                             env_offset_buffer,
-                            inst_tint_buffer_id[id],
-                            is_env_instanced[id],
+                            inst_tint_buffer_id[i_p],
+                            is_env_instanced[i_p],
                             gl,
                         )
                 else:
                     draw_instances(
-                        mode[id],
-                        n_indices[id],
-                        n_instances[id],
-                        env_idx if is_env_instanced[id] else -1,
-                        model_buffer_id[id],
-                        inst_attr_start[id],
+                        mode[i_p],
+                        n_indices[i_p],
+                        n_instances[i_p],
+                        env_idx if is_env_instanced[i_p] else -1,
+                        model_buffer_id[i_p],
+                        inst_attr_start[i_p],
                         env_offset_buffer,
-                        inst_tint_buffer_id[id],
-                        is_env_instanced[id],
+                        inst_tint_buffer_id[i_p],
+                        is_env_instanced[i_p],
                         gl,
                     )
 
@@ -1345,39 +1365,11 @@ class JITRenderer:
                 depth_im = (z_near * z_far) / (z_far + z_near - depth_im * (z_far - z_near)) * 2
             return depth_im
 
-        @nb.jit(nb.uint8[:, :, :](nb.int32, nb.int32, nb.int32, self.gl.wrapper_type), cache=True)
-        def read_color_buf(width, height, rgba, gl):
-            if rgba:
-                buf = np.zeros((height, width, 4), np.uint8)
-                gl.glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, address_to_ptr(buf.ctypes.data))
-            else:
-                buf = np.zeros((height, width, 3), np.uint8)
-                gl.glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, address_to_ptr(buf.ctypes.data))
+        @nb.jit(nb.uint8[:, :, :](nb.int32, nb.int32, self.gl.wrapper_type), cache=True)
+        def read_color_buf(width, height, gl):
+            buf = np.zeros((height, width, 3), np.uint8)
+            gl.glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, address_to_ptr(buf.ctypes.data))
             return buf[::-1, :, :]
-
-        @nb.jit(nb.float32[:, :](nb.float32[:, :, :]), cache=True)
-        def update_normal_flat(p):
-            face_normal = np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])
-            vertex_normal = np.zeros((p.shape[0] * 3, 3), p.dtype)
-            for f in range(face_normal.shape[0]):
-                n = face_normal[f]
-                n /= np.linalg.norm(n)
-                vertex_normal[f * 3 + 0] = n
-                vertex_normal[f * 3 + 1] = n
-                vertex_normal[f * 3 + 2] = n
-            return vertex_normal
-
-        @nb.jit(nb.float32[:, :](nb.float32[:, :], nb.int32[:, :]), cache=True)
-        def update_normal_smooth(p, idx):
-            face_normal = np.cross(p[idx[:, 1]] - p[idx[:, 0]], p[idx[:, 2]] - p[idx[:, 0]])
-            vertex_normal = np.zeros_like(p)
-            for f in range(face_normal.shape[0]):
-                vertex_normal[idx[f, 0]] += face_normal[f]
-                vertex_normal[idx[f, 1]] += face_normal[f]
-                vertex_normal[idx[f, 2]] += face_normal[f]
-            for v in range(vertex_normal.shape[0]):
-                vertex_normal[v] /= np.linalg.norm(vertex_normal[v])
-            return vertex_normal
 
         @nb.jit(nb.none(nb.int64[:, :], self.gl.wrapper_type), cache=True)
         def update_buffer(updates, gl):
@@ -1397,8 +1389,6 @@ class JITRenderer:
         self._shadow_mapping_pass = shadow_mapping_pass
         self._read_depth_buf = read_depth_buf
         self._read_color_buf = read_color_buf
-        self._update_normal_flat = update_normal_flat
-        self._update_normal_smooth = update_normal_smooth
         self._update_buffer_fn = update_buffer
 
     def forward_pass(
@@ -1417,14 +1407,13 @@ class JITRenderer:
         markers_only=False,
     ):
         self.load_programs(renderer, flags, program_flags)
-        if self._forward_pass is None:
-            self.gen_func_ptr()
+        self.gen_func_ptr()
         if self._placeholder_textures is None:
             # A white 2D color texture, a 2D depth texture compared as a shadow map, a depth cube map and a white color
             # cube map, the colors letting a light through untinted (see bind_lighting)
             self._placeholder_textures = (
-                Texture(source=np.full((1, 1, 4), 255, np.uint8), source_channels="RGBA"),
-                Texture(width=1, height=1, source_channels="D", data_format=GL.GL_UNSIGNED_SHORT),
+                Texture(source=np.full((1, 1, 4), 255, np.uint8), source_channels=TexChannels.RGBA),
+                Texture(width=1, height=1, source_channels=TexChannels.DEPTH, data_format=GL.GL_UNSIGNED_SHORT),
                 CubeMapTexture(1, 1),
                 CubeMapTexture(1, 1, is_color=True),
             )
@@ -1476,7 +1465,7 @@ class JITRenderer:
         # Depth along the view axis grows towards the viewer, so ascending depth is farthest first
         draw_order = np.lexsort((np.where(self.is_transparent, depths, -depths), self.is_transparent)).astype(np.int32)
 
-        with self._env_filtered_culling(env_idx, P @ V, not is_env_pass(flags)):
+        with self._culled(env_idx, P @ V, not is_env_pass(flags)):
             self._forward_pass(
                 self.vao_id,
                 self.program_id[(flags, program_flags)],
@@ -1507,7 +1496,7 @@ class JITRenderer:
                 self.lights_angle_offset,
                 self.shadow_map,
                 self.transmittance_map,
-                self.light_matrix,
+                self.lights_matrix,
                 self.ambient_light,
                 np.ascontiguousarray(V, dtype=np.float32),
                 np.ascontiguousarray(P, dtype=np.float32),
@@ -1535,47 +1524,30 @@ class JITRenderer:
             )
         self.n_indices[is_hidden] = n_indices_hidden
 
-    def shadow_mapping_pass(
-        self,
-        renderer,
-        V,
-        P,
-        flags,
-        program_flags,
-        env_idx=-1,
-        light_matrix=None,
-        light_pos=None,
-        is_transmittance=False,
-    ):
+    def shadow_mapping_pass(self, renderer, light_node, flags, env_idx=-1, is_transmittance=False):
         """Render the shadow map of a light, the depth seen from it or for a point light its distance to the scene.
 
         Parameters
         ----------
         renderer : Renderer
             The renderer whose shader programs draw the pass.
-        V : (4,4) float | None
-            The view matrix of the light, None for a point light.
-        P : (4,4) float | None
-            The projection matrix of the light, None for a point light.
+        light_node : Node
+            The node of the light, among the lights of the last 'set_light'.
         flags : int
             The render flags of the pass.
-        program_flags : int
-            The program flags of the pass.
         env_idx : int, optional
             The environment drawn, -1 for all of them. Defaults to -1.
-        light_matrix : (6,4,4) float | None, optional
-            The view-projection matrix of each face of the cube map of a point light. Defaults to None.
-        light_pos : (3,) float | None, optional
-            The position of a point light, None for any other light. Defaults to None.
         is_transmittance : bool, optional
             Whether the pass renders the transmittance map of the light rather than its shadow map. Defaults to False.
         """
+        i_light = self.lights_idx_by_node[light_node]
+        is_point = self.lights_type[i_light] == LightType.POINT
+        program_flags = ProgramFlags.POINT_SHADOW if is_point else ProgramFlags.SHADOW
+        if is_transmittance:
+            program_flags |= ProgramFlags.TRANSMITTANCE
         self.load_programs(renderer, flags, program_flags)
-        if self._shadow_mapping_pass is None:
-            self.gen_func_ptr()
-        is_point = light_pos is not None
-        identity = np.identity(4, dtype=np.float32)
-        with self._env_filtered_culling(env_idx):
+        self.gen_func_ptr()
+        with self._culled(env_idx):
             self._shadow_mapping_pass(
                 self.vao_id,
                 self.program_id[(flags, program_flags)],
@@ -1583,10 +1555,8 @@ class JITRenderer:
                 self.mode,
                 self.n_instances,
                 self.n_indices,
-                identity if is_point else np.ascontiguousarray(V, dtype=np.float32),
-                identity if is_point else np.ascontiguousarray(P, dtype=np.float32),
-                np.ascontiguousarray(light_matrix, dtype=np.float32) if is_point else identity[None],
-                np.ascontiguousarray(light_pos, dtype=np.float32) if is_point else identity[0, :3],
+                self.lights_matrix[i_light],
+                self.lights_pos[i_light],
                 is_point,
                 is_transmittance,
                 self.is_marker,
@@ -1609,20 +1579,6 @@ class JITRenderer:
                 self.texture_layers_idx,
                 self.gl.wrapper_instance,
             )
-
-    def update_normal(self, node, vertices):
-        primitive = node.mesh.primitives[0]
-        if primitive.normals is None:
-            return None
-        vertices = np.ascontiguousarray(vertices, dtype=np.float32)
-        if primitive.indices is not None:
-            if self._update_normal_smooth is None:
-                self.gen_func_ptr()
-            return self._update_normal_smooth(vertices, primitive.indices)
-        else:
-            if self._update_normal_flat is None:
-                self.gen_func_ptr()
-            return self._update_normal_flat(vertices.reshape((-1, 3, 3)))
 
     def update_texture_layers(self, primitives) -> None:
         """Copy the texture array layers each rendered environment of some primitives samples, for the next render pass.
@@ -1661,10 +1617,6 @@ class JITRenderer:
         New vertex positions update the bounds of the bare geometry, and new instance transforms update the bounds of
         the instances. A placed primitive refreshes the latter from its poses in bulk instead (see '_update_instances').
 
-        The GL buffer id is resolved at flush time rather than here: a primitive is only added to the GL context during
-        its first render pass, so an id resolved at enqueue time would be -1 for any update queued before that pass and
-        the update would be silently dropped.
-
         Parameters
         ----------
         primitives : Sequence[Primitive]
@@ -1675,6 +1627,8 @@ class JITRenderer:
         data : Sequence[np.ndarray]
             The new content of the buffer of each primitive.
         """
+        # The GL buffer is looked up as the queue is flushed, since a primitive enters the GL context at its first
+        # render pass, after which the updates queued before it still apply
         primitives_idx, poses = [], []
         for primitive, primitive_data in zip(primitives, data):
             self._buffer[(primitive, buffer_name)] = primitive_data
@@ -1707,23 +1661,41 @@ class JITRenderer:
             buffer = np.ascontiguousarray(data, dtype=np.float32)
             buffers.append(buffer)
 
-            # Still -1 if the primitive was removed from the scene since the update was queued. The upload kernel
-            # skips negative ids.
-            updates[idx, 0] = primitive.get_buffer_id(buffer_name)
+            # A primitive removed from the scene since the update was queued holds no buffer, which the upload skips
+            updates[idx, 0] = primitive.buffers_id.get(buffer_name, -1)
             updates[idx, 1] = 4 * buffer.size
             updates[idx, 2] = buffer.ctypes.data
 
-        if self._update_buffer_fn is None:
-            self.gen_func_ptr()
+        self.gen_func_ptr()
         self._update_buffer_fn(updates, self.gl.wrapper_instance)
         self._buffer.clear()
 
-    def read_depth_buf(self, weight, height, z_near, z_far):
-        if self._read_depth_buf is None:
-            self.gen_func_ptr()
-        return self._read_depth_buf(weight, height, z_near, z_far, self.gl.wrapper_instance)
+    def read_depth_buf(self, width, height, z_near, z_far):
+        """Read the depth buffer of the current framebuffer as the distance to the camera plane, rows from the top.
 
-    def read_color_buf(self, weight, height, rgba):
-        if self._read_color_buf is None:
-            self.gen_func_ptr()
-        return self._read_color_buf(weight, height, rgba, self.gl.wrapper_instance)
+        Parameters
+        ----------
+        width : int
+            The width of the buffer, in pixels.
+        height : int
+            The height of the buffer, in pixels.
+        z_near : float
+            The near plane of the camera.
+        z_far : float
+            The far plane of the camera, negative for an infinite projection.
+        """
+        self.gen_func_ptr()
+        return self._read_depth_buf(width, height, z_near, z_far, self.gl.wrapper_instance)
+
+    def read_color_buf(self, width, height):
+        """Read the RGB color buffer of the current framebuffer, rows from the top.
+
+        Parameters
+        ----------
+        width : int
+            The width of the buffer, in pixels.
+        height : int
+            The height of the buffer, in pixels.
+        """
+        self.gen_func_ptr()
+        return self._read_color_buf(width, height, self.gl.wrapper_instance)

@@ -1934,7 +1934,7 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
         assert pyrender_viewer.is_active
         pyrender_viewer.switch_to()
         pyrender_viewer.on_draw()
-        viewer_rgb = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size, rgba=False)
+        viewer_rgb = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size)
 
         png_snapshot.extension._std_err_threshold = STD_ERR_THR
         assert rgb_array_to_png_bytes(viewer_rgb) == png_snapshot
@@ -1942,16 +1942,16 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
         # The interactive viewer shows a setter right away, without stepping
         franka.set_dofs_position(np.roll(dofs_pos, 1, axis=0))
         pyrender_viewer.on_draw()
-        viewer_rgb_set = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size, rgba=False)
+        viewer_rgb_set = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size)
         scene.visualizer.update(force=True)
         pyrender_viewer.on_draw()
-        viewer_rgb_forced = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size, rgba=False)
+        viewer_rgb_forced = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size)
         assert_equal(viewer_rgb_set, viewer_rgb_forced)
         # The contacts of the last step no longer hold once a setter moved the arms, so their markers go away until the
         # next step, as after a reset to the same state
         scene.reset(scene.get_state())
         pyrender_viewer.on_draw()
-        viewer_rgb_reset = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size, rgba=False)
+        viewer_rgb_reset = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size)
         assert_equal(viewer_rgb_set, viewer_rgb_reset)
         franka.set_dofs_position(dofs_pos)
         scene.step()
@@ -2806,3 +2806,68 @@ def test_normal_map(renderer, show_viewer):
         tensor_to_array(cam.render()[0])[CENTRE, CENTRE].mean(axis=(0, 1)) for cam in (cam_mapped, cam_tilted)
     )
     assert_allclose(patch_mapped, patch_tilted, atol=2.0)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
+def test_occlusion_map(renderer, show_viewer):
+    AMBIENT = 0.2
+    RES = 64
+    CENTRE = slice(RES // 2 - 4, RES // 2 + 4)
+
+    scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            ambient_light=(AMBIENT, AMBIENT, AMBIENT),
+            lights=[
+                gs.options.vis.DirectionalLight(
+                    dir=(0.0, 0.0, -1.0),
+                    color=(1.0, 1.0, 1.0),
+                    intensity=1.0,
+                ),
+            ],
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -3.0, 2.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        renderer=renderer,
+        show_viewer=show_viewer,
+    )
+    # A white floor whose occlusion map hides it from the ambient light, and the same floor without it
+    for x, occlusion_texture in (
+        (-1.0, gs.textures.ImageTexture(image_array=np.zeros((4, 4), np.uint8), encoding="linear")),
+        (1.0, None),
+    ):
+        scene.add_entity(
+            morph=gs.morphs.Plane(
+                pos=(x, 0.0, 0.0),
+                plane_size=(1.0, 1.0),
+            ),
+            surface=gs.surfaces.Rough(
+                color=(1.0, 1.0, 1.0),
+                occlusion_texture=occlusion_texture,
+            ),
+        )
+    # Each floor wholly in view of its camera, since a software renderer misdraws geometry that leaves the view
+    cam_occluded, cam_lit = (
+        scene.add_camera(
+            res=(RES, RES),
+            pos=(x, 0.0, 2.0),
+            lookat=(x, 0.0, 0.0),
+            up=(0.0, 1.0, 0.0),
+            fov=40,
+        )
+        for x in (-1.0, 1.0)
+    )
+    scene.build()
+
+    # The floors take the same light from the lamp, seen from the same view, while the occluded one loses the ambient
+    # light that its white surface diffuses
+    patch_occluded, patch_lit = (
+        tensor_to_array(cam.render()[0])[CENTRE, CENTRE] / 255.0 for cam in (cam_occluded, cam_lit)
+    )
+    radiance_occluded, radiance_lit = (
+        np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4).mean(axis=(0, 1))
+        for rgb in (patch_occluded, patch_lit)
+    )
+    assert_allclose(radiance_lit - radiance_occluded, AMBIENT, tol=2e-3)

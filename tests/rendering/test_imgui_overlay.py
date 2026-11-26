@@ -173,7 +173,7 @@ def test_control_panel(png_snapshot, monkeypatch):
     pyrender_viewer = scene.viewer._pyrender_viewer
     pyrender_viewer.switch_to()
     pyrender_viewer.on_draw()
-    rgb = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size, rgba=False)
+    rgb = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size)
     assert rgb_array_to_png_bytes(rgb) == png_snapshot
 
 
@@ -199,7 +199,7 @@ def test_editing_controls(png_snapshot, monkeypatch):
     pyrender_viewer = scene.viewer._pyrender_viewer
     pyrender_viewer.switch_to()
     pyrender_viewer.on_draw()
-    rgb = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size, rgba=False)
+    rgb = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size)
     assert rgb_array_to_png_bytes(rgb) == png_snapshot
 
 

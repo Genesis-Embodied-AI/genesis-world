@@ -1,4 +1,1 @@
-"""Platforms for generating offscreen OpenGL contexts for rendering.
-
-Author: Matthew Matl
-"""
+"""Platforms creating the OpenGL contexts without window that the cameras render into."""

@@ -136,17 +136,14 @@ class Viewer(BuildableMixin, RBC):
                         context=self.context,
                         viewport_size=self._res,
                         run_in_thread=self._run_in_thread,
-                        auto_start=False,
                         view_center=self._camera_init_lookat,
                         shadow=self.context.shadow,
                         plane_reflection=self.context.plane_reflection,
                         enable_help_text=self._enable_help_text,
                         plugins=self._plugins,
                         debug_view=True,
-                        viewer_flags={
-                            "window_title": f"Genesis {gs.__version__}",
-                            "refresh_rate": self._refresh_rate,
-                        },
+                        window_title=f"Genesis {gs.__version__}",
+                        refresh_rate=self._refresh_rate,
                     )
                     if not self._run_in_thread:
                         self._pyrender_viewer.start(auto_refresh=False)
@@ -316,11 +313,12 @@ class Viewer(BuildableMixin, RBC):
         Parameters
         ----------
         pose : array-like, shape (4, 4), optional
-            Camera-to-world pose. If provided, `pos` and `lookat` will be ignored.
+            Camera-to-world pose. If provided, `pos` is ignored.
         pos : array-like, shape (3,), optional
             Camera position.
         lookat : array-like, shape (3,), optional
-            Camera lookat point.
+            Camera lookat point, which the camera orbits about. With a pose, defaults to the point along the view axis
+            of the camera, as far from it as the former one.
         """
         if pose is None:
             pos = self._camera_init_pos if pos is None else tensor_to_array(pos, dtype=np.float64)
@@ -328,13 +326,14 @@ class Viewer(BuildableMixin, RBC):
             up = self._camera_up
 
             pose = gu.pos_lookat_up_to_T(pos, lookat, up)
-            self._camera_up = pose[:3, 1].copy()
         else:
             pose = tensor_to_array(pose, dtype=np.float64)
             if pose.shape != (4, 4):
                 gs.raise_exception("pose should be a 4x4 matrix.")
-
-        self._pyrender_viewer._trackball.set_camera_pose(pose)
+            if lookat is not None:
+                lookat = tensor_to_array(lookat, dtype=np.float64)
+        self._camera_up = pose[:3, 1].copy()
+        self._pyrender_viewer.trackball.set_camera_pose(pose, lookat)
 
     def follow_entity(self, entity, fixed_axis=(None, None, None), smoothing=None, fix_orientation=False):
         """
@@ -365,8 +364,8 @@ class Viewer(BuildableMixin, RBC):
         if entity_pos.ndim > 1:  # check for multiple envs
             entity_pos = entity_pos[0]
         # numpy < 2.0 doesn't support the copy keyword argument in np.asarray()
-        camera_transform = np.array(self._pyrender_viewer._trackball.pose, copy=True)
-        camera_pos = np.array(self._pyrender_viewer._trackball.pose[:3, 3])
+        camera_transform = np.array(self._pyrender_viewer.trackball.pose, copy=True)
+        camera_pos = np.array(self._pyrender_viewer.trackball.pose[:3, 3])
 
         if self._follow_smoothing is not None:
             # Smooth viewer movement with a low-pass filter
@@ -499,7 +498,7 @@ class Viewer(BuildableMixin, RBC):
     @property
     def recording(self) -> bool:
         """Whether the viewer is currently recording its on-screen output to a video file."""
-        return self._pyrender_viewer.viewer_flags["record"]
+        return self._pyrender_viewer.is_recording
 
     @property
     def plugins(self):
@@ -538,15 +537,15 @@ class Viewer(BuildableMixin, RBC):
         """
         Get the camera's current position.
         """
-        return np.array(self._pyrender_viewer._trackball._n_pose[:3, 3])
+        return np.array(self._pyrender_viewer.trackball.pose[:3, 3])
 
     @property
     def camera_lookat(self):
         """
         Get the camera's current lookat point.
         """
-        pos = np.array(self._pyrender_viewer._trackball._n_pose[:3, 3])
-        z = self._pyrender_viewer._trackball._n_pose[:3, 2]
+        pos = np.array(self._pyrender_viewer.trackball.pose[:3, 3])
+        z = self._pyrender_viewer.trackball.pose[:3, 2]
         return pos - z
 
     @property
@@ -554,7 +553,7 @@ class Viewer(BuildableMixin, RBC):
         """
         Get the camera's current pose represented by a 4x4 matrix.
         """
-        return np.array(self._pyrender_viewer._trackball._n_pose)
+        return np.array(self._pyrender_viewer.trackball.pose)
 
     @property
     def camera_up(self):

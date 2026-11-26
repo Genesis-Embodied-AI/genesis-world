@@ -57,6 +57,9 @@ struct Material {
 #ifdef HAS_NORMAL_TEX
     sampler2D normal_texture;
 #endif
+#ifdef HAS_OCCLUSION_TEX
+    sampler2D occlusion_texture;
+#endif
 #ifdef HAS_EMISSIVE_TEX
 #ifdef EMISSIVE_TEX_ARRAY
     sampler2DArray emissive_texture;
@@ -119,18 +122,8 @@ in vec3 frag_position;
 #ifdef NORMAL_LOC
 in vec3 frag_normal;
 #endif
-#ifdef HAS_NORMAL_TEX
-#ifdef TANGENT_LOC
-#ifdef NORMAL_LOC
-in mat3 tbn;
-#endif
-#endif
-#endif
 #ifdef TEXCOORD_0_LOC
 in vec2 uv_0;
-#endif
-#ifdef TEXCOORD_1_LOC
-in vec2 uv_1;
 #endif
 #ifdef COLOR_0_LOC
 in vec4 color_multiplier;
@@ -178,8 +171,7 @@ vec4 linear_to_srgb(vec4 linear)
 vec3 get_normal()
 {
 #ifdef HAS_NORMAL_TEX
-    // The tangent frame comes from the tangents of the mesh when it has some, from the derivatives of the position and
-    // the uvs across the screen otherwise
+    // The tangent frame follows the derivatives of the position and of the uvs across the screen
     vec3 pos_dx = dFdx(frag_position);
     vec3 pos_dy = dFdy(frag_position);
     vec3 tex_dx = dFdx(vec3(uv_0, 0.0));
@@ -192,15 +184,8 @@ vec3 get_normal()
 #endif
     t = normalize(t - ng * dot(ng, t));
     vec3 b = normalize(cross(ng, t));
-    mat3 tbn_n = mat3(t, b, ng);
-#ifdef TANGENT_LOC
-#ifdef NORMAL_LOC
-    tbn_n = tbn;
-#endif
-#endif
-
     // The normal map holds the normal in tangent space, each component from -1 to 1 encoded from 0 to 1
-    return normalize(tbn_n * (2.0 * texture(material.normal_texture, uv_0).rgb - 1.0));
+    return normalize(mat3(t, b, ng) * (2.0 * texture(material.normal_texture, uv_0).rgb - 1.0));
 #else
 
 #ifdef NORMAL_LOC
@@ -485,7 +470,13 @@ void main()
 #endif
         color.xyz += res;
     }
-    color.xyz += (1.0 - transmission) * base_color.xyz * ambient_light;
+    // The occlusion map scales the light that reaches a point from all around it (the ambient light and the
+    // environment), the shadows darkening the light of the lamps already
+    float occlusion = 1.0;
+#ifdef HAS_OCCLUSION_TEX
+    occlusion = texture(material.occlusion_texture, uv_0).r;
+#endif
+    color.xyz += occlusion * (1.0 - transmission) * base_color.xyz * ambient_light;
 
     // The environment that a surface mirrors is a sky above the horizon, as bright as a surface of albedo 0.5 facing up
     // under the directional lights, and the ambient light below it
@@ -494,7 +485,7 @@ void main()
         float elevation = max(-directional_lights[i].direction.z, 0.0);
         sky += 0.5 * directional_lights[i].intensity * directional_lights[i].color * elevation / PI;
     }
-    vec3 env = mix(ambient_light, sky, smoothstep(-0.1, 0.1, reflect(-v, n).z));
+    vec3 env = occlusion * mix(ambient_light, sky, smoothstep(-0.1, 0.1, reflect(-v, n).z));
     float nv_env = clamp(abs(dot(n, v)), 0.0, 1.0);
 
     // A metal diffuses no light, so away from the highlights of the lights it only shows the environment it mirrors. A

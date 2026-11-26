@@ -1,167 +1,101 @@
-"""Meshes, conforming to the glTF 2.0 standards as specified in
-https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#reference-mesh
-
-Author: Matthew Matl
-"""
+"""Meshes of the rasterizer, as glTF 2.0 defines them."""
 
 import copy
 
 import numpy as np
 
+from OpenGL.GL import GL_POINTS
 import trimesh
 
-from .constants import GLTF, ViewFlags
+from .constants import ViewFlags
 from .material import Material
 from .primitive import Primitive
 
 
-class Mesh(object):
-    """A set of primitives to be rendered.
+class Mesh:
+    """A set of primitives drawn together.
 
     Parameters
     ----------
-    name : str
-        The user-defined name of this object.
-    primitives : list of :class:`Primitive`
-        The primitives associated with this mesh.
-    weights : (k,) float
-        Array of weights to be applied to the Morph Targets.
-    is_visible : bool
-        If False, the mesh will not be rendered.
-    views : int
-        The views drawing the mesh, a bitwise or of :class:`.ViewFlags`: those that show the scene as it looks, the
-        debug views, or both.
+    primitives : list of Primitive
+        The primitives of the mesh.
+    is_marker : bool, optional
+        Whether the mesh is a marker, which the debug views alone draw and which receives no shadow. Defaults to False.
+    views : int, optional
+        The views drawing the mesh, a bitwise or of ViewFlags: those that show the scene as it looks, the debug views,
+        or both. Defaults to both.
     """
 
-    def __init__(
-        self,
-        primitives,
-        name=None,
-        weights=None,
-        is_visible=True,
-        is_marker=False,
-        views=ViewFlags.NORMAL | ViewFlags.DEBUG,
-    ):
+    def __init__(self, primitives, is_marker=False, views=ViewFlags.NORMAL | ViewFlags.DEBUG):
         self.primitives = primitives
-        self.name = name
-        self.weights = weights
-        self.is_visible = is_visible
         self.is_marker = is_marker
         self.views = views
 
-        self._bounds = None
-
-    @property
-    def name(self):
-        """str : The user-defined name of this object."""
-        return self._name
-
-    @name.setter
-    def name(self, value):
-        if value is not None:
-            value = str(value)
-        self._name = value
-
     @property
     def bounds(self):
-        """(2,3) float : The axis-aligned bounds of the mesh."""
-        if self._bounds is None:
-            if self.primitives:
-                if len(self.primitives) > 1:
-                    self._bounds = np.stack(
-                        (
-                            np.min([p.bounds[0] for p in self.primitives], axis=0),
-                            np.max([p.bounds[1] for p in self.primitives], axis=0),
-                        ),
-                        axis=0,
-                    )
-                else:
-                    # In the vast majority of scenarios there is a single primitive
-                    self._bounds = self.primitives[0].bounds
-            else:
-                self._bounds = np.zeros((2, 3))
-        return self._bounds
+        """(2, 3) float : The axis-aligned bounds of the mesh, over the instances of its primitives."""
+        if not self.primitives:
+            return np.zeros((2, 3))
+        # In the vast majority of scenarios there is a single primitive
+        if len(self.primitives) == 1:
+            return self.primitives[0].bounds
+        primitives_bounds = np.stack([primitive.bounds for primitive in self.primitives])
+        return np.stack((primitives_bounds[:, 0].min(axis=0), primitives_bounds[:, 1].max(axis=0)))
 
     @property
     def centroid(self):
-        """(3,) float : The centroid of the mesh's axis-aligned bounding box
-        (AABB).
-        """
+        """(3,) float : The centre of the axis-aligned bounds of the mesh."""
         return np.mean(self.bounds, axis=0)
 
     @property
-    def extents(self):
-        """(3,) float : The lengths of the axes of the mesh's AABB."""
-        return self.bounds[1] - self.bounds[0]
-
-    @property
-    def scale(self):
-        """(3,) float : The length of the diagonal of the mesh's AABB."""
-        return max(np.linalg.norm(self.extents), 1e-7)
-
-    @property
     def is_transparent(self):
-        """bool : If True, the mesh is partially-transparent."""
-        for p in self.primitives:
-            if p.is_transparent:
-                return True
-        return False
+        """bool : Whether some primitives of the mesh show part of what lies behind them."""
+        return any(primitive.is_transparent for primitive in self.primitives)
 
     @staticmethod
     def from_points(
         points,
-        name=None,
         colors=None,
         normals=None,
-        is_visible=True,
         poses=None,
         is_marker=False,
         views=ViewFlags.NORMAL | ViewFlags.DEBUG,
         envs=None,
     ):
-        """Create a Mesh from a set of points.
+        """Create a mesh drawing a set of points.
 
         Parameters
         ----------
-        points : (n,3) float
-            The point positions.
-        name : str
-            The user-defined name of this object.
-        colors : (n,3) or (n,4) float, optional
-            RGB or RGBA colors for each point.
-        normals : (n,3) float, optionals
-            The normal vectors for each point.
-        is_visible : bool
-            If False, the points will not be rendered.
-        poses : (x,4,4)
-            Array of 4x4 transformation matrices for instancing this object.
-        is_marker : bool
-            Whether the points are a marker.
-        views : int
-            The views drawing the points (see :class:`Mesh`).
+        points : (n, 3) float
+            The positions of the points.
+        colors : (n, 3) or (n, 4) float, optional
+            The RGB or RGBA color of each point. Defaults to None.
+        normals : (n, 3) float, optional
+            The normal of each point. Defaults to None.
+        poses : (k, 4, 4) float, optional
+            The pose of each instance of the points. Defaults to a single instance.
+        is_marker : bool, optional
+            Whether the points are a marker (see Mesh). Defaults to False.
+        views : int, optional
+            The views drawing the points (see Mesh). Defaults to both.
         envs : int or (n_envs,) bool, optional
-            The environments the instances belong to (see :class:`.Primitive`).
+            The environments the instances belong to (see Primitive). Defaults to every environment.
 
         Returns
         -------
-        mesh : :class:`Mesh`
-            The created mesh.
+        mesh : Mesh
+            The mesh drawing the points.
         """
-        primitive = Primitive(
-            positions=points, normals=normals, color_0=colors, mode=GLTF.POINTS, poses=poses, envs=envs
-        )
-        return Mesh(primitives=[primitive], name=name, is_visible=is_visible, is_marker=is_marker, views=views)
+        primitive = Primitive(positions=points, normals=normals, color_0=colors, mode=GL_POINTS, poses=poses, envs=envs)
+        return Mesh(primitives=[primitive], is_marker=is_marker, views=views)
 
     @staticmethod
     def from_trimesh(
         mesh,
-        name=None,
         material=None,
-        is_visible=True,
         is_marker=False,
         views=ViewFlags.NORMAL | ViewFlags.DEBUG,
         poses=None,
-        wireframe=False,
         smooth=False,
         double_sided=False,
         is_floor=False,
@@ -173,200 +107,145 @@ class Mesh(object):
         transmission_factor=0.0,
         ior=1.5,
     ):
-        """Create a Mesh from a :class:`~trimesh.base.Trimesh`.
+        """Create a mesh drawing a triangle mesh of trimesh.
 
         Parameters
         ----------
-        mesh : :class:`~trimesh.base.Trimesh` or list of them
-            A triangular mesh or a list of meshes.
-        name : str
-            The user-defined name of this object.
-        material : :class:`Material`
-            The material of the object. Overrides any mesh material.
-            If not specified and the mesh has no material, a default material
-            will be used.
-        is_visible : bool
-            If `False`, the mesh will not be rendered.
-        views : int
-            The views drawing the mesh (see :class:`Mesh`).
-        poses : (n,4,4) float
-            Array of 4x4 transformation matrices for instancing this object.
-        wireframe : bool
-            If `True`, the mesh will be rendered as a wireframe object
-        smooth : bool
-            If `True`, the mesh will be rendered with interpolated vertex
-            normals. Otherwise, the mesh edges will stay sharp.
+        mesh : trimesh.Trimesh
+            The triangle mesh, its visual giving its colors, texture coordinates and material.
+        material : Material, optional
+            The material of the mesh, in place of the one its visual gives. Defaults to None.
+        is_marker : bool, optional
+            Whether the mesh is a marker (see Mesh). Defaults to False.
+        views : int, optional
+            The views drawing the mesh (see Mesh). Defaults to both.
+        poses : (k, 4, 4) float, optional
+            The pose of each instance of the mesh. Defaults to a single instance.
+        smooth : bool, optional
+            Whether the normals are interpolated across the faces, rather than the edges staying sharp. Defaults to
+            False.
+        double_sided : bool, optional
+            Whether both faces of each triangle are drawn and lit (see Primitive). Defaults to False.
+        is_floor : bool, optional
+            Whether the mesh is the floor (see Primitive). Defaults to False.
         envs : int or (n_envs,) bool, optional
-            The environments the instances belong to (see :class:`Primitive`).
-            Defaults to every environment.
-        inst_tints : (n,4) float, optional
-            RGBA tint of every instance (see :class:`Primitive`). Defaults to None.
+            The environments the instances belong to (see Primitive). Defaults to every environment.
+        inst_tints : (k, 4) float, optional
+            The RGBA tint of every instance (see Primitive). Defaults to None.
         metallic_factor : float, optional
-            Metalness of the material made from the vertex colors, the face colors or the simple material of the mesh.
-            A physically based rendering (PBR) material keeps its own. Defaults to 0.0.
+            The metalness of the material made from the vertex colors, the face colors or the simple material of the
+            mesh. A physically based rendering (PBR) material keeps its own. Defaults to 0.0.
         roughness_factor : float, optional
-            Roughness of the material made from the vertex colors, the face colors or the simple material of the mesh.
-            A PBR material keeps its own. Defaults to 1.0.
+            The roughness of the material made from the vertex colors, the face colors or the simple material of the
+            mesh. A PBR material keeps its own. Defaults to 1.0.
         base_color_factor : (3,) float, optional
-            Color that the base color of every material made from the mesh is multiplied by. Defaults to white.
+            The color that the base color of the material made from the mesh is multiplied by. Defaults to white.
         transmission_factor : float, optional
-            Share of the light that the materials made from the mesh let through. Defaults to 0.0.
-        ior : float | None, optional
-            Index of refraction of the materials made from the mesh, 1.5 if None. Defaults to 1.5.
+            The share of the light that the material made from the mesh lets through. Defaults to 0.0.
+        ior : float, optional
+            The index of refraction of the material made from the mesh, 1.5 if None. Defaults to 1.5.
 
         Returns
         -------
-        mesh : :class:`Mesh`
-            The created mesh.
+        mesh : Mesh
+            The mesh drawing the triangle mesh.
         """
-
-        if isinstance(mesh, (list, tuple, set, np.ndarray)):
-            meshes = list(mesh)
-        elif isinstance(mesh, trimesh.Trimesh):
-            meshes = [mesh]
-        else:
-            raise TypeError("Expected a Trimesh or a list, got a {}".format(type(mesh)))
-
-        primitives = []
-        for m in meshes:
-            positions = None
-            normals = None
-            indices = None
+        if smooth:
+            positions, normals, indices = mesh.vertices.copy(), mesh.vertex_normals.copy(), mesh.faces.copy()
             vertex_mapping = None
+        else:
+            positions = mesh.vertices[mesh.faces].reshape((-1, 3))
+            normals = np.repeat(mesh.face_normals, 3, axis=0)
+            indices = None
+            vertex_mapping = mesh.faces.reshape((-1,))
+        color_0, texcoord_0, primitive_material = _get_trimesh_visual(
+            mesh, smooth, metallic_factor, roughness_factor, has_material=material is not None
+        )
 
-            # Compute positions, normals, and indices
-            if smooth:
-                positions = m.vertices.copy()
-                normals = m.vertex_normals.copy()
-                indices = m.faces.copy()
-            else:
-                positions = m.vertices[m.faces].reshape((3 * len(m.faces), 3))
-                normals = np.repeat(m.face_normals, 3, axis=0)
-                vertex_mapping = m.faces.reshape((-1,))
-
-            # Compute colors, texture coords, and material properties
-            color_0, texcoord_0, primitive_material = Mesh._get_trimesh_props(
-                m, smooth=smooth, material=material, metallic_factor=metallic_factor, roughness_factor=roughness_factor
-            )
-
-            # Override if material is given. Shallow-copy so per-primitive state (e.g. wireframe) stays isolated, while
-            # the heavy Texture objects stay shared with the source material. Primitives reusing one material then
-            # expose the same Texture instances, which the renderer deduplicates into a single host array and upload.
-            if material is not None:
-                primitive_material = copy.copy(material)
-
+        if material is not None:
+            # A shallow copy keeps the state of the primitive (such as its wireframe) its own, while the heavy textures
+            # stay shared with the source material. The primitives reusing one material then hold the same textures,
+            # which the renderer uploads once.
+            primitive_material = copy.copy(material)
+        else:
             if primitive_material is None:
-                # Replace material with default if needed
                 primitive_material = Material(
-                    alphaMode="BLEND",
-                    baseColorFactor=[0.3, 0.3, 0.3, 1.0],
-                    metallicFactor=metallic_factor,
-                    roughnessFactor=roughness_factor,
+                    is_blended=True,
+                    base_color_factor=(0.3, 0.3, 0.3, 1.0),
+                    metallic_factor=metallic_factor,
+                    roughness_factor=roughness_factor,
                 )
-            if material is None:
-                primitive_material.baseColorFactor = primitive_material.baseColorFactor * (*base_color_factor, 1.0)
-                # The materials of trimesh hold no transmission, so every material made here takes the given one
-                primitive_material.transmissionFactor = transmission_factor
-                primitive_material.ior = ior
+            primitive_material.base_color_factor = primitive_material.base_color_factor * (*base_color_factor, 1.0)
+            # The materials of trimesh hold no transmission, so every material made here takes the given one
+            primitive_material.transmission_factor = transmission_factor
+            primitive_material.ior = 1.5 if ior is None else ior
 
-            primitive_material.wireframe = wireframe
+        primitive = Primitive(
+            positions=positions,
+            normals=normals,
+            texcoord_0=texcoord_0,
+            color_0=color_0,
+            indices=indices,
+            material=primitive_material,
+            poses=poses,
+            vertex_mapping=vertex_mapping,
+            double_sided=double_sided,
+            is_floor=is_floor,
+            envs=envs,
+            inst_tints=inst_tints,
+        )
+        return Mesh(primitives=[primitive], is_marker=is_marker, views=views)
 
-            # Create the primitive
-            primitives.append(
-                Primitive(
-                    positions=positions,
-                    normals=normals,
-                    texcoord_0=texcoord_0,
-                    color_0=color_0,
-                    indices=indices,
-                    material=primitive_material,
-                    mode=GLTF.TRIANGLES,
-                    poses=poses,
-                    vertex_mapping=vertex_mapping,
-                    double_sided=double_sided,
-                    is_floor=is_floor,
-                    envs=envs,
-                    inst_tints=inst_tints,
-                )
-            )
 
-        return Mesh(primitives=primitives, name=name, is_visible=is_visible, is_marker=is_marker, views=views)
+def _get_trimesh_visual(mesh, smooth, metallic_factor, roughness_factor, has_material):
+    """Return the vertex colors, the texture coordinates and the material that the visual of a trimesh mesh gives.
 
-    @staticmethod
-    def _get_trimesh_props(mesh, smooth, material, *, metallic_factor, roughness_factor):
-        """Gets the vertex colors, texture coordinates, and material properties
-        from a :class:`~trimesh.base.Trimesh`.
-        """
-        colors = None
-        texcoords = None
-
-        # If the trimesh visual is undefined, return none for both
-        if not mesh.visual.defined:
-            return colors, texcoords, material
-
-        # Process vertex colors
-        if material is None:
-            if mesh.visual.kind == "vertex":
-                vc = mesh.visual.vertex_colors.copy()
-                if smooth:
-                    colors = vc
-                else:
-                    if vc.ndim == 1:
-                        colors = vc
-                    else:
-                        colors = vc[mesh.faces].reshape((3 * len(mesh.faces), vc.shape[1]))
-                material = Material(
-                    alphaMode="OPAQUE" if colors.shape[-1] < 4 or (colors[..., 3] == 255).all() else "BLEND",
-                    baseColorFactor=[1.0, 1.0, 1.0, 1.0],
-                    metallicFactor=metallic_factor,
-                    roughnessFactor=roughness_factor,
-                )
-            # Process face colors
-            elif mesh.visual.kind == "face":
-                if smooth:
-                    raise ValueError("Cannot use face colors with a smooth mesh")
-                else:
-                    colors = np.repeat(mesh.visual.face_colors, 3, axis=0)
-                material = Material(
-                    alphaMode="OPAQUE" if colors.shape[-1] < 4 or (colors[..., 3] == 255).all() else "BLEND",
-                    baseColorFactor=[1.0, 1.0, 1.0, 1.0],
-                    metallicFactor=metallic_factor,
-                    roughnessFactor=roughness_factor,
-                )
-
-        # Process texture colors
-        if mesh.visual.kind == "texture":
-            # Configure UV coordinates
-            if isinstance(mesh.visual, trimesh.visual.texture.TextureVisuals) and mesh.visual.uv is not None:
-                uv = mesh.visual.uv.copy()
-                if smooth:
-                    texcoords = uv
-                else:
-                    texcoords = uv[mesh.faces].reshape((3 * len(mesh.faces), uv.shape[1]))
-
-            if material is None:
-                # Configure mesh material
-                mat = mesh.visual.material
-
-                if isinstance(mat, trimesh.visual.texture.PBRMaterial):
-                    material = Material(
-                        normalTexture=mat.normalTexture,
-                        emissiveTexture=mat.emissiveTexture,
-                        emissiveFactor=mat.emissiveFactor,
-                        alphaMode="BLEND",
-                        baseColorFactor=mat.baseColorFactor,
-                        baseColorTexture=mat.baseColorTexture,
-                        metallicFactor=mat.metallicFactor,
-                        roughnessFactor=mat.roughnessFactor,
-                        metallicRoughnessTexture=mat.metallicRoughnessTexture,
-                    )
-                elif isinstance(mat, trimesh.visual.texture.SimpleMaterial):
-                    material = Material(
-                        alphaMode="OPAQUE" if (np.asarray(mat.image.convert("RGBA"))[..., 3] == 255).all() else "BLEND",
-                        metallicFactor=metallic_factor,
-                        roughnessFactor=roughness_factor,
-                        baseColorFactor=mat.diffuse,
-                        baseColorTexture=mat.image,
-                    )
-
+    The vertices of a flat-shaded mesh are split per face, which the colors and the texture coordinates follow. A mesh
+    given a material of its own takes the texture coordinates of its visual alone.
+    """
+    colors = None
+    texcoords = None
+    material = None
+    visual = mesh.visual
+    if not visual.defined:
         return colors, texcoords, material
+
+    if visual.kind in ("vertex", "face") and not has_material:
+        if visual.kind == "vertex":
+            colors = visual.vertex_colors
+            if not smooth and colors.ndim > 1:
+                colors = colors[mesh.faces].reshape((3 * len(mesh.faces), colors.shape[1]))
+        else:
+            assert not smooth
+            colors = np.repeat(visual.face_colors, 3, axis=0)
+        material = Material(
+            is_blended=colors.shape[-1] == 4 and bool((colors[..., 3] < 255).any()),
+            metallic_factor=metallic_factor,
+            roughness_factor=roughness_factor,
+        )
+    elif visual.kind == "texture":
+        if isinstance(visual, trimesh.visual.texture.TextureVisuals) and visual.uv is not None:
+            texcoords = visual.uv if smooth else visual.uv[mesh.faces].reshape((3 * len(mesh.faces), -1))
+        trimesh_material = None if has_material else visual.material
+        if isinstance(trimesh_material, trimesh.visual.texture.PBRMaterial):
+            material = Material(
+                normal_texture=trimesh_material.normalTexture,
+                occlusion_texture=trimesh_material.occlusionTexture,
+                emissive_texture=trimesh_material.emissiveTexture,
+                emissive_factor=trimesh_material.emissiveFactor,
+                is_blended=True,
+                base_color_factor=trimesh_material.baseColorFactor,
+                base_color_texture=trimesh_material.baseColorTexture,
+                metallic_factor=trimesh_material.metallicFactor,
+                roughness_factor=trimesh_material.roughnessFactor,
+                metallic_roughness_texture=trimesh_material.metallicRoughnessTexture,
+            )
+        elif isinstance(trimesh_material, trimesh.visual.texture.SimpleMaterial):
+            material = Material(
+                is_blended=bool((np.asarray(trimesh_material.image.convert("RGBA"))[..., 3] < 255).any()),
+                metallic_factor=metallic_factor,
+                roughness_factor=roughness_factor,
+                base_color_factor=trimesh_material.diffuse,
+                base_color_texture=trimesh_material.image,
+            )
+    return colors, texcoords, material
