@@ -146,13 +146,7 @@ def test_pendulum_links_acc(gs_sim, tol):
         # * acc_spatial_lin_y = sin(theta) * g
         acc_spatial_lin_world = gs_sim.rigid_solver.dyn_state.links.cacc_lin.to_numpy()
         assert_allclose(acc_spatial_lin_world[0], 0, tol=tol)
-        R = np.array(
-            [
-                [1.0, 0.0, 0.0],
-                [0.0, np.cos(theta), np.sin(theta)],
-                [0.0, -np.sin(theta), np.cos(theta)],
-            ]
-        )
+        R = gu.rotvec_to_R(np.array([-theta, 0.0, 0.0]))
         acc_spatial_lin_local = R @ acc_spatial_lin_world[2, 0]
         assert_allclose(acc_spatial_lin_local, np.array([0.0, np.sin(theta) * g, 0.0]), tol=tol)
         # Linear true acceleration:
@@ -162,6 +156,18 @@ def test_pendulum_links_acc(gs_sim, tol):
         assert_allclose(acc_classical_lin_world[0], 0, tol=tol)
         acc_classical_lin_local = R @ acc_classical_lin_world[2]
         assert_allclose(acc_classical_lin_local, np.array([0.0, np.sin(theta) * g, -(theta_dot**2)]), tol=tol)
+
+    # Implicit damping updates dofs.acc during integration, so link accelerations must match the integrated value.
+    pendulum.set_dofs_damping(5.0)
+    theta = tensor_to_array(pendulum.get_qpos())[0]
+    theta_dot = tensor_to_array(pendulum.get_dofs_velocity())[0]
+    gs_sim.scene.step()
+    theta_ddot = tensor_to_array(pendulum.get_dofs_acc())[0]
+    assert_allclose(pendulum.get_links_acc_ang()[2], np.array([theta_ddot, 0.0, 0.0]), tol=tol)
+    R = gu.rotvec_to_R(np.array([-theta, 0.0, 0.0]))
+    acc_classical_lin_local = R @ tensor_to_array(pendulum.get_links_acc())[2]
+    assert_allclose(acc_classical_lin_local, np.array([0.0, -theta_ddot, -(theta_dot**2)]), tol=tol)
+    pendulum.set_dofs_damping(0.0)
 
     # Hold the pendulum straight using PD controller and check again
     pendulum.set_dofs_kp([4000.0])

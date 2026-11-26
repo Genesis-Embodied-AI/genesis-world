@@ -254,6 +254,10 @@ def func_hibernate_link(
     dyn_state.links.is_hibernated[i_l, i_b] = True
     dyn_state.links.cd_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
     dyn_state.links.cd_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+    dyn_state.links.cacc_lin[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+    dyn_state.links.cacc_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+    dyn_state.links.acc_lin[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+    dyn_state.links.acc_cd_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
     for i_d in range(dyn_info.links.dof_start[link_I], dyn_info.links.dof_end[link_I]):
         dyn_state.dofs.is_hibernated[i_d, i_b] = True

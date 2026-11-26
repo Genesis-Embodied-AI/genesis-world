@@ -413,7 +413,7 @@ def _kernel_point_cloud_proximity_taxel_bvh(
         cache_start = sensor_cache_start[i_s]
         _i_p = i_p - sensor_probe_start[i_s]
 
-        s_vel, s_ang, _, _, s_com = func_sensor_link_motion(sensor_link_idx, i_b, dyn_state.links)
+        s_vel, s_ang, s_com = func_sensor_link_motion(sensor_link_idx, i_b, dyn_state.links)
 
         probe_local = func_vec3_at(i_p, probe_positions_local)
         probe_world = s_pos + gu.qd_transform_by_quat(probe_local, s_quat)

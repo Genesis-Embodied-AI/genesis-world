@@ -430,6 +430,12 @@ def test_getter_vs_state_post_step_consistency(enable_mujoco_compatibility):
     with pytest.raises(AssertionError) if enable_mujoco_compatibility else nullcontext():
         assert_allclose(dof_pos[:3], pos, atol=gs.EPS)
 
+    # Link linear acceleration must stay consistent with gravity under simultaneous translation and rotation regardless
+    # of whether kinematics are refreshed after integration.
+    box.set_dofs_velocity((1.0, -2.0, 3.0, 4.0, 5.0, 6.0))
+    scene.step()
+    assert_allclose(box.get_links_acc(), (0.0, 0.0, GRAVITY), atol=gs.EPS)
+
 
 @pytest.mark.required
 def test_extended_broadcasting():
@@ -636,6 +642,7 @@ def test_geom_pos_quat(n_envs, show_viewer):
 @pytest.mark.parametrize("batch_fixed_verts", [False, True])
 @pytest.mark.parametrize("relative", [False, True])
 def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
+    GRAVITY = (0.0, 0.0, -9.81)
     ROBOT_POS_ZERO = (0.0, 0.4, 0.1)
     ROBOT_EULER_ZERO = (0.0, 0.0, 90.0)
     CUBE_POS_ZERO = (0.65, 0.0, 0.02)
@@ -643,6 +650,9 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
     DELTA_THETA = 0.7
 
     scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            gravity=GRAVITY,
+        ),
         show_viewer=show_viewer,
         show_FPS=False,
     )
@@ -723,9 +733,11 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
     # Spinning the box makes the authored origin orbit the internal one, so both are reported at the displacement 'd'
     # the position getters strip. The spin is about a principal body axis orthogonal to the offset position, so it is
     # torque-free and stays orthogonal to 'd', which collapses the acceleration transport to the centripetal term
-    # 'SPIN**2 * d' toward the internal origin.
+    # 'SPIN**2 * d' toward the internal origin. The acceleration takes 'd' at the start of the step, the instant it
+    # describes.
     SPIN = 5.0
     posed_box.set_dofs_velocity((0.0, 0.0, 0.0, SPIN, 0.0, 0.0))
+    offset_shift_start = posed_box.get_pos(relative=False) - posed_box.get_pos(relative=True)
     scene.step()
     omega = posed_box.get_ang()
     offset_shift = posed_box.get_pos(relative=False) - posed_box.get_pos(relative=True)
@@ -734,9 +746,10 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
         posed_box.get_vel(relative=False) - torch.cross(omega, offset_shift, dim=-1),
         tol=tol,
     )
+    assert_allclose(posed_box.get_links_acc(relative=False)[..., 0, :], GRAVITY, tol=tol)
     assert_allclose(
         posed_box.get_links_acc(relative=True)[..., 0, :],
-        posed_box.get_links_acc(relative=False)[..., 0, :] + SPIN**2 * offset_shift,
+        posed_box.get_links_acc(relative=False)[..., 0, :] + SPIN**2 * offset_shift_start,
         tol=tol,
     )
 

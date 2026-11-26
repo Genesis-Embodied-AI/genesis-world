@@ -1459,8 +1459,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             with custom_backward(self._constraint_force_grad):
                 kernel_compute_smooth_qacc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
                 self._func_constraint_force()
-            kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
             kernel_integrate(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
+            kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
             kernel_copy_next_to_curr_clear_coupling(
                 self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno
             )
@@ -3444,15 +3444,15 @@ def kernel_step_1(
 def func_step_2(
     dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template(), errno: qd.Tensor
 ):
-    # Position, Velocity and Acceleration data must be consistent when computing links acceleration, otherwise it
-    # would not corresponds to anyting physical. There is no other way than doing this right before integration,
-    # because the acceleration at the end of the step is unknown for now as it may change discontinuous between
-    # before and after integration under the effect of external forces and constraints. This means that
-    # acceleration data will be shifted one timestep in the past, but there isn't really any way around.
-    # A substep whose launches are recorded for its backward pass runs these steps as one launch each (see
+    # Position, velocity and acceleration must belong to the same instant when computing link accelerations. Running
+    # func_update_acc after func_integrate and before func_copy_next_to_curr uses the final integrated dofs.acc
+    # (including implicit damping and midpoint free-body updates) while link pose, velocity and tree COM still hold
+    # their pre-integration values. The accelerations therefore lag one substep behind the pose and velocity the step
+    # ends with, since the acceleration at the end of the step depends on forces and constraints not yet known. A
+    # substep whose launches are recorded for its backward pass runs these steps as one launch each (see
     # 'RigidSolver.substep').
-    func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=True, is_backward=False)
     func_integrate(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
+    func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=True, is_backward=False)
     func_copy_next_to_curr(dyn_state, rigid_info, rigid_config, errno)
     func_clear_external_wrench(dyn_state, dyn_info, rigid_info, rigid_config)
     if qd.static(not rigid_config.enable_mujoco_compatibility):

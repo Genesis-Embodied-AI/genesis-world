@@ -847,6 +847,15 @@ def func_update_acc_link(
                 BW,
             )
 
+    if qd.static(update_cacc):
+        cpos = dyn_state.links.pos[i_l, i_b] - dyn_state.links.root_COM[i_l, i_b]
+        acc_ang = dyn_state.links.cacc_ang[i_l, i_b]
+        ang = dyn_state.links.cd_ang[i_l, i_b]
+        vel = dyn_state.links.cd_vel[i_l, i_b] + ang.cross(cpos)
+        dyn_state.links.acc_lin[i_l, i_b] = dyn_state.links.cacc_lin[i_l, i_b] + acc_ang.cross(cpos) + ang.cross(vel)
+        dyn_state.links.acc_quat[i_l, i_b] = dyn_state.links.quat[i_l, i_b]
+        dyn_state.links.acc_cd_ang[i_l, i_b] = ang
+
 
 @qd.func
 def func_forward_velocity_root(

@@ -653,23 +653,40 @@ def func_sensor_link_pose(i_l: int, i_b: int, links_state: LinksState):
 
 @qd.func
 def func_sensor_link_motion(i_l: int, i_b: int, links_state: LinksState):
-    """Return the spatial velocity and acceleration of the link a sensor is attached to, as the kinematic tree states
-    them at the center of mass of its root: (cd_vel, cd_ang, cacc_lin, cacc_ang, root_COM).
+    """Return the spatial velocity of the link a sensor is attached to, as the kinematic tree states it at the center of
+    mass of its root: (cd_vel, cd_ang, root_COM).
 
     A sensor attached to no entity (link -1) is at rest in the world frame, every term being zero.
     """
     cd_vel = qd.Vector.zero(gs.qd_float, 3)
     cd_ang = qd.Vector.zero(gs.qd_float, 3)
-    cacc_lin = qd.Vector.zero(gs.qd_float, 3)
-    cacc_ang = qd.Vector.zero(gs.qd_float, 3)
     root_com = qd.Vector.zero(gs.qd_float, 3)
     if i_l >= 0:
         cd_vel = links_state.cd_vel[i_l, i_b]
         cd_ang = links_state.cd_ang[i_l, i_b]
-        cacc_lin = links_state.cacc_lin[i_l, i_b]
-        cacc_ang = links_state.cacc_ang[i_l, i_b]
         root_com = links_state.root_COM[i_l, i_b]
-    return cd_vel, cd_ang, cacc_lin, cacc_ang, root_com
+    return cd_vel, cd_ang, root_com
+
+
+@qd.func
+def func_sensor_link_acc(i_l: int, i_b: int, links_state: LinksState):
+    """Return the acceleration of the link a sensor is attached to over the last substep, with the orientation and
+    angular velocity of the link at its start: (acc_lin, cacc_ang, acc_quat, acc_cd_ang).
+
+    The classical linear acceleration is that of the link origin, in world coordinates. The pose and velocity the
+    substep ends with are one substep ahead of it (see acc_lin in rigid/data.py). A sensor attached to no entity
+    (link -1) is at rest in the world frame, with zero acceleration and the identity orientation.
+    """
+    acc_lin = qd.Vector.zero(gs.qd_float, 3)
+    cacc_ang = qd.Vector.zero(gs.qd_float, 3)
+    acc_quat = qd.Vector([1.0, 0.0, 0.0, 0.0], dt=gs.qd_float)
+    acc_cd_ang = qd.Vector.zero(gs.qd_float, 3)
+    if i_l >= 0:
+        acc_lin = links_state.acc_lin[i_l, i_b]
+        cacc_ang = links_state.cacc_ang[i_l, i_b]
+        acc_quat = links_state.acc_quat[i_l, i_b]
+        acc_cd_ang = links_state.acc_cd_ang[i_l, i_b]
+    return acc_lin, cacc_ang, acc_quat, acc_cd_ang
 
 
 class _LinkAttachedSensorMixin(BuildableMixin):

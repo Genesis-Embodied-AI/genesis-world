@@ -18,6 +18,7 @@ from .base_sensor import (
     RigidSensorMixin,
     SimpleSensor,
     SimpleSensorMetadata,
+    func_sensor_link_acc,
     func_sensor_link_motion,
     func_sensor_link_pose,
 )
@@ -54,22 +55,22 @@ def _kernel_update_imu_raw_data(
         for j in qd.static(range(4)):
             offset_quat[j] = offsets_quat[i_b, i_s, j]
 
-        # Spatial velocity and acceleration are expressed at the root of the kinematic tree, hence the transport to the
-        # link origin before converting the spatial acceleration to the classical one.
-        pos, quat = func_sensor_link_pose(i_l, i_b, dyn_state.links)
-        cd_vel, ang, cacc_lin, acc_ang, root_com = func_sensor_link_motion(i_l, i_b, dyn_state.links)
-        cpos = pos - root_com
-        vel = cd_vel + ang.cross(cpos)
-        acc = cacc_lin + acc_ang.cross(cpos) + ang.cross(vel)
+        _, quat = func_sensor_link_pose(i_l, i_b, dyn_state.links)
+        _, ang, _ = func_sensor_link_motion(i_l, i_b, dyn_state.links)
+        acc, acc_ang, acc_quat, acc_ang_vel = func_sensor_link_acc(i_l, i_b, dyn_state.links)
 
+        # The accelerometer works in the link frame at the instant of the acceleration, the start of the last substep.
+        # Rotating it by the orientation the substep ends with would tilt the measured acceleration by the rotation of
+        # the link over the substep (see acc_lin in rigid/data.py).
         # Rigid-body transport from the link origin to the measurement point: a_imu = a + alpha x r + w x (w x r). A
         # zero mounting offset contributes nothing, so this stays unconditional.
-        offset_pos_world = gu.qd_transform_by_quat(offset_pos, quat)
-        acc = acc + acc_ang.cross(offset_pos_world) + ang.cross(ang.cross(offset_pos_world))
+        offset_pos_world = gu.qd_transform_by_quat(offset_pos, acc_quat)
+        acc = acc + acc_ang.cross(offset_pos_world) + acc_ang_vel.cross(acc_ang_vel.cross(offset_pos_world))
 
         # An accelerometer measures proper acceleration, so gravity is subtracted before rotating into the sensor frame
+        acc_sensor_quat = gu.qd_transform_quat_by_quat(acc_quat, offset_quat)
+        local_acc = gu.qd_inv_transform_by_quat(acc - rigid_info.gravity[i_b], acc_sensor_quat)
         sensor_quat = gu.qd_transform_quat_by_quat(quat, offset_quat)
-        local_acc = gu.qd_inv_transform_by_quat(acc - rigid_info.gravity[i_b], sensor_quat)
         local_ang = gu.qd_inv_transform_by_quat(ang, sensor_quat)
         local_mag = gu.qd_inv_transform_by_quat(mag, sensor_quat)
 

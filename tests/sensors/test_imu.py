@@ -188,6 +188,40 @@ def test_sensor(free_box, show_viewer, tol, n_envs):
     imu.set_acc_cross_axis_coupling((0.0, 0.0, 0.0))
     scene.reset()
 
+    # Free-falling spinning and translating symmetric box: proper acceleration at the COM is zero.
+    box.set_dofs_velocity((1.0, -2.0, 3.0, 4.0, 5.0, 6.0))
+    for _ in range(5):
+        scene.step()
+    assert_allclose(imu.read_ground_truth().lin_acc, 0.0, tol=tol)
+    assert_allclose(box.get_links_acc(), (0.0, 0.0, GRAVITY), tol=tol)
+    scene.reset()
+
+    # Symmetric box spinning about its y axis under a thrust and a torque fixed in its frame: an IMU at a mounting
+    # offset r measures the thrust acceleration plus alpha x r + w x (w x r), with the angular velocity w the step
+    # starts with. Spin and torque share the y axis, which the rotation leaves fixed, so w and alpha read the same in
+    # world and link coordinates.
+    THRUST = 9.0
+    POS_OFFSET = (0.5, -0.2, 0.1)
+    imu.set_pos_offset(POS_OFFSET)
+    box.set_dofs_velocity((0.0, 0.0, 0.0, 0.0, 6.0, 0.0))
+    offset = torch.tensor(POS_OFFSET, dtype=gs.tc_float, device=gs.device)
+    thrust_acc = torch.tensor((0.0, 0.0, THRUST), dtype=gs.tc_float, device=gs.device) / box.get_mass()[..., None]
+    for _ in range(3):
+        ang_vel = box.get_ang()
+        box.apply_links_external_wrench(
+            force=(0.0, 0.0, THRUST),
+            torque=(0.0, 0.01, 0.0),
+            ref=gs.link_ref_frame.link_COM,
+            local=True,
+        )
+        scene.step()
+        ang_acc = box.get_links_acc_ang()[..., 0, :]
+        centripetal_acc = torch.linalg.cross(ang_vel, torch.linalg.cross(ang_vel, offset.expand_as(ang_vel)))
+        expected_lin_acc = thrust_acc + torch.linalg.cross(ang_acc, offset.expand_as(ang_acc)) + centripetal_acc
+        assert_allclose(imu.read_ground_truth().lin_acc, expected_lin_acc, tol=tol)
+    imu.set_pos_offset((0.0, 0.0, 0.0))
+    scene.reset()
+
     assert_allclose(imu.read().lin_acc, 0.0, tol=gs.EPS)  # biased, but cache hasn't been updated yet
     assert_allclose(imu_delayed.read().lin_acc, 0.0, tol=gs.EPS)
     assert_allclose(imu_noisy.read().ang_vel, 0.0, tol=gs.EPS)
