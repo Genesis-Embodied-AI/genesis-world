@@ -45,6 +45,7 @@ from genesis.utils.simt import (
     ExactSums,
     func_exact_sum_add,
     func_exact_sum_take,
+    qd_block_max,
     qd_block_scan,
     qd_block_shuffle,
     qd_block_sum,
@@ -1698,6 +1699,83 @@ def func_pressure_step(sph_state: SPHState):
 
 
 @qd.func
+def func_update_particle(i_p: int, i_b: int, sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template()):
+    """
+    Take the step of the pressure solve of a sorted particle, and return its terms of the sums of func_pressure_next
+    and its relative density error, both zero for an expansion step.
+    """
+    expansion_step = sph_info.expansion_step[None]
+    # The pressure of the particle comes first, then those of its contacts (see func_contacts_diag)
+    diags_contacts = func_contacts_diag(i_p, i_b, sph_state, sph_info, sph_config)
+    pressures = qd.Vector(
+        [
+            sph_state.particles_reordered.p[i_p, i_b],
+            sph_state.pressure_solve.p_contacts[i_p, i_b][0],
+            sph_state.pressure_solve.p_contacts[i_p, i_b][1],
+            sph_state.pressure_solve.p_contacts[i_p, i_b][2],
+        ]
+    )
+    grads = qd.Vector(
+        [
+            sph_state.pressure_solve.grad[i_p, i_b],
+            sph_state.pressure_solve.grad_contacts[i_p, i_b][0],
+            sph_state.pressure_solve.grad_contacts[i_p, i_b][1],
+            sph_state.pressure_solve.grad_contacts[i_p, i_b][2],
+        ]
+    )
+    dirs = qd.Vector(
+        [
+            sph_state.pressure_solve.dir[i_p, i_b],
+            sph_state.pressure_solve.dir_contacts[i_p, i_b][0],
+            sph_state.pressure_solve.dir_contacts[i_p, i_b][1],
+            sph_state.pressure_solve.dir_contacts[i_p, i_b][2],
+        ]
+    )
+    dir_prods = qd.Vector(
+        [
+            sph_state.pressure_solve.dir_prod[i_p, i_b],
+            sph_state.pressure_solve.dir_prod_contacts[i_p, i_b][0],
+            sph_state.pressure_solve.dir_prod_contacts[i_p, i_b][1],
+            sph_state.pressure_solve.dir_prod_contacts[i_p, i_b][2],
+        ]
+    )
+    diags_inv = qd.Vector(
+        [
+            sph_state.pressure_solve.diag_inv[i_p, i_b],
+            1.0 / diags_contacts[0],
+            1.0 / diags_contacts[1],
+            1.0 / diags_contacts[2],
+        ]
+    )
+    if not sph_state.envs_solve.is_recomputing[i_b]:
+        step = sph_state.envs_solve.step[i_b]
+        pressures = qd.max(pressures - step * dirs, 0.0)
+        grads = grads - step * dir_prods
+    grads_free = qd.select(pressures > 0.0, grads, 0.0)
+    terms = qd.Vector.zero(gs.qd_float, 3)
+    err = gs.qd_float(0.0)
+    if sph_state.envs_solve.is_expanding[i_b]:
+        pressures = qd.max(pressures - expansion_step * diags_inv * grads_free, 0.0)
+    else:
+        grads_chopped = qd.select(pressures > 0.0, 0.0, qd.min(grads, 0.0))
+        # The particles free of pressure have no free gradient, and would divide zero by zero
+        grads_reduced = qd.select(pressures > 0.0, qd.min(pressures / (expansion_step * diags_inv), grads_free), 0.0)
+        # The search direction is stale while the environment recomputes its gradient
+        free_prod = gs.qd_float(0.0)
+        if not sph_state.envs_solve.is_recomputing[i_b]:
+            free_prod = (diags_inv * grads_free * dir_prods).sum()
+        terms = qd.Vector(
+            [(diags_inv * grads_chopped**2).sum(), (diags_inv * grads_reduced * grads_free).sum(), free_prod]
+        )
+        err = qd.abs(grads_free + grads_chopped).max()
+    sph_state.particles_reordered.p[i_p, i_b] = pressures[0]
+    sph_state.pressure_solve.p_contacts[i_p, i_b] = qd.Vector([pressures[1], pressures[2], pressures[3]])
+    sph_state.pressure_solve.grad[i_p, i_b] = grads[0]
+    sph_state.pressure_solve.grad_contacts[i_p, i_b] = qd.Vector([grads[1], grads[2], grads[3]])
+    return terms, err
+
+
+@qd.func
 def func_pressure_update(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template()):
     """
     Take the step of the pressure solve of each environment, and sum what decides the next one.
@@ -1708,80 +1786,32 @@ def func_pressure_update(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.
     the reduced free gradient, which decide between conjugate gradients and proportioning, and the product of the free
     gradient with the operator times the search direction, which conjugates the next direction.
     """
-    expansion_step = sph_info.expansion_step[None]
-    for i_p, i_b in qd.ndrange(
-        *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.p))
-    ):
-        if sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]:
-            # The pressure of the particle comes first, then those of its contacts (see func_contacts_diag)
-            diags_contacts = func_contacts_diag(i_p, i_b, sph_state, sph_info, sph_config)
-            pressures = qd.Vector(
-                [
-                    sph_state.particles_reordered.p[i_p, i_b],
-                    sph_state.pressure_solve.p_contacts[i_p, i_b][0],
-                    sph_state.pressure_solve.p_contacts[i_p, i_b][1],
-                    sph_state.pressure_solve.p_contacts[i_p, i_b][2],
-                ]
-            )
-            grads = qd.Vector(
-                [
-                    sph_state.pressure_solve.grad[i_p, i_b],
-                    sph_state.pressure_solve.grad_contacts[i_p, i_b][0],
-                    sph_state.pressure_solve.grad_contacts[i_p, i_b][1],
-                    sph_state.pressure_solve.grad_contacts[i_p, i_b][2],
-                ]
-            )
-            dirs = qd.Vector(
-                [
-                    sph_state.pressure_solve.dir[i_p, i_b],
-                    sph_state.pressure_solve.dir_contacts[i_p, i_b][0],
-                    sph_state.pressure_solve.dir_contacts[i_p, i_b][1],
-                    sph_state.pressure_solve.dir_contacts[i_p, i_b][2],
-                ]
-            )
-            dir_prods = qd.Vector(
-                [
-                    sph_state.pressure_solve.dir_prod[i_p, i_b],
-                    sph_state.pressure_solve.dir_prod_contacts[i_p, i_b][0],
-                    sph_state.pressure_solve.dir_prod_contacts[i_p, i_b][1],
-                    sph_state.pressure_solve.dir_prod_contacts[i_p, i_b][2],
-                ]
-            )
-            diags_inv = qd.Vector(
-                [
-                    sph_state.pressure_solve.diag_inv[i_p, i_b],
-                    1.0 / diags_contacts[0],
-                    1.0 / diags_contacts[1],
-                    1.0 / diags_contacts[2],
-                ]
-            )
-            if not sph_state.envs_solve.is_recomputing[i_b]:
-                step = sph_state.envs_solve.step[i_b]
-                pressures = qd.max(pressures - step * dirs, 0.0)
-                grads = grads - step * dir_prods
-            grads_free = qd.select(pressures > 0.0, grads, 0.0)
-            if sph_state.envs_solve.is_expanding[i_b]:
-                pressures = qd.max(pressures - expansion_step * diags_inv * grads_free, 0.0)
-            else:
-                grads_chopped = qd.select(pressures > 0.0, 0.0, qd.min(grads, 0.0))
-                # The particles free of pressure have no free gradient, and would divide zero by zero
-                grads_reduced = qd.select(
-                    pressures > 0.0, qd.min(pressures / (expansion_step * diags_inv), grads_free), 0.0
-                )
-                # The search direction is stale while the environment recomputes its gradient
-                free_prod = gs.qd_float(0.0)
-                if not sph_state.envs_solve.is_recomputing[i_b]:
-                    free_prod = (diags_inv * grads_free * dir_prods).sum()
-                terms = qd.Vector(
-                    [(diags_inv * grads_chopped**2).sum(), (diags_inv * grads_reduced * grads_free).sum(), free_prod]
-                )
-                for i_s in range(3):
-                    func_exact_sum_add(i_s, i_b, terms[i_s], sph_state.envs_solve.sums)
-                qd.atomic_max(sph_state.envs_solve.err_max[i_b], qd.abs(grads_free + grads_chopped).max())
-            sph_state.particles_reordered.p[i_p, i_b] = pressures[0]
-            sph_state.pressure_solve.p_contacts[i_p, i_b] = qd.Vector([pressures[1], pressures[2], pressures[3]])
-            sph_state.pressure_solve.grad[i_p, i_b] = grads[0]
-            sph_state.pressure_solve.grad_contacts[i_p, i_b] = qd.Vector([grads[1], grads[2], grads[3]])
+    # Every particle adds to the same few sums of its environment, so where a block of lanes holds the particles of a
+    # single environment (see 'log2_neighbor_lanes'), the block sums its terms before the atomic operations. A single
+    # lane takes the environments of a particle in turn instead, which reads them from neighboring addresses.
+    N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
+    n_particles, n_envs = sph_state.particles_reordered.pos.shape
+    n_particles_padded = (n_particles + N_LANES - 1) // N_LANES * N_LANES
+    for i_t in range(n_envs * n_particles_padded):
+        i_b, i_p = i_t // n_particles_padded, i_t % n_particles_padded
+        if qd.static(N_LANES == 1):
+            i_b, i_p = i_t % n_envs, i_t // n_envs
+        terms = qd.Vector.zero(gs.qd_float, 3)
+        err = gs.qd_float(0.0)
+        is_adding = False
+        if i_p < n_particles:
+            if sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]:
+                terms, err = func_update_particle(i_p, i_b, sph_state, sph_info, sph_config)
+                is_adding = True
+        if qd.static(N_LANES > 1):
+            for i_s in qd.static(range(3)):
+                terms[i_s] = qd_block_sum(terms[i_s], sph_config.log2_neighbor_lanes)
+            err = qd_block_max(err)
+            is_adding = i_p % N_LANES == 0 and sph_state.envs_solve.is_solving[i_b]
+        if is_adding and not sph_state.envs_solve.is_expanding[i_b]:
+            for i_s in range(3):
+                func_exact_sum_add(i_s, i_b, terms[i_s], sph_state.envs_solve.sums)
+            qd.atomic_max(sph_state.envs_solve.err_max[i_b], err)
 
 
 @qd.func
