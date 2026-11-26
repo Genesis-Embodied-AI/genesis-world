@@ -55,7 +55,7 @@ def test_grid_sensor_contact_and_reset(show_viewer, tol, n_envs):
                     specific_heat=1.0,
                     emissivity=0.95,
                 ),
-                hot_box.base_link_idx: TemperatureProperties(
+                hot_box.base_link: TemperatureProperties(
                     base_temperature=BASE_TEMP + 100.0,
                     conductivity=200.0,
                     density=3000.0,

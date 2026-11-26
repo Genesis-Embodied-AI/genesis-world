@@ -73,25 +73,35 @@ def objects_idx_type(
     """Return the annotation of a field that takes objects of a class and holds their indices.
 
     The field holds the 'idx' of the object, or a tuple of indices with 'many', so that an option referring to an
-    entity or a link takes the object itself rather than an index the user computes. 'allow_empty' admits an empty
-    sequence with 'many', and 'allow_int' admits the indices themselves beside the objects. 'get_cls' returns the class
-    as the field is validated, since the module declaring the field is imported before the class is defined.
+    entity or a link takes the object itself rather than an index the user computes.
+
+    Parameters
+    ----------
+    get_cls : Callable[[], type]
+        Returns the class of the objects as the field is validated, since the module declaring the field is imported
+        before the class is defined.
+    many : bool
+        Whether the field takes a sequence of objects and holds a tuple of indices, rather than a single index.
+    allow_empty : bool, optional
+        Whether an empty sequence is admitted with 'many'. Defaults to False.
+    allow_int : bool, optional
+        Whether the indices themselves are admitted beside the objects. Defaults to False.
     """
 
     def _objects_to_idx(val: Any) -> int | tuple[int, ...]:
         cls = get_cls()
-        expected = f"{cls.__name__} or int" if allow_int else cls.__name__
+        expected_type = f"{cls.__name__} or int" if allow_int else cls.__name__
         if many and not is_sequence(val):
             raise PydanticCustomError(
                 "invalid_type",
                 "Input should be a sequence of {cls}, got {t}",
-                {"cls": expected, "t": type(val).__name__},
+                {"cls": expected_type, "t": type(val).__name__},
             )
         objects = tuple(val) if many else (val,)
         if not objects and not allow_empty:
             raise PydanticCustomError("too_short", "Input should hold at least one {cls}", {"cls": cls.__name__})
         objects_idx = []
-        for i, obj in enumerate(objects):
+        for i_object, obj in enumerate(objects):
             if isinstance(obj, cls):
                 objects_idx.append(obj.idx)
             elif allow_int and isinstance(obj, (int, np.integer)) and not isinstance(obj, bool):
@@ -101,11 +111,11 @@ def objects_idx_type(
                 raise PydanticCustomError(
                     "invalid_type",
                     "Item {i} should be {cls}, got {t}",
-                    {"i": i, "cls": expected, "t": type(obj).__name__},
+                    {"i": i_object, "cls": expected_type, "t": type(obj).__name__},
                 )
             else:
                 raise PydanticCustomError(
-                    "invalid_type", "Input should be {cls}, got {t}", {"cls": expected, "t": type(obj).__name__}
+                    "invalid_type", "Input should be {cls}, got {t}", {"cls": expected_type, "t": type(obj).__name__}
                 )
         objects_idx = tuple(objects_idx)
         return objects_idx if many else objects_idx[0]

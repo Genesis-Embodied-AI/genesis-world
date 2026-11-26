@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     NonNegativeUnboundedFloat = float
     LaxNonNegativeUnboundedVec3FType = Vec3FType | float
     EntityIdx = Entity | int
+    RigidLinkIdx = RigidLink | int
     RigidLinksIdx = Sequence[RigidLink | int]
     OptionalRigidLinksIdx = Sequence[RigidLink | int]
 else:
@@ -68,10 +69,15 @@ else:
         Field(strict=False),
     ]
     # The classes are looked up lazily, since the engine imports these options before defining them
-    EntityIdx = objects_idx_type(lambda: gs.engine.entities.Entity, many=False, allow_int=True)
-    RigidLinksIdx = objects_idx_type(lambda: gs.engine.entities.rigid_entity.RigidLink, many=True, allow_int=True)
+    EntityIdx = objects_idx_type(get_cls=lambda: gs.engine.entities.Entity, many=False, allow_int=True)
+    RigidLinkIdx = objects_idx_type(
+        get_cls=lambda: gs.engine.entities.rigid_entity.RigidLink, many=False, allow_int=True
+    )
+    RigidLinksIdx = objects_idx_type(
+        get_cls=lambda: gs.engine.entities.rigid_entity.RigidLink, many=True, allow_int=True
+    )
     OptionalRigidLinksIdx = objects_idx_type(
-        lambda: gs.engine.entities.rigid_entity.RigidLink, many=True, allow_empty=True, allow_int=True
+        get_cls=lambda: gs.engine.entities.rigid_entity.RigidLink, many=True, allow_empty=True, allow_int=True
     )
 CrossCouplingAxisType = RotationMatrixType | UnitIntervalVec3Type | float
 
@@ -493,8 +499,8 @@ class TemperatureGrid(
 
     Parameters
     ----------
-    properties_dict: dict[int, TemperatureProperties]
-        A dictionary which maps link indices to their temperature-related material properties. Key `-1` is
+    properties_dict: dict[RigidLink | int, TemperatureProperties]
+        A dictionary which maps links, or their indices, to their temperature-related material properties. Key `-1` is
         used as the default for links not present in the dict; if omitted, unlisted links are ignored in contacts.
         This parameter is shared across all Temperature sensors (dicts will be merged).
     ambient_temperature: float
@@ -520,7 +526,7 @@ class TemperatureGrid(
         The range of temperatures to visualize in the debug mode. Defaults to (0.0, 100.0).
     """
 
-    properties_dict: dict[int, TemperatureProperties] = Field(default_factory=dict)
+    properties_dict: dict[RigidLinkIdx, TemperatureProperties] = Field(default_factory=dict)
     ambient_temperature: float | None = None
     convection_coefficient: float | None = None
     simulate_all_link_temperatures: bool = False
