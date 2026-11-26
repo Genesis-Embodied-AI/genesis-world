@@ -1,8 +1,8 @@
-from .camera import Camera, PerspectiveCamera, OrthographicCamera, IntrinsicsCamera
+from .camera import Camera, PerspectiveCamera, OrthographicCamera
 from .light import Light, PointLight, DirectionalLight, SpotLight
 from .sampler import Sampler
 from .texture import Texture
-from .material import Material, MetallicRoughnessMaterial
+from .material import Material
 from .primitive import Primitive
 from .mesh import Mesh
 from .node import Node
@@ -17,7 +17,6 @@ __all__ = [
     "Camera",
     "PerspectiveCamera",
     "OrthographicCamera",
-    "IntrinsicsCamera",
     "Light",
     "PointLight",
     "DirectionalLight",
@@ -25,7 +24,6 @@ __all__ = [
     "Sampler",
     "Texture",
     "Material",
-    "MetallicRoughnessMaterial",
     "Primitive",
     "Mesh",
     "Node",

@@ -59,8 +59,8 @@ class RenderFlags(object):
     """Do not cull back faces."""
     RGBA = 2048
     """Render the color buffer with the alpha channel enabled."""
-    FLAT = 4096
-    """Render the color buffer flat, with no lighting computations."""
+    NORMAL = 4096
+    """Render the normal of the surfaces in world space, encoded as a color."""
     SEG = 8192
     """Render segmentation."""
     RET_DEPTH = 1 << 14
@@ -171,8 +171,6 @@ class TexFlags(object):
     EMISSIVE = 4
     BASE_COLOR = 8
     METALLIC_ROUGHNESS = 16
-    DIFFUSE = 32
-    SPECULAR_GLOSSINESS = 64
 
 
 class ProgramFlags:
@@ -181,7 +179,6 @@ class ProgramFlags:
     VERTEX_NORMALS = 2
     FACE_NORMALS = 4
     POINT_SHADOW = 8
-    DOUBLE_SIDED = 16
     SHADOW = 32
     TRANSMITTANCE = 64
 

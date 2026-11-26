@@ -46,20 +46,11 @@ struct PointLight {
 
 struct Material {
     vec3 emissive_factor;
-
-#ifdef USE_METALLIC_MATERIAL
     vec4 base_color_factor;
     float metallic_factor;
     float roughness_factor;
     float transmission_factor;
     float ior;
-#endif
-
-#ifdef USE_GLOSSY_MATERIAL
-    vec4 diffuse_factor;
-    vec3 specular_factor;
-    float glossiness_factor;
-#endif
 
 #ifdef HAS_NORMAL_TEX
     sampler2D normal_texture;
@@ -85,12 +76,6 @@ struct Material {
 #endif
 #ifdef HAS_METALLIC_ROUGHNESS_TEX
     sampler2D metallic_roughness_texture;
-#endif
-#ifdef HAS_DIFFUSE_TEX
-    sampler2D diffuse_texture;
-#endif
-#ifdef HAS_SPECULAR_GLOSSINESS_TEX
-    sampler2D specular_glossiness;
 #endif
 };
 
@@ -126,10 +111,6 @@ uniform vec2 screen_size;
 
 uniform mat4 reflection_mat;
 
-#ifdef USE_IBL
-uniform samplerCube diffuse_env;
-uniform samplerCube specular_env;
-#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 // Inputs
@@ -181,28 +162,17 @@ const float min_roughness = 0.04;
 ///////////////////////////////////////////////////////////////////////////////
 vec4 srgb_to_linear(vec4 srgb)
 {
-#ifndef SRGB_CORRECTED
-    // Fast Approximation
-    //vec3 linOut = pow(srgbIn.xyz,vec3(2.2));
-    //
-    vec3 b_less = step(vec3(0.04045),srgb.xyz);
-    vec3 lin_out = mix( srgb.xyz/vec3(12.92), pow((srgb.xyz+vec3(0.055))/vec3(1.055),vec3(2.4)), b_less );
+    vec3 b_less = step(vec3(0.04045), srgb.xyz);
+    vec3 lin_out = mix(srgb.xyz / vec3(12.92), pow((srgb.xyz + vec3(0.055)) / vec3(1.055), vec3(2.4)), b_less);
     return vec4(lin_out, srgb.w);
-#else
-    return srgb;
-#endif
 }
 
 // The sRGB encoding of IEC 61966-2-1, inverse of srgb_to_linear
 vec4 linear_to_srgb(vec4 linear)
 {
-#ifndef SRGB_CORRECTED
     vec3 b_less = step(vec3(0.0031308), linear.xyz);
     vec3 srgb_out = mix(linear.xyz * vec3(12.92), vec3(1.055) * pow(linear.xyz, vec3(1.0 / 2.4)) - vec3(0.055), b_less);
     return vec4(srgb_out, linear.w);
-#else
-    return linear;
-#endif
 }
 
 // Normal computation
@@ -375,10 +345,6 @@ void main()
     }
 
     vec4 color = vec4(vec3(0.0), 1.0);
-///////////////////////////////////////////////////////////////////////////////
-// Handle Metallic Materials
-///////////////////////////////////////////////////////////////////////////////
-#ifdef USE_METALLIC_MATERIAL
 
     // Compute metallic/roughness factors
     float roughness = material.roughness_factor;
@@ -572,11 +538,6 @@ void main()
         transmittance = transmission * (1.0 - fresnel) * base_color.rgb;
     }
 
-    // Calculate lighting from environment
-#ifdef USE_IBL
-    // TODO
-#endif
-
     // Apply occlusion
 #ifdef HAS_OCCLUSION_TEX
     float ao = texture(material.occlusion_texture, uv_0).r;
@@ -605,14 +566,4 @@ void main()
     if (transmission > 0.0) {
         frag_color.rgb *= coverage;
     }
-
-
-#else
-    // TODO GLOSSY MATERIAL BRDF
-#endif
-
-///////////////////////////////////////////////////////////////////////////////
-// Handle Glossy Materials
-///////////////////////////////////////////////////////////////////////////////
-
 }

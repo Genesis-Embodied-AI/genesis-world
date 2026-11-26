@@ -25,9 +25,8 @@ from .constants import (
 from .font import FontCache
 from .jit_render import is_env_pass
 from .light import DirectionalLight, PointLight, SpotLight
-from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
 from .sampler import Sampler
-from .shader_program import NormalShaderCache, ShaderProgramCache
+from .shader_program import ShaderProgramCache
 from .texture import Texture
 from .utils import format_color_vector
 
@@ -81,7 +80,6 @@ class Renderer(object):
 
         # Shader Program Cache
         self._program_cache = ShaderProgramCache()
-        self._normal_program_cache = NormalShaderCache()
         self._font_cache = FontCache()
 
         self._floor_texture_color = None
@@ -164,7 +162,7 @@ class Renderer(object):
                 # flickering. The caller should display the previous frame.
                 return ()
 
-        if flags & RenderFlags.SEG or flags & RenderFlags.DEPTH_ONLY or flags & RenderFlags.FLAT:
+        if flags & RenderFlags.SEG or flags & RenderFlags.DEPTH_ONLY or flags & RenderFlags.NORMAL:
             flags &= ~RenderFlags.REFLECTIVE_FLOOR
 
         # The normals are drawn by a pass of their own, which the flags tell apart from the others (see 'forward_pass'
@@ -338,7 +336,6 @@ class Renderer(object):
         """Free all allocated OpenGL resources."""
         # Free shaders
         self._program_cache.clear()
-        self._normal_program_cache.clear()
 
         # Free fonts
         self._font_cache.clear()
@@ -462,16 +459,16 @@ class Renderer(object):
 
     def _marker_xray_pass(self, V, P, cam_pos, flags, screen_size, env_idx):
         """Render markers behind geometry with darkened transparency (X-ray effect)."""
-        marker_mask = self.jit.render_flags[:, 6].astype(bool)
-        if not np.any(marker_mask):
+        marker_mask = self.jit.is_marker
+        if not marker_mask.any():
             return
 
         # Save and dim marker colors, force alpha blending
         saved_pbr_mat = self.jit.pbr_mat[marker_mask].copy()
-        saved_blend_flags = self.jit.render_flags[marker_mask, 0].copy()
+        saved_is_blended = self.jit.is_blended[marker_mask].copy()
         self.jit.pbr_mat[marker_mask, 0:3] *= MARKER_XRAY_DIM_FACTOR
         self.jit.pbr_mat[marker_mask, 3] = MARKER_XRAY_ALPHA
-        self.jit.render_flags[marker_mask, 0] = 1
+        self.jit.is_blended[marker_mask] = True
 
         # Draw only occluded fragments, without touching the depth buffer.
         glDepthFunc(GL_GREATER)
@@ -486,7 +483,7 @@ class Renderer(object):
         glDepthFunc(GL_LESS)
         glDepthMask(GL_TRUE)
         self.jit.pbr_mat[marker_mask] = saved_pbr_mat
-        self.jit.render_flags[marker_mask, 0] = saved_blend_flags
+        self.jit.is_blended[marker_mask] = saved_is_blended
 
     def _point_shadow_mapping_pass(self, scene, light_node, flags, env_idx=-1):
         light = light_node.light
@@ -537,7 +534,7 @@ class Renderer(object):
         # White lets the light through untinted, behind a transparent surface at the far end of the depth range
         glClearColor(1.0, 1.0, 1.0, 1.0)
         glClear(GL_COLOR_BUFFER_BIT)
-        if not self.jit.render_flags[:, 5].any():
+        if not self.jit.is_transparent.any():
             return
 
         # The colors multiply over the transparent surfaces that a ray of the light crosses, whatever their order, and
@@ -634,7 +631,7 @@ class Renderer(object):
         elif (
             program_flags & ProgramFlags.USE_MATERIAL
             and not flags & RenderFlags.DEPTH_ONLY
-            and not flags & RenderFlags.FLAT
+            and not flags & RenderFlags.NORMAL
             and not flags & RenderFlags.SEG
         ):
             vertex_shader = "mesh.vert"
@@ -656,10 +653,11 @@ class Renderer(object):
             else:
                 geometry_shader = "vertex_normals.geom"
             fragment_shader = "vertex_normals.frag"
-        elif flags & RenderFlags.FLAT:
-            vertex_shader = "flat.vert"
-            fragment_shader = "flat.frag"
+        elif flags & RenderFlags.NORMAL:
+            vertex_shader = "mesh_normal.vert"
+            fragment_shader = "mesh_normal.frag"
             if primitive.double_sided:
+                geometry_shader = "mesh_normal_double_sided.geom"
                 defines["DOUBLE_SIDED"] = 1
         elif flags & RenderFlags.SEG:
             vertex_shader = "segmentation.vert"
@@ -676,7 +674,7 @@ class Renderer(object):
         # samples its alpha.
         material = primitive.material
         is_shadow_program = program_flags & (ProgramFlags.SHADOW | ProgramFlags.POINT_SHADOW)
-        if is_shadow_program and isinstance(material, MetallicRoughnessMaterial):
+        if is_shadow_program:
             is_base_color_array = (
                 material.tex_flags & TexFlags.BASE_COLOR and material.baseColorTexture.tex_type == GL_TEXTURE_2D_ARRAY
             )
@@ -759,14 +757,6 @@ class Renderer(object):
                         defines["BASE_COLOR_TEX_LINEAR"] = 1
             if tf & TexFlags.METALLIC_ROUGHNESS:
                 defines["HAS_METALLIC_ROUGHNESS_TEX"] = 1
-            if tf & TexFlags.DIFFUSE:
-                defines["HAS_DIFFUSE_TEX"] = 1
-            if tf & TexFlags.SPECULAR_GLOSSINESS:
-                defines["HAS_SPECULAR_GLOSSINESS_TEX"] = 1
-            if isinstance(primitive.material, MetallicRoughnessMaterial):
-                defines["USE_METALLIC_MATERIAL"] = 1
-            elif isinstance(primitive.material, SpecularGlossinessMaterial):
-                defines["USE_GLOSSY_MATERIAL"] = 1
 
         program = self._program_cache.get_program(
             vertex_shader=vertex_shader,
@@ -1009,5 +999,4 @@ class Renderer(object):
 
     def reload_program(self):
         self._program_cache.clear()
-        self._normal_program_cache.clear()
         self.jit.program_id.clear()

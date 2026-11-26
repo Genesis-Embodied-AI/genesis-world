@@ -11,7 +11,7 @@ import numpy as np
 import trimesh
 
 from .constants import GLTF, ViewFlags
-from .material import MetallicRoughnessMaterial
+from .material import Material
 from .primitive import Primitive
 
 
@@ -106,11 +106,6 @@ class Mesh(object):
             if p.is_transparent:
                 return True
         return False
-
-    @property
-    def has_translucent_color(self):
-        """bool : If True, the color of some primitives is partially transparent, whatever the alpha of the textures."""
-        return any(p.has_translucent_color for p in self.primitives)
 
     @staticmethod
     def from_points(
@@ -262,7 +257,7 @@ class Mesh(object):
 
             if primitive_material is None:
                 # Replace material with default if needed
-                primitive_material = MetallicRoughnessMaterial(
+                primitive_material = Material(
                     alphaMode="BLEND",
                     baseColorFactor=[0.3, 0.3, 0.3, 1.0],
                     metallicFactor=metallic_factor,
@@ -320,7 +315,7 @@ class Mesh(object):
                         colors = vc
                     else:
                         colors = vc[mesh.faces].reshape((3 * len(mesh.faces), vc.shape[1]))
-                material = MetallicRoughnessMaterial(
+                material = Material(
                     alphaMode="OPAQUE" if colors.shape[-1] < 4 or (colors[..., 3] == 255).all() else "BLEND",
                     baseColorFactor=[1.0, 1.0, 1.0, 1.0],
                     metallicFactor=metallic_factor,
@@ -332,7 +327,7 @@ class Mesh(object):
                     raise ValueError("Cannot use face colors with a smooth mesh")
                 else:
                     colors = np.repeat(mesh.visual.face_colors, 3, axis=0)
-                material = MetallicRoughnessMaterial(
+                material = Material(
                     alphaMode="OPAQUE" if colors.shape[-1] < 4 or (colors[..., 3] == 255).all() else "BLEND",
                     baseColorFactor=[1.0, 1.0, 1.0, 1.0],
                     metallicFactor=metallic_factor,
@@ -354,7 +349,7 @@ class Mesh(object):
                 mat = mesh.visual.material
 
                 if isinstance(mat, trimesh.visual.texture.PBRMaterial):
-                    material = MetallicRoughnessMaterial(
+                    material = Material(
                         normalTexture=mat.normalTexture,
                         occlusionTexture=mat.occlusionTexture,
                         emissiveTexture=mat.emissiveTexture,
@@ -365,18 +360,14 @@ class Mesh(object):
                         metallicFactor=mat.metallicFactor,
                         roughnessFactor=mat.roughnessFactor,
                         metallicRoughnessTexture=mat.metallicRoughnessTexture,
-                        doubleSided=mat.doubleSided,
-                        alphaCutoff=mat.alphaCutoff,
                     )
                 elif isinstance(mat, trimesh.visual.texture.SimpleMaterial):
-                    material = MetallicRoughnessMaterial(
+                    material = Material(
                         alphaMode="OPAQUE" if (np.asarray(mat.image.convert("RGBA"))[..., 3] == 255).all() else "BLEND",
                         metallicFactor=metallic_factor,
                         roughnessFactor=roughness_factor,
                         baseColorFactor=mat.diffuse,
                         baseColorTexture=mat.image,
                     )
-                elif isinstance(mat, MetallicRoughnessMaterial):
-                    material = mat
 
         return colors, texcoords, material

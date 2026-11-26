@@ -159,19 +159,9 @@ class Texture(object):
     def data_format(self, value):
         self._data_format = value
 
-    def is_transparent(self, cutoff=1.0):
-        """Tell whether some texels shown are translucent enough to be blended with what lies behind them.
-
-        Parameters
-        ----------
-        cutoff : float, optional
-            The alpha between 0 and 1 below which a texel is translucent. Defaults to 1.0.
-
-        Returns
-        -------
-        is_transparent : bool
-            Whether the alpha of some texels shown is below the cutoff.
-        """
+    @property
+    def is_transparent(self):
+        """bool : Whether some texels shown are translucent, to be blended with what lies behind them."""
         if self._layers_alpha_min is None:
             return False
         layers_alpha_min = (
@@ -179,7 +169,7 @@ class Texture(object):
         )
         # An 8-bit source stores an alpha of 1 as 255
         alpha_opaque = 255 if self._source.dtype == np.uint8 else 1.0
-        return (layers_alpha_min < cutoff * alpha_opaque).any()
+        return (layers_alpha_min < alpha_opaque).any()
 
     def delete(self):
         """Remove this texture from the OpenGL context."""

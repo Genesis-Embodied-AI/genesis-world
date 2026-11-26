@@ -9,7 +9,7 @@ import numpy as np
 from OpenGL.GL import *
 
 from .constants import FLOAT_SZ, GLTF, UINT_SZ, BufFlags
-from .material import Material, MetallicRoughnessMaterial
+from .material import Material
 from .utils import format_color_array, transform_box
 
 
@@ -247,13 +247,7 @@ class Primitive(object):
 
     @material.setter
     def material(self, value):
-        # Create default material
-        if value is None:
-            value = MetallicRoughnessMaterial()
-        else:
-            if not isinstance(value, Material):
-                raise TypeError("Object material must be of type Material")
-        self._material = value
+        self._material = Material() if value is None else value
 
     @property
     def mode(self):
@@ -347,11 +341,6 @@ class Primitive(object):
     def is_transparent(self):
         """bool : If True, the mesh is partially-transparent."""
         return self.material.is_transparent or self._compute_transparency()
-
-    @property
-    def has_translucent_color(self):
-        """bool : If True, the color factor or the vertex colors are partially transparent, the textures aside."""
-        return self.material.has_translucent_color or self._compute_transparency()
 
     def get_buffer_id(self, buffer_name):
         if self._vaid is None:

@@ -23,7 +23,7 @@ from genesis.utils.video_encoder import VideoEncoder
 from genesis.vis.keybindings import Key, KeyAction, Keybind, Keybindings, KeyMod
 from genesis.vis.viewer_plugins import EVENT_HANDLE_STATE, EVENT_HANDLED, ViewerPlugin
 
-from .camera import IntrinsicsCamera, OrthographicCamera, PerspectiveCamera
+from .camera import OrthographicCamera, PerspectiveCamera
 from .constants import (
     DEFAULT_SCENE_SCALE,
     DEFAULT_Z_FAR,
@@ -452,7 +452,7 @@ class Viewer(pyglet.window.Window):
         if self.scene.main_camera_node is not None:
             n = self.scene.main_camera_node
             camera = copy.copy(n.camera)
-            if isinstance(camera, (PerspectiveCamera, IntrinsicsCamera)):
+            if isinstance(camera, PerspectiveCamera):
                 self._default_persp_cam = camera
                 znear = camera.znear
                 zfar = camera.zfar
@@ -1157,10 +1157,7 @@ class Viewer(pyglet.window.Window):
             retval = ()
 
         if normal:
-            old_cache = renderer._program_cache
-            renderer._program_cache = renderer._normal_program_cache
-
-            flags = RenderFlags.FLAT | RenderFlags.OFFSCREEN
+            flags = RenderFlags.NORMAL | RenderFlags.OFFSCREEN
             if self.render_flags.get("split_envs", False):
                 flags |= RenderFlags.ENV_SEPARATE
             if not self.render_flags["debug_view"]:
@@ -1168,8 +1165,6 @@ class Viewer(pyglet.window.Window):
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
             normal_arr, *_ = renderer.render(scene, flags, is_first_pass=not first_pass_done, env_idx=env_idx)
             retval = (*retval, normal_arr)
-
-            renderer._program_cache = old_cache
 
         if camera_node is not None:
             self.scene.main_camera_node = saved_camera_node

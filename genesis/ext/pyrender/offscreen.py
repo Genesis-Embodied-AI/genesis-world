@@ -146,10 +146,7 @@ class OffscreenRenderer(object):
             retval = ()
 
         if normal:
-            old_cache = renderer._program_cache
-            renderer._program_cache = renderer._normal_program_cache
-
-            flags = RenderFlags.FLAT | RenderFlags.OFFSCREEN
+            flags = RenderFlags.NORMAL | RenderFlags.OFFSCREEN
             if split_envs:
                 flags |= RenderFlags.ENV_SEPARATE
             if not debug_view:
@@ -160,8 +157,6 @@ class OffscreenRenderer(object):
                 scene, flags, is_first_pass=not first_pass_done, force_skip_shadows=True, env_idx=env_idx
             )
             retval = (*retval, normal_arr)
-
-            renderer._program_cache = old_cache
 
         if camera_node is not None:
             scene.main_camera_node = saved_camera_node
