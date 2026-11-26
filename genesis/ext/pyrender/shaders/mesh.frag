@@ -331,26 +331,27 @@ float shadow_calc(mat4 light_matrix, sampler2DShadow shadow_map, float nl)
     return shadow;
 }
 
-vec3 point_PCF_samples[20] = vec3[]
-(
-   vec3( 1,  1,  1), vec3( 1, -1,  1), vec3(-1, -1,  1), vec3(-1,  1,  1), 
-   vec3( 1,  1, -1), vec3( 1, -1, -1), vec3(-1, -1, -1), vec3(-1,  1, -1),
-   vec3( 1,  1,  0), vec3( 1, -1,  0), vec3(-1, -1,  0), vec3(-1,  1,  0),
-   vec3( 1,  0,  1), vec3(-1,  0,  1), vec3( 1,  0, -1), vec3(-1,  0, -1),
-   vec3( 0,  1,  1), vec3( 0, -1,  1), vec3( 0, -1, -1), vec3( 0,  1, -1)
-);   
-int point_PCF_n = 20;
-
+// Percentage-closer filtering over the 4x4 texels around the fragment, along the axes of the face of the cube map it
+// falls on. The shadow map of a transparent surface keeps an ordered 4x4 pattern of its fragments (see
+// mesh_depth.frag), which these taps average over exactly one period.
 float point_PCF(samplerCube shadow_map, vec3 frag_to_light, float bias)
 {
-    float point_PCF_radius = 40.0 / textureSize(shadow_map, 0)[0];
     float dist = length(frag_to_light);
+    vec3 axes = abs(frag_to_light);
+    float major = max(axes.x, max(axes.y, axes.z));
+    vec3 u = axes.x >= major ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 w = axes.z >= major ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+    // A face spans twice the major coordinate of the direction over its width in texels
+    float texel = 2.0 * major / float(textureSize(shadow_map, 0).x);
     float shadow = 0.0;
-    for (int i = 0; i < point_PCF_n; i++) {
-        float dis_shadow = texture(shadow_map, frag_to_light + point_PCF_samples[i] * point_PCF_radius).r * 25.0;
-        shadow += (dis_shadow < 24.5 && dist > dis_shadow + bias) ? 1.0 : 0.0;
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            vec3 offset = ((float(i) - 1.5) * u + (float(j) - 1.5) * w) * texel;
+            float dis_shadow = texture(shadow_map, frag_to_light + offset).r * 25.0;
+            shadow += (dis_shadow < 24.5 && dist > dis_shadow + bias) ? 1.0 : 0.0;
+        }
     }
-    return shadow / point_PCF_n;
+    return shadow / 16.0;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

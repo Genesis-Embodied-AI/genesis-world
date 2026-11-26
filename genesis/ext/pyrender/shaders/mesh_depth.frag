@@ -1,5 +1,11 @@
 #version 330 core
 
+// A point light stores in its cube map the distance of each fragment to it, scaled to the depth range
+#ifdef POINT_SHADOW
+in vec3 frag_pos;
+uniform vec3 light_pos;
+#endif
+
 #ifdef TRANSPARENT_SHADOW
 #ifdef TEXCOORD_0_LOC
 in vec2 uv_0;
@@ -61,6 +67,9 @@ void main()
     if (opacity <= (BAYER[4 * pixel.y + pixel.x] + 0.5) / 16.0) {
         discard;
     }
+#endif
+#ifdef POINT_SHADOW
+    gl_FragDepth = length(frag_pos - light_pos) / 25.0;
 #endif
     frag_color = vec4(1.0);
 }

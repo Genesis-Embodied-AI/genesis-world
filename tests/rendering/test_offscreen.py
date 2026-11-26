@@ -2325,8 +2325,9 @@ def test_video_recording_lifecycle(tmp_path, monkeypatch, renderer, show_viewer)
     "alpha_source, n_envs", [("color", 2), ("image_texture", 2), ("dynamic_texture", 0), ("dynamic_texture", 2)]
 )
 @pytest.mark.parametrize("red_alpha_u8", [0, 128])
+@pytest.mark.parametrize("light_type", ["directional", "point"])
 def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
-    alpha_source, n_envs, red_alpha_u8, translucent_box_obj, renderer, show_viewer
+    alpha_source, n_envs, red_alpha_u8, light_type, translucent_box_obj, renderer, show_viewer
 ):
     # Alphas that 8-bit texels store exactly, so that every source gives the same opacity
     RED = (1.0, 0.0, 0.0, red_alpha_u8 / 255)
@@ -2354,9 +2355,12 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
             # Black leaves each surface worth exactly its own contribution, so the composite below needs no offset
             background_color=(0.0, 0.0, 0.0),
             # Lighting the faces that the camera sees head-on keeps them clear of the edge of the shadow of their own
-            # box, and the shadow of each box falls clear of the other box
+            # box, and the shadow of each box falls clear of the other box. The point light stands along the same
+            # direction from the red box, as bright on the slab below it.
             lights=[
-                {"type": "directional", "dir": (-1.0, -1.0, -2.0), "color": (1.0, 1.0, 1.0), "intensity": 5.0},
+                {"type": "directional", "dir": (-1.0, -1.0, -2.0), "color": (1.0, 1.0, 1.0), "intensity": 5.0}
+                if light_type == "directional"
+                else {"type": "point", "pos": (3.3, 2.7, 5.9), "color": (1.0, 1.0, 1.0), "intensity": 255.0},
             ],
         ),
         viewer_options=gs.options.ViewerOptions(

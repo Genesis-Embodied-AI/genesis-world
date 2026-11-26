@@ -251,7 +251,6 @@ class JITRenderer:
     def __init__(self, scene, node_list, primitive_list, envs_offset):
         self._forward_pass = None
         self._shadow_mapping_pass = None
-        self._point_shadow_mapping_pass = None
         self._read_depth_buf = None
         self._read_color_buf = None
         self._update_normal_flat = None
@@ -693,8 +692,8 @@ class JITRenderer:
             self.render_flags[i, 4] = primitive.is_floor and not floor_existed
             self.render_flags[i, 5] = node_list[i].mesh.is_transparent
             self.render_flags[i, 6] = node_list[i].mesh.is_marker
-            # The shadow cube maps of the point lights sample no texture, so a mesh made transparent by the alpha of its
-            # texels alone casts the shadow of its whole surface there, and a mesh of translucent color none
+            # A mesh of translucent color casts a partial shadow through the transparent shadow programs alone (see
+            # TRANSPARENT_SHADOW in renderer.py)
             self.render_flags[i, 9] = node_list[i].mesh.has_translucent_color
             self.render_flags[i, 10] = isinstance(material, MetallicRoughnessMaterial) and material.is_transmissive
             self.views[i] = node_list[i].mesh.views
@@ -1125,6 +1124,9 @@ class JITRenderer:
                 nb.int32[:],
                 nb.float32[:, :],
                 nb.float32[:, :],
+                nb.float32[:, :, :],
+                nb.float32[:],
+                nb.boolean,
                 nb.int8[:, :],
                 nb.int32,
                 nb.int32[:],
@@ -1150,6 +1152,9 @@ class JITRenderer:
             n_indices,
             mat_V,
             mat_P,
+            light_matrix,
+            light_pos,
+            is_point,
             render_flags,
             env_idx,
             model_buffer_id,
@@ -1175,8 +1180,14 @@ class JITRenderer:
                 if pid != last_pid:
                     gl.glUseProgram(pid)
 
-                    set_uniform_matrix_4fv(pid, "V", mat_V, gl)
-                    set_uniform_matrix_4fv(pid, "P", mat_P, gl)
+                    # A point light renders the six faces of its cube map at once (see point_shadow.geom)
+                    if is_point:
+                        for i in range(6):
+                            set_uniform_matrix_4fv(pid, "light_matrix[" + str(i) + "]", light_matrix[i], gl)
+                        set_uniform_3fv(pid, "light_pos", light_pos, gl)
+                    else:
+                        set_uniform_matrix_4fv(pid, "V", mat_V, gl)
+                        set_uniform_matrix_4fv(pid, "P", mat_P, gl)
                     set_uniform_1f(pid, "env_offset_scale", env_offset_scale, gl)
 
                     last_pid = pid
@@ -1217,144 +1228,6 @@ class JITRenderer:
                                 continue
                             if is_layer_set:
                                 set_uniform_1f(pid, "base_color_layer", texture_layers[i_layers, k, 0], gl)
-                            if IS_OPENGL_42_AVAILABLE:
-                                if n_indices[id] > 0:
-                                    gl.glDrawElementsInstancedBaseInstance(
-                                        mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1, k
-                                    )
-                                else:
-                                    gl.glDrawArraysInstancedBaseInstance(mode[id], 0, -n_indices[id], 1, k)
-                            else:
-                                gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
-                                for j in range(4):
-                                    gl.glVertexAttribPointer(
-                                        inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(k * 64 + j * 16)
-                                    )
-                                if is_env_instanced[id]:
-                                    gl.glBindBuffer(GL_ARRAY_BUFFER, env_offset_buffer)
-                                    gl.glVertexAttribPointer(
-                                        inst_attr_start[id] + 4, 3, GL_FLOAT, 0, 12, address_to_ptr(k * 12)
-                                    )
-                                if n_indices[id] > 0:
-                                    gl.glDrawElementsInstanced(
-                                        mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1
-                                    )
-                                else:
-                                    gl.glDrawArraysInstanced(mode[id], 0, -n_indices[id], 1)
-                                if is_env_instanced[id]:
-                                    gl.glVertexAttribPointer(
-                                        inst_attr_start[id] + 4, 3, GL_FLOAT, 0, 12, address_to_ptr(0)
-                                    )
-                                    gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
-                                for j in range(4):
-                                    gl.glVertexAttribPointer(
-                                        inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(j * 16)
-                                    )
-                    elif n_indices[id] > 0:
-                        gl.glDrawElementsInstanced(
-                            mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), n_instances[id]
-                        )
-                    else:
-                        gl.glDrawArraysInstanced(mode[id], 0, -n_indices[id], n_instances[id])
-                elif IS_OPENGL_42_AVAILABLE:
-                    if n_indices[id] > 0:
-                        gl.glDrawElementsInstancedBaseInstance(
-                            mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1, env_idx
-                        )
-                    else:
-                        gl.glDrawArraysInstancedBaseInstance(mode[id], 0, -n_indices[id], 1, env_idx)
-                else:
-                    gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
-                    for j in range(4):
-                        gl.glVertexAttribPointer(
-                            inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(env_idx * 64 + j * 16)
-                        )
-                    if n_indices[id] > 0:
-                        gl.glDrawElementsInstanced(mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1)
-                    else:
-                        gl.glDrawArraysInstanced(mode[id], 0, -n_indices[id], 1)
-                    # Restore default attribute pointer (offset 0) to avoid corrupting VAO state
-                    for j in range(4):
-                        gl.glVertexAttribPointer(inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(j * 16))
-
-                gl.glBindVertexArray(0)
-            gl.glUseProgram(0)
-            gl.glFlush()
-
-        @nb.jit(
-            nb.none(
-                nb.int32[:],
-                nb.int32[:],
-                nb.float32[:, :, :],
-                nb.int32[:],
-                nb.int32[:],
-                nb.int32[:],
-                nb.float32[:, :, :],
-                nb.float32[:],
-                nb.int8[:, :],
-                nb.int32,
-                nb.int32[:],
-                nb.int32[:],
-                nb.boolean[:, :],
-                nb.float32,
-                nb.boolean[:],
-                nb.int32,
-                self.gl.wrapper_type,
-            ),
-            cache=True,
-        )
-        def point_shadow_mapping_pass(
-            vao_id,
-            program_id,
-            pose,
-            mode,
-            n_instances,
-            n_indices,
-            light_matrix,
-            light_pos,
-            render_flags,
-            env_idx,
-            model_buffer_id,
-            inst_attr_start,
-            env_active,
-            env_offset_scale,
-            is_env_instanced,
-            env_offset_buffer,
-            gl,
-        ):
-            last_pid = -1
-            for id in range(len(vao_id)):
-                # Do not render shadows for markers and meshes of translucent color
-                if render_flags[id, 9] or render_flags[id, 6]:
-                    continue
-
-                pid = program_id[id]
-                if pid != last_pid:
-                    gl.glUseProgram(pid)
-
-                    for i in range(6):
-                        set_uniform_matrix_4fv(pid, "light_matrix[" + str(i) + "]", light_matrix[i], gl)
-                    set_uniform_3fv(pid, "light_pos", light_pos, gl)
-                    set_uniform_1f(pid, "env_offset_scale", env_offset_scale, gl)
-
-                    last_pid = pid
-
-                set_uniform_matrix_4fv(pid, "M", pose[id], gl)
-                gl.glBindVertexArray(vao_id[id])
-
-                gl.glEnable(GL_CULL_FACE)
-                gl.glCullFace(GL_BACK)
-                gl.glDisable(GL_BLEND)
-                gl.glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-                gl.glDisable(GL_PROGRAM_POINT_SIZE)
-
-                if render_flags[id, 7] or env_idx == -1:
-                    if render_flags[id, 8] and env_idx == -1:
-                        # Combined draw-all of a heterogeneous variant: shadow only the environments it is active in,
-                        # otherwise the variant would cast a shadow in every environment's instance.
-                        for k in range(n_instances[id]):
-                            if not env_active[id, k]:
-                                continue
                             if IS_OPENGL_42_AVAILABLE:
                                 if n_indices[id] > 0:
                                     gl.glDrawElementsInstancedBaseInstance(
@@ -1480,7 +1353,6 @@ class JITRenderer:
 
         self._forward_pass = forward_pass
         self._shadow_mapping_pass = shadow_mapping_pass
-        self._point_shadow_mapping_pass = point_shadow_mapping_pass
         self._read_depth_buf = read_depth_buf
         self._read_color_buf = read_color_buf
         self._update_normal_flat = update_normal_flat
@@ -1587,10 +1459,33 @@ class JITRenderer:
         if markers_only:
             self.n_indices[non_marker_mask] = saved_non_marker_indices
 
-    def shadow_mapping_pass(self, renderer, V, P, flags, program_flags, env_idx=-1):
+    def shadow_mapping_pass(self, renderer, V, P, flags, program_flags, env_idx=-1, light_matrix=None, light_pos=None):
+        """Render the shadow map of a light, the depth seen from it or for a point light its distance to the scene.
+
+        Parameters
+        ----------
+        renderer : Renderer
+            The renderer whose shader programs draw the pass.
+        V : (4,4) float | None
+            The view matrix of the light, None for a point light.
+        P : (4,4) float | None
+            The projection matrix of the light, None for a point light.
+        flags : int
+            The render flags of the pass.
+        program_flags : int
+            The program flags of the pass.
+        env_idx : int, optional
+            The environment drawn, -1 for all of them. Defaults to -1.
+        light_matrix : (6,4,4) float | None, optional
+            The view-projection matrix of each face of the cube map of a point light. Defaults to None.
+        light_pos : (3,) float | None, optional
+            The position of a point light, None for any other light. Defaults to None.
+        """
         self.load_programs(renderer, flags, program_flags)
         if self._shadow_mapping_pass is None:
             self.gen_func_ptr()
+        is_point = light_pos is not None
+        identity = np.identity(4, dtype=np.float32)
         with self._env_filtered_culling(env_idx):
             self._shadow_mapping_pass(
                 self.vao_id,
@@ -1599,8 +1494,11 @@ class JITRenderer:
                 self.mode,
                 self.n_instances,
                 self.n_indices,
-                np.ascontiguousarray(V, dtype=np.float32),
-                np.ascontiguousarray(P, dtype=np.float32),
+                identity if is_point else np.ascontiguousarray(V, dtype=np.float32),
+                identity if is_point else np.ascontiguousarray(P, dtype=np.float32),
+                np.ascontiguousarray(light_matrix, dtype=np.float32) if is_point else identity[None],
+                np.ascontiguousarray(light_pos, dtype=np.float32) if is_point else identity[0, :3],
+                is_point,
                 self.render_flags,
                 env_idx,
                 self.model_buffer_id,
@@ -1613,31 +1511,6 @@ class JITRenderer:
                 self.pbr_mat,
                 self.texture_layers,
                 self.texture_layers_idx,
-                self.gl.wrapper_instance,
-            )
-
-    def point_shadow_mapping_pass(self, renderer, light_matrix, light_pos, flags, program_flags, env_idx=-1):
-        self.load_programs(renderer, flags, program_flags)
-        if self._point_shadow_mapping_pass is None:
-            self.gen_func_ptr()
-        with self._env_filtered_culling(env_idx):
-            self._point_shadow_mapping_pass(
-                self.vao_id,
-                self.program_id[(flags, program_flags)],
-                self.pose,
-                self.mode,
-                self.n_instances,
-                self.n_indices,
-                np.ascontiguousarray(light_matrix, dtype=np.float32),
-                np.ascontiguousarray(light_pos, dtype=np.float32),
-                self.render_flags,
-                env_idx,
-                self.model_buffer_id,
-                self.inst_attr_start,
-                self.env_active,
-                0.0 if is_env_pass(flags) else 1.0,
-                self.is_env_instanced,
-                self.env_offset_buffer if self.env_offset_buffer is not None else 0,
                 self.gl.wrapper_instance,
             )
 

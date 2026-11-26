@@ -497,8 +497,15 @@ class Renderer(object):
 
         self._configure_point_shadow_mapping_viewport(light, flags)
 
-        self.jit.point_shadow_mapping_pass(
-            self, light_matrix, position, flags, ProgramFlags.POINT_SHADOW, env_idx=env_idx
+        self.jit.shadow_mapping_pass(
+            self,
+            None,
+            None,
+            flags,
+            ProgramFlags.POINT_SHADOW,
+            env_idx=env_idx,
+            light_matrix=light_matrix,
+            light_pos=position,
         )
 
     def _shadow_mapping_pass(self, scene, light_node, flags, env_idx=-1):
@@ -766,8 +773,9 @@ class Renderer(object):
 
         if program_flags & ProgramFlags.POINT_SHADOW:
             vertex_shader = "point_shadow.vert"
-            fragment_shader = "point_shadow.frag"
+            fragment_shader = "mesh_depth.frag"
             geometry_shader = "point_shadow.geom"
+            defines["POINT_SHADOW"] = 1
         elif (
             program_flags & ProgramFlags.USE_MATERIAL
             and not flags & RenderFlags.DEPTH_ONLY
@@ -803,19 +811,17 @@ class Renderer(object):
         else:
             vertex_shader = "mesh_depth.vert"
             fragment_shader = "mesh_depth.frag"
-            # A transparent surface casts a shadow as dark as it is opaque (see mesh_depth.frag). The layer that a
-            # texture array shows may change after the program is built, so a texture array always samples its alpha.
-            material = primitive.material
+
+        # A transparent surface casts a shadow as dark as it is opaque, for every kind of light (see mesh_depth.frag).
+        # The layer that a texture array shows may change after the program is built, so a texture array always
+        # samples its alpha.
+        material = primitive.material
+        is_shadow_program = program_flags & (ProgramFlags.SHADOW | ProgramFlags.POINT_SHADOW)
+        if is_shadow_program and isinstance(material, MetallicRoughnessMaterial):
             is_base_color_array = (
-                isinstance(material, MetallicRoughnessMaterial)
-                and material.tex_flags & TexFlags.BASE_COLOR
-                and material.baseColorTexture.tex_type == GL_TEXTURE_2D_ARRAY
+                material.tex_flags & TexFlags.BASE_COLOR and material.baseColorTexture.tex_type == GL_TEXTURE_2D_ARRAY
             )
-            if (
-                program_flags & ProgramFlags.SHADOW
-                and isinstance(material, MetallicRoughnessMaterial)
-                and (primitive.is_transparent or is_base_color_array)
-            ):
+            if primitive.is_transparent or is_base_color_array:
                 defines["TRANSPARENT_SHADOW"] = 1
                 if material.tex_flags & TexFlags.BASE_COLOR:
                     defines["HAS_BASE_COLOR_TEX"] = 1
