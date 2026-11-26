@@ -14,6 +14,7 @@ from OpenGL.GL import (
     GL_DEPTH_ATTACHMENT,
     GL_DEPTH_COMPONENT,
     GL_DEPTH_COMPONENT16,
+    GL_DEPTH_COMPONENT32F,
     GL_FLOAT,
     GL_FRAMEBUFFER,
     GL_GREATER,
@@ -26,8 +27,10 @@ from OpenGL.GL import (
     GL_RG,
     GL_RGB,
     GL_RGB16F,
+    GL_RGB32F,
     GL_RGBA,
     GL_RGBA16F,
+    GL_RGBA32F,
     GL_TEXTURE_2D,
     GL_TEXTURE_2D_ARRAY,
     GL_TEXTURE_BORDER_COLOR,
@@ -286,13 +289,19 @@ class Texture(object):
             height, width = self.source.shape[1:3] if is_array else self.source.shape[:2]
 
         # A 16-bit depth texture halves what sampling a shadow map reads, which is what bounds the cost of the shadow
-        # comparisons at the default map size, and its quantization stays below the depth bias of those comparisons.
+        # comparisons at the default map size, and its quantization stays below the depth bias of those comparisons
+        # wherever the depth is linear. A float depth texture serves a perspective projection, which packs the depth of
+        # whatever lies far from its near plane close to 1.
         internal_fmt = fmt
         if fmt == GL_DEPTH_COMPONENT and self.data_format == GL_UNSIGNED_SHORT:
             internal_fmt = GL_DEPTH_COMPONENT16
-        # An unsized format would let the driver store half floats at 8 bits per channel
+        if fmt == GL_DEPTH_COMPONENT and self.data_format == GL_FLOAT:
+            internal_fmt = GL_DEPTH_COMPONENT32F
+        # An unsized format would let the driver store floats at 8 bits per channel
         if self.data_format == GL_HALF_FLOAT:
             internal_fmt = GL_RGBA16F if fmt == GL_RGBA else GL_RGB16F
+        if self.data_format == GL_FLOAT and fmt in (GL_RGBA, GL_RGB):
+            internal_fmt = GL_RGBA32F if fmt == GL_RGBA else GL_RGB32F
 
         # The source rows are tightly packed, while OpenGL reads each row from a 4-byte boundary by default, shifting
         # every row after the first where a row is no multiple of 4 bytes, as an odd width of RGB half floats does.

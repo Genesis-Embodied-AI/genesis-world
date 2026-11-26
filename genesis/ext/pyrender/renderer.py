@@ -77,6 +77,7 @@ from .constants import (
     DEFAULT_Z_NEAR,
     GLTF,
     BufFlags,
+    LightType,
     ProgramFlags,
     RenderFlags,
     TexFlags,
@@ -513,10 +514,10 @@ class Renderer(object):
             return
 
         # Save and dim marker colors, force alpha blending
-        saved_pbr_mat = self.jit.pbr_mat[marker_mask].copy()
+        saved_base_color_factor = self.jit.base_color_factor[marker_mask].copy()
         saved_is_blended = self.jit.is_blended[marker_mask].copy()
-        self.jit.pbr_mat[marker_mask, 0:3] *= MARKER_XRAY_DIM_FACTOR
-        self.jit.pbr_mat[marker_mask, 3] = MARKER_XRAY_ALPHA
+        self.jit.base_color_factor[marker_mask, :3] *= MARKER_XRAY_DIM_FACTOR
+        self.jit.base_color_factor[marker_mask, 3] = MARKER_XRAY_ALPHA
         self.jit.is_blended[marker_mask] = True
 
         # Draw only occluded fragments, without touching the depth buffer.
@@ -531,7 +532,7 @@ class Renderer(object):
         # Restore GL state and marker data
         glDepthFunc(GL_LESS)
         glDepthMask(GL_TRUE)
-        self.jit.pbr_mat[marker_mask] = saved_pbr_mat
+        self.jit.base_color_factor[marker_mask] = saved_base_color_factor
         self.jit.is_blended[marker_mask] = saved_is_blended
 
     def _point_shadow_mapping_pass(self, scene, light_node, flags, env_idx=-1):
@@ -776,10 +777,12 @@ class Renderer(object):
             defines["POINT_LIGHT_SHADOWS"] = 1
         # The light arrays hold the lights of the scene, with one slot at least, so that the samplers of their shadow
         # and transmittance maps fit in the texture units of every driver along with those of the material
-        lights_type = self.jit.light[:, 7]
-        defines["MAX_DIRECTIONAL_LIGHTS"] = max(np.count_nonzero(lights_type < 0.5), 1)
-        defines["MAX_SPOT_LIGHTS"] = 1
-        defines["MAX_POINT_LIGHTS"] = max(np.count_nonzero(lights_type > 0.5), 1)
+        for name, light_type in (
+            ("MAX_DIRECTIONAL_LIGHTS", LightType.DIRECTIONAL),
+            ("MAX_POINT_LIGHTS", LightType.POINT),
+            ("MAX_SPOT_LIGHTS", LightType.SPOT),
+        ):
+            defines[name] = max(np.count_nonzero(self.jit.lights_type == light_type), 1)
 
         # Set up vertex normal defines
         if program_flags & ProgramFlags.VERTEX_NORMALS:

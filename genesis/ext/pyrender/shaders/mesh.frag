@@ -6,14 +6,16 @@
 struct SpotLight {
     vec3 color;
     float intensity;
-    float range;
     vec3 position;
     vec3 direction;
+    // The falloff across the cone, as glTF defines it: clamp(cos(angle to the axis) * scale + offset, 0, 1) squared
     float light_angle_scale;
     float light_angle_offset;
 
     #ifdef SPOT_LIGHT_SHADOWS
     sampler2DShadow shadow_map;
+    // The share of each color of the light that transparent surfaces let through, and the depth of the nearest one
+    sampler2D transmittance_map;
     mat4 light_matrix;
     #endif
 };
@@ -484,13 +486,10 @@ void main()
         vec3 res = compute_brdf(n, v, l, roughness, metallic,
                                 f0, c_diff, base_color.rgb, radiance);
 #ifdef SPOT_LIGHT_SHADOWS
-        float nl = clamp(dot(n,l), 0.0, 1.0);
-        float shadow = shadow_calc(
-            spot_lights[i].light_matrix,
-            spot_lights[i].shadow_map,
-            nl
-        );
-        res = res * (1.0 - shadow);
+        float nl = clamp(dot(n, l), 0.0, 1.0);
+        float shadow = shadow_calc(spot_lights[i].light_matrix, spot_lights[i].shadow_map, nl);
+        vec3 transmitted = transmittance_calc(spot_lights[i].light_matrix, spot_lights[i].transmittance_map, nl);
+        res = res * (1.0 - shadow) * transmitted;
 #endif
         color.xyz += res;
     }

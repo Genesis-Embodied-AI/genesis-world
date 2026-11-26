@@ -8,10 +8,12 @@ MIN_OPEN_GL_MAJOR = 3  # Minimum OpenGL Major Version
 MIN_OPEN_GL_MINOR = 3  # Minimum OpenGL Minor Version
 FLOAT_SZ = 4  # Byte size of GL float32
 UINT_SZ = 4  # Byte size of GL uint32
-SHADOW_TEX_SZ = 8192  # Width and Height of Shadow Textures
 DIRECTIONAL_SHADOW_TEX_SZ = 4096  # Width and Height of the shadow textures of directional lights
 POINT_SHADOW_TEX_SZ = 2048  # Width and Height of each face of the shadow cube maps of point lights
-TRANSMITTANCE_TEX_SZ = 1024  # Width and Height of the light a directional light passes through transparent surfaces
+SPOT_SHADOW_TEX_SZ = 2048  # Width and Height of the shadow textures of spot lights
+TRANSMITTANCE_TEX_SZ = (
+    1024  # Width and Height of the light a directional or spot light passes through transparent surfaces
+)
 POINT_TRANSMITTANCE_TEX_SZ = 512  # Width and Height of each face of the same for point lights
 TEXT_PADDING = 20  # Width of padding for rendering text (px)
 FONT_SIZE = 26  # Default font size for rendering text (px)
@@ -49,7 +51,7 @@ class RenderFlags(object):
     """Render shadows for point lights."""
     SHADOWS_SPOT = 128
     """Render shadows for spot lights."""
-    SHADOWS_ALL = 32 | 64  # | 128
+    SHADOWS_ALL = 32 | 64 | 128
     """Render shadows for all lights."""
     VERTEX_NORMALS = 256
     """Render vertex normals."""
@@ -75,6 +77,14 @@ class RenderFlags(object):
     """Skip rendering marker nodes (debug arrows, frames, etc.)."""
     MARKER_XRAY = 1 << 19
     """Render occluded markers with darkened transparency (X-ray mode)."""
+
+
+class LightType:
+    """The kind of a light, as the compiled passes read it."""
+
+    DIRECTIONAL = 0
+    POINT = 1
+    SPOT = 2
 
 
 class ViewFlags:

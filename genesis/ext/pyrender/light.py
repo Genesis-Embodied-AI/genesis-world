@@ -11,6 +11,7 @@ import numpy as np
 
 from OpenGL.GL import (
     GL_CLAMP_TO_BORDER,
+    GL_FLOAT,
     GL_HALF_FLOAT,
     GL_LINEAR,
     GL_UNSIGNED_SHORT,
@@ -22,11 +23,29 @@ from .constants import (
     DIRECTIONAL_SHADOW_TEX_SZ,
     POINT_SHADOW_TEX_SZ,
     POINT_TRANSMITTANCE_TEX_SZ,
-    SHADOW_TEX_SZ,
+    SPOT_SHADOW_TEX_SZ,
     TRANSMITTANCE_TEX_SZ,
 )
 from .sampler import Sampler
 from .camera import OrthographicCamera, PerspectiveCamera
+
+
+def _make_transmittance_texture(data_format):
+    # The tint of the light varies slowly across a transparent surface, which a coarser map holds. Beyond the map, its
+    # white border lets the light through untinted. Its alpha holds the depth of the nearest transparent surface, as the
+    # shadow map does (see the shadow texture of each light for the precision it needs).
+    return Texture(
+        width=TRANSMITTANCE_TEX_SZ,
+        height=TRANSMITTANCE_TEX_SZ,
+        source_channels="RGBA",
+        data_format=data_format,
+        sampler=Sampler(
+            magFilter=GL_LINEAR,
+            minFilter=GL_LINEAR,
+            wrapS=GL_CLAMP_TO_BORDER,
+            wrapT=GL_CLAMP_TO_BORDER,
+        ),
+    )
 
 
 class Light(metaclass=ABCMeta):
@@ -176,20 +195,7 @@ class DirectionalLight(Light):
         if size is None:
             size = DIRECTIONAL_SHADOW_TEX_SZ
         self.shadow_texture = Texture(width=size, height=size, source_channels="D", data_format=GL_UNSIGNED_SHORT)
-        # The tint of the light varies slowly across a transparent surface, which a coarser map holds. Beyond the map,
-        # its white border lets the light through untinted.
-        self.transmittance_texture = Texture(
-            width=TRANSMITTANCE_TEX_SZ,
-            height=TRANSMITTANCE_TEX_SZ,
-            source_channels="RGBA",
-            data_format=GL_HALF_FLOAT,
-            sampler=Sampler(
-                magFilter=GL_LINEAR,
-                minFilter=GL_LINEAR,
-                wrapS=GL_CLAMP_TO_BORDER,
-                wrapT=GL_CLAMP_TO_BORDER,
-            ),
-        )
+        self.transmittance_texture = _make_transmittance_texture(GL_HALF_FLOAT)
 
     def _get_shadow_camera(self, scene_scale):
         """Generate and return a shadow mapping camera for this light.
@@ -399,8 +405,10 @@ class SpotLight(Light):
             Size of texture map. Must be a positive power of two.
         """
         if size is None:
-            size = SHADOW_TEX_SZ
-        self.shadow_texture = Texture(width=size, height=size, source_channels="D", data_format=GL_UNSIGNED_SHORT)
+            size = SPOT_SHADOW_TEX_SZ
+        # The shadow camera of a spot light projects in perspective from a near plane close to the light (see 'Texture')
+        self.shadow_texture = Texture(width=size, height=size, source_channels="D", data_format=GL_FLOAT)
+        self.transmittance_texture = _make_transmittance_texture(GL_FLOAT)
 
     def _get_shadow_camera(self, scene_scale):
         """Generate and return a shadow mapping camera for this light.

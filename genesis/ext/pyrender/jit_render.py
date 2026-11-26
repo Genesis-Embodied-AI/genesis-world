@@ -8,7 +8,7 @@ import numba as nb
 import OpenGL.GL as GL
 import OpenGL.constant as GL_constant
 
-from .constants import BufFlags, MAX_N_LIGHTS, RenderFlags, ViewFlags
+from .constants import BufFlags, LightType, MAX_N_LIGHTS, RenderFlags, ViewFlags
 from .light import DirectionalLight, PointLight, SpotLight
 from .numba_gl_wrapper import GLWrapper
 from .scene import CORNER_INDICES
@@ -78,6 +78,8 @@ RenderFlags_OFFSCREEN = RenderFlags.OFFSCREEN
 RenderFlags_REFLECTIVE_FLOOR = RenderFlags.REFLECTIVE_FLOOR
 RenderFlags_NORMAL = RenderFlags.NORMAL
 RenderFlags_NORMALS = RenderFlags.VERTEX_NORMALS | RenderFlags.FACE_NORMALS
+LightType_POINT = LightType.POINT
+LightType_SPOT = LightType.SPOT
 
 
 @nb.jit(nopython=True, cache=True)
@@ -129,8 +131,23 @@ def set_uniform_4fv(pid, name, value, gl):
 
 
 @nb.jit(nopython=True, cache=True)
-def bind_lighting(pid, flags, light, shadow_map, transmittance_map, light_matrix, ambient_light, placeholder_tex, gl):
-    n = len(light)
+def bind_lighting(
+    pid,
+    flags,
+    lights_type,
+    lights_color,
+    lights_intensity,
+    lights_pos,
+    lights_dir,
+    lights_angle_scale,
+    lights_angle_offset,
+    shadow_map,
+    transmittance_map,
+    light_matrix,
+    ambient_light,
+    placeholder_tex,
+    gl,
+):
     set_uniform_3fv(pid, "ambient_light", ambient_light, gl)
     n_dir, n_pt, n_spot = 0, 0, 0
     active_texture = 0
@@ -139,46 +156,44 @@ def bind_lighting(pid, flags, light, shadow_map, transmittance_map, light_matrix
     transmittance_tex = -1
     transmittance_cube_tex = -1
 
-    for i in range(n):
-        if abs(light[i, 7] - 0.0) < 0.1:
-            b = "directional_lights[" + str(n_dir) + "]."
-            set_uniform_3fv(pid, b + "color", light[i, :3], gl)
-            set_uniform_3fv(pid, b + "direction", light[i, 3:6], gl)
-            set_uniform_1f(pid, b + "intensity", light[i, 6], gl)
-            if flags & RenderFlags_SHADOWS_DIRECTIONAL:
-                if active_texture == 0:
-                    active_texture += 1
-                gl.glActiveTexture(GL_TEXTURE0 + active_texture)
-                gl.glBindTexture(GL_TEXTURE_2D, shadow_map[i])
-                set_uniform_1i(pid, b + "shadow_map", active_texture, gl)
-                set_uniform_matrix_4fv(pid, b + "light_matrix", light_matrix[i, 0], gl)
-                depth_tex = active_texture
-                active_texture += 1
-                gl.glActiveTexture(GL_TEXTURE0 + active_texture)
-                gl.glBindTexture(GL_TEXTURE_2D, transmittance_map[i])
-                set_uniform_1i(pid, b + "transmittance_map", active_texture, gl)
-                transmittance_tex = active_texture
-                active_texture += 1
-            n_dir += 1
-        elif abs(light[i, 7] - 1.0) < 0.1:
+    for i in range(len(lights_type)):
+        if lights_type[i] == LightType_POINT:
             b = "point_lights[" + str(n_pt) + "]."
-            set_uniform_3fv(pid, b + "color", light[i, :3], gl)
-            set_uniform_3fv(pid, b + "position", light[i, 3:6], gl)
-            set_uniform_1f(pid, b + "intensity", light[i, 6], gl)
-            if flags & RenderFlags_SHADOWS_POINT:
-                if active_texture == 0:
-                    active_texture += 1
-                gl.glActiveTexture(GL_TEXTURE0 + active_texture)
-                gl.glBindTexture(GL_TEXTURE_CUBE_MAP, shadow_map[i])
-                set_uniform_1i(pid, b + "shadow_map", active_texture, gl)
-                cube_tex = active_texture
-                active_texture += 1
-                gl.glActiveTexture(GL_TEXTURE0 + active_texture)
-                gl.glBindTexture(GL_TEXTURE_CUBE_MAP, transmittance_map[i])
-                set_uniform_1i(pid, b + "transmittance_map", active_texture, gl)
-                transmittance_cube_tex = active_texture
-                active_texture += 1
             n_pt += 1
+            set_uniform_3fv(pid, b + "position", lights_pos[i], gl)
+            is_shadowed = flags & RenderFlags_SHADOWS_POINT
+        elif lights_type[i] == LightType_SPOT:
+            b = "spot_lights[" + str(n_spot) + "]."
+            n_spot += 1
+            set_uniform_3fv(pid, b + "position", lights_pos[i], gl)
+            set_uniform_3fv(pid, b + "direction", lights_dir[i], gl)
+            set_uniform_1f(pid, b + "light_angle_scale", lights_angle_scale[i], gl)
+            set_uniform_1f(pid, b + "light_angle_offset", lights_angle_offset[i], gl)
+            is_shadowed = flags & RenderFlags_SHADOWS_SPOT
+        else:
+            b = "directional_lights[" + str(n_dir) + "]."
+            n_dir += 1
+            set_uniform_3fv(pid, b + "direction", lights_dir[i], gl)
+            is_shadowed = flags & RenderFlags_SHADOWS_DIRECTIONAL
+        set_uniform_3fv(pid, b + "color", lights_color[i], gl)
+        set_uniform_1f(pid, b + "intensity", lights_intensity[i], gl)
+        if is_shadowed:
+            # Unit 0 holds the material textures (see the comment below)
+            if active_texture == 0:
+                active_texture += 1
+            tex_type = GL_TEXTURE_CUBE_MAP if lights_type[i] == LightType_POINT else GL_TEXTURE_2D
+            gl.glActiveTexture(GL_TEXTURE0 + active_texture)
+            gl.glBindTexture(tex_type, shadow_map[i])
+            set_uniform_1i(pid, b + "shadow_map", active_texture, gl)
+            gl.glActiveTexture(GL_TEXTURE0 + active_texture + 1)
+            gl.glBindTexture(tex_type, transmittance_map[i])
+            set_uniform_1i(pid, b + "transmittance_map", active_texture + 1, gl)
+            if lights_type[i] == LightType_POINT:
+                cube_tex, transmittance_cube_tex = active_texture, active_texture + 1
+            else:
+                set_uniform_matrix_4fv(pid, b + "light_matrix", light_matrix[i, 0], gl)
+                depth_tex, transmittance_tex = active_texture, active_texture + 1
+            active_texture += 2
 
     set_uniform_1i(pid, "n_directional_lights", n_dir, gl)
     set_uniform_1i(pid, "n_spot_lights", n_spot, gl)
@@ -189,37 +204,38 @@ def bind_lighting(pid, flags, light, shadow_map, transmittance_map, light_matrix
     # samplerCube) take units of their own, and the light slots beyond the lights present point at one of those. A
     # unit that no light fills holds a placeholder of its type, since a sampler reading no complete texture makes the
     # draw invalid on some drivers.
-    if flags & RenderFlags_SHADOWS_DIRECTIONAL:
+    if flags & (RenderFlags_SHADOWS_DIRECTIONAL | RenderFlags_SHADOWS_SPOT):
         if depth_tex < 0:
             if active_texture == 0:
                 active_texture += 1
             depth_tex = active_texture
-            active_texture += 1
+            transmittance_tex = active_texture + 1
+            active_texture += 2
             gl.glActiveTexture(GL_TEXTURE0 + depth_tex)
             gl.glBindTexture(GL_TEXTURE_2D, placeholder_tex[1])
-            transmittance_tex = active_texture
-            active_texture += 1
             gl.glActiveTexture(GL_TEXTURE0 + transmittance_tex)
             gl.glBindTexture(GL_TEXTURE_2D, placeholder_tex[0])
-
-        for i in range(n_dir, max(n_dir, 1)):
-            b = "directional_lights[" + str(i) + "]."
-            set_uniform_1i(pid, b + "shadow_map", depth_tex, gl)
-            set_uniform_1i(pid, b + "transmittance_map", transmittance_tex, gl)
+        for prefix, n_lights, flag in (
+            ("directional_lights[", n_dir, RenderFlags_SHADOWS_DIRECTIONAL),
+            ("spot_lights[", n_spot, RenderFlags_SHADOWS_SPOT),
+        ):
+            if flags & flag:
+                for i in range(n_lights, max(n_lights, 1)):
+                    b = prefix + str(i) + "]."
+                    set_uniform_1i(pid, b + "shadow_map", depth_tex, gl)
+                    set_uniform_1i(pid, b + "transmittance_map", transmittance_tex, gl)
 
     if flags & RenderFlags_SHADOWS_POINT:
         if cube_tex < 0:
             if active_texture == 0:
                 active_texture += 1
             cube_tex = active_texture
-            active_texture += 1
+            transmittance_cube_tex = active_texture + 1
+            active_texture += 2
             gl.glActiveTexture(GL_TEXTURE0 + cube_tex)
             gl.glBindTexture(GL_TEXTURE_CUBE_MAP, placeholder_tex[2])
-            transmittance_cube_tex = active_texture
-            active_texture += 1
             gl.glActiveTexture(GL_TEXTURE0 + transmittance_cube_tex)
             gl.glBindTexture(GL_TEXTURE_CUBE_MAP, placeholder_tex[3])
-
         for i in range(n_pt, max(n_pt, 1)):
             b = "point_lights[" + str(i) + "]."
             set_uniform_1i(pid, b + "shadow_map", cube_tex, gl)
@@ -485,15 +501,18 @@ class JITRenderer:
             self.env_offset_buffer = None
 
     def set_light(self, scene, light_nodes, ambient_light):
-        self.light_list = light_nodes
-
         n = len(light_nodes)
         if n > MAX_N_LIGHTS:
             raise ValueError("Number of lights exceeds limit.")
 
-        # directional: color <- 3, direction <- 3, intensity, 0
-        # point:       color <- 3, position <- 3, intensity, 1
-        self.light = np.zeros((n, 8), np.float32)
+        self.lights_type = np.zeros(n, np.int32)
+        self.lights_color = np.zeros((n, 3), np.float32)
+        self.lights_intensity = np.zeros(n, np.float32)
+        self.lights_pos = np.zeros((n, 3), np.float32)
+        self.lights_dir = np.zeros((n, 3), np.float32)
+        # The falloff of a spot light across its cone, as glTF defines it (see 'spot_lights' in mesh.frag)
+        self.lights_angle_scale = np.zeros(n, np.float32)
+        self.lights_angle_offset = np.zeros(n, np.float32)
         self.shadow_map = np.zeros(n, np.int32)
         self.transmittance_map = np.zeros(n, np.int32)
         self.light_matrix = np.zeros((n, 6, 4, 4), np.float32)
@@ -505,49 +524,35 @@ class JITRenderer:
         for i, node in enumerate(light_nodes):
             light = node.light
             pose = scene.get_pose(node)
-            position = pose[:3, 3]
-            direction = -pose[:3, 2]
+            self.lights_color[i] = light.color
+            self.lights_intensity[i] = light.intensity
+            self.lights_pos[i] = pose[:3, 3]
+            self.lights_dir[i] = -pose[:3, 2]
 
-            if isinstance(light, DirectionalLight):
-                self.light[i, :3] = light.color
-                self.light[i, 3:6] = direction
-                self.light[i, 6] = light.intensity
-                self.light[i, 7] = 0
+            if light.shadow_texture:
+                if light.shadow_texture._in_context() and light.transmittance_texture._in_context():
+                    self.shadow_map[i] = light.shadow_texture._texid
+                    self.transmittance_map[i] = light.transmittance_texture._texid
+                else:
+                    all_textures_ready = False
 
-                if light.shadow_texture:
-                    if light.shadow_texture._in_context() and light.transmittance_texture._in_context():
-                        self.shadow_map[i] = light.shadow_texture._texid
-                        self.transmittance_map[i] = light.transmittance_texture._texid
-                    else:
-                        all_textures_ready = False
-
-                pose = pose.copy()
-                camera = light._get_shadow_camera(scene.scale)
-                P = camera.get_projection_matrix()
-                c = scene.centroid
-                loc = c - direction * scene.scale
-                pose[:3, 3] = loc
-                V = np.linalg.inv(pose)  # V maps from world to camera
-                self.light_matrix[i, 0] = P.dot(V)
-            elif isinstance(light, PointLight):
-                self.light[i, :3] = light.color
-                self.light[i, 3:6] = position
-                self.light[i, 6] = light.intensity
-                self.light[i, 7] = 1
-
-                if light.shadow_texture:
-                    if light.shadow_texture._in_context() and light.transmittance_texture._in_context():
-                        self.shadow_map[i] = light.shadow_texture._texid
-                        self.transmittance_map[i] = light.transmittance_texture._texid
-                    else:
-                        all_textures_ready = False
-
-                camera = light._get_shadow_camera(scene.scale)
-                projection = camera.get_projection_matrix()
-                view = light._get_view_matrices(position)
-                self.light_matrix[i] = projection @ view
+            camera = light._get_shadow_camera(scene.scale)
+            P = camera.get_projection_matrix()
+            if isinstance(light, PointLight):
+                self.lights_type[i] = LightType.POINT
+                self.light_matrix[i] = P @ light._get_view_matrices(self.lights_pos[i])
+                continue
+            if isinstance(light, SpotLight):
+                self.lights_type[i] = LightType.SPOT
+                cos_outer = np.cos(light.outerConeAngle)
+                self.lights_angle_scale[i] = 1.0 / max(0.001, np.cos(light.innerConeAngle) - cos_outer)
+                self.lights_angle_offset[i] = -cos_outer * self.lights_angle_scale[i]
             else:
-                raise TypeError("Light type not supported yet.")
+                self.lights_type[i] = LightType.DIRECTIONAL
+                # The shadow camera of a directional light looks at the scene from outside its bounds
+                pose = pose.copy()
+                pose[:3, 3] = scene.centroid - self.lights_dir[i] * scene.scale
+            self.light_matrix[i, 0] = P @ np.linalg.inv(pose)
 
         return all_textures_ready
 
@@ -568,8 +573,12 @@ class JITRenderer:
         self.texture_layers_idx = np.full(n, -1, np.int32)
         self.texture_layers_idx[is_layered] = np.arange(np.count_nonzero(is_layered))
         self.texture_layers = np.zeros((np.count_nonzero(is_layered), len(self.envs_offset), 2), np.float32)
-        # base_color <- 4, metallic <- 1, roughness <- 1, emissive <- 3, transmission <- 1, ior <- 1
-        self.pbr_mat = np.zeros((n, 11), np.float32)
+        self.base_color_factor = np.zeros((n, 4), np.float32)
+        self.metallic_factor = np.zeros(n, np.float32)
+        self.roughness_factor = np.zeros(n, np.float32)
+        self.emissive_factor = np.zeros((n, 3), np.float32)
+        self.transmission_factor = np.zeros(n, np.float32)
+        self.ior = np.zeros(n, np.float32)
         self.is_blended = np.zeros(n, np.bool_)
         self.is_wireframe = np.zeros(n, np.bool_)
         # The one floor the reflection is set up for (see 'reflection_mat')
@@ -675,12 +684,12 @@ class JITRenderer:
             if tf & 8 and material.baseColorTexture.tex_type == GL_TEXTURE_2D_ARRAY:
                 self.textures[i, 0] |= 8 << 8
 
-            self.pbr_mat[i, :4] = material.baseColorFactor
-            self.pbr_mat[i, 4] = material.metallicFactor
-            self.pbr_mat[i, 5] = material.roughnessFactor
-            self.pbr_mat[i, 6:9] = material.emissiveFactor
-            self.pbr_mat[i, 9] = material.transmissionFactor
-            self.pbr_mat[i, 10] = material.ior
+            self.base_color_factor[i] = material.baseColorFactor
+            self.metallic_factor[i] = material.metallicFactor
+            self.roughness_factor[i] = material.roughnessFactor
+            self.emissive_factor[i] = material.emissiveFactor
+            self.transmission_factor[i] = material.transmissionFactor
+            self.ior[i] = material.ior
 
             self.is_blended[i] = material.alphaMode == "BLEND"
             self.is_wireframe[i] = material.wireframe
@@ -846,16 +855,27 @@ class JITRenderer:
                 nb.float32[:, :, :],
                 nb.int32[:, :],
                 nb.float32[:, :],
+                nb.float32[:],
+                nb.float32[:],
+                nb.float32[:, :],
+                nb.float32[:],
+                nb.float32[:],
                 nb.boolean[:],
                 nb.boolean[:],
                 nb.boolean[:],
                 nb.boolean[:],
                 nb.boolean[:],
                 nb.boolean[:],
+                nb.int32[:],
                 nb.int32[:],
                 nb.int32[:],
                 nb.int32[:],
                 nb.float32[:, :],
+                nb.float32[:],
+                nb.float32[:, :],
+                nb.float32[:, :],
+                nb.float32[:],
+                nb.float32[:],
                 nb.int32[:],
                 nb.int32[:],
                 nb.float32[:, :, :, :],
@@ -891,7 +911,12 @@ class JITRenderer:
             program_id,
             pose,
             textures,
-            pbr_mat,
+            base_color_factor,
+            metallic_factor,
+            roughness_factor,
+            emissive_factor,
+            transmission_factor,
+            ior,
             is_blended,
             is_wireframe,
             is_reflective_floor,
@@ -901,7 +926,13 @@ class JITRenderer:
             mode,
             n_instances,
             n_indices,
-            light,
+            lights_type,
+            lights_color,
+            lights_intensity,
+            lights_pos,
+            lights_dir,
+            lights_angle_scale,
+            lights_angle_offset,
             shadow_map,
             transmittance_map,
             light_matrix,
@@ -969,7 +1000,13 @@ class JITRenderer:
                         lighting_texture = bind_lighting(
                             pid,
                             light_flags,
-                            light,
+                            lights_type,
+                            lights_color,
+                            lights_intensity,
+                            lights_pos,
+                            lights_dir,
+                            lights_angle_scale,
+                            lights_angle_offset,
                             shadow_map,
                             transmittance_map,
                             light_matrix,
@@ -1026,12 +1063,12 @@ class JITRenderer:
                             set_uniform_1i(pid, "material." + texture_list[i], active_texture, gl)
                             active_texture += 1
 
-                    set_uniform_4fv(pid, "material.base_color_factor", pbr_mat[id, :4], gl)
-                    set_uniform_1f(pid, "material.metallic_factor", pbr_mat[id, 4], gl)
-                    set_uniform_1f(pid, "material.roughness_factor", pbr_mat[id, 5], gl)
-                    set_uniform_3fv(pid, "material.emissive_factor", pbr_mat[id, 6:9], gl)
-                    set_uniform_1f(pid, "material.transmission_factor", pbr_mat[id, 9], gl)
-                    set_uniform_1f(pid, "material.ior", pbr_mat[id, 10], gl)
+                    set_uniform_4fv(pid, "material.base_color_factor", base_color_factor[id], gl)
+                    set_uniform_1f(pid, "material.metallic_factor", metallic_factor[id], gl)
+                    set_uniform_1f(pid, "material.roughness_factor", roughness_factor[id], gl)
+                    set_uniform_3fv(pid, "material.emissive_factor", emissive_factor[id], gl)
+                    set_uniform_1f(pid, "material.transmission_factor", transmission_factor[id], gl)
+                    set_uniform_1f(pid, "material.ior", ior[id], gl)
 
                     if is_transmissive[id]:
                         # A transmissive material adds the light it reflects to the background, which its second output
@@ -1154,6 +1191,8 @@ class JITRenderer:
                 nb.int32,
                 nb.int32[:, :],
                 nb.float32[:, :],
+                nb.float32[:],
+                nb.float32[:],
                 nb.float32[:, :, :],
                 nb.int32[:],
                 self.gl.wrapper_type,
@@ -1185,7 +1224,9 @@ class JITRenderer:
             is_env_instanced,
             env_offset_buffer,
             textures,
-            pbr_mat,
+            base_color_factor,
+            transmission_factor,
+            ior,
             texture_layers,
             texture_layers_idx,
             gl,
@@ -1225,10 +1266,10 @@ class JITRenderer:
                 is_layer_set = False
                 tf = textures[id, 0]
                 if is_transparent[id] or tf & (8 << 8):
-                    set_uniform_4fv(pid, "base_color_factor", pbr_mat[id, :4], gl)
-                    set_uniform_1f(pid, "transmission_factor", pbr_mat[id, 9], gl)
+                    set_uniform_4fv(pid, "base_color_factor", base_color_factor[id], gl)
+                    set_uniform_1f(pid, "transmission_factor", transmission_factor[id], gl)
                     if is_transmittance:
-                        set_uniform_1f(pid, "ior", pbr_mat[id, 10], gl)
+                        set_uniform_1f(pid, "ior", ior[id], gl)
                     if tf & 8:
                         gl.glActiveTexture(GL_TEXTURE0)
                         gl.glBindTexture(GL_TEXTURE_2D_ARRAY if tf & (8 << 8) else GL_TEXTURE_2D, textures[id, 4])
@@ -1435,7 +1476,12 @@ class JITRenderer:
                 self.program_id[(flags, program_flags)],
                 self.pose,
                 self.textures,
-                self.pbr_mat,
+                self.base_color_factor,
+                self.metallic_factor,
+                self.roughness_factor,
+                self.emissive_factor,
+                self.transmission_factor,
+                self.ior,
                 self.is_blended,
                 self.is_wireframe,
                 self.is_reflective_floor,
@@ -1445,7 +1491,13 @@ class JITRenderer:
                 self.mode,
                 self.n_instances,
                 self.n_indices,
-                self.light,
+                self.lights_type,
+                self.lights_color,
+                self.lights_intensity,
+                self.lights_pos,
+                self.lights_dir,
+                self.lights_angle_scale,
+                self.lights_angle_offset,
                 self.shadow_map,
                 self.transmittance_map,
                 self.light_matrix,
@@ -1454,7 +1506,7 @@ class JITRenderer:
                 np.ascontiguousarray(P, dtype=np.float32),
                 np.ascontiguousarray(cam_pos, dtype=np.float32),
                 flags,
-                color_list if flags & RenderFlags.SEG else self.pbr_mat,
+                color_list if flags & RenderFlags.SEG else np.empty((0, 3), np.float32),
                 reflection_mat,
                 floor_tex,
                 self.placeholder_tex,
@@ -1542,7 +1594,9 @@ class JITRenderer:
                 self.is_env_instanced,
                 self.env_offset_buffer if self.env_offset_buffer is not None else 0,
                 self.textures,
-                self.pbr_mat,
+                self.base_color_factor,
+                self.transmission_factor,
+                self.ior,
                 self.texture_layers,
                 self.texture_layers_idx,
                 self.gl.wrapper_instance,
