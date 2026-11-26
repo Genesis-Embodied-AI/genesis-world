@@ -308,7 +308,8 @@ class UsdContext:
         if geom_path in self._prim_material_bindings:
             surface_id = self._prim_material_bindings[geom_path]
             surface_dict, uv_name = self._material_properties.get(surface_id, ({}, "st"))
-            # accepted keys: color_texture, opacity_texture, roughness_texture, metallic_texture, normal_texture, emissive_texture, ior
+            # accepted keys: color_texture, opacity_texture, roughness_texture, metallic_texture, normal_texture,
+            # occlusion_texture, emissive_texture, ior
             applied_surface.update_texture(**surface_dict)
             asset_textures = mu.AssetTextures(
                 color=surface_dict.get("color_texture"),

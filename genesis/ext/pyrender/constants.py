@@ -1,26 +1,49 @@
-DEFAULT_Z_NEAR = 0.05  # Near clipping plane, in meters
-DEFAULT_Z_FAR = 100.0  # Far clipping plane, in meters
-DEFAULT_SCENE_SCALE = 5.0  # Default scene scale
-MAX_N_LIGHTS = 4  # Maximum number of lights of each type allowed
-TARGET_OPEN_GL_MAJOR = 4  # Target OpenGL Major Version
-TARGET_OPEN_GL_MINOR = 2  # Target OpenGL Minor Version
-MIN_OPEN_GL_MAJOR = 3  # Minimum OpenGL Major Version
-MIN_OPEN_GL_MINOR = 3  # Minimum OpenGL Minor Version
-FLOAT_SZ = 4  # Byte size of GL float32
-UINT_SZ = 4  # Byte size of GL uint32
-SHADOW_TEX_SZ = 8192  # Width and Height of Shadow Textures
-DIRECTIONAL_SHADOW_TEX_SZ = 4096  # Width and Height of the shadow textures of directional lights
-POINT_SHADOW_TEX_SZ = 2048  # Width and Height of each face of the shadow cube maps of point lights
-TRANSMITTANCE_TEX_SZ = 1024  # Width and Height of the light a directional light passes through transparent surfaces
-POINT_TRANSMITTANCE_TEX_SZ = 512  # Width and Height of each face of the same for point lights
-TEXT_PADDING = 20  # Width of padding for rendering text (px)
-FONT_SIZE = 26  # Default font size for rendering text (px)
-FONT_COLOR_LIGHTMODE = (0.0, 0.0, 0.0, 0.85)  # Default font color for light background color
-FONT_COLOR_DARKMODE = (1.0, 1.0, 1.0, 0.85)  # Default font color for dark background color
+from enum import IntEnum
+
+DEFAULT_Z_NEAR = 0.05
+"""The near plane of the camera of the viewer, in meters."""
+DEFAULT_Z_FAR = 100.0
+"""The far plane of the camera of the viewer, in meters."""
+DEFAULT_SCENE_SCALE = 5.0
+"""The size of the scene that the camera of the viewer frames at first, in meters."""
+MAX_N_LIGHTS = 4
+"""The maximum number of lights of a scene (see 'set_light' in jit_render.py)."""
+TARGET_OPEN_GL_MAJOR = 4
+"""The major version of the OpenGL context requested first."""
+TARGET_OPEN_GL_MINOR = 2
+"""The minor version of the OpenGL context requested first."""
+MIN_OPEN_GL_MAJOR = 3
+"""The major version of the oldest OpenGL context accepted."""
+MIN_OPEN_GL_MINOR = 3
+"""The minor version of the oldest OpenGL context accepted."""
+SOFTWARE_RENDERERS = ("llvmpipe", "Apple Software Renderer")
+"""The names of the OpenGL renderers running on the CPU, which make rendering slow."""
+FLOAT_SZ = 4
+"""The size of a GL float, in bytes."""
+UINT_SZ = 4
+"""The size of a GL unsigned integer, in bytes."""
+DIRECTIONAL_SHADOW_TEX_SZ = 4096
+"""The width and height of the shadow map of a directional light, in texels."""
+POINT_SHADOW_TEX_SZ = 2048
+"""The width and height of each face of the shadow cube map of a point light, in texels."""
+SPOT_SHADOW_TEX_SZ = 2048
+"""The width and height of the shadow map of a spot light, in texels."""
+TRANSMITTANCE_TEX_SZ = 1024
+"""The width and height of the map of the light that transparent surfaces let through, for a directional or a spot
+light, in texels."""
+POINT_TRANSMITTANCE_TEX_SZ = 512
+"""The width and height of each face of the same cube map for a point light, in texels."""
+TEXT_PADDING = 20
+"""The margin between the text and the edges of the window, in pixels."""
+FONT_SIZE = 26
+"""The height of the text of the viewer, in pixels."""
+FONT_COLOR_LIGHTMODE = (0.0, 0.0, 0.0, 0.85)
+"""The RGBA color of the text over a light background."""
+FONT_COLOR_DARKMODE = (1.0, 1.0, 1.0, 0.85)
+"""The RGBA color of the text over a dark background."""
 
 
-# Flags for render type
-class RenderFlags(object):
+class RenderFlags:
     """Flags for rendering in the scene.
 
     Combine them with the bitwise or. For example,
@@ -49,18 +72,14 @@ class RenderFlags(object):
     """Render shadows for point lights."""
     SHADOWS_SPOT = 128
     """Render shadows for spot lights."""
-    SHADOWS_ALL = 32 | 64  # | 128
+    SHADOWS_ALL = 32 | 64 | 128
     """Render shadows for all lights."""
     VERTEX_NORMALS = 256
     """Render vertex normals."""
     FACE_NORMALS = 512
     """Render face normals."""
-    SKIP_CULL_FACES = 1024
-    """Do not cull back faces."""
-    RGBA = 2048
-    """Render the color buffer with the alpha channel enabled."""
-    FLAT = 4096
-    """Render the color buffer flat, with no lighting computations."""
+    NORMAL = 4096
+    """Render the normal of the surfaces in world space, encoded as a color."""
     SEG = 8192
     """Render segmentation."""
     RET_DEPTH = 1 << 14
@@ -77,6 +96,30 @@ class RenderFlags(object):
     """Render occluded markers with darkened transparency (X-ray mode)."""
 
 
+class TexChannels(IntEnum):
+    """The channels that a texture holds."""
+
+    R = 0
+    GB = 1
+    """The green and the blue channels of the source, those of the metalness and the roughness."""
+    RGB = 2
+    RGBA = 3
+    DEPTH = 4
+
+    @property
+    def n_channels(self):
+        """int : The number of channels."""
+        return (1, 2, 3, 4, 1)[self]
+
+
+class LightType:
+    """The kind of a light, as the compiled passes read it."""
+
+    DIRECTIONAL = 0
+    POINT = 1
+    SPOT = 2
+
+
 class ViewFlags:
     """Which views draw a mesh, as a bitwise or of the flags below (see 'Mesh.views').
 
@@ -90,89 +133,44 @@ class ViewFlags:
     """Drawn by the debug views."""
 
 
-class TextAlign:
-    """Text alignment options for captions.
+class WireframeMode(IntEnum):
+    """How the viewer draws the meshes, as solids or as wireframes."""
 
-    Only use one at a time.
-    """
-
-    CENTER = 0
-    """Center the text by width and height."""
-    CENTER_LEFT = 1
-    """Center the text by height and left-align it."""
-    CENTER_RIGHT = 2
-    """Center the text by height and right-align it."""
-    BOTTOM_LEFT = 3
-    """Put the text in the bottom-left corner."""
-    BOTTOM_RIGHT = 4
-    """Put the text in the bottom-right corner."""
-    BOTTOM_CENTER = 5
-    """Center the text by width and fix it to the bottom."""
-    TOP_LEFT = 6
-    """Put the text in the top-left corner."""
-    TOP_RIGHT = 7
-    """Put the text in the top-right corner."""
-    TOP_CENTER = 8
-    """Center the text by width and fix it to the top."""
+    MATERIAL = 0
+    """Each mesh as its material says."""
+    FLIP = 1
+    """Each mesh the other way than its material says."""
+    WIREFRAME = 2
+    """Every mesh as a wireframe."""
+    SOLID = 3
+    """Every mesh as a solid."""
 
 
-class GLTF(object):
-    """Options for GL objects."""
+class TextAlign(IntEnum):
+    """The corner of a text that its position gives."""
 
-    NEAREST = 9728
-    """Nearest neighbor interpolation."""
-    LINEAR = 9729
-    """Linear interpolation."""
-    NEAREST_MIPMAP_NEAREST = 9984
-    """Nearest mipmapping."""
-    LINEAR_MIPMAP_NEAREST = 9985
-    """Linear mipmapping."""
-    NEAREST_MIPMAP_LINEAR = 9986
-    """Nearest mipmapping."""
-    LINEAR_MIPMAP_LINEAR = 9987
-    """Linear mipmapping."""
-    CLAMP_TO_EDGE = 33071
-    """Clamp to the edge of the texture."""
-    MIRRORED_REPEAT = 33648
-    """Mirror the texture."""
-    REPEAT = 10497
-    """Repeat the texture."""
-    POINTS = 0
-    """Render as points."""
-    LINES = 1
-    """Render as lines."""
-    LINE_LOOP = 2
-    """Render as a line loop."""
-    LINE_STRIP = 3
-    """Render as a line strip."""
-    TRIANGLES = 4
-    """Render as triangles."""
-    TRIANGLE_STRIP = 5
-    """Render as a triangle strip."""
-    TRIANGLE_FAN = 6
-    """Render as a triangle fan."""
+    TOP_LEFT = 0
+    """The top-left corner."""
+    BOTTOM_RIGHT = 1
+    """The bottom-right corner."""
 
 
-class BufFlags(object):
+class BufFlags:
+    """The vertex buffers that a primitive holds besides its positions."""
+
     POSITION = 0
     NORMAL = 1
-    TANGENT = 2
-    TEXCOORD_0 = 4
-    TEXCOORD_1 = 8
-    COLOR_0 = 16
-    JOINTS_0 = 32
-    WEIGHTS_0 = 64
+    TEXCOORD_0 = 2
+    COLOR_0 = 4
 
 
-class TexFlags(object):
+class TexFlags:
     NONE = 0
     NORMAL = 1
-    OCCLUSION = 2
-    EMISSIVE = 4
-    BASE_COLOR = 8
-    METALLIC_ROUGHNESS = 16
-    DIFFUSE = 32
-    SPECULAR_GLOSSINESS = 64
+    EMISSIVE = 2
+    BASE_COLOR = 4
+    METALLIC_ROUGHNESS = 8
+    OCCLUSION = 16
 
 
 class ProgramFlags:
@@ -181,9 +179,5 @@ class ProgramFlags:
     VERTEX_NORMALS = 2
     FACE_NORMALS = 4
     POINT_SHADOW = 8
-    DOUBLE_SIDED = 16
     SHADOW = 32
     TRANSMITTANCE = 64
-
-
-__all__ = ["RenderFlags", "TextAlign", "GLTF"]

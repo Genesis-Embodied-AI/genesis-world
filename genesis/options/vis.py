@@ -6,17 +6,25 @@ from pydantic import Field, StrictBool, model_validator
 
 import genesis as gs
 from genesis.datatypes import List
-from genesis.typing import IArrayType, PositiveFloat, PositiveInt, PositiveVec2IType, UnitIntervalVec3Type, Vec3FType
+from genesis.typing import (
+    IArrayType,
+    PositiveFloat,
+    PositiveInt,
+    PositiveVec2IType,
+    UnitIntervalVec3Type,
+    ValidFloat,
+    Vec3FType,
+)
 from genesis.utils.serialization import ignore_invalid_load
 
 from .options import Options
 
 
 if TYPE_CHECKING:
-    LightType = Mapping[str, Any] | "DirectionalLight" | "PointLight" | "AmbientLight"
+    LightType = Mapping[str, Any] | "DirectionalLight" | "PointLight" | "SpotLight"
     LightArray = Sequence[LightType]
 else:
-    LightType = Annotated["DirectionalLight | PointLight | AmbientLight", Field(discriminator="type")]
+    LightType = Annotated["DirectionalLight | PointLight | SpotLight", Field(discriminator="type")]
     LightArray = Annotated[List[LightType], Field(strict=False)]
 
 
@@ -117,6 +125,19 @@ class ViewerOptions(Options):
 
 
 class DirectionalLight(Options):
+    """
+    Light coming from infinitely far away along one direction, like the sun, for the rasterizer.
+
+    Parameters
+    ----------
+    dir : tuple of float, shape (3,)
+        The direction the light travels in.
+    color : tuple of float, shape (3,)
+        The color of the light.
+    intensity : float
+        The brightness of the light, the same everywhere in the scene.
+    """
+
     type: Literal["directional"] = "directional"
     dir: Vec3FType
     color: UnitIntervalVec3Type
@@ -124,16 +145,51 @@ class DirectionalLight(Options):
 
 
 class PointLight(Options):
+    """
+    Light shining in every direction from one point, like a bulb, for the rasterizer.
+
+    Parameters
+    ----------
+    pos : tuple of float, shape (3,)
+        The position of the light.
+    color : tuple of float, shape (3,)
+        The color of the light.
+    intensity : float
+        The brightness of the light, which falls with the square of the distance to the light.
+    """
+
     type: Literal["point"] = "point"
     pos: Vec3FType
     color: UnitIntervalVec3Type
     intensity: float
 
 
-class AmbientLight(Options):
-    type: Literal["ambient"] = "ambient"
+class SpotLight(Options):
+    """
+    Light shining within a cone from one point, like a torch or a stage spot, for the rasterizer.
+
+    Parameters
+    ----------
+    pos : tuple of float, shape (3,)
+        The position of the light.
+    dir : tuple of float, shape (3,)
+        The direction of the axis of the cone.
+    color : tuple of float, shape (3,)
+        The color of the light.
+    intensity : float
+        The brightness of the light along the axis of the cone, which falls with the square of the distance to the
+        light.
+    cutoff : float, optional
+        The angle in degrees between the axis of the cone and its edge, in (0, 90). The light is the brightest along
+        the axis and fades out towards the edge. Defaults to 45.
+    """
+
+    type: Literal["spot"] = "spot"
+    pos: Vec3FType
+    dir: Vec3FType
     color: UnitIntervalVec3Type
     intensity: float
+    cutoff: Annotated[ValidFloat, Field(gt=0.0, lt=90.0)] = 45.0
 
 
 class ThinLens(Options):

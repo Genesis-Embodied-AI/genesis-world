@@ -6,14 +6,16 @@
 struct SpotLight {
     vec3 color;
     float intensity;
-    float range;
     vec3 position;
     vec3 direction;
+    // The falloff across the cone, as glTF defines it: clamp(cos(angle to the axis) * scale + offset, 0, 1) squared
     float light_angle_scale;
     float light_angle_offset;
 
     #ifdef SPOT_LIGHT_SHADOWS
     sampler2DShadow shadow_map;
+    // The share of each color of the light that transparent surfaces let through, and the depth of the nearest one
+    sampler2D transmittance_map;
     mat4 light_matrix;
     #endif
 };
@@ -46,20 +48,11 @@ struct PointLight {
 
 struct Material {
     vec3 emissive_factor;
-
-#ifdef USE_METALLIC_MATERIAL
     vec4 base_color_factor;
     float metallic_factor;
     float roughness_factor;
     float transmission_factor;
     float ior;
-#endif
-
-#ifdef USE_GLOSSY_MATERIAL
-    vec4 diffuse_factor;
-    vec3 specular_factor;
-    float glossiness_factor;
-#endif
 
 #ifdef HAS_NORMAL_TEX
     sampler2D normal_texture;
@@ -85,12 +78,6 @@ struct Material {
 #endif
 #ifdef HAS_METALLIC_ROUGHNESS_TEX
     sampler2D metallic_roughness_texture;
-#endif
-#ifdef HAS_DIFFUSE_TEX
-    sampler2D diffuse_texture;
-#endif
-#ifdef HAS_SPECULAR_GLOSSINESS_TEX
-    sampler2D specular_glossiness;
 #endif
 };
 
@@ -126,10 +113,6 @@ uniform vec2 screen_size;
 
 uniform mat4 reflection_mat;
 
-#ifdef USE_IBL
-uniform samplerCube diffuse_env;
-uniform samplerCube specular_env;
-#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 // Inputs
@@ -139,18 +122,8 @@ in vec3 frag_position;
 #ifdef NORMAL_LOC
 in vec3 frag_normal;
 #endif
-#ifdef HAS_NORMAL_TEX
-#ifdef TANGENT_LOC
-#ifdef NORMAL_LOC
-in mat3 tbn;
-#endif
-#endif
-#endif
 #ifdef TEXCOORD_0_LOC
 in vec2 uv_0;
-#endif
-#ifdef TEXCOORD_1_LOC
-in vec2 uv_1;
 #endif
 #ifdef COLOR_0_LOC
 in vec4 color_multiplier;
@@ -181,62 +154,41 @@ const float min_roughness = 0.04;
 ///////////////////////////////////////////////////////////////////////////////
 vec4 srgb_to_linear(vec4 srgb)
 {
-#ifndef SRGB_CORRECTED
-    // Fast Approximation
-    //vec3 linOut = pow(srgbIn.xyz,vec3(2.2));
-    //
-    vec3 b_less = step(vec3(0.04045),srgb.xyz);
-    vec3 lin_out = mix( srgb.xyz/vec3(12.92), pow((srgb.xyz+vec3(0.055))/vec3(1.055),vec3(2.4)), b_less );
+    vec3 b_less = step(vec3(0.04045), srgb.xyz);
+    vec3 lin_out = mix(srgb.xyz / vec3(12.92), pow((srgb.xyz + vec3(0.055)) / vec3(1.055), vec3(2.4)), b_less);
     return vec4(lin_out, srgb.w);
-#else
-    return srgb;
-#endif
 }
 
 // The sRGB encoding of IEC 61966-2-1, inverse of srgb_to_linear
 vec4 linear_to_srgb(vec4 linear)
 {
-#ifndef SRGB_CORRECTED
     vec3 b_less = step(vec3(0.0031308), linear.xyz);
     vec3 srgb_out = mix(linear.xyz * vec3(12.92), vec3(1.055) * pow(linear.xyz, vec3(1.0 / 2.4)) - vec3(0.055), b_less);
     return vec4(srgb_out, linear.w);
-#else
-    return linear;
-#endif
 }
 
 // Normal computation
 vec3 get_normal()
 {
 #ifdef HAS_NORMAL_TEX
-
-#ifndef HAS_TANGENTS
+    // The tangent frame follows the derivatives of the position and of the uvs across the screen
     vec3 pos_dx = dFdx(frag_position);
     vec3 pos_dy = dFdy(frag_position);
     vec3 tex_dx = dFdx(vec3(uv_0, 0.0));
     vec3 tex_dy = dFdy(vec3(uv_0, 0.0));
-    vec3 t = (tex_dy.t * pos_dx - tex_dx.t * pos_dy) / (tex_dx.s * tex_dy.t - tex_dy.s * tex_dx.t);
-
+    float uv_det = tex_dx.s * tex_dy.t - tex_dy.s * tex_dx.t;
+    vec3 t = (tex_dy.t * pos_dx - tex_dx.t * pos_dy) / uv_det;
+    vec3 b = (tex_dx.s * pos_dy - tex_dy.s * pos_dx) / uv_det;
 #ifdef NORMAL_LOC
     vec3 ng = normalize(frag_normal);
 #else
     vec3 ng = cross(pos_dx, pos_dy);
 #endif
-
+    // The bitangent keeps the side of the tangent that the direction of v gives, which mirrored uvs turn over
     t = normalize(t - ng * dot(ng, t));
-    vec3 b = normalize(cross(ng, t));
-    mat3 tbn_n = mat3(t, b, ng);
-
-#else
-
-    mat3 tbn_n = tbn;
-
-#endif
-
-    vec3 n = texture(material.normal_texture, uv_0).rgb;
-    n = normalize(tbn_n * ((2.0 * n - 1.0) * vec3(1.0, 1.0, 1.0)));
-    return n; // TODO NORMAL MAPPING
-
+    b = sign(dot(b, cross(ng, t))) * normalize(cross(ng, t));
+    // The normal map holds the normal in tangent space, each component from -1 to 1 encoded from 0 to 1
+    return normalize(mat3(t, b, ng) * (2.0 * texture(material.normal_texture, uv_0).rgb - 1.0));
 #else
 
 #ifdef NORMAL_LOC
@@ -375,10 +327,6 @@ void main()
     }
 
     vec4 color = vec4(vec3(0.0), 1.0);
-///////////////////////////////////////////////////////////////////////////////
-// Handle Metallic Materials
-///////////////////////////////////////////////////////////////////////////////
-#ifdef USE_METALLIC_MATERIAL
 
     // Compute metallic/roughness factors
     float roughness = material.roughness_factor;
@@ -518,17 +466,20 @@ void main()
         vec3 res = compute_brdf(n, v, l, roughness, metallic,
                                 f0, c_diff, base_color.rgb, radiance);
 #ifdef SPOT_LIGHT_SHADOWS
-        float nl = clamp(dot(n,l), 0.0, 1.0);
-        float shadow = shadow_calc(
-            spot_lights[i].light_matrix,
-            spot_lights[i].shadow_map,
-            nl
-        );
-        res = res * (1.0 - shadow);
+        float nl = clamp(dot(n, l), 0.0, 1.0);
+        float shadow = shadow_calc(spot_lights[i].light_matrix, spot_lights[i].shadow_map, nl);
+        vec3 transmitted = transmittance_calc(spot_lights[i].light_matrix, spot_lights[i].transmittance_map, nl);
+        res = res * (1.0 - shadow) * transmitted;
 #endif
         color.xyz += res;
     }
-    color.xyz += (1.0 - transmission) * base_color.xyz * ambient_light;
+    // The occlusion map scales the light that reaches a point from all around it (the ambient light and the
+    // environment), the shadows darkening the light of the lamps already
+    float occlusion = 1.0;
+#ifdef HAS_OCCLUSION_TEX
+    occlusion = texture(material.occlusion_texture, uv_0).r;
+#endif
+    color.xyz += occlusion * (1.0 - transmission) * base_color.xyz * ambient_light;
 
     // The environment that a surface mirrors is a sky above the horizon, as bright as a surface of albedo 0.5 facing up
     // under the directional lights, and the ambient light below it
@@ -537,7 +488,7 @@ void main()
         float elevation = max(-directional_lights[i].direction.z, 0.0);
         sky += 0.5 * directional_lights[i].intensity * directional_lights[i].color * elevation / PI;
     }
-    vec3 env = mix(ambient_light, sky, smoothstep(-0.1, 0.1, reflect(-v, n).z));
+    vec3 env = occlusion * mix(ambient_light, sky, smoothstep(-0.1, 0.1, reflect(-v, n).z));
     float nv_env = clamp(abs(dot(n, v)), 0.0, 1.0);
 
     // A metal diffuses no light, so away from the highlights of the lights it only shows the environment it mirrors. A
@@ -572,17 +523,6 @@ void main()
         transmittance = transmission * (1.0 - fresnel) * base_color.rgb;
     }
 
-    // Calculate lighting from environment
-#ifdef USE_IBL
-    // TODO
-#endif
-
-    // Apply occlusion
-#ifdef HAS_OCCLUSION_TEX
-    float ao = texture(material.occlusion_texture, uv_0).r;
-    color.xyz *= ao;
-#endif
-
     // Apply emissive map. 'emissive' already folds in the factor, so add it directly rather than scaling by the
     // factor a second time.
     vec3 emissive = material.emissive_factor;
@@ -605,14 +545,4 @@ void main()
     if (transmission > 0.0) {
         frag_color.rgb *= coverage;
     }
-
-
-#else
-    // TODO GLOSSY MATERIAL BRDF
-#endif
-
-///////////////////////////////////////////////////////////////////////////////
-// Handle Glossy Materials
-///////////////////////////////////////////////////////////////////////////////
-
 }

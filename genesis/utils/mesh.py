@@ -528,10 +528,11 @@ def compute_sdf_data(mesh, res):
 
 
 # Trimesh materials drawing the image textures, keyed by texture, then by the factors and the index of refraction of the
-# surface and the content of its emission. The rasterizer draws every mesh sharing a trimesh material with a single
-# material, made with the factors of the first surface it meets (see 'RasterizerContext._sync_shape_nodes'), so these
-# are part of the key of every material. A weak reference keys the texture, which never matches a later texture reusing
-# the id of a collected one, even while the release of the owned entries is disabled.
+# surface, the content of its emission, its normal map and its occlusion map. The rasterizer draws every mesh sharing a
+# trimesh material with a single material, made with the factors of the first surface it meets (see
+# 'RasterizerContext._sync_shape_nodes'), so these are part of the key of every material. A weak reference keys a
+# texture, which never matches a later texture reusing the id of a collected one, even while the release of the owned
+# entries is disabled.
 _TEXTURE_MATERIALS_CACHE = OwnedCache()
 
 
@@ -631,12 +632,27 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
             )
         elif isinstance(emission, gs.textures.ColorTexture):
             emissive_kwargs = dict(emissiveFactor=emission.color)
+    # A normal map and an occlusion map sample uvs, so they are drawn only when the mesh has them, and only with a PBR
+    # material, since SimpleMaterial has neither channel
+    maps_kwargs = {}
+    # The texture of each map drawn, which keys the material along with the map it fills
+    maps_texture = {}
+    if not isinstance(surface, gs.surfaces.Emission) and flipped_uvs is not None:
+        for map_name, map_texture in (
+            ("normalTexture", surface.normal_texture),
+            ("occlusionTexture", surface.occlusion_texture),
+        ):
+            if isinstance(map_texture, gs.textures.ImageTexture) and map_texture.image_array is not None:
+                assert map_texture.image_array.dtype == np.uint8
+                maps_kwargs[map_name] = Image.fromarray(map_texture.image_array)
+                maps_texture[map_name] = map_texture
     # The rasterizer reads a factor left unset as 1.0, as glTF specifies, which renders a fully metallic material
     pbr_material_factory = partial(
         trimesh.visual.material.PBRMaterial,
         metallicFactor=surface.metallic_factor,
         roughnessFactor=surface.roughness_factor,
         **emissive_kwargs,
+        **maps_kwargs,
     )
 
     if texture_seed is not None:
@@ -667,13 +683,14 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
                     surface.transmission_factor,
                     surface.ior,
                     get_hashkey(emission) if emissive_kwargs else None,
+                    tuple((map_name, weakref.ref(map_texture)) for map_name, map_texture in maps_texture.items()),
                 ),
                 lambda: (
                     pbr_material_factory(
                         baseColorTexture=Image.fromarray(texture.image_array),
                         baseColorFactor=color_f32_to_u8(image_rgba),
                     )
-                    if emissive_kwargs
+                    if emissive_kwargs or maps_kwargs
                     else trimesh.visual.material.SimpleMaterial(
                         image=Image.fromarray(texture.image_array), diffuse=image_rgba
                     )
@@ -688,8 +705,9 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     elif isinstance(texture, gs.textures.ColorTexture):
         if n_verts is None:
             gs.raise_exception("n_verts is required for color texture.")
-        if emissive_kwargs:
-            # The flat base color applies through a factor, but an image emissive still samples the UVs, so pass them.
+        if emissive_kwargs or maps_kwargs:
+            # The flat base color applies through a factor, but an image emissive, a normal map or an occlusion map
+            # still samples the uvs, so pass them.
             material = pbr_material_factory(baseColorFactor=color_f32_to_u8(texture.color))
             visual = trimesh.visual.TextureVisuals(uv=flipped_uvs, material=material)
         else:

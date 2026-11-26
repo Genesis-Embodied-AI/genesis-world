@@ -17,7 +17,6 @@ from genesis.engine.render_context import (
     Frames,
     Lines,
     Points,
-    ScopedRenderContext,
     SegmentationKeys,
     Shape,
     StaticMeshBatch,
@@ -25,6 +24,7 @@ from genesis.engine.render_context import (
 )
 from genesis.engine.state_change import StateChange, Subscriber, Tracker
 from genesis.ext import pyrender
+from genesis.ext.pyrender.constants import MAX_N_LIGHTS
 from genesis.ext.pyrender.jit_render import JITRenderer
 from genesis.typing import IndexType
 from genesis.utils.misc import BuildableMixin, tensor_to_array
@@ -231,7 +231,7 @@ class RasterizerContext(BuildableMixin):
             ambient_light=self.ambient_light, bg_color=self.background_color, n_envs=len(self.rendered_envs_idx)
         )
 
-        self.jit = JITRenderer(self._scene, [], [], self.scene.envs_offset[self.rendered_envs_idx])
+        self.jit = JITRenderer(self._scene, self.scene.envs_offset[self.rendered_envs_idx])
 
         self.on_lights()
 
@@ -854,15 +854,15 @@ class RasterizerContext(BuildableMixin):
             # The arrays hold the images in the format of their map, which the shaders read from the type of the array
             texture_array = pyrender.Texture(
                 source=tensor_to_array(images),
-                source_channels="RGBA" if texture.is_base_color else "RGB",
+                source_channels=pyrender.TexChannels.RGBA if texture.is_base_color else pyrender.TexChannels.RGB,
                 tex_type=GL_TEXTURE_2D_ARRAY,
                 data_format=GL_UNSIGNED_BYTE if texture.map_type == TEXTURE_MAP_TYPE.DIFFUSE else GL_HALF_FLOAT,
             )
             for primitive in primitives:
                 if texture.is_base_color:
-                    primitive.material.baseColorTexture = texture_array
+                    primitive.material.base_color_texture = texture_array
                 else:
-                    primitive.material.emissiveTexture = texture_array
+                    primitive.material.emissive_texture = texture_array
                 if primitive.texture_layers is None:
                     primitive.texture_layers = np.zeros((len(self.rendered_envs_idx), 2), dtype=np.float32)
             binding = TextureBinding(texture, texture_array, primitives, texture.changelog.track(StateChange.VISUAL))
@@ -917,17 +917,19 @@ class RasterizerContext(BuildableMixin):
             node = shape_nodes.nodes[i_n]
             if node is not None:
                 node.mesh.views = int(views[i_n])
-                self._scene._meshes_updated = True
+                self._scene.has_meshes_changed = True
                 # What the views draw changed, which the shadow maps follow (see 'pyrender.Scene.revision')
                 self._scene.bump_revision()
         shape_nodes.nodes_views = views
 
     def _update_vertices(self, node: "pyrender.Node", vverts: np.ndarray) -> None:
-        update_data = self._scene.reorder_vertices(node, vverts.astype(np.float32, copy=False))
+        (primitive,) = node.mesh.primitives
+        update_data = vverts.astype(np.float32, copy=False)
+        if primitive.vertex_mapping is not None:
+            update_data = update_data[primitive.vertex_mapping]
         self.jit.update_buffer(node.mesh.primitives, "pos", (update_data,))
-        normal_data = self.jit.update_normal(node, update_data)
-        if normal_data is not None:
-            self.jit.update_buffer(node.mesh.primitives, "normal", (normal_data,))
+        if primitive.normals is not None:
+            self.jit.update_buffer(node.mesh.primitives, "normal", (primitive.compute_normals(update_data),))
 
     def set_reflection_mat(self, geom_T):
         height = geom_T[0, 2, 3]
@@ -973,6 +975,8 @@ class RasterizerContext(BuildableMixin):
                 self.update_camera_frustum(camera)
 
     def add_light(self, light):
+        if len(self._scene.light_nodes) >= MAX_N_LIGHTS:
+            gs.raise_exception(f"The rasterizer renders at most {MAX_N_LIGHTS} lights.")
         # light direction is light pose's -z frame
         if isinstance(light, gs.options.vis.DirectionalLight):
             pose = np.eye(4, dtype=np.float32)
@@ -982,7 +986,12 @@ class RasterizerContext(BuildableMixin):
             pose = gu.trans_to_T(np.array(light.pos, dtype=np.float32))
             self.add_node(pyrender.PointLight(color=light.color, intensity=light.intensity), pose=pose)
         else:
-            gs.raise_exception(f"Unsupported light: {light}")
+            pose = gu.trans_to_T(np.array(light.pos, dtype=np.float32))
+            gu.z_up_to_R(-np.array(light.dir, dtype=np.float32), out=pose[:3, :3])
+            spot_light = pyrender.SpotLight(
+                color=light.color, intensity=light.intensity, cone_angle=np.deg2rad(light.cutoff)
+            )
+            self.add_node(spot_light, pose=pose)
 
     def create_node_seg(self, seg_key, seg_node):
         seg_idxc = self.seg_color_map.seg_key_to_idxc(seg_key)

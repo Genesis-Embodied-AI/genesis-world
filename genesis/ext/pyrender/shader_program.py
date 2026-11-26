@@ -1,150 +1,127 @@
-"""OpenGL shader program wrapper."""
+"""Shader programs of the rasterizer."""
 
-import numbers
 import os
 import re
 
 import numpy as np
 
 import OpenGL
-from OpenGL.GL import *
-from OpenGL.GL import shaders as gl_shader_utils
+from OpenGL.GL import (
+    GL_FRAGMENT_SHADER,
+    GL_GEOMETRY_SHADER,
+    GL_TRUE,
+    GL_VERTEX_SHADER,
+    glBindVertexArray,
+    glDeleteProgram,
+    glDeleteVertexArrays,
+    glGenVertexArrays,
+    glGetUniformLocation,
+    glUniform4fv,
+    glUniformMatrix4fv,
+    glUseProgram,
+    shaders,
+)
 
-func = None
+SHADER_DIR = os.path.join(os.path.dirname(__file__), "shaders")
 
 
-class ShaderProgramCache(object):
-    """A cache for shader programs."""
+class ShaderProgramCache:
+    """The shader programs built in each OpenGL context, for each set of shaders and defines."""
 
-    def __init__(self, shader_dir=None):
+    def __init__(self):
         self._program_cache = {}
-        self.shader_dir = shader_dir
-        if self.shader_dir is None:
-            base_dir, _ = os.path.split(os.path.realpath(__file__))
-            self.shader_dir = os.path.join(base_dir, "shaders")
 
     def get_program(self, vertex_shader, fragment_shader, geometry_shader=None, defines=None):
-        """Get a program via a list of shader files to include in the program.
+        """Return the program built from shaders of the 'shaders' folder, in the current OpenGL context.
 
         Parameters
         ----------
         vertex_shader : str
-            The vertex shader filename.
+            The file of the vertex shader.
         fragment_shader : str
-            The fragment shader filename.
-        geometry_shader : str
-            The geometry shader filename.
-        defines : dict
-            Defines and their values for the shader.
+            The file of the fragment shader.
+        geometry_shader : str, optional
+            The file of the geometry shader. Defaults to none.
+        defines : dict of str to int, optional
+            The macros of the shaders and their values. Defaults to none.
 
         Returns
         -------
-        program : :class:`.ShaderProgram`
-            The program.
+        program : ShaderProgram
+            The program, which the caller adds to the context.
         """
-        shader_names = []
         if defines is None:
             defines = {}
-        shader_filenames = [x for x in [vertex_shader, fragment_shader, geometry_shader] if x is not None]
-        for fn in shader_filenames:
-            if fn is None:
-                continue
-            _, name = os.path.split(fn)
-            shader_names.append(name)
-        cid = OpenGL.contextdata.getContext()
-        key = tuple([cid] + sorted([(s, 1) for s in shader_names] + [(d, defines[d]) for d in defines]))
-
+        key = (
+            OpenGL.contextdata.getContext(),
+            vertex_shader,
+            fragment_shader,
+            geometry_shader,
+            *sorted(defines.items()),
+        )
         if key not in self._program_cache:
-            shader_filenames = [os.path.join(self.shader_dir, fn) for fn in shader_filenames]
-            if len(shader_filenames) == 2:
-                shader_filenames.append(None)
-            vs, fs, gs = shader_filenames
             self._program_cache[key] = ShaderProgram(
-                vertex_shader=vs, fragment_shader=fs, geometry_shader=gs, defines=defines
+                vertex_shader=os.path.join(SHADER_DIR, vertex_shader),
+                fragment_shader=os.path.join(SHADER_DIR, fragment_shader),
+                geometry_shader=None if geometry_shader is None else os.path.join(SHADER_DIR, geometry_shader),
+                defines=defines,
             )
         return self._program_cache[key]
 
     def clear(self):
-        for key in self._program_cache:
+        """Free the programs of every context."""
+        for program in self._program_cache.values():
             try:
-                self._program_cache[key].delete()
+                program.delete()
             except OpenGL.error.GLError:
                 pass
         self._program_cache.clear()
 
 
-class NormalShaderCache(ShaderProgramCache):
-    """A program cache that draws every primitive with the surface-normal shader.
+class ShaderProgram:
+    """An OpenGL shader program built from shader files.
 
-    Swapped in place of the regular program cache for normal-channel render passes. Double-sided primitives are
-    drawn through a geometry shader emitting both faces. Programs are keyed on the primitive-specific defines
-    (buffer attribute locations, double-sidedness), so primitives with different buffer layouts each get a program
-    compiled with the correct attribute bindings.
-    """
-
-    def get_program(self, vertex_shader, fragment_shader, geometry_shader=None, defines=None):
-        is_double_sided = defines is not None and "DOUBLE_SIDED" in defines
-        return super().get_program(
-            vertex_shader="mesh_normal.vert",
-            fragment_shader="mesh_normal.frag",
-            geometry_shader="mesh_normal_double_sided.geom" if is_double_sided else None,
-            defines=defines,
-        )
-
-
-class ShaderProgram(object):
-    """A thin wrapper about OpenGL shader programs that supports easy creation,
-    binding, and uniform-setting.
+    The shaders take each define as a macro: the preprocessor directives '#ifdef' and '#ifndef' test whether it is
+    given, and its name is replaced by its value everywhere.
 
     Parameters
     ----------
     vertex_shader : str
-        The vertex shader filename.
+        The file of the vertex shader.
     fragment_shader : str
-        The fragment shader filename.
-    geometry_shader : str
-        The geometry shader filename.
-    defines : dict
-        Defines and their values for the shader.
+        The file of the fragment shader.
+    geometry_shader : str, optional
+        The file of the geometry shader. Defaults to none.
+    defines : dict of str to int, optional
+        The macros of the shaders and their values. Defaults to none.
     """
 
     def __init__(self, vertex_shader, fragment_shader, geometry_shader=None, defines=None):
         self.vertex_shader = vertex_shader
         self.fragment_shader = fragment_shader
         self.geometry_shader = geometry_shader
-
-        self.defines = defines
-        if self.defines is None:
-            self.defines = {}
-
+        self.defines = {} if defines is None else defines
         self._program_id = None
-        self._vao_id = None  # PYOPENGL BUG
-
-        # DEBUG
-        # self._unif_map = {}
+        self._vao_id = None
 
     def _add_to_context(self):
-        if self._program_id is not None:
-            raise ValueError("Shader program already in context")
+        assert self._program_id is None
         shader_ids = []
 
         # Load vert shader
-        shader_ids.append(gl_shader_utils.compileShader(self._load(self.vertex_shader), GL_VERTEX_SHADER))
+        shader_ids.append(shaders.compileShader(self._load(self.vertex_shader), GL_VERTEX_SHADER))
         # Load frag shader
-        shader_ids.append(gl_shader_utils.compileShader(self._load(self.fragment_shader), GL_FRAGMENT_SHADER))
+        shader_ids.append(shaders.compileShader(self._load(self.fragment_shader), GL_FRAGMENT_SHADER))
         # Load geometry shader
         if self.geometry_shader is not None:
-            shader_ids.append(gl_shader_utils.compileShader(self._load(self.geometry_shader), GL_GEOMETRY_SHADER))
+            shader_ids.append(shaders.compileShader(self._load(self.geometry_shader), GL_GEOMETRY_SHADER))
 
-        # Bind empty VAO PYOPENGL BUG
+        # PyOpenGL checks the program against the bound vertex array, which a core profile requires to exist
         if self._vao_id is None:
             self._vao_id = glGenVertexArrays(1)
         glBindVertexArray(self._vao_id)
 
-        # Compile program
-        self._program_id = gl_shader_utils.compileProgram(*shader_ids, validate=False)
-
-        # Unbind empty VAO PYOPENGL BUG
+        self._program_id = shaders.compileProgram(*shader_ids, validate=False)
         glBindVertexArray(0)
 
     def _in_context(self):
@@ -161,39 +138,22 @@ class ShaderProgram(object):
             self._vao_id = None
 
     def _load(self, shader_filename):
-        path, _ = os.path.split(shader_filename)
-
         with open(shader_filename) as f:
             text = f.read()
-
-        def ifdef(matchobj):
-            if matchobj.group(1) in self.defines:
-                return "#if 1"
-            else:
-                return "#if 0"
-
-        def ifndef(matchobj):
-            if matchobj.group(1) in self.defines:
-                return "#if 0"
-            else:
-                return "#if 1"
-
-        ifdef_regex = re.compile("#ifdef\\s+([a-zA-Z_][a-zA-Z_0-9]*)\\s*$", re.MULTILINE)
-        ifndef_regex = re.compile("#ifndef\\s+([a-zA-Z_][a-zA-Z_0-9]*)\\s*$", re.MULTILINE)
-        text = re.sub(ifdef_regex, ifdef, text)
-        text = re.sub(ifndef_regex, ifndef, text)
-
-        for define in self.defines:
-            value = str(self.defines[define])
-            text = text.replace(define, value)
-
+        # The directives testing a macro are resolved here, which leaves the macros free of any '#define'
+        text = re.sub(
+            r"#(ifdef|ifndef)\s+([a-zA-Z_][a-zA-Z_0-9]*)\s*$",
+            lambda match: "#if 1" if (match.group(2) in self.defines) == (match.group(1) == "ifdef") else "#if 0",
+            text,
+            flags=re.MULTILINE,
+        )
+        for define, value in self.defines.items():
+            text = text.replace(define, str(value))
         return text
 
     def _bind(self):
         """Bind this shader program to the current OpenGL context."""
-        if self._program_id is None:
-            raise ValueError("Cannot bind program that is not in context")
-        # glBindVertexArray(self._vao_id)
+        assert self._program_id is not None
         glUseProgram(self._program_id)
 
     def _unbind(self):
@@ -204,73 +164,19 @@ class ShaderProgram(object):
         """Delete this shader program from the current OpenGL context."""
         self._remove_from_context()
 
-    def set_uniform(self, name, value, unsigned=False):
-        """Set a uniform value in the current shader program.
+    def set_uniform(self, name, value):
+        """Set a uniform of the program, which the caller binds.
 
         Parameters
         ----------
         name : str
-            Name of the uniform to set.
-        value : int, float, or ndarray
-            Value to set the uniform to.
-        unsigned : bool
-            If True, ints will be treated as unsigned values.
+            The name of the uniform. A uniform that the program lacks or leaves unused is ignored.
+        value : (4,) or (4, 4) float
+            The value of the uniform, a vector or a matrix.
         """
-        # DEBUG
-        # self._unif_map[name] = 1, (1,)
         loc = glGetUniformLocation(self._program_id, name)
-
-        if loc == -1:
-            raise ValueError("Invalid shader variable: {}".format(name))
-
-        if isinstance(value, np.ndarray):
-            # DEBUG
-            # self._unif_map[name] = value.size, value.shape
-            if value.ndim == 1:
-                if np.issubdtype(value.dtype, np.unsignedinteger) or unsigned:
-                    value = np.ascontiguousarray(value, np.uint32)
-                elif np.issubdtype(value.dtype, np.integer):
-                    value = np.ascontiguousarray(value, dtype=np.int32)
-                else:
-                    value = np.ascontiguousarray(value, dtype=np.float32)
-                func = self._FUNC_MAP[(len(value), value.dtype.kind)]
-                func(loc, 1, value)
-            else:
-                value = np.ascontiguousarray(value, dtype=np.float32)
-                func = self._FUNC_MAP[tuple(value.shape[:2])]
-                func(loc, 1, GL_TRUE, value)
-
-        # Call correct uniform function
-        elif isinstance(value, (numbers.Real, np.floating)):
-            glUniform1f(loc, float(value))
-        elif isinstance(value, (numbers.Integral, np.integer)):
-            if unsigned:
-                glUniform1ui(loc, int(value))
-            else:
-                glUniform1i(loc, int(value))
+        value = np.ascontiguousarray(value, dtype=np.float32)
+        if value.ndim == 1:
+            glUniform4fv(loc, 1, value)
         else:
-            raise ValueError("Invalid data type")
-
-    _FUNC_MAP = {
-        (1, "u"): glUniform1uiv,
-        (2, "u"): glUniform2uiv,
-        (3, "u"): glUniform3uiv,
-        (4, "u"): glUniform4uiv,
-        (1, "i"): glUniform1iv,
-        (2, "i"): glUniform2iv,
-        (3, "i"): glUniform3iv,
-        (4, "i"): glUniform4iv,
-        (1, "f"): glUniform1fv,
-        (2, "f"): glUniform2fv,
-        (3, "f"): glUniform3fv,
-        (4, "f"): glUniform4fv,
-        (2, 2): glUniformMatrix2fv,
-        (2, 3): glUniformMatrix2x3fv,
-        (2, 4): glUniformMatrix2x4fv,
-        (3, 2): glUniformMatrix3x2fv,
-        (3, 3): glUniformMatrix4fv,
-        (3, 4): glUniformMatrix3x4fv,
-        (4, 2): glUniformMatrix4x2fv,
-        (4, 3): glUniformMatrix4x3fv,
-        (4, 4): glUniformMatrix4fv,
-    }
+            glUniformMatrix4fv(loc, 1, GL_TRUE, value)

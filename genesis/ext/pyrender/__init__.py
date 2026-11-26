@@ -1,23 +1,27 @@
-from .camera import Camera, PerspectiveCamera, OrthographicCamera, IntrinsicsCamera
+"""The rasterizer of Genesis, which draws scenes with OpenGL.
+
+It started as a fork of pyrender by Matthew Matl (https://github.com/mmatl/pyrender), whose license covers the code they
+still share (see LICENSE).
+"""
+
+from .camera import Camera, PerspectiveCamera, OrthographicCamera
+from .constants import RenderFlags, TexChannels, TextAlign, ViewFlags
 from .light import Light, PointLight, DirectionalLight, SpotLight
-from .sampler import Sampler
-from .texture import Texture
-from .material import Material, MetallicRoughnessMaterial
-from .primitive import Primitive
+from .material import Material
 from .mesh import Mesh
 from .node import Node
-from .scene import Scene
-from .renderer import Renderer
-from .viewer import Viewer
 from .offscreen import OffscreenRenderer
-from .version import __version__
-from .constants import RenderFlags, TextAlign, GLTF, ViewFlags
+from .primitive import Primitive
+from .renderer import Renderer
+from .sampler import Sampler
+from .scene import Scene
+from .texture import Texture
+from .viewer import Viewer
 
 __all__ = [
     "Camera",
     "PerspectiveCamera",
     "OrthographicCamera",
-    "IntrinsicsCamera",
     "Light",
     "PointLight",
     "DirectionalLight",
@@ -25,7 +29,6 @@ __all__ = [
     "Sampler",
     "Texture",
     "Material",
-    "MetallicRoughnessMaterial",
     "Primitive",
     "Mesh",
     "Node",
@@ -33,9 +36,8 @@ __all__ = [
     "Renderer",
     "Viewer",
     "OffscreenRenderer",
-    "__version__",
     "RenderFlags",
+    "TexChannels",
     "ViewFlags",
     "TextAlign",
-    "GLTF",
 ]

@@ -1934,7 +1934,7 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
         assert pyrender_viewer.is_active
         pyrender_viewer.switch_to()
         pyrender_viewer.on_draw()
-        viewer_rgb = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size, rgba=False)
+        viewer_rgb = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size)
 
         png_snapshot.extension._std_err_threshold = STD_ERR_THR
         assert rgb_array_to_png_bytes(viewer_rgb) == png_snapshot
@@ -1942,16 +1942,16 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
         # The interactive viewer shows a setter right away, without stepping
         franka.set_dofs_position(np.roll(dofs_pos, 1, axis=0))
         pyrender_viewer.on_draw()
-        viewer_rgb_set = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size, rgba=False)
+        viewer_rgb_set = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size)
         scene.visualizer.update(force=True)
         pyrender_viewer.on_draw()
-        viewer_rgb_forced = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size, rgba=False)
+        viewer_rgb_forced = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size)
         assert_equal(viewer_rgb_set, viewer_rgb_forced)
         # The contacts of the last step no longer hold once a setter moved the arms, so their markers go away until the
         # next step, as after a reset to the same state
         scene.reset(scene.get_state())
         pyrender_viewer.on_draw()
-        viewer_rgb_reset = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size, rgba=False)
+        viewer_rgb_reset = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size)
         assert_equal(viewer_rgb_set, viewer_rgb_reset)
         franka.set_dofs_position(dofs_pos)
         scene.step()
@@ -2325,7 +2325,7 @@ def test_video_recording_lifecycle(tmp_path, monkeypatch, renderer, show_viewer)
     "alpha_source, n_envs", [("color", 2), ("image_texture", 2), ("dynamic_texture", 0), ("dynamic_texture", 2)]
 )
 @pytest.mark.parametrize("red_alpha_u8", [0, 128])
-@pytest.mark.parametrize("light_type", ["directional", "point"])
+@pytest.mark.parametrize("light_type", ["directional", "point", "spot"])
 def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
     alpha_source, n_envs, red_alpha_u8, light_type, translucent_box_obj, renderer, show_viewer
 ):
@@ -2344,6 +2344,30 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
     PARKED = (0.0, 0.0, 1.2)
     CENTRE = slice(RES // 2 - 3, RES // 2 + 3)
 
+    # Lighting the faces that the camera sees head-on keeps them clear of the edge of the shadow of their own box, and
+    # the shadow of each box falls clear of the other box. The point and spot lights stand along the same direction from
+    # the red box, the spot aiming at it, as bright on the slab below it.
+    if light_type == "directional":
+        light = gs.options.vis.DirectionalLight(
+            dir=(-1.0, -1.0, -2.0),
+            color=(1.0, 1.0, 1.0),
+            intensity=5.0,
+        )
+    elif light_type == "point":
+        light = gs.options.vis.PointLight(
+            pos=(3.3, 2.7, 5.9),
+            color=(1.0, 1.0, 1.0),
+            intensity=255.0,
+        )
+    else:
+        light = gs.options.vis.SpotLight(
+            pos=(3.3, 2.7, 5.9),
+            dir=(-1.0, -1.0, -2.0),
+            color=(1.0, 1.0, 1.0),
+            intensity=255.0,
+            cutoff=30.0,
+        )
+
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             # The boxes are placed by hand and their overlap is what is measured, so nothing may pull them down
@@ -2354,14 +2378,7 @@ def test_transparent_surfaces_show_what_lies_behind_and_cast_partial_shadows(
             split_envs=True,
             # Black leaves each surface worth exactly its own contribution, so the composite below needs no offset
             background_color=(0.0, 0.0, 0.0),
-            # Lighting the faces that the camera sees head-on keeps them clear of the edge of the shadow of their own
-            # box, and the shadow of each box falls clear of the other box. The point light stands along the same
-            # direction from the red box, as bright on the slab below it.
-            lights=[
-                {"type": "directional", "dir": (-1.0, -1.0, -2.0), "color": (1.0, 1.0, 1.0), "intensity": 5.0}
-                if light_type == "directional"
-                else {"type": "point", "pos": (3.3, 2.7, 5.9), "color": (1.0, 1.0, 1.0), "intensity": 255.0},
-            ],
+            lights=[light],
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.5, 0.0, 0.5),
@@ -2723,3 +2740,136 @@ def test_plane_reflection(roughness, renderer, show_viewer):
     reflectance = 0.04 * env_ab[0] + env_ab[1]
     radiance = AMBIENT * ((RED + 0.055) / 1.055) ** 2.4
     assert_allclose(floor_mirrored - floor_alone, (reflectance * radiance, 0.0, 0.0), atol=1e-4)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
+def test_normal_map(renderer, show_viewer):
+    TILT = np.deg2rad(40.0)
+    AZIMUTH = np.deg2rad(30.0)
+    RES = 64
+    CENTRE = slice(RES // 2 - 4, RES // 2 + 4)
+
+    scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            # A light coming from aside shades a surface differently for every direction its normal tilts towards
+            lights=[
+                gs.options.vis.DirectionalLight(
+                    dir=(-0.3, 0.5, -1.0),
+                    color=(1.0, 1.0, 1.0),
+                    intensity=3.0,
+                ),
+            ],
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -3.0, 2.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        renderer=renderer,
+        show_viewer=show_viewer,
+    )
+    # A floor whose normal map holds a normal tilted by TILT towards its texture axes u and v, which run along x and y,
+    # its components from -1 to 1 encoded from 0 to 255, and a floor tilted by as much
+    tilt_uv = np.sin(TILT) * np.array([np.cos(AZIMUTH), np.sin(AZIMUTH)])
+    normal_rgb = np.round((np.array([*tilt_uv, np.cos(TILT)]) + 1.0) * 127.5).astype(np.uint8)
+    for x, normal, normal_texture in (
+        (
+            -1.0,
+            (0.0, 0.0, 1.0),
+            gs.textures.ImageTexture(image_array=np.tile(normal_rgb, (4, 4, 1)), encoding="linear"),
+        ),
+        (1.0, (*tilt_uv, np.cos(TILT)), None),
+    ):
+        scene.add_entity(
+            morph=gs.morphs.Plane(
+                pos=(x, 0.0, 0.0),
+                normal=normal,
+                plane_size=(1.0, 1.0),
+            ),
+            surface=gs.surfaces.Rough(
+                color=(0.6, 0.6, 0.6),
+                normal_texture=normal_texture,
+            ),
+        )
+    # Each floor wholly in view of its camera, since a software renderer misdraws geometry that leaves the view
+    cam_mapped, cam_tilted = (
+        scene.add_camera(
+            res=(RES, RES),
+            pos=(x, 0.0, 2.0),
+            lookat=(x, 0.0, 0.0),
+            up=(0.0, 1.0, 0.0),
+            fov=40,
+        )
+        for x in (-1.0, 1.0)
+    )
+    scene.build()
+
+    patch_mapped, patch_tilted = (
+        tensor_to_array(cam.render()[0])[CENTRE, CENTRE].mean(axis=(0, 1)) for cam in (cam_mapped, cam_tilted)
+    )
+    assert_allclose(patch_mapped, patch_tilted, atol=2.0)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
+def test_occlusion_map(renderer, show_viewer):
+    AMBIENT = 0.2
+    RES = 64
+    CENTRE = slice(RES // 2 - 4, RES // 2 + 4)
+
+    scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            ambient_light=(AMBIENT, AMBIENT, AMBIENT),
+            lights=[
+                gs.options.vis.DirectionalLight(
+                    dir=(0.0, 0.0, -1.0),
+                    color=(1.0, 1.0, 1.0),
+                    intensity=1.0,
+                ),
+            ],
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -3.0, 2.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        renderer=renderer,
+        show_viewer=show_viewer,
+    )
+    # A white floor whose occlusion map hides it from the ambient light, and the same floor without it
+    for x, occlusion_texture in (
+        (-1.0, gs.textures.ImageTexture(image_array=np.zeros((4, 4), np.uint8), encoding="linear")),
+        (1.0, None),
+    ):
+        scene.add_entity(
+            morph=gs.morphs.Plane(
+                pos=(x, 0.0, 0.0),
+                plane_size=(1.0, 1.0),
+            ),
+            surface=gs.surfaces.Rough(
+                color=(1.0, 1.0, 1.0),
+                occlusion_texture=occlusion_texture,
+            ),
+        )
+    # Each floor wholly in view of its camera, since a software renderer misdraws geometry that leaves the view
+    cam_occluded, cam_lit = (
+        scene.add_camera(
+            res=(RES, RES),
+            pos=(x, 0.0, 2.0),
+            lookat=(x, 0.0, 0.0),
+            up=(0.0, 1.0, 0.0),
+            fov=40,
+        )
+        for x in (-1.0, 1.0)
+    )
+    scene.build()
+
+    # The floors take the same light from the lamp, seen from the same view, while the occluded one loses the ambient
+    # light that its white surface diffuses
+    patch_occluded, patch_lit = (
+        tensor_to_array(cam.render()[0])[CENTRE, CENTRE] / 255.0 for cam in (cam_occluded, cam_lit)
+    )
+    radiance_occluded, radiance_lit = (
+        np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4).mean(axis=(0, 1))
+        for rgb in (patch_occluded, patch_lit)
+    )
+    assert_allclose(radiance_lit - radiance_occluded, AMBIENT, tol=2e-3)

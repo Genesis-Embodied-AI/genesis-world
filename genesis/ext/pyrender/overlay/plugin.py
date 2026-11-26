@@ -6,7 +6,7 @@ Requires the ``render`` optional extras: ``pip install 'genesis-world[render]'``
 
 import os
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -20,7 +20,6 @@ from genesis.utils.misc import tensor_to_array
 from genesis.vis.viewer_plugins import EVENT_HANDLE_STATE, EVENT_HANDLED, MouseInteractionPlugin, ViewerPlugin
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.rigid_entity import RigidEntity
     from genesis.engine.scene import Scene
     from genesis.ext.pyrender.viewer import Viewer
 
@@ -263,9 +262,9 @@ class ImGuiOverlayPlugin(ViewerPlugin):
             except ImportError:
                 pass
         except ImportError:
-            print("ImGuiOverlayPlugin: imgui-bundle not found. Install with: pip install imgui-bundle")
+            gs.logger.warning("The ImGui overlay needs 'imgui-bundle'. Install it with 'pip install imgui-bundle'.")
         except Exception as e:
-            print(f"ImGuiOverlayPlugin: Failed to initialize ImGui: {e}")
+            gs.logger.warning(f"The ImGui overlay failed to initialize: {e}")
 
     def _cache_entity_data(self):
         """Cache static joint metadata from all rigid and kinematic entities.
@@ -398,7 +397,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
             self._gizmo.begin_frame()
             io = self._io
             self._gizmo.set_rect(0, 0, io.display_size.x, io.display_size.y)
-            self._gizmo.set_orthographic(not self.viewer.viewer_flags["use_perspective_cam"])
+            self._gizmo.set_orthographic(not self.viewer.is_perspective)
 
         self._render_control_panel()
 
@@ -522,13 +521,12 @@ class ImGuiOverlayPlugin(ViewerPlugin):
     def _render_visualization(self):
         """Render visualization toggle controls."""
         imgui = self._imgui
-        render_flags = self.viewer.render_flags
         gs_context = self.viewer.gs_context
 
         # Shadows
-        changed, new_val = imgui.checkbox("Shadows", render_flags["shadows"])
+        changed, new_val = imgui.checkbox("Shadows", self.viewer.shadow)
         if changed:
-            render_flags["shadows"] = new_val
+            self.viewer.shadow = new_val
 
         # Debug view, which shows each entity in its debug representation (see 'VisOptions.debug')
         is_changed, is_debug = imgui.checkbox("Debug View", self.scene.sim.render_context.debug)
@@ -579,26 +577,21 @@ class ImGuiOverlayPlugin(ViewerPlugin):
             (gs_context.on_camera_frustum if new_val else gs_context.off_camera_frustum)()
 
         # Face Normals
-        changed, new_val = imgui.checkbox("Face Normals", render_flags["face_normals"])
+        changed, new_val = imgui.checkbox("Face Normals", self.viewer.show_face_normals)
         if changed:
-            render_flags["face_normals"] = new_val
+            self.viewer.show_face_normals = new_val
 
         # Vertex Normals
-        changed, new_val = imgui.checkbox("Vertex Normals", render_flags["vertex_normals"])
+        changed, new_val = imgui.checkbox("Vertex Normals", self.viewer.show_vertex_normals)
         if changed:
-            render_flags["vertex_normals"] = new_val
+            self.viewer.show_vertex_normals = new_val
 
         draw_separator(imgui)
 
         # Orthographic Camera
-        is_ortho = not self.viewer.viewer_flags["use_perspective_cam"]
-        changed, new_ortho = imgui.checkbox("Orthographic Camera", is_ortho)
+        changed, new_ortho = imgui.checkbox("Orthographic Camera", not self.viewer.is_perspective)
         if changed:
-            self.viewer.viewer_flags["use_perspective_cam"] = not new_ortho
-            if new_ortho:
-                self.viewer._camera_node.camera = self.viewer._default_orth_cam
-            else:
-                self.viewer._camera_node.camera = self.viewer._default_persp_cam
+            self.viewer.is_perspective = not new_ortho
 
     def _render_plugins(self):
         """Render checkboxes to attach/detach the whitelisted optional viewer plugins at runtime.
@@ -647,7 +640,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         # ImGuizmo expects column-major (transpose for row-major numpy)
         object_matrix = Matrix16(obj_mat.T.flatten().tolist())
 
-        cam_pose = self.viewer._trackball._n_pose.copy()
+        cam_pose = self.viewer.trackball.pose.copy()
         camera_view = Matrix16(np.linalg.inv(cam_pose).T.flatten().tolist())
 
         w, h = int(self._io.display_size.x), int(self._io.display_size.y)
@@ -695,13 +688,13 @@ class ImGuiOverlayPlugin(ViewerPlugin):
     def _render_camera_controls(self):
         """Render camera position, lookat, FOV controls."""
         imgui = self._imgui
-        trackball = self.viewer._trackball
+        trackball = self.viewer.trackball
 
         # Read current camera state from trackball
-        pose = trackball._n_pose
+        pose = trackball.pose
         pos = [float(pose[0, 3]), float(pose[1, 3]), float(pose[2, 3])]
-        # Use trackball's actual orbit center as lookat (not derived from z-axis)
-        target = trackball._n_target
+        # The lookat is the point that the camera orbits about
+        target = trackball.target
         lookat = [float(target[0]), float(target[1]), float(target[2])]
 
         # Position drag
@@ -716,11 +709,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
             # Build pose with fixed world-up to prevent unintuitive roll
             world_up = np.array([0.0, 0.0, 1.0])
             cam_pose = gu.pos_lookat_up_to_T(cam_pos, cam_lookat, world_up)
-            self.scene.viewer._camera_up = cam_pose[:3, 1].copy()
-            trackball.set_camera_pose(cam_pose)
-            # Sync trackball orbit center so mouse orbiting works correctly after
-            trackball._n_target = cam_lookat.copy()
-            trackball._target = cam_lookat.copy()
+            self.scene.viewer.set_camera_pose(pose=cam_pose, lookat=cam_lookat)
 
         # FOV slider
         fov_deg = float(self.camera.camera.yfov * 180.0 / np.pi)
@@ -1081,7 +1070,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                         for primitive in node.mesh.primitives:
                             if primitive.material is not None:
                                 primitive.material.wireframe = is_wireframe
-                rasterizer_context._scene._meshes_updated = True
+                rasterizer_context._scene.has_meshes_changed = True
 
             # Visualize contact toggle. Contacts only exist for dynamically simulated rigid entities; for kinematic
             # entities the control is disabled and reads False.

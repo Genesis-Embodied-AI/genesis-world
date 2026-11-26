@@ -10,7 +10,6 @@ from .base import Platform
 
 
 EGL_PLATFORM_DEVICE_EXT = 0x313F
-EGL_DRM_DEVICE_FILE_EXT = 0x3233
 
 _EGL_LOAD_ERROR = "EGL is required to create an offscreen OpenGL context, and it is unavailable on this system."
 
@@ -39,7 +38,8 @@ def _ensure_egl_loaded():
 
 
 _ensure_egl_loaded()
-from OpenGL import EGL as egl
+from OpenGL import EGL as egl, arrays
+from OpenGL._opaque import opaque_pointer_cls
 
 
 def _get_egl_func(func_name, res_type, *arg_types):
@@ -53,17 +53,10 @@ def _get_egl_func(func_name, res_type, *arg_types):
     return func
 
 
-def _get_egl_struct(struct_name):
-    from OpenGL._opaque import opaque_pointer_cls
-
-    return opaque_pointer_cls(struct_name)
-
-
-# These are not defined in PyOpenGL by default.
-_EGLDeviceEXT = _get_egl_struct("EGLDeviceEXT")
+# The device extensions of EGL, which PyOpenGL leaves out
+_EGLDeviceEXT = opaque_pointer_cls("EGLDeviceEXT")
 _eglGetPlatformDisplayEXT = _get_egl_func("eglGetPlatformDisplayEXT", egl.EGLDisplay)
 _eglQueryDevicesEXT = _get_egl_func("eglQueryDevicesEXT", egl.EGLBoolean)
-_eglQueryDeviceStringEXT = _get_egl_func("eglQueryDeviceStringEXT", ctypes.c_char_p)
 
 
 def query_devices():
@@ -111,20 +104,6 @@ class EGLDevice:
 
         return _eglGetPlatformDisplayEXT(EGL_PLATFORM_DEVICE_EXT, self._display, None)
 
-    @property
-    def name(self):
-        if self._display is None:
-            return "default"
-
-        name = _eglQueryDeviceStringEXT(self._display, EGL_DRM_DEVICE_FILE_EXT)
-        if name is None:
-            return None
-
-        return name.decode("ascii")
-
-    def __repr__(self):
-        return "<EGLDevice(name={})>".format(self.name)
-
 
 class EGLPlatform(Platform):
     """Renders using EGL."""
@@ -133,85 +112,51 @@ class EGLPlatform(Platform):
         if _eglQueryDevicesEXT is None and device_id not in (0, None):
             raise RuntimeError("EGL platform plugin is not available. Enforcing specific EGL device not supported.")
         self._egl_device_id = device_id
-        self._egl_device = None
         self._egl_display = None
         self._egl_context = None
 
     def init_context(self):
-        _ensure_egl_loaded()
-        from OpenGL.EGL import (
-            EGL_SURFACE_TYPE,
-            EGL_NO_SURFACE,
-            EGL_PBUFFER_BIT,
-            EGL_BLUE_SIZE,
-            EGL_RED_SIZE,
-            EGL_GREEN_SIZE,
-            EGL_DEPTH_SIZE,
-            EGL_COLOR_BUFFER_TYPE,
-            EGL_RGB_BUFFER,
-            EGL_RENDERABLE_TYPE,
-            EGL_OPENGL_BIT,
-            EGL_CONFORMANT,
-            EGL_NONE,
-            EGL_NO_CONTEXT,
-            EGL_OPENGL_API,
-            EGL_CONTEXT_MAJOR_VERSION,
-            EGL_CONTEXT_MINOR_VERSION,
-            EGL_CONTEXT_OPENGL_PROFILE_MASK,
-            EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-            eglInitialize,
-            eglChooseConfig,
-            eglBindAPI,
-            eglCreateContext,
-            eglMakeCurrent,
-            EGLConfig,
-            EGLError,
-        )
-        from OpenGL import arrays
-
         config_attributes = arrays.GLintArray.asArray(
             [
-                EGL_SURFACE_TYPE,
-                EGL_PBUFFER_BIT,
-                EGL_BLUE_SIZE,
+                egl.EGL_SURFACE_TYPE,
+                egl.EGL_PBUFFER_BIT,
+                egl.EGL_BLUE_SIZE,
                 8,
-                EGL_RED_SIZE,
+                egl.EGL_RED_SIZE,
                 8,
-                EGL_GREEN_SIZE,
+                egl.EGL_GREEN_SIZE,
                 8,
-                EGL_DEPTH_SIZE,
+                egl.EGL_DEPTH_SIZE,
                 24,
-                EGL_COLOR_BUFFER_TYPE,
-                EGL_RGB_BUFFER,
-                EGL_RENDERABLE_TYPE,
-                EGL_OPENGL_BIT,
-                EGL_CONFORMANT,
-                EGL_OPENGL_BIT,
-                EGL_NONE,
+                egl.EGL_COLOR_BUFFER_TYPE,
+                egl.EGL_RGB_BUFFER,
+                egl.EGL_RENDERABLE_TYPE,
+                egl.EGL_OPENGL_BIT,
+                egl.EGL_CONFORMANT,
+                egl.EGL_OPENGL_BIT,
+                egl.EGL_NONE,
             ]
         )
         context_attributes = arrays.GLintArray.asArray(
             [
-                EGL_CONTEXT_MAJOR_VERSION,
+                egl.EGL_CONTEXT_MAJOR_VERSION,
                 4,
-                EGL_CONTEXT_MINOR_VERSION,
+                egl.EGL_CONTEXT_MINOR_VERSION,
                 1,
-                EGL_CONTEXT_OPENGL_PROFILE_MASK,
-                EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-                EGL_NONE,
+                egl.EGL_CONTEXT_OPENGL_PROFILE_MASK,
+                egl.EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+                egl.EGL_NONE,
             ]
         )
         major, minor = ctypes.c_long(), ctypes.c_long()
         num_configs = ctypes.c_long()
-        configs = (EGLConfig * 1)()
+        configs = (egl.EGLConfig * 1)()
 
-        # Get the list of devices to try on
+        # The devices to try, the default display alone without the device extensions
         if _eglQueryDevicesEXT is None:
-            all_devices = (EGLDevice(None),)
-        else:
-            all_devices = query_devices()
-        if _eglQueryDevicesEXT is None or self._egl_device_id is None:
-            devices = all_devices
+            devices = (EGLDevice(None),)
+        elif self._egl_device_id is None:
+            devices = query_devices()
         else:
             devices = (get_device_by_index(self._egl_device_id),)
 
@@ -230,34 +175,27 @@ class EGLPlatform(Platform):
             if orig_dpy is not None:
                 os.environ["DISPLAY"] = orig_dpy
 
+            # Initialize EGL, pick a configuration, bind the OpenGL API, then create a context and select it
             try:
-                # Initialize EGL
-                assert eglInitialize(egl_display, major, minor)
-
-                # Configure EGL
-                assert eglChooseConfig(egl_display, config_attributes, configs, 1, num_configs)
-
-                # Bind EGL to the OpenGL API
-                assert eglBindAPI(EGL_OPENGL_API)
-
-                # Create an EGL context
-                egl_context = eglCreateContext(egl_display, configs[0], EGL_NO_CONTEXT, context_attributes)
-
-                # Select EGL context
-                assert eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_context)
-
+                if not egl.eglInitialize(egl_display, major, minor):
+                    raise egl.EGLError("Unable to initialize the EGL display.")
+                if not egl.eglChooseConfig(egl_display, config_attributes, configs, 1, num_configs):
+                    raise egl.EGLError("No EGL configuration matches the attributes requested.")
+                if not egl.eglBindAPI(egl.EGL_OPENGL_API):
+                    raise egl.EGLError("Unable to bind EGL to the OpenGL API.")
+                egl_context = egl.eglCreateContext(egl_display, configs[0], egl.EGL_NO_CONTEXT, context_attributes)
+                if not egl.eglMakeCurrent(egl_display, egl.EGL_NO_SURFACE, egl.EGL_NO_SURFACE, egl_context):
+                    raise egl.EGLError("Unable to make the EGL context current.")
                 break
-            except (AssertionError, EGLError) as e:
+            except egl.EGLError as e:
                 error = e
         else:
             if self._egl_device_id is None:
                 err_msg = "No EGL context could be initialized."
             else:
                 err_msg = f"No EGL context could not be initialized for EGL_DEVICE_ID='{self._egl_device_id or i}'."
-            raise EGLError(err_msg) from error
+            raise egl.EGLError(err_msg) from error
 
-        # Backup the device and display that will be used
-        self._egl_device = device
         self._egl_display = egl_display
         self._egl_context = egl_context
 
@@ -265,23 +203,19 @@ class EGLPlatform(Platform):
         self.make_current()
 
     def make_current(self):
-        from OpenGL.EGL import eglMakeCurrent, EGL_NO_SURFACE
-
-        assert eglMakeCurrent(self._egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, self._egl_context)
+        if not egl.eglMakeCurrent(self._egl_display, egl.EGL_NO_SURFACE, egl.EGL_NO_SURFACE, self._egl_context):
+            gs.raise_exception("Unable to make the EGL context current.")
 
     def make_uncurrent(self):
         """Make the OpenGL context uncurrent."""
-        from OpenGL.EGL import eglMakeCurrent, EGL_NO_SURFACE, EGL_NO_CONTEXT
-
         if self._egl_display is not None:
-            eglMakeCurrent(self._egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT)
+            egl.eglMakeCurrent(self._egl_display, egl.EGL_NO_SURFACE, egl.EGL_NO_SURFACE, egl.EGL_NO_CONTEXT)
 
     def save_current_context(self):
-        # Capture the current context as a restore callable, returning None when nothing is current. EGL's
-        # 'make_uncurrent' releases the context, so our own context is never current here - only an external context
-        # (e.g. another renderer mid-render) or none. Use the module-level 'egl' alias rather than a local import so
-        # the returned callable stays valid during teardown, including at interpreter shutdown. Genesis EGL contexts
-        # are surfaceless, so only the display and context are needed to restore (matching 'make_current').
+        # 'make_uncurrent' releases the context of this platform, so the context captured is that of another renderer,
+        # if any. The module-level 'egl' alias keeps the returned callable valid during teardown, interpreter shutdown
+        # included. The contexts of Genesis are surfaceless, so the display and the context restore one (see
+        # 'make_current').
         egl_display = egl.eglGetCurrentDisplay()
         egl_context = egl.eglGetCurrentContext()
         if not egl_context:
@@ -289,24 +223,21 @@ class EGLPlatform(Platform):
         return functools.partial(egl.eglMakeCurrent, egl_display, egl.EGL_NO_SURFACE, egl.EGL_NO_SURFACE, egl_context)
 
     def delete_context(self):
-        from OpenGL.EGL import eglDestroyContext, eglGetCurrentContext
-
         if self._egl_display is not None:
             if self._egl_context is not None:
                 # The EGL current context is per-thread and shared across renderers. Only release it if it is
                 # ours; otherwise another renderer (possibly mid-render) is current and tearing down this context
-                # must not strand it with no current context. eglGetCurrentContext returns a fresh pointer object
+                # must not strand it with no current context. egl.eglGetCurrentContext returns a fresh pointer object
                 # each call that never compares equal to the stored handle by identity, so compare the underlying
                 # addresses instead of the pointer objects.
-                current_addr = ctypes.cast(eglGetCurrentContext(), ctypes.c_void_p).value
+                current_addr = ctypes.cast(egl.eglGetCurrentContext(), ctypes.c_void_p).value
                 own_addr = ctypes.cast(self._egl_context, ctypes.c_void_p).value
                 if current_addr == own_addr:
                     self.make_uncurrent()
-                eglDestroyContext(self._egl_display, self._egl_context)
+                egl.eglDestroyContext(self._egl_display, self._egl_context)
                 self._egl_context = None
-            # NOTE: intentionally not calling eglTerminate here. The NVIDIA EGL
-            # driver does not support terminate/re-initialize cycles on the same
-            # device (returns EGL_BAD_ACCESS), which breaks multi-scene workflows.
+            # The display stays initialized, since the NVIDIA driver fails to initialize a display terminated before
+            # (EGL_BAD_ACCESS), which the next scene would do
             self._egl_display = None
 
 

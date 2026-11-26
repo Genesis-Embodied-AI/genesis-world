@@ -1,47 +1,76 @@
-"""Font texture loader and processor.
+"""Fonts of the rasterizer, which draws text from textures of glyphs."""
 
-Author: Matthew Matl
-"""
-
-import freetype
-import numpy as np
 import os
 
-import OpenGL
-from OpenGL.GL import *
+import numpy as np
 
-from .constants import TextAlign, FLOAT_SZ
+import freetype
+import OpenGL
+from OpenGL.GL import (
+    GL_ARRAY_BUFFER,
+    GL_BLEND,
+    GL_CLAMP_TO_EDGE,
+    GL_DEPTH_TEST,
+    GL_DYNAMIC_DRAW,
+    GL_FALSE,
+    GL_FILL,
+    GL_FLOAT,
+    GL_FRONT_AND_BACK,
+    GL_LINEAR,
+    GL_NEAREST,
+    GL_ONE_MINUS_SRC_ALPHA,
+    GL_SRC_ALPHA,
+    GL_TEXTURE0,
+    GL_TRIANGLES,
+    GL_UNPACK_ALIGNMENT,
+    ctypes,
+    glActiveTexture,
+    glBindBuffer,
+    glBindVertexArray,
+    glBlendFunc,
+    glBufferData,
+    glDeleteBuffers,
+    glDeleteVertexArrays,
+    glDisable,
+    glDrawArrays,
+    glEnable,
+    glEnableVertexAttribArray,
+    glGenBuffers,
+    glGenVertexArrays,
+    glPixelStorei,
+    glPolygonMode,
+    glVertexAttribPointer,
+)
+
+from .constants import FLOAT_SZ, TexChannels, TextAlign
 from .texture import Texture
 from .sampler import Sampler
 
 
-class FontCache(object):
-    """A cache for fonts."""
+class FontCache:
+    """The fonts loaded in each OpenGL context, at each size."""
 
-    def __init__(self, font_dir=None):
+    def __init__(self):
         self._font_cache = {}
-        self.font_dir = font_dir
-        if self.font_dir is None:
-            base_dir, _ = os.path.split(os.path.realpath(__file__))
-            self.font_dir = os.path.join(base_dir, "fonts")
 
     def get_font(self, font_name, font_pt):
-        # If it's a file, load it directly, else, try to load from font dir.
-        if os.path.isfile(font_name):
-            font_filename = font_name
-            _, font_name = os.path.split(font_name)
-            font_name, _ = os.path.split(font_name)
-        else:
-            font_filename = os.path.join(self.font_dir, font_name) + ".ttf"
+        """Return a font, loaded in the current OpenGL context at a size.
 
-        cid = OpenGL.contextdata.getContext()
-        key = (cid, font_name, int(font_pt))
-
+        Parameters
+        ----------
+        font_name : str
+            The name of the font, a file of the 'fonts' folder without its extension.
+        font_pt : int
+            The height of the font, in pixels.
+        """
+        key = (OpenGL.contextdata.getContext(), font_name, font_pt)
         if key not in self._font_cache:
-            self._font_cache[key] = Font(font_filename, font_pt)
+            font_file = os.path.join(os.path.dirname(__file__), "fonts", f"{font_name}.ttf")
+            self._font_cache[key] = Font(font_file, font_pt)
         return self._font_cache[key]
 
     def clear(self):
+        """Free the fonts of every context."""
         for key in self._font_cache:
             try:
                 self._font_cache[key].delete()
@@ -50,20 +79,18 @@ class FontCache(object):
         self._font_cache.clear()
 
 
-class Font(object):
-    """A font object.
+class Font:
+    """A font at one size, its glyphs packed into one texture.
 
     Parameters
     ----------
     font_file : str
-        The file to load the font from.
+        The TrueType file of the font.
     font_pt : int
-        The height of the font in pixels.
+        The height of the font, in pixels.
     """
 
-    def __init__(self, font_file, font_pt=40):
-        self.font_file = font_file
-        self.font_pt = int(font_pt)
+    def __init__(self, font_file, font_pt):
         self._face = freetype.Face(font_file)
         self._face.set_pixel_sizes(0, font_pt)
         # The glyphs of the 128 ASCII characters are packed into one texture, so that a string is drawn in a single
@@ -118,29 +145,13 @@ class Font(object):
             bottom_v = 1.0 - (top + rows) / atlas_height
             self._glyph_uv[i] = (left / atlas_width, bottom_v, (left + width) / atlas_width, 1.0 - top / atlas_height)
         filter_mode = GL_NEAREST if "PYTEST_VERSION" in os.environ else GL_LINEAR
-        sampler = Sampler(magFilter=filter_mode, minFilter=filter_mode, wrapS=GL_CLAMP_TO_EDGE, wrapT=GL_CLAMP_TO_EDGE)
-        self._atlas = Texture(sampler=sampler, source=atlas, source_channels="R")
+        sampler = Sampler(
+            mag_filter=filter_mode, min_filter=filter_mode, wrap_s=GL_CLAMP_TO_EDGE, wrap_t=GL_CLAMP_TO_EDGE
+        )
+        self._atlas = Texture(sampler=sampler, source=atlas, source_channels=TexChannels.R)
 
         self._vbo = None
         self._vao = None
-
-    @property
-    def font_file(self):
-        """str : The file the font was loaded from."""
-        return self._font_file
-
-    @font_file.setter
-    def font_file(self, value):
-        self._font_file = value
-
-    @property
-    def font_pt(self):
-        """int : The height of the font in pixels."""
-        return self._font_pt
-
-    @font_pt.setter
-    def font_pt(self, value):
-        self._font_pt = int(value)
 
     def _add_to_context(self):
         self._vao = glGenVertexArrays(1)
@@ -177,28 +188,19 @@ class Font(object):
         self._unbind()
         self._remove_from_context()
 
-    def render_string(self, text, x, y, scale=1.0, align=TextAlign.BOTTOM_LEFT):
-        """Render a string to the current view buffer.
-
-        Note
-        ----
-        Assumes correct shader program already bound w/ uniforms set.
+    def render_string(self, text, x, y, align):
+        """Draw a line of text with the text program, which the caller binds with its uniforms.
 
         Parameters
         ----------
         text : str
-            The text to render.
+            The line of text, in ASCII.
         x : int
-            Horizontal pixel location of text.
+            The horizontal position of the text, in pixels from the left.
         y : int
-            Vertical pixel location of text.
-        scale : int
-            Scaling factor for text.
-        align : int
-            One of the TextAlign options which specifies where the ``x``
-            and ``y`` parameters lie on the text. For example,
-            :attr:`.TextAlign.BOTTOM_LEFT` means that ``x`` and ``y`` indicate
-            the position of the bottom-left corner of the textbox.
+            The vertical position of the text, in pixels from the bottom.
+        align : TextAlign
+            The corner of the text that the position gives.
         """
         glActiveTexture(GL_TEXTURE0)
         glEnable(GL_BLEND)
@@ -211,40 +213,19 @@ class Font(object):
         if not len(codes):
             self._unbind()
             return
-        size = self._glyph_size[codes] * scale
-        bearing = self._glyph_bearing[codes] * scale
-        advance = self._glyph_advance[codes] * scale
+        size = self._glyph_size[codes]
+        bearing = self._glyph_bearing[codes]
+        advance = self._glyph_advance[codes]
 
         # Determine width and height of text relative to x, y
         width = advance.sum()
         height = max(bearing[:, 1].max(), 0.0)
 
-        # Determine offsets based on alignments
-        xoff = 0
-        yoff = 0
+        # The text starts at the corner it is aligned on
         if align == TextAlign.BOTTOM_RIGHT:
-            xoff = -width
-        elif align == TextAlign.BOTTOM_CENTER:
-            xoff = -width / 2.0
-        elif align == TextAlign.TOP_LEFT:
-            yoff = -height
-        elif align == TextAlign.TOP_RIGHT:
-            yoff = -height
-            xoff = -width
-        elif align == TextAlign.TOP_CENTER:
-            yoff = -height
-            xoff = -width / 2.0
-        elif align == TextAlign.CENTER:
-            xoff = -width / 2.0
-            yoff = -height / 2.0
-        elif align == TextAlign.CENTER_LEFT:
-            yoff = -height / 2.0
-        elif align == TextAlign.CENTER_RIGHT:
-            xoff = -width
-            yoff = -height / 2.0
-
-        x += xoff
-        y += yoff
+            x -= width
+        else:
+            y -= height
 
         # Two triangles per glyph, each vertex holding its position and its texture coordinates in the atlas
         xpos = x + np.concatenate(((0.0,), np.cumsum(advance[:-1]))) + bearing[:, 0]

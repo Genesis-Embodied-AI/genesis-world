@@ -168,6 +168,7 @@ def parse_glb_material(glb, material_index, surface, images=None):
     roughness_texture = None
     metallic_texture = None
     normal_texture = None
+    occlusion_texture = None
     emissive_texture = None
 
     double_sided = None
@@ -186,13 +187,18 @@ def parse_glb_material(glb, material_index, surface, images=None):
         if normal_image is not None:
             normal_texture = mu.create_texture(normal_image, None, "linear")
 
-    # TODO: Parse occlusion
+    # parse occlusion map, read from its red channel and blended with no occlusion by its strength
     if material.occlusionTexture is not None:
         texture = glb.textures[material.occlusionTexture.index]
         if material.occlusionTexture.texCoord is not None:
             uvs_used = material.occlusionTexture.texCoord
         occlusion_image = get_glb_image(glb, texture.source, images)
         if occlusion_image is not None:
+            if occlusion_image.ndim == 3:
+                occlusion_image = occlusion_image[..., 0]
+            strength = material.occlusionTexture.strength
+            if strength is not None and abs(strength - 1.0) > gs.EPS:
+                occlusion_image = np.round(255.0 - strength * (255.0 - occlusion_image)).astype(np.uint8)
             occlusion_texture = mu.create_texture(occlusion_image, None, "linear")
 
     # parse alpha mode
@@ -327,6 +333,7 @@ def parse_glb_material(glb, material_index, surface, images=None):
         roughness_texture=roughness_texture,
         metallic_texture=metallic_texture,
         normal_texture=normal_texture,
+        occlusion_texture=occlusion_texture,
         emissive_texture=emissive_texture,
         ior=ior,
         double_sided=double_sided,

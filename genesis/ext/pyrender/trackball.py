@@ -1,4 +1,6 @@
-"""Trackball class for 3D manipulation of viewpoints."""
+"""Trackball moving the camera of the viewer with the mouse."""
+
+from enum import IntEnum
 
 import numpy as np
 
@@ -8,37 +10,37 @@ import trimesh.transformations as transformations
 EPSILON = np.finfo(np.float32).eps
 
 
-class Trackball(object):
-    """A trackball class for creating camera transforms from mouse movements."""
+class TrackballMode(IntEnum):
+    """The motion that dragging the mouse gives the camera."""
 
-    STATE_ROTATE = 0
-    STATE_PAN = 1
-    STATE_ROLL = 2
-    STATE_ZOOM = 3
+    ROTATE = 0
+    """Orbit about the target."""
+    PAN = 1
+    """Move along the image plane, with the target."""
+    ZOOM = 2
+    """Move towards the target or away from it."""
 
-    def __init__(self, pose, size, scale, target=np.array([0.0, 0.0, 0.0])):
-        """Initialize a trackball with an initial camera-to-world pose
-        and the given parameters.
 
-        Parameters
-        ----------
-        pose : [4,4]
-            An initial camera-to-world pose for the trackball.
+class Trackball:
+    """The camera of the viewer, orbiting about a target point as the mouse drags it.
 
-        size : (float, float)
-            The width and height of the camera image in pixels.
+    A drag moves the camera from its pose at the start of the drag.
 
-        scale : float
-            The diagonal of the scene's bounding box --
-            used for ensuring translation motions are sufficiently
-            fast for differently-sized scenes.
+    Parameters
+    ----------
+    pose : (4, 4) float
+        The initial camera-to-world pose.
+    size : (2,) float
+        The width and height of the image of the camera, in pixels.
+    scale : float
+        The length that a pan across the image moves the camera by, in meters.
+    target : (3,) float
+        The point that the camera orbits about.
+    """
 
-        target : (3,) float
-            The center of the scene in world coordinates.
-            The trackball will revolve around this point.
-        """
-        self._size = np.asarray(size, dtype=np.float32)
-        self._scale = float(scale)
+    def __init__(self, pose, size, scale, target):
+        self._size = np.array(size, dtype=np.float32)
+        self._scale = scale
 
         self._pose = pose.copy()
         self._n_pose = pose.copy()
@@ -46,26 +48,29 @@ class Trackball(object):
         self._target = target
         self._n_target = target
 
-        self._state = Trackball.STATE_ROTATE
+        self._mode = TrackballMode.ROTATE
 
         self._pdown = np.array([0.0, 0.0], dtype=np.float32)
 
     @property
     def pose(self):
-        """autolab_core.RigidTransform : The current camera-to-world pose."""
+        """(4, 4) float : The camera-to-world pose of the camera."""
         return self._n_pose
 
-    def set_state(self, state):
-        """Set the state of the trackball in order to change the effect of
-        dragging motions.
+    @property
+    def target(self):
+        """(3,) float : The point that the camera orbits about."""
+        return self._n_target
+
+    def set_mode(self, mode):
+        """Set the motion that dragging the mouse gives the camera.
 
         Parameters
         ----------
-        state : int
-            One of Trackball.STATE_ROTATE, Trackball.STATE_PAN,
-            Trackball.STATE_ROLL, and Trackball.STATE_ZOOM.
+        mode : TrackballMode
+            The motion of the next drags.
         """
-        self._state = state
+        self._mode = mode
 
     def resize(self, size):
         """Resize the window.
@@ -110,7 +115,7 @@ class Trackball(object):
         eye = self._pose[:3, 3]
 
         # Interpret drag as a rotation
-        if self._state == Trackball.STATE_ROTATE:
+        if self._mode == TrackballMode.ROTATE:
             # Compute updated azimut directly. No fancy math here because this angle can controlled freely.
             roll_angle = np.arctan2(self._pose[2, 1], self._pose[2, 2])
 
@@ -151,22 +156,8 @@ class Trackball(object):
             # Prevent locking the camera in the up/down direction
             self._pdown[1] -= (desired_elevation_angle - clamped_elevation_angle) * mindim
 
-        # Interpret drag as a roll about the camera axis
-        elif self._state == Trackball.STATE_ROLL:
-            center = self._size / 2.0
-            v_init = self._pdown - center
-            v_curr = point - center
-            v_init = v_init / np.linalg.norm(v_init)
-            v_curr = v_curr / np.linalg.norm(v_curr)
-
-            theta = -np.arctan2(v_curr[1], v_curr[0]) + np.arctan2(v_init[1], v_init[0])
-
-            rot_mat = transformations.rotation_matrix(theta, z_axis, target)
-
-            self._n_pose = rot_mat @ self._pose
-
         # Interpret drag as a camera pan in view plane
-        elif self._state == Trackball.STATE_PAN:
+        elif self._mode == TrackballMode.PAN:
             dx = -dx / (5.0 * mindim) * self._scale
             dy = -dy / (5.0 * mindim) * self._scale
 
@@ -177,7 +168,7 @@ class Trackball(object):
             self._n_pose = t_tf @ self._pose
 
         # Interpret drag as a zoom motion
-        elif self._state == Trackball.STATE_ZOOM:
+        elif self._mode == TrackballMode.ZOOM:
             radius = np.linalg.norm(eye - target)
             ratio = 0.0
             if dy > 0:
@@ -190,67 +181,53 @@ class Trackball(object):
             self._n_pose = t_tf @ self._pose
 
     def scroll(self, clicks):
-        """Zoom using a mouse scroll wheel motion.
+        """Move the camera towards the target or away from it, as the wheel of the mouse turns.
 
         Parameters
         ----------
-        clicks : int
-            The number of clicks. Positive numbers indicate forward wheel
-            movement.
+        clicks : float
+            The number of clicks of the wheel, positive to move towards the target.
         """
-        target = self._target
-        ratio = 0.90
+        # Each click scales the distance to the target, for the pose shown and the one a drag starts from alike
+        poses = []
+        for pose in (self._n_pose, self._pose):
+            radius = np.linalg.norm(pose[:3, 3] - self._target)
+            pose_moved = pose.copy()
+            pose_moved[:3, 3] += (0.9**clicks - 1.0) * radius * pose[:3, 2]
+            poses.append(pose_moved)
+        self._n_pose, self._pose = poses
 
-        mult = 1.0
-        if clicks > 0:
-            mult = ratio**clicks
-        elif clicks < 0:
-            mult = (1.0 / ratio) ** abs(clicks)
-
-        z_axis = self._n_pose[:3, 2]
-        eye = self._n_pose[:3, 3]
-        radius = np.linalg.norm(eye - target)
-        translation = (mult * radius - radius) * z_axis
-        t_tf = np.eye(4)
-        t_tf[:3, 3] = translation
-        self._n_pose = t_tf @ self._n_pose
-
-        z_axis = self._pose[:3, 2]
-        eye = self._pose[:3, 3]
-        radius = np.linalg.norm(eye - target)
-        translation = (mult * radius - radius) * z_axis
-        t_tf = np.eye(4)
-        t_tf[:3, 3] = translation
-        self._pose = t_tf @ self._pose
-
-    def rotate(self, azimuth, axis=None):
-        """Rotate the trackball about the "Up" axis by azimuth radians.
+    def rotate(self, azimuth, axis):
+        """Turn the camera about an axis through the target.
 
         Parameters
         ----------
         azimuth : float
-            The number of radians to rotate.
+            The angle of the rotation, in radians.
+        axis : (3,) float
+            The axis of the rotation.
         """
-        target = self._target
+        rotation = transformations.rotation_matrix(azimuth, axis, self._target)
+        self._n_pose = rotation @ self._n_pose
+        self._pose = rotation @ self._pose
 
-        y_axis = self._n_pose[:3, 1]
-        if axis is not None:
-            y_axis = axis
-        x_rot_mat = transformations.rotation_matrix(azimuth, y_axis, target)
-        self._n_pose = x_rot_mat @ self._n_pose
-
-        y_axis = self._pose[:3, 1]
-        if axis is not None:
-            y_axis = axis
-        x_rot_mat = transformations.rotation_matrix(azimuth, y_axis, target)
-        self._pose = x_rot_mat @ self._pose
-
-    def set_camera_pose(self, pose):
-        """Set the camera pose.
+    def set_camera_pose(self, pose, target=None):
+        """Place the camera, and the point it orbits about.
 
         Parameters
         ----------
-        pose : [4,4]
-            The camera pose.
+        pose : (4, 4) float
+            The camera-to-world pose.
+        target : (3,) float, optional
+            The point that the camera orbits about. Defaults to the point along the view axis of the camera, as far
+            from it as the former target.
         """
-        self._n_pose = pose
+        if target is None:
+            radius = np.linalg.norm(self._n_pose[:3, 3] - self._n_target)
+            target = pose[:3, 3] - radius * pose[:3, 2]
+        else:
+            target = target.copy()
+        self._pose = pose.copy()
+        self._n_pose = pose.copy()
+        self._target = target
+        self._n_target = target

@@ -136,6 +136,7 @@ include = ["genesis", "genesis.*"]
 [tool.setuptools.package-data]
 genesis = [
     "assets/*",
+    "ext/pyrender/LICENSE",
     "ext/pyrender/fonts/*",
     "ext/pyrender/shaders/*",
 ]

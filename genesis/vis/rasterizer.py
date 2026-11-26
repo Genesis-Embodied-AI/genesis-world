@@ -47,7 +47,7 @@ class Rasterizer(BuildableMixin, RBC):
                 yfov=np.deg2rad(camera.fov),
                 znear=camera.near,
                 zfar=camera.far,
-                aspectRatio=camera.aspect_ratio,
+                aspect_ratio=camera.aspect_ratio,
             ),
         )
         self._camera_targets[camera.uid] = pyrender.Renderer(camera.res[0], camera.res[1], self._context.jit)

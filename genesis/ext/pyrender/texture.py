@@ -1,50 +1,97 @@
-"""Textures, conforming to the glTF 2.0 standards as specified in
-https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#reference-texture
-
-Author: Matthew Matl
-"""
+"""Textures of the rasterizer, as glTF 2.0 defines them."""
 
 import numpy as np
 
-from OpenGL.GL import *
+from OpenGL.GL import (
+    GL_CLAMP_TO_BORDER,
+    GL_CLAMP_TO_EDGE,
+    GL_COLOR_ATTACHMENT0,
+    GL_COMPARE_REF_TO_TEXTURE,
+    GL_DEPTH_ATTACHMENT,
+    GL_DEPTH_COMPONENT,
+    GL_DEPTH_COMPONENT16,
+    GL_DEPTH_COMPONENT32F,
+    GL_FLOAT,
+    GL_FRAMEBUFFER,
+    GL_GREATER,
+    GL_HALF_FLOAT,
+    GL_LINEAR,
+    GL_LINEAR_MIPMAP_LINEAR,
+    GL_MAX_ARRAY_TEXTURE_LAYERS,
+    GL_NEAREST,
+    GL_RED,
+    GL_RG,
+    GL_RGB,
+    GL_RGB16F,
+    GL_RGB32F,
+    GL_RGBA,
+    GL_RGBA16F,
+    GL_RGBA32F,
+    GL_TEXTURE_2D,
+    GL_TEXTURE_2D_ARRAY,
+    GL_TEXTURE_BORDER_COLOR,
+    GL_TEXTURE_COMPARE_FUNC,
+    GL_TEXTURE_COMPARE_MODE,
+    GL_TEXTURE_CUBE_MAP,
+    GL_TEXTURE_CUBE_MAP_POSITIVE_X,
+    GL_TEXTURE_MAG_FILTER,
+    GL_TEXTURE_MIN_FILTER,
+    GL_TEXTURE_WRAP_R,
+    GL_TEXTURE_WRAP_S,
+    GL_TEXTURE_WRAP_T,
+    GL_UNPACK_ALIGNMENT,
+    GL_UNSIGNED_BYTE,
+    GL_UNSIGNED_SHORT,
+    OpenGL,
+    glBindTexture,
+    glDeleteTextures,
+    glFramebufferTexture,
+    glFramebufferTexture2D,
+    glGenTextures,
+    glGenerateMipmap,
+    glGetFloat,
+    glGetIntegerv,
+    glPixelStorei,
+    glTexImage2D,
+    glTexImage3D,
+    glTexParameterf,
+    glTexParameterfv,
+    glTexParameteri,
+    glTexSubImage3D,
+)
 from OpenGL.GL.EXT import texture_filter_anisotropic
 
 import genesis as gs
 
-from .utils import format_texture_source
+from .constants import TexChannels
 from .sampler import Sampler
+from .utils import format_texture_source
 
 
-class Texture(object):
+class Texture:
     """A texture and its sampler.
 
     Parameters
     ----------
-    name : str, optional
-        The user-defined name of this object.
-    sampler : :class:`Sampler`
-        The sampler used by this texture.
-    source : (h,w,c) uint8 or (h,w,c) float or :class:`PIL.Image.Image`
-        The image used by this texture. If None, the texture is created
-        empty and width and height must be specified. A texture array takes
-        (n,h,w,c) uint8 or float16 layers, which 'set_layers' rewrites.
-    source_channels : str
-        Either `D`, `R`, `RG`, `GB`, `RGB`, or `RGBA`. Indicates the
-        channels to extract from `source`. Any missing channels will be filled
-        with `1.0`.
+    sampler : Sampler, optional
+        The sampler of the texture. Defaults to a default Sampler.
+    source : (h, w, c) uint8 or float or PIL.Image.Image, optional
+        The image of the texture, None for an empty texture of the given size. A texture array takes (n, h, w, c) uint8
+        or float16 layers, which 'set_layers' rewrites. Defaults to None.
+    source_channels : TexChannels
+        The channels that the texture holds, taken from the source, a missing channel filled with 1.0.
     width : int, optional
-        For empty textures, the width of the texture buffer.
+        The width of an empty texture. Defaults to None.
     height : int, optional
-        For empty textures, the height of the texture buffer.
-    tex_type : int
-        Either GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY or GL_TEXTURE_CUBE.
-    data_format : int
-        GL_UNSIGNED_BYTE, GL_HALF_FLOAT or GL_FLOAT.
+        The height of an empty texture. Defaults to None.
+    tex_type : int, optional
+        GL_TEXTURE_2D or GL_TEXTURE_2D_ARRAY. Defaults to GL_TEXTURE_2D.
+    data_format : int, optional
+        GL_UNSIGNED_BYTE, GL_UNSIGNED_SHORT, GL_HALF_FLOAT or GL_FLOAT. Defaults to GL_UNSIGNED_BYTE.
     """
 
     def __init__(
         self,
-        name=None,
         sampler=None,
         source=None,
         source_channels=None,
@@ -54,8 +101,7 @@ class Texture(object):
         data_format=GL_UNSIGNED_BYTE,
     ):
         self.source_channels = source_channels
-        self.name = name
-        self.sampler = sampler
+        self.sampler = Sampler() if sampler is None else sampler
         self.source = source
         self.width = width
         self.height = height
@@ -71,32 +117,8 @@ class Texture(object):
         self.layers_shown: np.ndarray | None = None
 
     @property
-    def name(self):
-        """str : The user-defined name of this object."""
-        return self._name
-
-    @name.setter
-    def name(self, value):
-        if value is not None:
-            value = str(value)
-        self._name = value
-
-    @property
-    def sampler(self):
-        """:class:`Sampler` : The sampler used by this texture."""
-        return self._sampler
-
-    @sampler.setter
-    def sampler(self, value):
-        if value is None:
-            value = Sampler()
-        self._sampler = value
-
-    @property
     def source(self):
-        """(h,w,c) uint8 or float or :class:`PIL.Image.Image` : The image
-        used in this texture.
-        """
+        """(h, w, c) uint8 or float : The image of the texture."""
         return self._source
 
     @source.setter
@@ -104,74 +126,19 @@ class Texture(object):
         if value is None:
             self._source = None
         elif isinstance(value, np.ndarray) and value.ndim == 4:
-            self._source = np.ascontiguousarray(value[..., : len(self.source_channels)])
+            self._source = np.ascontiguousarray(value[..., : self.source_channels.n_channels])
         else:
             self._source = format_texture_source(value, self.source_channels)
         # The lowest alpha of each layer, in the scale of the source, which 'set_layers' keeps up to date since the host
         # drops the layers it writes once they are uploaded. Texels of zero alpha count, since filtering blends them
         # with their neighbours into partial alpha.
         self._layers_alpha_min = None
-        if self.source_channels == "RGBA" and self._source is not None:
+        if self.source_channels == TexChannels.RGBA and self._source is not None:
             self._layers_alpha_min = self._source[..., 3].min(axis=(-2, -1))
 
     @property
-    def source_channels(self):
-        """str : The channels that were extracted from the original source."""
-        return self._source_channels
-
-    @source_channels.setter
-    def source_channels(self, value):
-        self._source_channels = value
-
-    @property
-    def width(self):
-        """int : The width of the texture buffer."""
-        return self._width
-
-    @width.setter
-    def width(self, value):
-        self._width = value
-
-    @property
-    def height(self):
-        """int : The height of the texture buffer."""
-        return self._height
-
-    @height.setter
-    def height(self, value):
-        self._height = value
-
-    @property
-    def tex_type(self):
-        """int : The type of the texture."""
-        return self._tex_type
-
-    @tex_type.setter
-    def tex_type(self, value):
-        self._tex_type = value
-
-    @property
-    def data_format(self):
-        """int : The format of the texture data."""
-        return self._data_format
-
-    @data_format.setter
-    def data_format(self, value):
-        self._data_format = value
-
-    def is_transparent(self, cutoff=1.0):
-        """Tell whether some texels shown are translucent enough to be blended with what lies behind them.
-
-        Parameters
-        ----------
-        cutoff : float, optional
-            The alpha between 0 and 1 below which a texel is translucent. Defaults to 1.0.
-
-        Returns
-        -------
-        is_transparent : bool
-            Whether the alpha of some texels shown is below the cutoff.
-        """
+    def is_transparent(self):
+        """bool : Whether some texels shown are translucent, to be blended with what lies behind them."""
         if self._layers_alpha_min is None:
             return False
         layers_alpha_min = (
@@ -179,7 +146,7 @@ class Texture(object):
         )
         # An 8-bit source stores an alpha of 1 as 255
         alpha_opaque = 255 if self._source.dtype == np.uint8 else 1.0
-        return (layers_alpha_min < cutoff * alpha_opaque).any()
+        return (layers_alpha_min < alpha_opaque).any()
 
     def delete(self):
         """Remove this texture from the OpenGL context."""
@@ -192,19 +159,11 @@ class Texture(object):
 
     @property
     def _gl_format(self) -> int:
-        if self.source_channels == "R":
-            return GL_RED
-        if self.source_channels in ("RG", "GB"):
-            return GL_RG
-        if self.source_channels == "RGB":
-            return GL_RGB
-        if self.source_channels == "RGBA":
-            return GL_RGBA
-        return GL_DEPTH_COMPONENT
+        return (GL_RED, GL_RG, GL_RGB, GL_RGBA, GL_DEPTH_COMPONENT)[self.source_channels]
 
     def set_layers(self, layers_idx: np.ndarray, images: np.ndarray) -> None:
         """Write (len(layers_idx),h,w,c) images into layers of a texture array, uploaded by 'upload_layers'."""
-        for layer, image in zip(layers_idx.tolist(), images[..., : len(self.source_channels)]):
+        for layer, image in zip(layers_idx.tolist(), images[..., : self.source_channels.n_channels]):
             self._pending_layers[layer] = np.ascontiguousarray(image[::-1])
         if self._layers_alpha_min is not None:
             self._layers_alpha_min[layers_idx] = images[..., 3].min(axis=(-2, -1))
@@ -225,7 +184,6 @@ class Texture(object):
     def _add_to_context(self):
         if self._texid is not None:
             return
-            # raise ValueError('Texture already loaded into OpenGL context')
 
         fmt = self._gl_format
 
@@ -243,13 +201,19 @@ class Texture(object):
             height, width = self.source.shape[1:3] if is_array else self.source.shape[:2]
 
         # A 16-bit depth texture halves what sampling a shadow map reads, which is what bounds the cost of the shadow
-        # comparisons at the default map size, and its quantization stays below the depth bias of those comparisons.
+        # comparisons at the default map size, and its quantization stays below the depth bias of those comparisons
+        # wherever the depth is linear. A float depth texture serves a perspective projection, which packs the depth of
+        # whatever lies far from its near plane close to 1.
         internal_fmt = fmt
         if fmt == GL_DEPTH_COMPONENT and self.data_format == GL_UNSIGNED_SHORT:
             internal_fmt = GL_DEPTH_COMPONENT16
-        # An unsized format would let the driver store half floats at 8 bits per channel
+        if fmt == GL_DEPTH_COMPONENT and self.data_format == GL_FLOAT:
+            internal_fmt = GL_DEPTH_COMPONENT32F
+        # An unsized format would let the driver store floats at 8 bits per channel
         if self.data_format == GL_HALF_FLOAT:
             internal_fmt = GL_RGBA16F if fmt == GL_RGBA else GL_RGB16F
+        if self.data_format == GL_FLOAT and fmt in (GL_RGBA, GL_RGB):
+            internal_fmt = GL_RGBA32F if fmt == GL_RGBA else GL_RGB32F
 
         # The source rows are tightly packed, while OpenGL reads each row from a 4-byte boundary by default, shifting
         # every row after the first where a row is no multiple of 4 bytes, as an odd width of RGB half floats does.
@@ -275,15 +239,15 @@ class Texture(object):
         if self.source is not None and not is_array:
             glGenerateMipmap(self.tex_type)
 
-        if self.sampler.magFilter is not None:
-            glTexParameteri(self.tex_type, GL_TEXTURE_MAG_FILTER, self.sampler.magFilter)
+        if self.sampler.mag_filter is not None:
+            glTexParameteri(self.tex_type, GL_TEXTURE_MAG_FILTER, self.sampler.mag_filter)
         else:
             if self.source is not None:
                 glTexParameteri(self.tex_type, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
             else:
                 glTexParameteri(self.tex_type, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-        if self.sampler.minFilter is not None:
-            glTexParameteri(self.tex_type, GL_TEXTURE_MIN_FILTER, self.sampler.minFilter)
+        if self.sampler.min_filter is not None:
+            glTexParameteri(self.tex_type, GL_TEXTURE_MIN_FILTER, self.sampler.min_filter)
         else:
             if is_array:
                 glTexParameteri(self.tex_type, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
@@ -292,8 +256,8 @@ class Texture(object):
             else:
                 glTexParameteri(self.tex_type, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
 
-        glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_S, self.sampler.wrapS)
-        glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_T, self.sampler.wrapT)
+        glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_S, self.sampler.wrap_s)
+        glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_T, self.sampler.wrap_t)
         border_color = np.full((4,), fill_value=255, dtype=np.uint8)
         # A texture of floating-point values reads its border as given, while the others scale it to [0, 1]
         if fmt == GL_DEPTH_COMPONENT or self.data_format in (GL_FLOAT, GL_HALF_FLOAT):
@@ -316,7 +280,7 @@ class Texture(object):
         if self.source is not None:
             if texture_filter_anisotropic.glInitTextureFilterAnisotropicEXT():
                 max_aniso = glGetFloat(texture_filter_anisotropic.GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT)
-                glTexParameterf(GL_TEXTURE_2D, texture_filter_anisotropic.GL_TEXTURE_MAX_ANISOTROPY_EXT, max_aniso)
+                glTexParameterf(self.tex_type, texture_filter_anisotropic.GL_TEXTURE_MAX_ANISOTROPY_EXT, max_aniso)
             else:
                 gs.logger.debug("Current OpenGL context does not support anisotropic filtering. Disabling it...")
 
@@ -326,8 +290,6 @@ class Texture(object):
     def _remove_from_context(self):
         if self._texid is not None:
             try:
-                # TODO OPENGL BUG?
-                # glDeleteTextures(1, [self._texid])
                 glDeleteTextures([self._texid])
             except OpenGL.error.Error:
                 pass
@@ -337,7 +299,6 @@ class Texture(object):
         return self._texid is not None
 
     def _bind(self):
-        # TODO HANDLE INDEXING INTO OTHER UV's
         glBindTexture(self.tex_type, self._texid)
 
     def _unbind(self):
@@ -350,96 +311,55 @@ class Texture(object):
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, self.tex_type, self._texid, 0)
 
 
-class CubeMapTexture(object):
-    """
-    Cube map texture for point light shadow: the depth, or with 'is_color' the color of what the light passes through.
+class CubeMapTexture(Texture):
+    """A cube map rendered into, the depth seen from a point light, or the color of the light passing through.
+
+    Parameters
+    ----------
+    width : int
+        The width of each face, in texels.
+    height : int
+        The height of each face, in texels.
+    is_color : bool, optional
+        Whether the cube map holds a color rather than a depth. Defaults to False.
     """
 
-    def __init__(self, width=None, height=None, is_color=False):
-        self.width = width
-        self.height = height
+    def __init__(self, width, height, is_color=False):
+        super().__init__(
+            source_channels=TexChannels.RGBA if is_color else TexChannels.DEPTH,
+            width=width,
+            height=height,
+            tex_type=GL_TEXTURE_CUBE_MAP,
+            data_format=GL_HALF_FLOAT if is_color else GL_FLOAT,
+        )
         self.is_color = is_color
 
-        self.tex_type = GL_TEXTURE_CUBE_MAP
-        self.data_format = GL_HALF_FLOAT if is_color else GL_FLOAT
-        self._texid = None
-
-    @property
-    def width(self):
-        """int : The width of the texture buffer."""
-        return self._width
-
-    @width.setter
-    def width(self, value):
-        self._width = value
-
-    @property
-    def height(self):
-        """int : The height of the texture buffer."""
-        return self._height
-
-    @height.setter
-    def height(self, value):
-        self._height = value
-
-    def delete(self):
-        """Remove this texture from the OpenGL context."""
-        self._unbind()
-        self._remove_from_context()
-
-    ##################
-    # OpenGL code
-    ##################
     def _add_to_context(self):
         if self._texid is not None:
             return
-            # raise ValueError('Texture already loaded into OpenGL context')
 
-        fmt = GL_RGBA if self.is_color else GL_DEPTH_COMPONENT
-        internal_fmt = GL_RGBA16F if self.is_color else GL_DEPTH_COMPONENT
-        # A color cube map is read filtered, the depth one compared texel by texel
-        tex_filter = GL_LINEAR if self.is_color else GL_NEAREST
-
-        # Generate the OpenGL texture
         self._texid = glGenTextures(1)
         glBindTexture(self.tex_type, self._texid)
-
-        # Flip data for OpenGL buffer
-        width = self.width
-        height = self.height
-
-        # Bind texture and generate mipmaps
-        for i in range(6):
+        internal_fmt = GL_RGBA16F if self.is_color else GL_DEPTH_COMPONENT
+        for i_face in range(6):
             glTexImage2D(
-                GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, internal_fmt, width, height, 0, fmt, self.data_format, None
+                GL_TEXTURE_CUBE_MAP_POSITIVE_X + i_face,
+                0,
+                internal_fmt,
+                self.width,
+                self.height,
+                0,
+                self._gl_format,
+                self.data_format,
+                None,
             )
 
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, tex_filter)
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, tex_filter)
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE)
-
-        # Unbind texture
-        glBindTexture(self.tex_type, 0)
-
-    def _remove_from_context(self):
-        if self._texid is not None:
-            try:
-                # TODO OPENGL BUG?
-                # glDeleteTextures(1, [self._texid])
-                glDeleteTextures([self._texid])
-            except OpenGL.error.Error:
-                pass
-            self._texid = None
-
-    def _in_context(self):
-        return self._texid is not None
-
-    def _bind(self):
-        glBindTexture(self.tex_type, self._texid)
-
-    def _unbind(self):
+        # A color cube map is read filtered, the depth one compared texel by texel
+        tex_filter = GL_LINEAR if self.is_color else GL_NEAREST
+        glTexParameteri(self.tex_type, GL_TEXTURE_MAG_FILTER, tex_filter)
+        glTexParameteri(self.tex_type, GL_TEXTURE_MIN_FILTER, tex_filter)
+        for wrap_axis in (GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_TEXTURE_WRAP_R):
+            glTexParameteri(self.tex_type, wrap_axis, GL_CLAMP_TO_EDGE)
         glBindTexture(self.tex_type, 0)
 
     def _bind_as_depth_attachment(self):

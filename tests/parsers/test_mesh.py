@@ -911,7 +911,7 @@ def test_mjcf_2d_texture_mapping(textured_mjcf):
     assert all([array is rgba_arrays[0] for array in rgba_arrays])
     nodes_by_seg_keys = scene.visualizer.context.nodes_by_seg_keys
     base_color_textures = [
-        nodes_by_seg_keys[vgeom.seg_keys][0].mesh.primitives[0].material.baseColorTexture for vgeom in vgeoms.values()
+        nodes_by_seg_keys[vgeom.seg_keys][0].mesh.primitives[0].material.base_color_texture for vgeom in vgeoms.values()
     ]
     assert base_color_textures[0] is not None
     assert all([texture is base_color_textures[0] for texture in base_color_textures])

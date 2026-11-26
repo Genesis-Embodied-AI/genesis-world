@@ -391,7 +391,7 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
     wait_for_viewer_events(pyrender_viewer, lambda: pyrender_viewer._last_recorded_t == scene.sim.cur_step_global)
     width, height = pyrender_viewer.viewport_size
     pyrender_viewer.dispatch_event("on_resize", width + 2, height)
-    wait_for_viewer_events(pyrender_viewer, lambda: not pyrender_viewer.viewer_flags["record"])
+    wait_for_viewer_events(pyrender_viewer, lambda: not pyrender_viewer.is_recording)
     pyrender_viewer.dispatch_event("on_resize", width, height)
     with av.open(VIDEO_FILENAME) as container:
         assert sum(1 for _ in container.decode(video=0)) == 1

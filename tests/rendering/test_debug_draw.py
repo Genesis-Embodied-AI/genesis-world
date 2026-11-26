@@ -99,6 +99,15 @@ def test_draw_debug(renderer, show_viewer):
     rgb_array, *_ = cam.render(rgb=True, depth=False, segmentation=False, colorize_seg=False, normal=False)
     assert_allclose(np.std(rgb_array.reshape((-1, 3)), axis=0), 0.0, tol=gs.EPS)
 
+    # Points hold no normals, and face the camera in the image of the normals as they are shaded
+    points_obj = scene.draw_debug_points(poss=0.05 * np.random.rand(100, 3), colors=(1.0, 0.0, 0.0, 1.0))
+    scene.visualizer.update()
+    *_, normal_array = cam.render(rgb=False, depth=False, segmentation=False, colorize_seg=False, normal=True)
+    cam_dir = np.array((3.5, 0.5, 2.5)) / np.linalg.norm((3.5, 0.5, 2.5))
+    assert np.isclose(normal_array, (0.5 * cam_dir + 0.5) * 255.0, atol=3.0).all(axis=-1).any()
+    scene.clear_debug_object(points_obj)
+    scene.visualizer.update()
+
     # A mesh is drawn at the scale of its transform, and placed again at the scale of the new one
     boxes_T = gu.trans_to_T(np.array(((0.0, 0.0, 0.5), (0.0, 0.0, 0.5))))
     boxes_T[:, :3, :3] *= np.array((2.0, 4.0))[:, None, None]

@@ -1,21 +1,19 @@
 import ctypes
 
 import numpy as np
-from numba import *
-from numba import types
+
+from numba import typeof, types
+from numba.core import cgutils
 from numba.extending import (
+    NativeValue,
+    as_numba_type,
+    make_attribute_wrapper,
     models,
     register_model,
-    make_attribute_wrapper,
     typeof_impl,
-    as_numba_type,
     unbox,
-    NativeValue,
 )
-from numba.core import cgutils
-
 import OpenGL.GL as GL
-from OpenGL._bytes import as_8_bit
 from OpenGL.GL import (
     GLboolean,
     GLenum,
@@ -33,39 +31,15 @@ import genesis as gs
 
 
 class GLWrapper:
+    """The OpenGL functions that the compiled passes call, as a numba type and an instance of it.
+
+    A function missing from the OpenGL version of the machine is left out of both, the passes checking 'gl_funcs'
+    before calling it.
+    """
+
     def __init__(self):
         self.gl_funcs = {}
-        self._wrapper_type = None
-        self._wrapper_instance = None
-
-    def load_func(self, func_name, *signature):
-        try:
-            dll = GL.platform.PLATFORM.GL
-            func_ptr = GL.platform.ctypesloader.buildFunction(
-                GL.platform.PLATFORM.functionTypeFor(dll)(*signature),
-                func_name,
-                dll,
-            )
-        except AttributeError:
-            pointer = GL.platform.PLATFORM.getExtensionProcedure(as_8_bit(func_name))
-            func_ptr = GL.platform.PLATFORM.functionTypeFor(dll)(*signature)(pointer)
-        self.gl_funcs[func_name] = func_ptr
-
-    @property
-    def wrapper_type(self):
-        if self._wrapper_type is None:
-            self.build_wrapper()
-        return self._wrapper_type
-
-    @property
-    def wrapper_instance(self):
-        if self._wrapper_instance is None:
-            self.build_wrapper()
-        return self._wrapper_instance
-
-    def build_wrapper(self):
-        load_func = self.load_func
-        for name, signature in (
+        for func_name, signature in (
             ("glGetUniformLocation", (GLint, GLuint, GLvoidp)),
             ("glUniformMatrix4fv", (GLvoid, GLint, GLsizei, GLboolean, GLvoidp)),
             ("glUniform1i", (GLvoid, GLint, GLint)),
@@ -94,35 +68,37 @@ class GLWrapper:
             ("glBufferSubData", (GLvoid, GLenum, GLintptr, GLsizeiptr, GLvoidp)),
             ("glVertexAttribPointer", (GLvoid, GLuint, GLint, GLenum, GLboolean, GLsizei, GLvoidp)),
         ):
+            dll = GL.platform.PLATFORM.GL
+            func_type = GL.platform.PLATFORM.functionTypeFor(dll)(*signature)
             try:
-                load_func(name, *signature)
+                try:
+                    self.gl_funcs[func_name] = GL.platform.ctypesloader.buildFunction(func_type, func_name, dll)
+                except AttributeError:
+                    pointer = GL.platform.PLATFORM.getExtensionProcedure(func_name.encode())
+                    self.gl_funcs[func_name] = func_type(pointer)
             except AttributeError:
-                # OpenGL function not available, probably because the installed version does not support it (too old).
-                # Moving to the next one without raising an exception since it is not blocking at this point.
-                gs.logger.debug(f"OpenGL function '{name}' not available on this machine.")
+                # An OpenGL version older than the one introducing the function, which the passes do without
+                gs.logger.debug(f"OpenGL function '{func_name}' not available on this machine.")
 
-        funcs = self.gl_funcs
-        func_types = {}
-        for func_name in funcs:
-            func_types[func_name] = typeof(funcs[func_name])
+        func_types = {func_name: typeof(func) for func_name, func in self.gl_funcs.items()}
+
+        # Unboxing the instance into a kernel argument reads the function addresses from this array in one go. Reading
+        # them from the ctypes functions costs the kernel call a Python lookup and a pointer extraction per function,
+        # which adds up to more than a small kernel does.
+        addresses = np.fromiter(
+            (ctypes.cast(func, ctypes.c_void_p).value for func in self.gl_funcs.values()), np.uint64, len(self.gl_funcs)
+        )
 
         class GLFunc:
             def __init__(self):
-                for func_name in funcs:
-                    setattr(self, func_name, funcs[func_name])
-                # Unboxing this object into a kernel argument reads the function addresses from this array in one go.
-                # Reading them from the ctypes attributes above costs the kernel call a Python attribute lookup and
-                # a pointer extraction per function, which adds up to more than a small kernel does.
-                self.addresses = np.fromiter(
-                    (ctypes.cast(funcs[func_name], ctypes.c_void_p).value for func_name in funcs), np.uint64, len(funcs)
-                )
+                self.addresses = addresses
 
         class GLFuncType(types.Type):
             def __init__(self):
                 super().__init__("GLFunc")
 
             def __eq__(self, other):
-                return hasattr(other, "name") and other.name == "GLFunc"
+                return isinstance(other, types.Type) and other.name == "GLFunc"
 
             def __hash__(self):
                 return hash("GLFuncType")
@@ -130,7 +106,7 @@ class GLWrapper:
         glfunc_type = GLFuncType()
 
         @typeof_impl.register(GLFunc)
-        def typeof_index(val, c):
+        def typeof_glfunc(val, c):
             return glfunc_type
 
         as_numba_type.register(GLFunc, glfunc_type)
@@ -151,15 +127,15 @@ class GLWrapper:
             data = c.context.make_array(addresses_type)(c.context, c.builder, addresses.value).data
 
             gl_func = cgutils.create_struct_proxy(typ)(c.context, c.builder)
-            for i, func_name in enumerate(funcs):
+            for i, func_name in enumerate(self.gl_funcs):
                 address = c.builder.load(cgutils.gep(c.builder, data, i))
                 func_ptr_type = c.context.get_value_type(func_types[func_name])
                 setattr(gl_func, func_name, c.builder.inttoptr(address, func_ptr_type))
 
             return NativeValue(gl_func._getvalue(), is_error=addresses.is_error)
 
-        for func_name in funcs:
+        for func_name in self.gl_funcs:
             make_attribute_wrapper(GLFuncType, func_name, func_name)
 
-        self._wrapper_type = glfunc_type
-        self._wrapper_instance = GLFunc()
+        self.wrapper_type = glfunc_type
+        self.wrapper_instance = GLFunc()
