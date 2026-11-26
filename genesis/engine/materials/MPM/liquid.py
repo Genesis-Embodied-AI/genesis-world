@@ -1,4 +1,3 @@
-import numbers
 from typing import Any, ClassVar
 
 from pydantic import StrictBool, model_validator
@@ -25,7 +24,7 @@ class Liquid(Base):
     rho : float, optional
         Density (kg/m³). Default is 1000.
     viscous : bool, optional
-        Whether the liquid is viscous. A non-viscous liquid takes mu=0 and refuses another value. Default is False.
+        Whether the liquid is viscous. Simply sets mu to zero when non-viscous. Default is False.
     """
 
     structure: ClassVar[STRUCTURE] = STRUCTURE.AMORPHOUS
@@ -36,10 +35,6 @@ class Liquid(Base):
     @classmethod
     def _zero_mu_if_inviscid(cls, data: dict[str, Any]) -> dict[str, Any]:
         if not data.get("viscous", False):
-            # The options exported from an inviscid liquid hold mu=0 exactly, which the liquid accepts back
-            mu = data.get("mu")
-            if isinstance(mu, numbers.Real) and abs(mu) > 0.0:
-                gs.raise_exception("An inviscid liquid takes mu=0. Set 'viscous=True' to give it a viscosity.")
             data = {**data, "mu": 0.0}
         return data
 
