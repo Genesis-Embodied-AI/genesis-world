@@ -663,7 +663,7 @@ class SurfaceDistanceProbe(
     """
 
     probe_radius: PositiveFArrayType | PositiveFloat = 0.5
-    track_link_idx: RigidLinksIdx = Field(default=(), validation_alias=AliasChoices("tracked_links", "track_link_idx"))
+    track_link_idx: RigidLinksIdx = Field(validation_alias=AliasChoices("tracked_links", "track_link_idx"))
 
     def _validate(self, sim: "Simulator"):
         super()._validate(sim)

@@ -235,7 +235,7 @@ class PointCloudTactileSensorMixin[SensorT: "Sensor"](TactileProbeSensorOptionsM
         The radius of the debug tracked object point cloud spheres.
     """
 
-    track_link_idx: RigidLinksIdx = Field(default=(), validation_alias=AliasChoices("tracked_links", "track_link_idx"))
+    track_link_idx: RigidLinksIdx = Field(validation_alias=AliasChoices("tracked_links", "track_link_idx"))
     n_sample_points: IArrayType | NonNegativeInt = 500
     use_visual_mesh: StrictBool = True
 
