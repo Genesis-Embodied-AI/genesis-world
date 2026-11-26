@@ -898,7 +898,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             lam=material.lam,
             rho=material.rho,
             friction_mu=material.friction_mu,
-            muscle_stiffness=material.E if is_muscle else 0.0,
+            muscle_stiffness=material.stiffness if is_muscle else 0.0,
             verts=verts,
             elems=elems,
             tri2v=tri2v,

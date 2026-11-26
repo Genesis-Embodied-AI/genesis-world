@@ -29,6 +29,11 @@ class Muscle(Elastic):
 
     n_groups: PositiveInt = 1
 
+    @property
+    def stiffness(self) -> float:
+        """The stiffness of the fibers, the Young's modulus of the material."""
+        return self.E
+
 
 # The active stress of the fibers of a muscle adds to the stress of its elastic model. The explicit solver applies it
 # along the fibers as they deform, while the implicit one applies it along their direction at the start of a substep,
