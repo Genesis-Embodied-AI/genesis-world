@@ -205,6 +205,69 @@ def test_plotter(tmp_path, monkeypatch, mpl_agg_backend, png_snapshot):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("plotter_kind", ["line", "image", "vector_field"])
+def test_plot_without_blitting(plotter_kind, mpl_agg_backend):
+    import matplotlib.pyplot as plt
+
+    STEPS = 4
+
+    # The 'pdf' backend draws on a canvas that does not blit. The fixture restores the backend that was in place, so
+    # the switch is undone with it.
+    plt.switch_backend("pdf")
+
+    scene = gs.Scene(
+        show_viewer=False,
+        show_FPS=False,
+    )
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(0.0, 0.0, 1.0),
+        ),
+    )
+    # Every plotter reads the speed of the falling box, which gravity grows by the same amount on each step, so
+    # every sample moves what it draws.
+    if plotter_kind == "line":
+        rec_options = gs.recorders.MPLLinePlot(
+            labels=("z",),
+            show_window=False,
+        )
+        plotter = scene.add_recorder(data_func=lambda: box.get_vel()[2], rec_options=rec_options)
+    elif plotter_kind == "image":
+        rec_options = gs.recorders.MPLImagePlot(
+            show_window=False,
+        )
+        # The speed weighs the diagonal against a fixed ramp, so the image changes shape and not only scale, which
+        # the limits of the colormap would take out.
+        plotter = scene.add_recorder(
+            data_func=lambda: np.arange(16.0).reshape(4, 4) - 10.0 * float(box.get_vel()[2]) * np.eye(4),
+            rec_options=rec_options,
+        )
+    else:
+        rec_options = gs.recorders.MPLVectorFieldPlot(
+            positions=np.c_[np.zeros(4), np.linspace(-0.05, 0.05, 4), np.zeros(4)],
+            show_window=False,
+        )
+        # The vectors lie in the plane the normal of the plot leaves, so the arrows it draws grow with the speed.
+        plotter = scene.add_recorder(
+            data_func=lambda: np.c_[np.full(4, -float(box.get_vel()[2])), np.zeros(4), np.zeros(4)],
+            rec_options=rec_options,
+        )
+    scene.build()
+
+    images = []
+    for _ in range(STEPS):
+        scene.step()
+        images.append(plotter.get_image_array())
+
+    scene.stop_recording()
+
+    # The plot of a step differs from the plot of the one before it, so the figure is drawn in full on each sample.
+    for rgb_diff in np.diff(images, axis=0):
+        assert rgb_diff.max() > 10.0
+
+
+@pytest.mark.required
 def test_file_writers(tmp_path):
     STEPS = 10
 

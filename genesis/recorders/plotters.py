@@ -404,13 +404,22 @@ class BaseMPLPlotter[T](BasePlotter[T]):
         self.fig.suptitle(self._options.title)
         return self.axes
 
+    @property
+    def has_blit(self):
+        """Whether the canvas composes a frame from a cached background and the artists that moved.
+
+        The canvas of the 'pdf' and 'svg' backends draws the whole figure on each sample instead.
+        """
+        return self.fig.canvas.supports_blit
+
     def _cache_background(self):
-        """Draw the figure and cache its full background region for fast blitting."""
+        """Draw the figure, caching its full background region for the blitting of the samples to come."""
         self.fig.canvas.draw()
-        self._background = self.fig.canvas.copy_from_bbox(self.fig.bbox)
+        if self.has_blit:
+            self._background = self.fig.canvas.copy_from_bbox(self.fig.bbox)
 
     def on_resize(self, event=None):
-        """Re-cache the blit background after a resize."""
+        """Draw the figure again after a resize, re-caching the background it blits over."""
         if self.fig is not None and self.axes:
             self._cache_background()
 
@@ -558,8 +567,9 @@ class MPLLinePlotter(BaseMPLPlotter):
         self.fig.legend(ncol=sum(map(len, self.lines.values())), loc="outside lower center")
         self.fig.canvas.draw()
 
-        for ax in self.axes:
-            self.caches_bbox.append(self.fig.canvas.copy_from_bbox(ax.bbox))
+        if self.has_blit:
+            for ax in self.axes:
+                self.caches_bbox.append(self.fig.canvas.copy_from_bbox(ax.bbox))
 
         self._show_fig()
 
@@ -620,29 +630,41 @@ class MPLLinePlotter(BaseMPLPlotter):
                             ax.set_ylim((y_min_plot - gs.EPS, y_max_plot + gs.EPS))
                 limits_changed = True
 
-        # Must redraw the entire figure if the limits have changed
-        if limits_changed:
+        is_blit_supported = self.has_blit
+
+        # Must redraw the entire figure if the limits have changed, which the draw closing a pass without blitting
+        # does on its own
+        if limits_changed and is_blit_supported:
             self.fig.canvas.draw()
 
         # Update background if the entire figure has been updated, or the buffer size has been exceeded
-        if limits_changed or (len(self.line_plot.x_data) > 1 and self.cache_xmax < self.line_plot.x_data[0] + gs.EPS):
+        if is_blit_supported and (
+            limits_changed or (len(self.line_plot.x_data) > 1 and self.cache_xmax < self.line_plot.x_data[0] + gs.EPS)
+        ):
             self.caches_bbox = [self.fig.canvas.copy_from_bbox(ax.bbox) for ax in self.axes]
             self.cache_xmax = self.line_plot.x_data[-2]
 
         # Update lines for each subplot
-        for ax, cache_bbox, (subplot_key, subplot_lines) in zip(self.axes, self.caches_bbox, self.lines.items()):
+        caches_bbox = self.caches_bbox if is_blit_supported else [None] * len(self.axes)
+        for ax, cache_bbox, (subplot_key, subplot_lines) in zip(self.axes, caches_bbox, self.lines.items()):
             # Restore background and update line data for this subplot
-            self.fig.canvas.restore_region(cache_bbox)
+            if is_blit_supported:
+                self.fig.canvas.restore_region(cache_bbox)
 
             # Update lines
             channel_labels = self.line_plot.subplot_structure[subplot_key]
             for line, channel_label in zip(subplot_lines, channel_labels):
                 y_data = self.line_plot.y_data[subplot_key][channel_label]
                 line.set_data(self.line_plot.x_data, y_data)
-                ax.draw_artist(line)
+                if is_blit_supported:
+                    ax.draw_artist(line)
 
             # Blit the updated subplot
-            self.fig.canvas.blit(ax.bbox)
+            if is_blit_supported:
+                self.fig.canvas.blit(ax.bbox)
+
+        if not is_blit_supported:
+            self.fig.canvas.draw()
 
         self.flush_events()
 
@@ -685,16 +707,22 @@ class MPLImagePlotter(BaseMPLPlotter):
 
         vmin, vmax = np.min(img_data), np.max(img_data)
 
+        is_blit_supported = self.has_blit
         current_vmin, current_vmax = self.image_plot.get_clim()
         if vmin != current_vmin or vmax != current_vmax:
             self.image_plot.set_clim(vmin, vmax)
-            self.fig.canvas.draw()
-            self.background = self.fig.canvas.copy_from_bbox(self.ax.bbox)
+            if is_blit_supported:
+                self.fig.canvas.draw()
+                self.background = self.fig.canvas.copy_from_bbox(self.ax.bbox)
 
-        self.fig.canvas.restore_region(self.background)
+        if is_blit_supported:
+            self.fig.canvas.restore_region(self.background)
         self.image_plot.set_data(img_data)
-        self.ax.draw_artist(self.image_plot)
-        self.fig.canvas.blit(self.ax.bbox)
+        if is_blit_supported:
+            self.ax.draw_artist(self.image_plot)
+            self.fig.canvas.blit(self.ax.bbox)
+        else:
+            self.fig.canvas.draw()
 
         self.flush_events()
 
@@ -844,14 +872,16 @@ class MPLVectorFieldPlotter(BaseMPLPlotter):
         n = len(self._positions)
         if vectors_all.ndim != 3 or vectors_all.shape[1:] != (n, 3):
             return
-        if vectors_all.shape[0] != len(self.axes) or self._background is None:
+        is_blit_supported = self.has_blit
+        if vectors_all.shape[0] != len(self.axes) or (is_blit_supported and self._background is None):
             return
         if is_twist and twist_all.shape != vectors_all.shape:
             return
 
         # Blit the whole figure, not per-axes: a stroke clipped at an axes box can bleed a pixel past it, and a
         # per-axes blit never restores that sliver, so it would accumulate as residue.
-        self.fig.canvas.restore_region(self._background)
+        if is_blit_supported:
+            self.fig.canvas.restore_region(self._background)
         for i_ax, (ax, scatter, quiver, vectors) in enumerate(
             zip(self.axes, self._scatters, self._quivers, vectors_all)
         ):
@@ -862,8 +892,9 @@ class MPLVectorFieldPlotter(BaseMPLPlotter):
             quiver.set_offsets(xy)
             quiver.set_UVC(*(uv * self._scale_factor).T)
             quiver.set_array(magnitudes)
-            ax.draw_artist(scatter)
-            ax.draw_artist(quiver)
+            if is_blit_supported:
+                ax.draw_artist(scatter)
+                ax.draw_artist(quiver)
             if is_twist:
                 arcs, heads = self._twist_arcs[i_ax], self._twist_heads[i_ax]
                 twist = twist_all[i_ax] @ self._normal
@@ -878,9 +909,13 @@ class MPLVectorFieldPlotter(BaseMPLPlotter):
                 arcs.set_array(twist)
                 heads.set_offsets(segments[:, -2])
                 heads.set_UVC(segments[:, -1, 0] - segments[:, -2, 0], segments[:, -1, 1] - segments[:, -2, 1], twist)
-                ax.draw_artist(arcs)
-                ax.draw_artist(heads)
-        self.fig.canvas.blit(self.fig.bbox)
+                if is_blit_supported:
+                    ax.draw_artist(arcs)
+                    ax.draw_artist(heads)
+        if is_blit_supported:
+            self.fig.canvas.blit(self.fig.bbox)
+        else:
+            self.fig.canvas.draw()
         self.flush_events()
 
     def cleanup(self):
