@@ -21,7 +21,7 @@ def main():
             grid_density=128,
             lower_bound=(0.55, -0.1, -0.05),
             upper_bound=(0.75, 0.1, 0.3),
-            vis=gs.options.ParticleVisOptions(
+            vis=gs.options.MPMVisOptions(
                 boundary=True,
             ),
         ),

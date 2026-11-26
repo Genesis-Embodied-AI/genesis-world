@@ -223,7 +223,7 @@ class VisOptions(Options):
     ambient_light : tuple of float, shape (3,)
         The color of the scene's ambient light.
     visualize_mpm_boundary : bool
-        Deprecated: use ``MPMOptions(vis=ParticleVisOptions(boundary=True))``. Whether to draw the boundary of
+        Deprecated: use ``MPMOptions(vis=MPMVisOptions(boundary=True))``. Whether to draw the boundary of
         the MPM solver.
     visualize_sph_boundary : bool
         Deprecated: use ``SPHOptions(vis=ParticleVisOptions(boundary=True))``. Whether to draw the boundary of
@@ -300,10 +300,10 @@ class VisOptions(Options):
             ("show_link_frame", "'RigidOptions(vis=RigidVisOptions(link_frames={}))'"),
             ("link_frame_size", "'RigidOptions(vis=RigidVisOptions(link_frame_size={}))'"),
             ("contact_force_scale", "'RigidOptions(vis=RigidVisOptions(contact_force_scale={}))'"),
-            ("visualize_mpm_boundary", "'MPMOptions(vis=ParticleVisOptions(boundary={}))'"),
+            ("visualize_mpm_boundary", "'MPMOptions(vis=MPMVisOptions(boundary={}))'"),
             ("visualize_sph_boundary", "'SPHOptions(vis=ParticleVisOptions(boundary={}))'"),
             ("visualize_pbd_boundary", "'PBDOptions(vis=PBDVisOptions(boundary={}))'"),
-            ("n_support_neighbors", "'MPMOptions(vis=ParticleVisOptions(n_support_neighbors={}))'"),
+            ("n_support_neighbors", "'MPMOptions(vis=MPMVisOptions(n_support_neighbors={}))'"),
         ):
             value = data.get(name)
             if value is not None:

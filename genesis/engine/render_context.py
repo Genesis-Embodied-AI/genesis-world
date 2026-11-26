@@ -596,6 +596,9 @@ class Frames(Shape):
 CONSTRAINT_POINT_RADIUS = 0.01
 CONSTRAINT_LINE_RADIUS = 0.003
 CONSTRAINT_COLOR = (1.0, 0.5, 0.0, 1.0)
+# The hue of the color of a label (an island, a muscle group) steps by the golden ratio conjugate from one label to the
+# next, so that close labels get distant hues whatever their number
+LABELS_HUE_STEP = 0.618034
 
 
 def select_view_shapes(shapes: "Iterable[Shape]", view: str) -> tuple[Shape, ...]:

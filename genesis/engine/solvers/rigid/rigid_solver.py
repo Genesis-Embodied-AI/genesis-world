@@ -22,6 +22,7 @@ from genesis.engine.render_context import (
     CONSTRAINT_LINE_RADIUS,
     CONSTRAINT_POINT_RADIUS,
     DEBUG,
+    LABELS_HUE_STEP,
     NORMAL,
     ArrayRef,
     Arrows,
@@ -3532,9 +3533,6 @@ def kernel_substep_post(
 # The colors of the arrows of the force and of the normal of a contact
 CONTACT_FORCE_COLOR = (0.0, 0.9, 0.8, 1.0)
 CONTACT_NORMAL_COLOR = (0.9, 0.0, 0.8, 1.0)
-# The hue of the color of an island steps by the golden ratio conjugate from one link to the next (see
-# 'RigidScopedRenderContext.update_shapes'). This way, the links of one entity, whose indices are close, get distant hues.
-ISLANDS_HUE_STEP = 0.618034
 # The tint of a sleeping link: a grey, weighted by the alpha. A sleeping link colored by its island blends that color
 # toward the grey by the same weight.
 HIBERNATION_TINT = (0.35, 0.35, 0.38, 0.7)
@@ -3635,7 +3633,8 @@ class RigidScopedRenderContext(KinematicScopedRenderContext, ScopedRenderContext
         # an island takes from its smallest link (see 'update_shapes').
         self._is_islands_shown = solver.options.vis.islands
         self._is_hibernation_shown = solver.options.vis.hibernation
-        links_hue = (np.arange(solver.n_links) * ISLANDS_HUE_STEP) % 1.0
+        # The links of one entity, whose indices are close, get distant hues (see 'LABELS_HUE_STEP')
+        links_hue = (np.arange(solver.n_links) * LABELS_HUE_STEP) % 1.0
         self._links_island_color = torch.as_tensor(
             mu.hsv_to_rgb(links_hue, saturation=0.8, value=0.95), dtype=gs.tc_float, device=gs.device
         )
