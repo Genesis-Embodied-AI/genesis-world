@@ -256,11 +256,13 @@ def _box_to_particles(p_size, pos, size, sampler):
         # The draws are scaled by separate numpy operations, each rounded exactly, so that every platform samples the
         # same positions. The compiled scaling of 'np.random.uniform' rounds differently from one platform to another.
         positions = lower + np.random.random((n_particles, 3)) * (upper - lower)
-    else:
+    elif sampler == "regular":
         p_lower = lower + 0.5 * p_size
         p_upper = upper - 0.5 * p_size
         x, y, z = (np.linspace(p_lower[i], p_upper[i], n_particles_axes[i]) for i in range(3))
         positions = np.stack(np.meshgrid(x, y, z, indexing="ij"), -1).reshape((-1, 3))
+    else:
+        gs.raise_exception(f"Unsupported sampler: {sampler!r}. It should be 'pbs-<res>', 'random' or 'regular'.")
     return positions
 
 

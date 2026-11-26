@@ -622,6 +622,8 @@ def compose_inertial_properties(mass1, com1, inertia1, mass2, com2, inertia2):
         combined_com: Combined center of mass (3,) array
         combined_inertia: Combined inertia tensor (3,3) array
     """
+    if mass1 < 0.0 or mass2 < 0.0:
+        gs.raise_exception(f"The mass of a body cannot be negative, got {mass1} and {mass2}.")
     combined_mass = mass1 + mass2
     # Two massless bodies have no center of mass, the one of the first body standing for it
     combined_com = (mass1 * com1 + mass2 * com2) / combined_mass if combined_mass > 0.0 else com1
