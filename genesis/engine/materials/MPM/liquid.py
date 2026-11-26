@@ -1,3 +1,4 @@
+import numbers
 from typing import Any, ClassVar
 
 from pydantic import StrictBool, model_validator
@@ -37,7 +38,7 @@ class Liquid(Base):
         if not data.get("viscous", False):
             # The options exported from an inviscid liquid hold mu=0 exactly, which the liquid accepts back
             mu = data.get("mu")
-            if mu is not None and abs(mu) > 0.0:
+            if isinstance(mu, numbers.Real) and abs(mu) > 0.0:
                 gs.raise_exception("An inviscid liquid takes mu=0. Set 'viscous=True' to give it a viscosity.")
             data = {**data, "mu": 0.0}
         return data
