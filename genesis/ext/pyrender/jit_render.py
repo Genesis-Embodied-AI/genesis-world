@@ -8,7 +8,7 @@ import numba as nb
 import OpenGL.GL as GL
 import OpenGL.constant as GL_constant
 
-from .constants import BufFlags, LightType, MAX_N_LIGHTS, RenderFlags, ViewFlags
+from .constants import BufFlags, LightType, MAX_N_LIGHTS, RenderFlags, TexFlags, ViewFlags
 from .light import DirectionalLight, PointLight, SpotLight
 from .numba_gl_wrapper import GLWrapper
 from .scene import CORNER_INDICES
@@ -79,6 +79,8 @@ RenderFlags_REFLECTIVE_FLOOR = RenderFlags.REFLECTIVE_FLOOR
 RenderFlags_NORMAL = RenderFlags.NORMAL
 RenderFlags_NORMALS = RenderFlags.VERTEX_NORMALS | RenderFlags.FACE_NORMALS
 LightType_POINT = LightType.POINT
+TexFlags_EMISSIVE = TexFlags.EMISSIVE
+TexFlags_BASE_COLOR = TexFlags.BASE_COLOR
 LightType_SPOT = LightType.SPOT
 
 
@@ -109,9 +111,9 @@ def set_uniform_1f(pid, name, value, gl):
 @nb.jit(nopython=True, cache=True)
 def set_texture_layers(pid, tex_flags, layers, gl):
     """Set the layers that the base color (0) and the emissive (1) texture arrays of a material are sampled at."""
-    if tex_flags & (8 << 8):
+    if tex_flags & (TexFlags_BASE_COLOR << 8):
         set_uniform_1f(pid, "material.base_color_layer", layers[0], gl)
-    if tex_flags & (4 << 8):
+    if tex_flags & (TexFlags_EMISSIVE << 8):
         set_uniform_1f(pid, "material.emissive_layer", layers[1], gl)
 
 
@@ -564,8 +566,10 @@ class JITRenderer:
         self.vao_id = np.zeros(n, np.int32)
         self.program_id = {}
         self.pose = np.zeros((n, 4, 4), np.float32)
-        # 0: flags, bit i set for texture slot i, and bit i + 8 for one that is a texture array, 1-5: texture id
-        self.textures = np.zeros((n, 6), np.int32)
+        # The textures of each slot of the material, in the order of the bits of 'TexFlags', and the flags of the slots
+        # filled, the bit of slot i shifted by 8 marking a texture array
+        self.textures = np.zeros((n, 5), np.int32)
+        self.tex_flags = np.zeros(n, np.int32)
         # Row i of texture_layers holds, for each rendered environment, the layer of the base color (0) and emissive (1)
         # texture arrays that a layered primitive samples (see 'Primitive.texture_layers').
         # texture_layers_idx maps each primitive to its row, or -1 for a primitive sampling no texture array.
@@ -667,22 +671,20 @@ class JITRenderer:
             self._set_instance_bounds(np.array([i]), poses[np.newaxis])
 
             material = primitive.material
-            tf = material.tex_flags
-            self.textures[i, 0] = tf
-            if tf & 1:
-                self.textures[i, 1] = material.normalTexture._texid
-            if tf & 2:
-                self.textures[i, 2] = material.occlusionTexture._texid
-            if tf & 4:
-                self.textures[i, 3] = material.emissiveTexture._texid
-            if tf & 8:
-                self.textures[i, 4] = material.baseColorTexture._texid
-            if tf & 16:
-                self.textures[i, 5] = material.metallicRoughnessTexture._texid
-            if tf & 4 and material.emissiveTexture.tex_type == GL_TEXTURE_2D_ARRAY:
-                self.textures[i, 0] |= 4 << 8
-            if tf & 8 and material.baseColorTexture.tex_type == GL_TEXTURE_2D_ARRAY:
-                self.textures[i, 0] |= 8 << 8
+            for i_slot, texture in enumerate(
+                (
+                    material.normalTexture,
+                    material.occlusionTexture,
+                    material.emissiveTexture,
+                    material.baseColorTexture,
+                    material.metallicRoughnessTexture,
+                )
+            ):
+                if texture is not None:
+                    self.textures[i, i_slot] = texture._texid
+                    self.tex_flags[i] |= 1 << i_slot
+                    if texture.tex_type == GL_TEXTURE_2D_ARRAY:
+                        self.tex_flags[i] |= 1 << (i_slot + 8)
 
             self.base_color_factor[i] = material.baseColorFactor
             self.metallic_factor[i] = material.metallicFactor
@@ -853,6 +855,7 @@ class JITRenderer:
                 nb.int32[:],
                 nb.int32[:],
                 nb.float32[:, :, :],
+                nb.int32[:],
                 nb.int32[:, :],
                 nb.float32[:, :],
                 nb.float32[:],
@@ -910,6 +913,7 @@ class JITRenderer:
             vao_id,
             program_id,
             pose,
+            tex_flags,
             textures,
             base_color_factor,
             metallic_factor,
@@ -1043,7 +1047,7 @@ class JITRenderer:
 
                 is_culled = not flags & RenderFlags_SKIP_CULL_FACES
                 if is_rgba and not flags & RenderFlags_NORMAL:
-                    tf = textures[id, 0]
+                    tf = tex_flags[id]
                     texture_list = [
                         "normal_texture",
                         "occlusion_texture",
@@ -1059,7 +1063,7 @@ class JITRenderer:
                         if tf & (1 << i):
                             gl.glActiveTexture(GL_TEXTURE0 + active_texture)
                             is_array = tf & (1 << (i + 8))
-                            gl.glBindTexture(GL_TEXTURE_2D_ARRAY if is_array else GL_TEXTURE_2D, textures[id, i + 1])
+                            gl.glBindTexture(GL_TEXTURE_2D_ARRAY if is_array else GL_TEXTURE_2D, textures[id, i])
                             set_uniform_1i(pid, "material." + texture_list[i], active_texture, gl)
                             active_texture += 1
 
@@ -1116,7 +1120,7 @@ class JITRenderer:
                 i_layers = texture_layers_idx[id]
                 is_layer_set = i_layers >= 0 and is_rgba and not flags & RenderFlags_NORMAL
                 if is_layer_set and env_idx >= 0:
-                    set_texture_layers(pid, textures[id, 0], texture_layers[i_layers, env_idx], gl)
+                    set_texture_layers(pid, tex_flags[id], texture_layers[i_layers, env_idx], gl)
 
                 # A single-sided transmissive surface is drawn twice, back faces first and front faces over them, so
                 # that the far side of a glass or of a body of water shows through its near side
@@ -1133,7 +1137,7 @@ class JITRenderer:
                             if not env_active[id, k]:
                                 continue
                             if is_layer_set:
-                                set_texture_layers(pid, textures[id, 0], texture_layers[i_layers, k], gl)
+                                set_texture_layers(pid, tex_flags[id], texture_layers[i_layers, k], gl)
                             draw_instances(
                                 mode[id],
                                 n_indices[id],
@@ -1189,6 +1193,7 @@ class JITRenderer:
                 nb.float32,
                 nb.boolean[:],
                 nb.int32,
+                nb.int32[:],
                 nb.int32[:, :],
                 nb.float32[:, :],
                 nb.float32[:],
@@ -1223,6 +1228,7 @@ class JITRenderer:
             env_offset_scale,
             is_env_instanced,
             env_offset_buffer,
+            tex_flags,
             textures,
             base_color_factor,
             transmission_factor,
@@ -1264,15 +1270,17 @@ class JITRenderer:
                 # sampled at the layer of the environment drawn.
                 i_layers = texture_layers_idx[id]
                 is_layer_set = False
-                tf = textures[id, 0]
-                if is_transparent[id] or tf & (8 << 8):
+                tf = tex_flags[id]
+                if is_transparent[id] or tf & (TexFlags_BASE_COLOR << 8):
                     set_uniform_4fv(pid, "base_color_factor", base_color_factor[id], gl)
                     set_uniform_1f(pid, "transmission_factor", transmission_factor[id], gl)
                     if is_transmittance:
                         set_uniform_1f(pid, "ior", ior[id], gl)
-                    if tf & 8:
+                    if tf & TexFlags_BASE_COLOR:
                         gl.glActiveTexture(GL_TEXTURE0)
-                        gl.glBindTexture(GL_TEXTURE_2D_ARRAY if tf & (8 << 8) else GL_TEXTURE_2D, textures[id, 4])
+                        gl.glBindTexture(
+                            GL_TEXTURE_2D_ARRAY if tf & (TexFlags_BASE_COLOR << 8) else GL_TEXTURE_2D, textures[id, 3]
+                        )
                         set_uniform_1i(pid, "base_color_texture", 0, gl)
                         is_layer_set = i_layers >= 0
                         if is_layer_set and env_idx >= 0:
@@ -1475,6 +1483,7 @@ class JITRenderer:
                 self.vao_id,
                 self.program_id[(flags, program_flags)],
                 self.pose,
+                self.tex_flags,
                 self.textures,
                 self.base_color_factor,
                 self.metallic_factor,
@@ -1593,6 +1602,7 @@ class JITRenderer:
                 0.0 if is_env_pass(flags) else 1.0,
                 self.is_env_instanced,
                 self.env_offset_buffer if self.env_offset_buffer is not None else 0,
+                self.tex_flags,
                 self.textures,
                 self.base_color_factor,
                 self.transmission_factor,
@@ -1631,7 +1641,7 @@ class JITRenderer:
             if i is not None:
                 self.texture_layers[self.texture_layers_idx[i]] = primitive.texture_layers
                 meshes.add(self.node_list[i].mesh)
-                if self.textures[i, 0] & (8 << 8):
+                if self.tex_flags[i] & (TexFlags.BASE_COLOR << 8):
                     is_shadow_changed = True
         # The shadow of a base color texture array follows the layers shown (see TRANSPARENT_SHADOW in renderer.py),
         # while a shadow map is rendered again only once the scene changed
