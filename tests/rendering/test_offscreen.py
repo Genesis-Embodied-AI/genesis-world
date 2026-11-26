@@ -2873,3 +2873,111 @@ def test_occlusion_map(renderer, show_viewer):
         for rgb in (patch_occluded, patch_lit)
     )
     assert_allclose(radiance_lit - radiance_occluded, AMBIENT, tol=2e-3)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
+def test_fisheye_camera(renderer, show_viewer):
+    CAM_POS = np.array((0.0, 0.0, 1.0))
+    DIST = 2.0
+    RADIUS = 0.2
+
+    scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            segmentation_level="entity",
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(-4.0, -4.0, 4.0),
+            camera_lookat=(0.0, 0.0, 1.0),
+        ),
+        renderer=renderer,
+        show_viewer=show_viewer,
+    )
+    # Spheres seen at an angle theta from the line of sight of the cameras and an azimuth phi around it, in the frame of
+    # OpenCV, which looks along +x of the world with its y axis down the image
+    spheres_angle = np.deg2rad(((0.0, 0.0), (50.0, 30.0), (80.0, 200.0), (120.0, 100.0), (160.0, 300.0)))
+    theta, phi = spheres_angle.T
+    rays_cv = np.stack((np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi), np.cos(theta)), axis=-1)
+    spheres_pos = CAM_POS + DIST * rays_cv @ np.array(((0.0, -1.0, 0.0), (0.0, 0.0, -1.0), (1.0, 0.0, 0.0)))
+    spheres = [
+        scene.add_entity(
+            morph=gs.morphs.Sphere(
+                pos=sphere_pos,
+                radius=RADIUS,
+            ),
+        )
+        for sphere_pos in spheres_pos
+    ]
+    # The calibration of a fisheye lens at a quarter of its resolution, which sees about 90 degrees on either side, and
+    # an equidistant fisheye seeing all around it. A camera sensor sees through the same lens, its view drawn.
+    lens = gs.options.FisheyeLens(
+        intrinsics=((132.94, 0.0, 203.87), (0.0, 132.91, 156.44), (0.0, 0.0, 1.0)),
+        distortion=(0.0320, 0.00347, 0.000385, -0.000154),
+    )
+    cam_calibrated = scene.add_camera(
+        res=(408, 316),
+        pos=CAM_POS,
+        lookat=CAM_POS + (1.0, 0.0, 0.0),
+        lens=lens,
+    )
+    cam_sensor = scene.add_sensor(
+        RasterizerCameraOptions(
+            res=(408, 316),
+            pos=CAM_POS,
+            lookat=CAM_POS + (1.0, 0.0, 0.0),
+            lens=lens,
+            near=0.1,
+            far=20.0,
+            draw_debug=True,
+        )
+    )
+    cam_equidistant = scene.add_camera(
+        model="fisheye",
+        res=(256, 256),
+        pos=CAM_POS,
+        lookat=CAM_POS + (1.0, 0.0, 0.0),
+        fov=360.0,
+    )
+    scene.build()
+
+    entities_seg_idx = {entity_idx: seg_idx for seg_idx, entity_idx in scene.segmentation_idx_dict.items()}
+    for cam, spheres_drawn in ((cam_calibrated, spheres[:3]), (cam_equidistant, spheres)):
+        _, depth, seg, _ = cam.render(rgb=False, depth=True, segmentation=True)
+        points, _ = cam.render_pointcloud()
+        (fx, _, cx), (_, fy, cy), _ = cam.intrinsics
+        k1, k2, k3, k4 = cam.distortion
+        for sphere, sphere_pos, (theta, phi) in zip(spheres_drawn, spheres_pos, spheres_angle):
+            # The pixel holding the centre of the sphere, whose ray reaches the sphere at its radius from the centre, up
+            # to the offset of the centre of the pixel and the facets of the mesh of the sphere
+            theta_d = theta * (1.0 + k1 * theta**2 + k2 * theta**4 + k3 * theta**6 + k4 * theta**8)
+            u, v = int(fx * theta_d * np.cos(phi) + cx), int(fy * theta_d * np.sin(phi) + cy)
+            assert seg[v, u] == entities_seg_idx[sphere.idx]
+            assert_allclose(depth[v, u], DIST - RADIUS, atol=5e-3)
+            assert_allclose(np.linalg.norm(points[v, u] - sphere_pos), RADIUS, atol=5e-3)
+
+    # The corners of the image of the equidistant fisheye lie beyond the rays pointing backwards, which no ray reaches
+    _, depth, seg, _ = cam_equidistant.render(rgb=False, depth=True, segmentation=True)
+    assert_equal(seg[[0, 0, -1, -1], [0, -1, 0, -1]], 0)
+    assert_allclose(depth[[0, 0, -1, -1], [0, -1, 0, -1]], cam_equidistant.far, tol=1e-5)
+
+    # The sensor renders what the camera does, up to the precision of its pose, and its view reaches the ray of the
+    # corner of the image farthest from the principal point, between its clipping distances
+    rgb, *_ = cam_calibrated.render(rgb=True)
+    assert_allclose(tensor_to_array(cam_sensor.read().rgb), rgb, atol=2)
+    (markers,) = scene.sim.render_context.get_markers()
+    verts = tensor_to_array(markers.geometries[1].verts)
+    assert_allclose(np.linalg.norm(verts, axis=-1).max(), 20.0, tol=1e-5)
+    _, corners_angle = gu.fisheye_pixels_to_rays(
+        np.array(((0.0, 0.0), (408.0, 0.0), (0.0, 316.0), (408.0, 316.0))),
+        (132.94, 132.91, 203.87, 156.44),
+        lens.distortion,
+    )
+    verts_angle = np.arctan2(np.linalg.norm(verts[:, :2], axis=-1), -verts[:, 2])
+    assert_allclose(verts_angle.max(), corners_angle.max(), tol=1e-5)
+
+    # The frustum of the camera bends as its view does, reaching the same ray at its far clipping distance
+    frustum = scene.draw_debug_frustum(cam_calibrated)
+    verts = tensor_to_array(frustum.geometries[0].verts)
+    verts_far = verts[np.linalg.norm(verts, axis=-1) > 0.999 * cam_calibrated.far]
+    verts_far_angle = np.arctan2(np.linalg.norm(verts_far[:, :2], axis=-1), -verts_far[:, 2])
+    assert_allclose(verts_far_angle.max(), corners_angle.max(), tol=1e-5)

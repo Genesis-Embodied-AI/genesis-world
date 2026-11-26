@@ -10,6 +10,7 @@ from OpenGL.GL import (
     GL_DEPTH_ATTACHMENT,
     GL_DEPTH_COMPONENT,
     GL_DEPTH_COMPONENT16,
+    GL_DEPTH_COMPONENT24,
     GL_DEPTH_COMPONENT32F,
     GL_FLOAT,
     GL_FRAMEBUFFER,
@@ -41,6 +42,7 @@ from OpenGL.GL import (
     GL_TEXTURE_WRAP_T,
     GL_UNPACK_ALIGNMENT,
     GL_UNSIGNED_BYTE,
+    GL_UNSIGNED_INT,
     GL_UNSIGNED_SHORT,
     OpenGL,
     glBindTexture,
@@ -161,6 +163,25 @@ class Texture:
     def _gl_format(self) -> int:
         return (GL_RED, GL_RG, GL_RGB, GL_RGBA, GL_DEPTH_COMPONENT)[self.source_channels]
 
+    @property
+    def _gl_internal_format(self) -> int:
+        fmt = self._gl_format
+        # A 16-bit depth texture halves what sampling a shadow map reads, which is what bounds the cost of the shadow
+        # comparisons at the default map size, and its quantization stays below the depth bias of those comparisons
+        # wherever the depth is linear. A float depth texture serves a perspective projection, which packs the depth of
+        # whatever lies far from its near plane close to 1. A 24-bit depth texture receives the depth buffer of a
+        # framebuffer, whose format a copy must match.
+        if fmt == GL_DEPTH_COMPONENT:
+            return {GL_UNSIGNED_SHORT: GL_DEPTH_COMPONENT16, GL_UNSIGNED_INT: GL_DEPTH_COMPONENT24}.get(
+                self.data_format, GL_DEPTH_COMPONENT32F
+            )
+        # An unsized format would let the driver store floats at 8 bits per channel
+        if self.data_format == GL_HALF_FLOAT:
+            return GL_RGBA16F if fmt == GL_RGBA else GL_RGB16F
+        if self.data_format == GL_FLOAT and fmt in (GL_RGBA, GL_RGB):
+            return GL_RGBA32F if fmt == GL_RGBA else GL_RGB32F
+        return fmt
+
     def set_layers(self, layers_idx: np.ndarray, images: np.ndarray) -> None:
         """Write (len(layers_idx),h,w,c) images into layers of a texture array, uploaded by 'upload_layers'."""
         for layer, image in zip(layers_idx.tolist(), images[..., : self.source_channels.n_channels]):
@@ -200,20 +221,7 @@ class Texture:
             data = np.flip(self.source, axis=1 if is_array else 0).reshape((-1,))
             height, width = self.source.shape[1:3] if is_array else self.source.shape[:2]
 
-        # A 16-bit depth texture halves what sampling a shadow map reads, which is what bounds the cost of the shadow
-        # comparisons at the default map size, and its quantization stays below the depth bias of those comparisons
-        # wherever the depth is linear. A float depth texture serves a perspective projection, which packs the depth of
-        # whatever lies far from its near plane close to 1.
-        internal_fmt = fmt
-        if fmt == GL_DEPTH_COMPONENT and self.data_format == GL_UNSIGNED_SHORT:
-            internal_fmt = GL_DEPTH_COMPONENT16
-        if fmt == GL_DEPTH_COMPONENT and self.data_format == GL_FLOAT:
-            internal_fmt = GL_DEPTH_COMPONENT32F
-        # An unsized format would let the driver store floats at 8 bits per channel
-        if self.data_format == GL_HALF_FLOAT:
-            internal_fmt = GL_RGBA16F if fmt == GL_RGBA else GL_RGB16F
-        if self.data_format == GL_FLOAT and fmt in (GL_RGBA, GL_RGB):
-            internal_fmt = GL_RGBA32F if fmt == GL_RGBA else GL_RGB32F
+        internal_fmt = self._gl_internal_format
 
         # The source rows are tightly packed, while OpenGL reads each row from a 4-byte boundary by default, shifting
         # every row after the first where a row is no multiple of 4 bytes, as an odd width of RGB half floats does.
@@ -312,27 +320,29 @@ class Texture:
 
 
 class CubeMapTexture(Texture):
-    """A cube map rendered into, the depth seen from a point light, or the color of the light passing through.
+    """A cube map rendered into, holding the depth or the color seen all around a point.
 
     Parameters
     ----------
-    width : int
-        The width of each face, in texels.
-    height : int
-        The height of each face, in texels.
-    is_color : bool, optional
-        Whether the cube map holds a color rather than a depth. Defaults to False.
+    size : int
+        The width and height of each face, in texels.
+    source_channels : TexChannels
+        The channels that the cube map holds, RGBA or DEPTH.
+    data_format : int
+        The type of each channel: GL_UNSIGNED_BYTE, GL_HALF_FLOAT, GL_UNSIGNED_INT or GL_FLOAT.
+    sampler : Sampler
+        The filters of the cube map, which wraps to the neighbouring face whatever its wrapping modes.
     """
 
-    def __init__(self, width, height, is_color=False):
+    def __init__(self, size, source_channels, data_format, sampler):
         super().__init__(
-            source_channels=TexChannels.RGBA if is_color else TexChannels.DEPTH,
-            width=width,
-            height=height,
+            sampler=sampler,
+            source_channels=source_channels,
+            width=size,
+            height=size,
             tex_type=GL_TEXTURE_CUBE_MAP,
-            data_format=GL_HALF_FLOAT if is_color else GL_FLOAT,
+            data_format=data_format,
         )
-        self.is_color = is_color
 
     def _add_to_context(self):
         if self._texid is not None:
@@ -340,12 +350,11 @@ class CubeMapTexture(Texture):
 
         self._texid = glGenTextures(1)
         glBindTexture(self.tex_type, self._texid)
-        internal_fmt = GL_RGBA16F if self.is_color else GL_DEPTH_COMPONENT
         for i_face in range(6):
             glTexImage2D(
                 GL_TEXTURE_CUBE_MAP_POSITIVE_X + i_face,
                 0,
-                internal_fmt,
+                self._gl_internal_format,
                 self.width,
                 self.height,
                 0,
@@ -353,17 +362,24 @@ class CubeMapTexture(Texture):
                 self.data_format,
                 None,
             )
-
-        # A color cube map is read filtered, the depth one compared texel by texel
-        tex_filter = GL_LINEAR if self.is_color else GL_NEAREST
-        glTexParameteri(self.tex_type, GL_TEXTURE_MAG_FILTER, tex_filter)
-        glTexParameteri(self.tex_type, GL_TEXTURE_MIN_FILTER, tex_filter)
+        glTexParameteri(self.tex_type, GL_TEXTURE_MAG_FILTER, self.sampler.mag_filter)
+        glTexParameteri(self.tex_type, GL_TEXTURE_MIN_FILTER, self.sampler.min_filter)
         for wrap_axis in (GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_TEXTURE_WRAP_R):
             glTexParameteri(self.tex_type, wrap_axis, GL_CLAMP_TO_EDGE)
         glBindTexture(self.tex_type, 0)
 
-    def _bind_as_depth_attachment(self):
-        glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, self._texid, 0)
+    def _bind_as_depth_attachment(self, i_face=None):
+        """Attach the cube map as the depth of the bound framebuffer, all of it for a layered render or one face."""
+        if i_face is None:
+            glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, self._texid, 0)
+        else:
+            face_target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + i_face
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, face_target, self._texid, 0)
 
-    def _bind_as_color_attachment(self):
-        glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, self._texid, 0)
+    def _bind_as_color_attachment(self, i_face=None):
+        """Attach the cube map as the color of the bound framebuffer, all of it for a layered render or one face."""
+        if i_face is None:
+            glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, self._texid, 0)
+        else:
+            face_target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + i_face
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, face_target, self._texid, 0)

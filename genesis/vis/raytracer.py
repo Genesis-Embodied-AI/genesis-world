@@ -515,8 +515,12 @@ class Raytracer(BuildableMixin):
 
     def add_camera(self, camera):
         camera_name = str(camera.uid)
+        if camera.model == "fisheye":
+            gs.raise_exception(
+                "The RayTracer renders pinhole cameras alone. Render a fisheye camera with the Rasterizer."
+            )
 
-        if camera.lens is not None:
+        if isinstance(camera.lens, gs.options.ThinLens):
             luisa_focal_len, luisa_aperture = _get_luisa_thin_lens(camera.fov, camera.res, camera.lens)
             self._cameras[camera_name] = LuisaRenderPy.ThinLensCamera(
                 name=camera_name,
@@ -546,7 +550,7 @@ class Raytracer(BuildableMixin):
         camera_name = str(camera.uid)
         camera_transform = camera.transform
 
-        if camera.lens is not None:
+        if isinstance(camera.lens, gs.options.ThinLens):
             luisa_focal_len, luisa_aperture = _get_luisa_thin_lens(camera.fov, camera.res, camera.lens)
             self._cameras[camera_name].update(
                 pose=self.get_transform(camera_transform),

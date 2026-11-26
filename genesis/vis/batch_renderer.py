@@ -7,6 +7,8 @@ import genesis as gs
 from genesis.constants import IMAGE_TYPE
 from genesis.engine.render_context import DynamicMesh
 from genesis.repr_base import RBC
+from genesis.options.vis import FisheyeLens
+from genesis.utils.geom import pixels_ray_cosine
 from genesis.utils.misc import BuildableMixin, tensor_to_array
 
 from .camera import Camera
@@ -303,6 +305,18 @@ class BatchRenderer(BuildableMixin, RBC):
         )
         if not self._cameras:
             gs.raise_exception("Please add at least one camera when using BatchRender.")
+        # The renderer draws a fisheye as an equidistant projection of its field of view, about the centre of the image
+        for camera in self._cameras:
+            if isinstance(camera, Camera) and camera.model == "fisheye":
+                (fx, _, cx), (_, fy, cy), _ = camera.lens.intrinsics
+                width, height = camera.res
+                if not np.allclose(
+                    (*camera.lens.distortion, fy - fx, cx - 0.5 * width, cy - 0.5 * height), 0.0, atol=gs.EPS
+                ):
+                    gs.raise_exception(
+                        "The BatchRenderer draws a fisheye camera as an equidistant projection about the centre of the "
+                        "image, which this calibrated fisheye lens is not. Render it with the Rasterizer."
+                    )
 
         # Build the geometry retriever
         self._geom_retriever.build()
@@ -312,6 +326,19 @@ class BatchRenderer(BuildableMixin, RBC):
             ((camera_width, camera_height),) = set(camera.res for camera in self._cameras)
         except ValueError as e:
             gs.raise_exception_from("All cameras must have the exact same resolution when using BatchRender.", e)
+
+        # The cosine of the angle between the ray of each pixel of each camera and its line of sight, which converts the
+        # depth between the distance along the ray and the depth along the line of sight (see 'render'). The cameras
+        # and the camera sensors alike state their projection by their field of view.
+        self._cameras_ray_cosine = []
+        for camera in self._cameras:
+            if camera.model == "fisheye":
+                (fx, _, cx), (_, fy, cy), _ = FisheyeLens.equidistant(camera.res, camera.fov).intrinsics
+                rays_cosine = pixels_ray_cosine(camera.res, (fx, fy, cx, cy), (0.0, 0.0, 0.0, 0.0))
+            else:
+                f = 0.5 * camera_height / math.tan(math.radians(0.5 * camera.fov))
+                rays_cosine = pixels_ray_cosine(camera.res, (f, f, 0.5 * camera_width, 0.5 * camera_height))
+            self._cameras_ray_cosine.append(torch.as_tensor(rays_cosine, dtype=gs.tc_float, device=gs.device))
 
         self._renderer = MadronaBatchRendererAdapter(
             geom_retriever=self._geom_retriever,
@@ -430,12 +457,20 @@ class BatchRenderer(BuildableMixin, RBC):
                     data = data.squeeze(1)
                 rendered[img_type] = tuple(data[..., :3].squeeze(-1))
 
-        # Convert center distance depth to plane distance
-        if not self._use_rasterizer and needed[IMAGE_TYPE.DEPTH]:
-            rendered[IMAGE_TYPE.DEPTH] = tuple(
-                camera.distance_center_to_plane(depth_data)
-                for camera, depth_data in zip(self._cameras, rendered[IMAGE_TYPE.DEPTH])
-            )
+        # The depth of a pinhole camera is along its line of sight, and that of a fisheye camera along the ray of each
+        # pixel. The ray tracer gives the distance along the ray, while the rasterizer draws a fisheye from a pinhole
+        # image, which gives the depth along the line of sight within the disk the fisheye shows and the far clipping
+        # distance beyond it.
+        if needed[IMAGE_TYPE.DEPTH]:
+            depths = []
+            for camera, rays_cosine, depth in zip(self._cameras, self._cameras_ray_cosine, rendered[IMAGE_TYPE.DEPTH]):
+                if camera.model == "fisheye":
+                    if self._use_rasterizer:
+                        depth = torch.where(depth < camera.far * (1.0 - 1e-6), depth / rays_cosine, depth)
+                elif not self._use_rasterizer:
+                    depth = depth * rays_cosine
+                depths.append(depth)
+            rendered[IMAGE_TYPE.DEPTH] = tuple(depths)
 
         # Update cache
         self._t = self._visualizer.scene.sim.cur_step_global

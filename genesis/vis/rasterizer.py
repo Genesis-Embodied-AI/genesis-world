@@ -42,20 +42,23 @@ class Rasterizer(BuildableMixin, RBC):
         self._is_built = True
 
     def add_camera(self, camera):
-        self._camera_nodes[camera.uid] = self._context.add_node(
-            pyrender.PerspectiveCamera(
-                yfov=np.deg2rad(camera.fov),
-                znear=camera.near,
-                zfar=camera.far,
-                aspect_ratio=camera.aspect_ratio,
-            ),
-        )
+        if camera.model == "fisheye":
+            (fx, _, cx), (_, fy, cy), _ = camera.lens.intrinsics
+            camera_node = pyrender.FisheyeCamera(
+                (fx, fy, cx, cy), camera.lens.distortion, znear=camera.near, zfar=camera.far
+            )
+        else:
+            camera_node = pyrender.PerspectiveCamera(
+                yfov=np.deg2rad(camera.fov), znear=camera.near, zfar=camera.far, aspect_ratio=camera.aspect_ratio
+            )
+        self._camera_nodes[camera.uid] = self._context.add_node(camera_node)
         self._camera_targets[camera.uid] = pyrender.Renderer(camera.res[0], camera.res[1], self._context.jit)
         # A camera sensor shows the scene as it looks, without markers
         self._context.add_view(camera, is_debug=isinstance(camera, Camera) and camera.debug)
 
     def update_camera(self, camera):
-        self._camera_nodes[camera.uid].camera.yfov = np.deg2rad(camera.fov)
+        if camera.model != "fisheye":
+            self._camera_nodes[camera.uid].camera.yfov = np.deg2rad(camera.fov)
         self._context.set_node_pose(self._camera_nodes[camera.uid], camera.transform)
         self._context.update_camera_frustum(camera)
 

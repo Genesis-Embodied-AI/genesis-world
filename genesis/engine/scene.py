@@ -41,6 +41,7 @@ from genesis.engine.states.solvers import SimState, SimulatorCheckpoint
 from genesis.options import (
     BaseCouplerOptions,
     FEMOptions,
+    FisheyeLens,
     KinematicOptions,
     MPMOptions,
     PBDOptions,
@@ -731,12 +732,12 @@ class Scene(BuildableMixin, RBC):
     @gs.assert_unbuilt
     def add_camera(
         self,
-        model="pinhole",
+        model=None,
         res=(320, 320),
         pos=(0.5, 2.5, 3.5),
         lookat=(0.5, 0.5, 0.5),
         up=(0.0, 0.0, 1.0),
-        fov=30,
+        fov=None,
         aperture=None,
         focus_dist=None,
         GUI=False,
@@ -755,14 +756,19 @@ class Scene(BuildableMixin, RBC):
         - The 'pinhole' model is a simple camera model that captures light rays from a single point in space. Given a
           `lens`, it becomes a thin-lens camera simulating a lens of finite aperture, which blurs what lies away from
           its focus distance (depth of field). A lens is only supported by the Raytracer.
-        - The 'fisheye' model is a camera model that simulates a fisheye lens, allowing for wide-angle views. It is
-          only supported by the BatchRenderer.
+        - The 'fisheye' model simulates a fisheye lens, whose wide view may span more than the half space in front of
+          the camera. Given a `lens` (gs.options.FisheyeLens), it follows the calibration of a real camera, its
+          intrinsics and its distortion in the Kannala-Brandt model of OpenCV. Without lens, it is an equidistant
+          projection, the circle inscribed in the image spanning `fov`. Its depth image holds the distance of each
+          pixel to the camera along its ray. The Rasterizer renders the faces of a cube map around the camera that the
+          image reaches, up to six passes of the scene per image, and resamples them. The BatchRenderer renders an
+          equidistant fisheye alone, and the RayTracer renders none.
 
         Parameters
         ----------
-        model : str
-            The projection of the camera: 'pinhole' or 'fisheye'. Deprecated: 'thinlens' stands for a pinhole camera
-            with a `lens`.
+        model : str | None
+            The projection of the camera: 'pinhole' or 'fisheye', None for that of its `lens`, pinhole without lens.
+            Deprecated: 'thinlens' stands for a pinhole camera with a `lens`.
         res : tuple of int, shape (2,)
             The resolution of the camera, specified as a tuple (width, height).
         pos : tuple of float, shape (3,)
@@ -771,8 +777,9 @@ class Scene(BuildableMixin, RBC):
             The point in the scene that the camera is looking at, specified as (x, y, z).
         up : tuple of float, shape (3,)
             The up vector of the camera, defining its orientation, specified as (x, y, z).
-        fov : float
-            The vertical field of view of the camera in degrees.
+        fov : float | None
+            The vertical field of view of the camera in degrees, or for a fisheye camera the angle that the circle
+            inscribed in its image spans. A calibrated fisheye lens gives it. None for 30 degrees otherwise.
         aperture : float | None
             Deprecated: use `lens`. The f-number of the lens of a 'thinlens' camera, 2.0 if None.
         focus_dist : float | None
@@ -803,8 +810,9 @@ class Scene(BuildableMixin, RBC):
             ``VisOptions.debug``). The Rasterizer renders it whatever the renderer of the scene, so that it records the
             simulation at any resolution and from any pose without interfering with what robots perceive from their
             environment. Defaults to False.
-        lens : gs.options.ThinLens | None
-            The lens of a pinhole camera, which makes it a thin-lens camera, None for a sharp image. Defaults to None.
+        lens : gs.options.ThinLens | gs.options.FisheyeLens | None
+            The lens of a pinhole camera, which makes it a thin-lens camera, or the calibrated lens of a fisheye camera,
+            None for a sharp pinhole image or an equidistant fisheye. Defaults to None.
 
         Returns
         -------
@@ -821,6 +829,12 @@ class Scene(BuildableMixin, RBC):
                     gs.raise_exception("'lens' and the deprecated 'model=\"thinlens\"' cannot be given together.")
                 lens = ThinLens(aperture=2.0 if aperture is None else aperture, focus_dist=focus_dist)
                 model = "pinhole"
+        if model is None:
+            model = "fisheye" if isinstance(lens, FisheyeLens) else "pinhole"
+        if isinstance(lens, FisheyeLens) and fov is not None:
+            gs.raise_exception("The field of view of a camera with a calibrated fisheye lens comes from its lens.")
+        if fov is None and not isinstance(lens, FisheyeLens):
+            fov = 30
         if denoise is None:
             denoise = sys.platform != "darwin"
         return self._visualizer.add_camera(
