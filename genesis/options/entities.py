@@ -13,7 +13,7 @@ from genesis.engine.materials.base import Material
 from genesis.repr_base import get_public_name
 
 from . import indices
-from .morphs import Morph
+from .morphs import Generator, Morph, Terrain
 from .options import Options
 from .patches import Geom, Patch, Vertex, VGeom
 from .surfaces import DynamicVertices, Surface
@@ -132,6 +132,8 @@ class Spec(Options, Generic[EntityT]):
 
     # Whether the kind of entity admits several morphs, one per variant of a heterogeneous entity
     _admits_variants: ClassVar[bool] = False
+    # The generator morphs the kind of entity is built from (see 'gs.morphs.Generator')
+    _admits_generators: ClassVar[tuple[type[Generator], ...]] = ()
     # The representations of the kind of entity in the debug view (see 'EntityVisOptions'), the first by default
     _debug_vis_modes: ClassVar[tuple[str, ...]] = ()
     # The patches of options the kind of entity admits, each with the selectors of the parts it is set on, from the
@@ -176,6 +178,12 @@ class Spec(Options, Generic[EntityT]):
             gs.raise_exception(
                 f"An entity of gs.entities.{type(self).__name__} is created from one morph, got {len(self.morph)}."
             )
+        for morph in self.morphs:
+            if isinstance(morph, Generator) and not isinstance(morph, self._admits_generators):
+                gs.raise_exception(
+                    f"gs.entities.{type(self).__name__} is not built from gs.morphs.{type(morph).__name__}. "
+                    f"Admitted generator morphs: {[get_public_name(cls) for cls in self._admits_generators]}."
+                )
         if self.vis is not None:
             self._check_vis(self.vis)
         if self.surface is not None:
@@ -513,6 +521,7 @@ class Rigid(Spec["RigidEntity"]):
     """
 
     _admits_variants = True
+    _admits_generators = (Terrain,)
     _debug_vis_modes = ("collision", "sdf")
     _patches_selector_types = {Geom: (indices.Link, indices.Geom), VGeom: (indices.Link, indices.VGeom)}
 

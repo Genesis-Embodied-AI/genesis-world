@@ -1306,7 +1306,17 @@ class Drone(FileMorph):
             gs.raise_exception(f"Drone only supports `{URDF_FORMAT}` extension: {self.file}")
 
 
-class Terrain(Morph):
+class Generator(Morph):
+    """Base class of the morphs whose geometry is generated from their options, and possibly from the scene.
+
+    A generator morph holds the options of the geometry, never the geometry itself. The scene generates the geometry as
+    the entity is added, into a morph that takes the place of the generator in the spec the entity holds, so that an
+    exported scene stores what was generated and loading it generates nothing again. The spec given to the scene stays
+    as it was. Each kind of entity admits the generators it can be built from (see ``gs.morphs.Terrain``).
+    """
+
+
+class Terrain(Generator):
     """
 
     Morph for creating a rigid terrain. This can be instantiated from two choices:

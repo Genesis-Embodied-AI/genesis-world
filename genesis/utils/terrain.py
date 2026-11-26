@@ -17,28 +17,12 @@ from .mesh import load_trimesh
 from .misc import tensor_to_array
 
 
-def parse_terrain(morph: Terrain, surface):
+def generate_height_field(morph: Terrain) -> np.ndarray:
+    """Generate the height field of the grid of subterrains of a terrain morph, in units of its vertical scale.
+
+    The height field of a named terrain is read from the cache when it holds one for the same options, and written to
+    it otherwise (see 'gs.morphs.Terrain.name').
     """
-    Generate mesh (and height field) according to configurations passed by morph.
-
-    ------------------------------------------------------------------------------------------------------
-    If morph.height_field is not passed, generate the height field by
-        n_subterrains    : Tuple[int, int]     = (3, 3)     # number of subterrains in x and y directions
-        subterrain_types : Any                 = [
-                ['flat_terrain', 'random_uniform_terrain', 'pyramid_sloped_terrain'],
-                ['pyramid_sloped_terrain', 'discrete_obstacles_terrain', 'wave_terrain'],
-                ['random_uniform_terrain', 'pyramid_stairs_terrain', 'pyramid_sloped_terrain'],
-        ]                                                   # types of subterrains in x and y directions
-    If morph.height_field is passed, (n_subterrains, subterrain_size, subterrain_types) will be ignored.
-    ------------------------------------------------------------------------------------------------------
-
-    Returns
-    --------------------------
-    vmesh        : Mesh | None, None when the morph disables visualization
-    mesh         : Mesh
-    height_field : np.ndarray
-    """
-
     gnd_file_path = None
     if morph.name is not None:
         gnd_file_path = Path(
@@ -53,8 +37,8 @@ def parse_terrain(morph: Terrain, surface):
             )
         )
 
-    heightfield = morph.height_field
-    if heightfield is None and (gnd_file_path is not None and gnd_file_path.exists()):
+    heightfield = None
+    if gnd_file_path is not None and gnd_file_path.exists():
         gs.logger.debug(f"Pre-genenerated terrain heightmap '{morph.name}' found in cache.")
         try:
             with open(gnd_file_path, "rb") as file:
@@ -170,8 +154,23 @@ def parse_terrain(morph: Terrain, surface):
             with open(gnd_file_path, "wb") as file:
                 serialization.export_record(file, heightfield, np.ndarray)
 
+    return heightfield
+
+
+def parse_terrain(morph: Terrain, surface):
+    """Build the meshes of the height field of a terrain morph, which its generation set (see 'generate_height_field').
+
+    Returns
+    -------
+    vmesh : Mesh | None
+        The visual mesh, or None when the morph disables visualization.
+    mesh : Mesh
+        The collision mesh.
+    height_field : np.ndarray
+        The height field, in units of the vertical scale of the morph.
+    """
     need_uvs = getattr(surface, "diffuse_texture", None) is not None
-    heightfield = heightfield.astype(gs.np_float)
+    heightfield = morph.height_field.astype(gs.np_float)
     tmesh, sdf_tmesh = convert_heightfield_to_watertight_trimesh(
         heightfield,
         horizontal_scale=morph.horizontal_scale,
