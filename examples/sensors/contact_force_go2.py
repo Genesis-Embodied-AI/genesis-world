@@ -52,8 +52,7 @@ def main():
     for link_name in foot_link_names:
         if not args.no_force:
             sensor_options = gs.sensors.ContactForce(
-                entity_idx=go2.idx,
-                link_idx_local=go2.get_link(link_name).idx_local,
+                link=go2.get_link(link_name),
                 draw_debug=True,
             )
             plot_kwargs = dict(
@@ -62,8 +61,7 @@ def main():
             )
         else:
             sensor_options = gs.sensors.Contact(
-                entity_idx=go2.idx,
-                link_idx_local=go2.get_link(link_name).idx_local,
+                link=go2.get_link(link_name),
                 draw_debug=True,
             )
             plot_kwargs = dict(

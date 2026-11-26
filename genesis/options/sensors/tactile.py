@@ -219,11 +219,10 @@ class PointCloudTactileSensorMixin[SensorT: "Sensor"](TactileProbeSensorOptionsM
 
     Parameters
     ----------
-    tracked_links : Sequence[RigidLink | int]
-        The links of rigid entities whose mesh geometry is used to sample a point cloud from, or their global indices
-        in the rigid solver. The keyword 'track_link_idx' is also accepted.
+    links : Sequence[RigidLink]
+        The links of rigid entities whose mesh geometry is used to sample a point cloud from.
     n_sample_points: int | array-like[int]
-        Total FPS samples split across ``tracked_links``, or one count per tracked link. Per-variant
+        Total FPS samples split across ``links``, or one count per tracked link. Per-variant
         counts are not supported: when a tracked link belongs to a heterogeneous entity, the per-link
         count is allocated to every variant on that link (so each parallel environment sees the full
         count regardless of which variant is active).
@@ -235,7 +234,7 @@ class PointCloudTactileSensorMixin[SensorT: "Sensor"](TactileProbeSensorOptionsM
         The radius of the debug tracked object point cloud spheres.
     """
 
-    track_link_idx: RigidLinksIdx = Field(validation_alias=AliasChoices("tracked_links", "track_link_idx"))
+    track_link_idx: RigidLinksIdx = Field(validation_alias=AliasChoices("links", "track_link_idx"))
     n_sample_points: IArrayType | NonNegativeInt = 500
     use_visual_mesh: StrictBool = True
 
@@ -436,11 +435,10 @@ class ElastomerTaxel(
     probe_radius : float | array-like[float]
         Probe sensing radius in meters. A scalar is shared by every probe; an array must match the probe count.
         Array entries of 0 mark inactive filler probes (see the grid note above); at least one must be positive.
-    tracked_links : Sequence[RigidLink | int]
-        The links of rigid entities whose collision geometry is queried by SDF and whose mesh is sampled for shear, or
-        their global indices in the rigid solver. The keyword 'track_link_idx' is also accepted.
+    links : Sequence[RigidLink]
+        The links of rigid entities whose collision geometry is queried by SDF and whose mesh is sampled for shear.
     n_sample_points: int | array-like[int]
-        Total surface samples split across ``tracked_links``, or one count per tracked link.
+        Total surface samples split across ``links``, or one count per tracked link.
     compressibility : float
         In-plane dilation kernel as a mix of a local and a global response, in ``[0, 1]``. ``1`` (default) is fully
         compressible: a concentrated *local* bulge from the ``exp(-lambda_d * r^2)`` Gaussian, with no far-field

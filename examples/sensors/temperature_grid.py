@@ -135,14 +135,14 @@ def main():
             specific_heat=1.0,
             emissivity=0.85,
         ),
-        platform.base_link_idx: gs.sensors.TemperatureProperties(
+        platform.base_link: gs.sensors.TemperatureProperties(
             base_temperature=22.0,
             conductivity=100.0,
             density=1000.0,
             specific_heat=0.2,
             emissivity=0.4,
         ),
-        pusher.base_link_idx: gs.sensors.TemperatureProperties(
+        pusher.base_link: gs.sensors.TemperatureProperties(
             base_temperature=200.0,
             conductivity=1000.0,
             density=2000.0,
@@ -153,8 +153,7 @@ def main():
 
     temperature_sensor = scene.add_sensor(
         gs.sensors.TemperatureGrid(
-            entity_idx=platform.idx,
-            link_idx_local=0,
+            link=platform.base_link,
             grid_size=GRID_SIZE,
             properties_dict=properties_dict,
             draw_debug=args.vis,

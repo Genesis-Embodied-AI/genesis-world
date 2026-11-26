@@ -47,15 +47,9 @@ class BaseCameraOptions[SensorT: "Sensor"](KinematicSensorOptionsMixin[SensorT])
     offset_T : array-like, shape (4, 4), optional
         4x4 transformation matrix specifying the camera's pose relative to the attached link.
         If provided, this takes priority over pos_offset and euler_offset. Default is None.
-    link : KinematicLink | None, optional
-        The link to which this sensor is attached, or None for a static sensor. It sets 'entity' and
-        'link_idx_local', which cannot be given with it. Defaults to None.
-    entity : Entity | int | None, optional
-        The entity to which this sensor is attached, or its index in the scene, or None for a static sensor. The
-        keyword 'entity_idx' is also accepted. Defaults to None.
-    link_idx_local : int, optional
-        Prefer 'link' instead. The index in 'entity' of the link to which this sensor is attached. Defaults to 0,
-        the base link.
+    link : KinematicLink | KinematicEntity | None, optional
+        The link to which this sensor is attached, or an entity for its base link, or None for a static sensor.
+        Defaults to None.
     """
 
     res: PositiveVec2IType = (512, 512)

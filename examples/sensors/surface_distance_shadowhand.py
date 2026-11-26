@@ -96,11 +96,10 @@ def main():
     ):
         sensor = scene.add_sensor(
             gs.sensors.SurfaceDistanceProbe(
-                entity_idx=robot.idx,
-                link_idx_local=robot.get_link(link_name).idx_local,
+                link=robot.get_link(link_name),
                 probe_local_pos=((0.0, 0.0, 0.0),),
                 probe_radius=MAX_RANGE,
-                track_link_idx=(duck.base_link_idx, box.base_link_idx),
+                links=(duck.base_link, box.base_link),
                 draw_debug=args.vis,
             )
         )

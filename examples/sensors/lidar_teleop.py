@@ -96,7 +96,7 @@ def main():
         pos_offset = (0.3, 0.0, 0.1)
 
     sensor_kwargs = dict(
-        entity_idx=robot.idx,
+        link=robot.base_link,
         pos_offset=pos_offset,
         euler_offset=(0.0, 0.0, 0.0),
         return_world_frame=True,
