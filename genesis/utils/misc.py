@@ -216,9 +216,20 @@ def get_generic_args(cls: type, generic_cls: type) -> tuple[Any, ...]:
     """
     Return the type arguments that a class gives to its first generic base deriving from a given class.
 
-    The bases are those written in the definition of `cls`, so that a class inherits no binding of its parents. Each
-    argument left as a type variable is None. The tuple is empty when no such base parameterizes a subclass of
-    `generic_cls`.
+    The bases are those written in the class definition alone, so that a class inherits no binding of its parents.
+
+    Parameters
+    ----------
+    cls : type
+        The class whose bases are read.
+    generic_cls : type
+        The generic class that the base parameterizes, directly or through a subclass of it.
+
+    Returns
+    -------
+    tuple
+        The type arguments of the base, None for each one left as a type variable. Empty when no base of `cls`
+        parameterizes a subclass of `generic_cls`.
     """
     for base in cls.__dict__.get("__orig_bases__", ()):
         origin = get_origin(base)

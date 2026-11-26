@@ -27,9 +27,24 @@ def elastic_stress(
     """
     Return the Kirchhoff stress of an elastic material, of the fixed corotated model or of the neo-Hookean one.
 
-    The fixed corotated stress reads the deformation gradient `F_new` once plasticity applies and the rotation `U @ V^T`
-    of the singular value decomposition of the advected deformation gradient. The neo-Hookean stress reads the advected
-    deformation gradient `F_tmp` and its determinant `J` alone. `mu` and `lam` are the Lame parameters.
+    Parameters
+    ----------
+    J : float
+        The determinant of the advected deformation gradient, which the neo-Hookean stress reads.
+    U : qd.types.matrix(3, 3)
+        The left rotation of the singular value decomposition of the advected deformation gradient.
+    V : qd.types.matrix(3, 3)
+        The right rotation of the singular value decomposition of the advected deformation gradient.
+    F_tmp : qd.types.matrix(3, 3)
+        The advected deformation gradient, which the neo-Hookean stress reads.
+    F_new : qd.types.matrix(3, 3)
+        The deformation gradient once plasticity applies, which the fixed corotated stress reads.
+    mu : float
+        The second Lame parameter.
+    lam : float
+        The first Lame parameter.
+    corotated : bool
+        Whether the stress is the fixed corotated one, which reads the rotation `U @ V^T`, or the neo-Hookean one.
     """
     stress = qd.Matrix.zero(gs.qd_float, 3, 3)
     if qd.static(corotated):
@@ -52,8 +67,18 @@ def clamp_singular_values(
     """
     Return the deformation gradient and its singular values once clamped to the elastic range of a material.
 
-    `U`, `S`, `V` are the singular value decomposition of the advected deformation gradient. The singular values are
-    clamped to `[1 - yield_lower, 1 + yield_higher]`.
+    Parameters
+    ----------
+    U : qd.types.matrix(3, 3)
+        The left rotation of the singular value decomposition of the advected deformation gradient.
+    S : qd.types.matrix(3, 3)
+        The diagonal matrix of the singular values of the advected deformation gradient.
+    V : qd.types.matrix(3, 3)
+        The right rotation of the singular value decomposition of the advected deformation gradient.
+    yield_lower : float
+        The compression bound, which clamps the singular values from below at `1 - yield_lower`.
+    yield_higher : float
+        The stretch bound, which clamps the singular values from above at `1 + yield_higher`.
     """
     S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
     for d in qd.static(range(3)):
@@ -81,13 +106,37 @@ class MPMMaterialPhysics[MaterialT: MPM.Base](MaterialPhysics[MaterialT]):
         return True
 
     @qd.func
-    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
+    def update_F_S_Jp(
+        self,
+        J: float,
+        F_tmp: qd.types.matrix(3, 3),
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        Jp: float,
+        eps: float,
+    ):
         """
         Return the deformation gradient, its singular values and the plastic volume ratio once plasticity applies.
 
-        `F_tmp` is the deformation gradient advected over the substep, of determinant `J` and singular value
-        decomposition `U`, `S`, `V`. `Jp` is the plastic volume ratio the substep starts from. By default the material
-        is purely elastic, and the substep keeps all three.
+        By default the material is purely elastic, and the substep keeps all three.
+
+        Parameters
+        ----------
+        J : float
+            The determinant of the advected deformation gradient.
+        F_tmp : qd.types.matrix(3, 3)
+            The deformation gradient advected over the substep.
+        U : qd.types.matrix(3, 3)
+            The left rotation of the singular value decomposition of `F_tmp`.
+        S : qd.types.matrix(3, 3)
+            The diagonal matrix of the singular values of `F_tmp`.
+        V : qd.types.matrix(3, 3)
+            The right rotation of the singular value decomposition of `F_tmp`.
+        Jp : float
+            The plastic volume ratio the substep starts from.
+        eps : float
+            The tolerance of the norms, which keeps their gradient finite at zero.
         """
         F_new = F_tmp
         S_new = S
@@ -95,12 +144,41 @@ class MPMMaterialPhysics[MaterialT: MPM.Base](MaterialPhysics[MaterialT]):
         return F_new, S_new, Jp_new
 
     @qd.func
-    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def update_stress(
+        self,
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        F_tmp: qd.types.matrix(3, 3),
+        F_new: qd.types.matrix(3, 3),
+        J: float,
+        Jp: float,
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         """
         Return the Kirchhoff stress of a particle, by default the one of the fixed corotated model.
 
-        `F_new` and `S` are the deformation gradient and its singular values once plasticity applies (see
-        'update_F_S_Jp'). `actu` is the actuation of the particle along its muscle direction `m_dir`.
+        Parameters
+        ----------
+        U : qd.types.matrix(3, 3)
+            The left rotation of the singular value decomposition of `F_tmp`.
+        S : qd.types.matrix(3, 3)
+            The diagonal matrix of the singular values once plasticity applies (see 'update_F_S_Jp').
+        V : qd.types.matrix(3, 3)
+            The right rotation of the singular value decomposition of `F_tmp`.
+        F_tmp : qd.types.matrix(3, 3)
+            The deformation gradient advected over the substep.
+        F_new : qd.types.matrix(3, 3)
+            The deformation gradient once plasticity applies (see 'update_F_S_Jp').
+        J : float
+            The determinant of `F_tmp`.
+        Jp : float
+            The plastic volume ratio the substep starts from.
+        actu : float
+            The actuation of the particle.
+        m_dir : qd.types.vector(3)
+            The direction of the muscle fibers of the particle, along which the actuation pulls.
         """
         return elastic_stress(J, U, V, F_tmp, F_new, self.material.mu, self.material.lam, corotated=True)
 
@@ -112,7 +190,18 @@ class ElasticPhysics(MPMMaterialPhysics[MPM.Elastic]):
         return self.material.model == "corotation"
 
     @qd.func
-    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def update_stress(
+        self,
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        F_tmp: qd.types.matrix(3, 3),
+        F_new: qd.types.matrix(3, 3),
+        J: float,
+        Jp: float,
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         return elastic_stress(
             J, U, V, F_tmp, F_new, self.material.mu, self.material.lam, corotated=self.material.model == "corotation"
         )
@@ -125,7 +214,18 @@ class MusclePhysics(MPMMaterialPhysics[MPM.Muscle]):
         return self.material.model == "corotation"
 
     @qd.func
-    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def update_stress(
+        self,
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        F_tmp: qd.types.matrix(3, 3),
+        F_new: qd.types.matrix(3, 3),
+        J: float,
+        Jp: float,
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         stress = elastic_stress(
             J, U, V, F_tmp, F_new, self.material.mu, self.material.lam, corotated=self.material.model == "corotation"
         )
@@ -138,17 +238,28 @@ class MusclePhysics(MPMMaterialPhysics[MPM.Muscle]):
 
 class ElastoPlasticPhysics(MPMMaterialPhysics[MPM.ElastoPlastic]):
     @qd.func
-    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
+    def update_F_S_Jp(
+        self,
+        J: float,
+        F_tmp: qd.types.matrix(3, 3),
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        Jp: float,
+        eps: float,
+    ):
         F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         if qd.static(self.material.use_von_mises):
-            S_new = qd.max(S, 0.05)  # to prevent NaN
+            # The singular values are bounded away from zero, where their logarithm is undefined
+            S_new = qd.max(S, 0.05)
             epsilon = qd.Vector([qd.log(S_new[0, 0]), qd.log(S_new[1, 1]), qd.log(S_new[2, 2])])
             epsilon_hat = epsilon - (epsilon.sum() / 3)
             epsilon_hat_norm = epsilon_hat.norm(eps)
             delta_gamma = epsilon_hat_norm - self.material.von_mises_yield_stress / (2 * self.material.mu)
 
-            if delta_gamma > 0:  # Yields
+            # The material yields
+            if delta_gamma > 0:
                 epsilon -= (delta_gamma / epsilon_hat_norm) * epsilon_hat
                 S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
                 for d in qd.static(range(3)):
@@ -166,7 +277,16 @@ class ElastoPlasticPhysics(MPMMaterialPhysics[MPM.ElastoPlastic]):
 
 class SnowPhysics(MPMMaterialPhysics[MPM.Snow]):
     @qd.func
-    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
+    def update_F_S_Jp(
+        self,
+        J: float,
+        F_tmp: qd.types.matrix(3, 3),
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        Jp: float,
+        eps: float,
+    ):
         F_new, S_new = clamp_singular_values(U, S, V, self.material.yield_lower, self.material.yield_higher)
         Jp_new = Jp
         for d in qd.static(range(3)):
@@ -174,7 +294,18 @@ class SnowPhysics(MPMMaterialPhysics[MPM.Snow]):
         return F_new, S_new, Jp_new
 
     @qd.func
-    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def update_stress(
+        self,
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        F_tmp: qd.types.matrix(3, 3),
+        F_new: qd.types.matrix(3, 3),
+        J: float,
+        Jp: float,
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         # Hardening coefficient: material harder when compressed
         h = qd.exp(10 * (1.0 - Jp))
         return elastic_stress(J, U, V, F_tmp, F_new, mu=self.material.mu * h, lam=self.material.lam * h, corotated=True)
@@ -187,14 +318,34 @@ class LiquidPhysics(MPMMaterialPhysics[MPM.Liquid]):
         return self.material.viscous
 
     @qd.func
-    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
+    def update_F_S_Jp(
+        self,
+        J: float,
+        F_tmp: qd.types.matrix(3, 3),
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        Jp: float,
+        eps: float,
+    ):
         F_new = qd.Matrix.identity(gs.qd_float, 3) * qd.pow(J, 1.0 / 3.0)
         S_new = S
         Jp_new = Jp
         return F_new, S_new, Jp_new
 
     @qd.func
-    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def update_stress(
+        self,
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        F_tmp: qd.types.matrix(3, 3),
+        F_new: qd.types.matrix(3, 3),
+        J: float,
+        Jp: float,
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         stress = qd.Matrix.zero(gs.qd_float, 3, 3)
         if qd.static(self.material.viscous):
             # The shear term reads the advected deformation gradient, since plasticity leaves the liquid a pure dilation
@@ -214,7 +365,16 @@ class SandPhysics(MPMMaterialPhysics[MPM.Sand]):
         self.alpha = math.sqrt(2 / 3) * 2 * sin_phi / (3 - sin_phi)
 
     @qd.func
-    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
+    def update_F_S_Jp(
+        self,
+        J: float,
+        F_tmp: qd.types.matrix(3, 3),
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        Jp: float,
+        eps: float,
+    ):
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         epsilon = qd.Vector.zero(gs.qd_float, 3)
         for i in qd.static(range(3)):
@@ -240,7 +400,18 @@ class SandPhysics(MPMMaterialPhysics[MPM.Sand]):
         return F_new, S_new, Jp_new
 
     @qd.func
-    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def update_stress(
+        self,
+        U: qd.types.matrix(3, 3),
+        S: qd.types.matrix(3, 3),
+        V: qd.types.matrix(3, 3),
+        F_tmp: qd.types.matrix(3, 3),
+        F_new: qd.types.matrix(3, 3),
+        J: float,
+        Jp: float,
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         log_S_sum = gs.qd_float(0.0)
         center = qd.Matrix.zero(gs.qd_float, 3, 3)
         for i in qd.static(range(3)):

@@ -219,7 +219,7 @@ def test_perf_dispatch(variant, show_viewer):
     )
     elastic_twin = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(-0.1, 0.2, 0.2),
+            pos=(0.025, 0.25, 0.2),
             size=(0.08, 0.08, 0.08),
         ),
         material=gs.materials.MPM.Elastic(
@@ -311,6 +311,7 @@ def test_perf_dispatch(variant, show_viewer):
 
     final_elastic_pos = elastic.get_particles_pos()
     final_liquid_pos = liquid.get_particles_pos()
+
     # Gravity acted: particles moved down on average.
     assert init_elastic_pos[..., 2].mean() - final_elastic_pos[..., 2].mean() > 0.05
     assert init_liquid_pos[..., 2].mean() - final_liquid_pos[..., 2].mean() > 0.05
@@ -355,7 +356,7 @@ def test_material_subclass(precision, show_viewer):
         pass
 
     with pytest.raises(gs.GenesisException, match="No MPMMaterialPhysics is registered"):
-        gs.Scene().add_entity(morph=gs.morphs.Box(size=(0.08, 0.08, 0.08)), material=UnboundMaterial())
+        gs.Scene().add_entity(morph=gs.morphs.Box(pos=(0, 0, 0.5), size=(0.08, 0.08, 0.08)), material=UnboundMaterial())
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
