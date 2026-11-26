@@ -208,6 +208,10 @@ class SPHBoundaries(Data, kind=DataKind.SCRATCH):
     # substep, the first fixed_envs_n_geoms[i_b] of them in ascending order (see kernel_select_sph_fixed_geoms)
     fixed_envs_geoms: qd.Tensor = field(int, shape=(FIXED_GEOMS, ENVS), labels=FIXED_SPH)
     fixed_envs_n_geoms: qd.Tensor = field(int, shape=(ENVS,), labels=FIXED_SPH)
+    # The moment about the centroid of each segment of the impulses the SPH particles give it over the substep, each
+    # acting at the point of the segment closest to its particle, which spares the moment on a rigid link the error of
+    # taking the impulse at the centroid of a segment
+    segments_moment: qd.Tensor = field((float, 3), shape=(PARTICLES, ENVS))
 
 
 class LegacyCouplerState(Data, kind=DataKind.STATE):
@@ -506,8 +510,12 @@ class LegacyCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, R
             np.array([geom.type == gs.GEOM_TYPE.PLANE for geom in geoms], dtype=bool),
             [len(geom.init_faces) for geom in geoms],
         )
+        # The segments of the moving rigid geoms locate the points of their surfaces closest to the particles exactly
+        # whatever their size, and carry the impulse of the liquid with its moment (see 'segments_moment'). Larger
+        # segments spare the particles some of the segments to look through, while widening their reach by the extent
+        # of the largest segment and the wet area of a link by a row of segments along the free surface.
         (tris_idx,) = np.nonzero(~rigid_tris_is_fixed & ~rigid_tris_is_plane)
-        tri_idx, corners_bary = split_triangles(rigid_tris_verts_pos[tris_idx], particle_size)
+        tri_idx, corners_bary = split_triangles(rigid_tris_verts_pos[tris_idx], 2.0 * particle_size)
         segments_tri_idx = tris_idx[tri_idx]
         segments_geom_idx_parts = [rigid_tris_geom_idx[segments_tri_idx]]
         segments_corners_parts = [np.einsum("nci,nij->ncj", corners_bary, rigid_tris_verts_pos[segments_tri_idx])]
@@ -2577,6 +2585,7 @@ def kernel_sph_boundaries_impulse(
         i_q = i_t // N_LANES % n_segments
         i_b = i_t // (N_LANES * n_segments)
         impulse = qd.Vector.zero(gs.qd_float, 3)
+        moment = qd.Vector.zero(gs.qd_float, 3)
         n_wet = 0
         i_sg = -1
         is_wet = False
@@ -2640,20 +2649,28 @@ def kernel_sph_boundaries_impulse(
                     if i_run < n_run:
                         # The particles whose nearest point of a surface lies on the segment give it their impulse
                         i_p = sph_state.hash_grid.particles_idx[i_r, i_b]
+                        pos = sph_state.particles.pos[i_p, i_b]
                         for i_s in qd.static(range(3)):
                             if sph_state.boundary.surfaces_segment[i_p, i_s, i_b] == i_sg:
                                 n_wet = n_wet + 1
-                                impulse = impulse + (
-                                    sph_state.boundary.surfaces_impulse[i_p, i_s, i_b]
-                                    * sph_state.boundary.surfaces_normal[i_p, i_s, i_b]
+                                normal_s = sph_state.boundary.surfaces_normal[i_p, i_s, i_b]
+                                impulse_s = sph_state.boundary.surfaces_impulse[i_p, i_s, i_b] * normal_s
+                                # The impulse acts at the point of the tangent plane closest to the particle
+                                contact = (
+                                    pos
+                                    - (normal_s.dot(pos) - sph_state.boundary.surfaces_offset[i_p, i_s, i_b]) * normal_s
                                 )
+                                impulse = impulse + impulse_s
+                                moment = moment + (contact - centroid).cross(impulse_s)
         if qd.static(N_LANES > 1):
             # The lanes sum scalars alone
             n_wet = qd_block_sum(n_wet)
             for i_d in qd.static(range(3)):
                 impulse[i_d] = qd_block_sum(impulse[i_d])
+                moment[i_d] = qd_block_sum(moment[i_d])
         if i_lane == 0 and is_wet:
             sph_boundaries.segments_impulse[i_sg, i_b] = impulse
+            sph_boundaries.segments_moment[i_sg, i_b] = moment
             sph_boundaries.segments_is_wet[i_sg, i_b] = n_wet > 0
 
     # The links of the rigid geoms take the impulse of their wet segments, and the mass of the liquid one particle size
@@ -2709,13 +2726,16 @@ def kernel_sph_boundaries_impulse(
                         segment_mass = (
                             sph_boundaries.rho_rest[None] * sph_boundaries.segments.area[i_q, i_b] * particle_size
                         )
+                        force_scale = mass / (mass + sph_boundaries.links_added_mass[i_l, i_b])
                         force = (
                             sph_boundaries.segments_impulse[i_sg, i_b] / sph_info.substep_dt[None]
                             - segment_mass * sph_info.gravity[i_b]
-                        ) * (mass / (mass + sph_boundaries.links_added_mass[i_l, i_b]))
-                        # The force acts at the centroid of the segment
-                        moment = (sph_boundaries.segments.centroid[i_sg, i_b] - links_state.root_COM[i_l, i_b]).cross(
-                            force
+                        ) * force_scale
+                        # The force acts at the centroid of the segment, plus the moment of the impulses about it
+                        arm = sph_boundaries.segments.centroid[i_sg, i_b] - links_state.root_COM[i_l, i_b]
+                        moment = (
+                            arm.cross(force)
+                            + force_scale / sph_info.substep_dt[None] * (sph_boundaries.segments_moment[i_sg, i_b])
                         )
             is_tail = i_l >= 0
             if qd.static(N_LANES > 1):
