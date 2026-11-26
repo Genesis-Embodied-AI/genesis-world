@@ -60,7 +60,7 @@ from genesis.utils.misc import (
     qd_to_numpy,
     tensor_to_array,
 )
-from genesis.utils.raycast_qd import triangle_face_normal
+from genesis.utils.raycast_qd import ray_aabb_intersection, triangle_face_normal
 from genesis.utils.sdf import SDFInfo
 from genesis.utils.simt import (
     ExactSums,
@@ -1558,6 +1558,57 @@ def kernel_fem_surface_force(
 
 
 @qd.func
+def func_sweep_particle_box(
+    pos_start: qd.types.vector(3), pos_end: qd.types.vector(3), half_size: qd.types.vector(3), radius: float, eps: float
+):
+    """Sweep a particle sphere in the box frame. Return the endpoint distance to the first contact plane and its normal,
+    or the radius and a zero normal on a miss.
+    """
+    delta = pos_end - pos_start
+    bounds = half_size + radius
+    time = ray_aabb_intersection(pos_start, delta, -bounds, bounds, eps)
+    signed_dist = radius
+    normal = qd.Vector.zero(gs.qd_float, 3)
+    while 0.0 <= time < 1.0:
+        # Between successive box face planes the closest feature stays the same, so the offset from the box varies
+        # linearly. Its squared length reaches the squared particle radius at the first contact with that feature.
+        time_next = gs.qd_float(1.0)
+        for axis in qd.static(range(3)):
+            if delta[axis] != 0.0:
+                for side in qd.static((-1, 1)):
+                    time_face = (side * half_size[axis] - pos_start[axis]) / delta[axis]
+                    if time_face > time:
+                        time_next = qd.min(time_next, time_face)
+        pos = pos_start + time * delta
+        pos_next = pos_start + time_next * delta
+        offset = pos - qd.math.clamp(pos, -half_size, half_size)
+        offset_next = pos_next - qd.math.clamp(pos_next, -half_size, half_size)
+        delta_offset = offset_next - offset
+        approach = -offset.dot(delta_offset)
+        if approach <= 0.0:
+            # A center starting on a bare face has zero offset even when it travels straight through that face
+            if time == 0.0 and offset.norm_sqr() == 0.0:
+                for axis in qd.static(range(3)):
+                    if qd.abs(pos[axis]) == half_size[axis] and pos[axis] * delta[axis] < 0.0:
+                        normal = qd.Vector.zero(gs.qd_float, 3)
+                        normal[axis] = qd.math.sign(pos[axis])
+                        signed_dist = normal[axis] * pos_end[axis] - half_size[axis]
+            break
+        gap_sq = offset.norm_sqr() - radius * radius
+        discriminant = approach * approach - delta_offset.norm_sqr() * gap_sq
+        if discriminant >= 0.0:
+            fraction = qd.max(gap_sq, 0.0) / (approach + qd.sqrt(discriminant))
+            if fraction <= 1.0:
+                offset_hit = offset + fraction * delta_offset
+                normal = offset_hit.normalized()
+                pos_contact = pos + fraction * (pos_next - pos) - offset_hit
+                signed_dist = (pos_end - pos_contact).dot(normal)
+                break
+        time = time_next
+    return signed_dist, normal
+
+
+@qd.func
 def func_pbd_collide_with_rigid_geom(
     i_p: int,
     i_g: int,
@@ -1584,9 +1635,9 @@ def func_pbd_collide_with_rigid_geom(
         i_g, i_b, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
     )
     pos_start = pbd_state.particles_reordered.ipos[i_p, i_b]
-    # The SDF at the predicted position points to the closest face, which is the far one once the particle center moves
-    # past the middle of a thin box within one substep. The face that the center enters through gives the side of
-    # contact instead. The sweep takes the pose of the box as constant over the substep, which holds for a fixed geom.
+    particle_radius = pbd_info.particle_size[None] / 2
+    # Beyond the middle of a thin box the endpoint SDF pushes toward the far face. A fixed box keeps the same local
+    # frame throughout the substep, so the particle can use the contact plane it first reaches along its path.
     if geoms_info.is_fixed[i_g] and geoms_info.type[i_g] == gs.GEOM_TYPE.BOX:
         box_pos = geoms_state.pos[i_g, i_b]
         box_quat = geoms_state.quat[i_g, i_b]
@@ -1594,22 +1645,15 @@ def func_pbd_collide_with_rigid_geom(
         pos_end_local = qd_inv_transform_by_trans_quat(pos_world, box_pos, box_quat)
         geom_data = geoms_info.data[i_g]
         box_half_size = 0.5 * gs.qd_vec3([geom_data[0], geom_data[1], geom_data[2]])
-        for axis in qd.static(range(3)):
-            side = qd.select(pos_start_local[axis] >= 0.0, 1.0, -1.0)
-            gap_start = side * pos_start_local[axis] - box_half_size[axis]
-            gap_end = side * pos_end_local[axis] - box_half_size[axis]
-            if gap_start >= 0.0 and gap_end < 0.0:
-                pos_hit = pos_start_local + gap_start / (gap_start - gap_end) * (pos_end_local - pos_start_local)
-                u, v = qd.static((axis + 1) % 3), qd.static((axis + 2) % 3)
-                if qd.abs(pos_hit[u]) <= box_half_size[u] and qd.abs(pos_hit[v]) <= box_half_size[v]:
-                    normal_local = qd.Vector.zero(gs.qd_float, 3)
-                    normal_local[axis] = side
-                    contact_normal = qd_transform_by_quat(normal_local, box_quat)
-                    signed_dist = gap_end
+        dist_box, normal_box = func_sweep_particle_box(
+            pos_start_local, pos_end_local, box_half_size, particle_radius, rigid_info.EPS[None]
+        )
+        if dist_box < particle_radius:
+            signed_dist = dist_box
+            contact_normal = qd_transform_by_quat(normal_box, box_quat)
 
     new_pos = pos_world
     new_vel = vel
-    particle_radius = pbd_info.particle_size[None] / 2
     if signed_dist < particle_radius:
         new_pos = pos_world + contact_normal * (particle_radius - signed_dist)
         new_vel = (new_pos - pos_start) / pbd_info.substep_dt[None]
