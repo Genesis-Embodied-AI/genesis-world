@@ -53,7 +53,7 @@ from genesis.options import (
     ViewerOptions,
     VisOptions,
 )
-from genesis.options.entities import EntityT, get_entity_spec
+from genesis.options.entities import EntityT, get_default_surface, get_entity_spec
 from genesis.options.morphs import Morph
 from genesis.options.recorders import RecorderOptions, TrajectoryFile
 from genesis.options.renderers import RendererOptions
@@ -398,8 +398,9 @@ class Scene(BuildableMixin, RBC):
         material : gs.materials.Material | None, optional
             The material of the entity. If None, use ``gs.materials.Rigid()``.
         surface : gs.surfaces.Surface | None, optional
-            The surface of the entity. If None, resolved based on the morph: ``gs.surfaces.Default(metallic=0.3,
-            roughness=0.5)`` for a plane, and ``gs.surfaces.Default()`` otherwise. Defaults to None.
+            The surface of the entity. If None, resolved based on the morph and the material:
+            ``gs.surfaces.Default(metallic=0.3, roughness=0.5)`` for a plane, ``gs.surfaces.Water()`` for a liquid,
+            and ``gs.surfaces.Default()`` otherwise. Defaults to None.
         visualize_contact : bool | None, optional
             Whether the contacts of the entity are drawn as markers, arrows that the interactive viewer and the debug
             cameras draw. Each contact is read back and drawn at every frame, so reserve it for the entities being
@@ -427,14 +428,10 @@ class Scene(BuildableMixin, RBC):
         material = spec.material
         # The surface resolves on a copy, since other entities may share it. The morph resolves in place, as shared
         # morphs rely on (see 'Entity.spec').
-        if spec.surface is not None:
-            surface = spec.surface.model_copy()
-        elif isinstance(spec.morphs[0], gs.morphs.Plane):
-            # A slightly metallic, glossy floor keeps the colors and the contrast of the checker texture of the plane
-            # under the default lights, and gives it the sheen of the ground planes of common simulators
-            surface = gs.surfaces.Default(metallic=0.3, roughness=0.5)
+        if spec.surface is None:
+            surface = get_default_surface(spec.morphs[0], material)
         else:
-            surface = gs.surfaces.Default()
+            surface = spec.surface.model_copy()
 
         # some morph should not smooth surface normal
         if isinstance(spec.morphs[0], (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)):
@@ -864,7 +861,8 @@ class Scene(BuildableMixin, RBC):
             The maximum number of particles the emitter holds at once, recycled once all are emitted. Each one costs
             memory and simulation time from the start, emitted or not. Default is 20000.
         surface : gs.surfaces.Surface | None, optional
-            The surface of the emitted particles. Defaults to ``gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))``.
+            The surface of the emitted particles. If None, resolved as ``Scene.add_entity`` does:
+            ``gs.surfaces.Water()`` for a liquid and ``gs.surfaces.Default()`` otherwise. Defaults to None.
         spec : gs.entities.MPM | gs.entities.SPH | gs.entities.PBD | None, optional
             The entity spec of the emitted particles, which replaces the material and the surface.
 
@@ -897,12 +895,8 @@ class Scene(BuildableMixin, RBC):
         if emitter_spec.morph is not None:
             gs.raise_exception("The emitter sets the morph of its entity spec. Leave it None.")
 
-        surface = emitter_spec.surface
-        if surface is None:
-            surface = gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))
-
         morph = gs.morphs.Nowhere(n_particles=max_particles)
-        entity = self.add_entity(spec=emitter_spec.model_copy(update={"morph": morph, "surface": surface}))
+        entity = self.add_entity(spec=emitter_spec.model_copy(update={"morph": morph}))
         emitter = Emitter(entity, max_particles)
         self._emitters.append(emitter)
         return emitter

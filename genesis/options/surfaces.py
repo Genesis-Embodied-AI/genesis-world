@@ -254,6 +254,16 @@ class Surface(Options):
         """
         return 0.0
 
+    @property
+    def transmission_factor(self) -> float:
+        """Share of the light that the surface lets through.
+
+        The rasterizer draws a surface letting light through as a clear dielectric tinted by its color, which reflects
+        more light at grazing angles, as its index of refraction gives. It is 1.0 for glass, the specular transmission
+        of a BSDF surface, and 0.0 otherwise.
+        """
+        return 0.0
+
     def get_rgba(self, batch: bool = False) -> BatchTexture | Texture:
         return _make_rgba(_resolve_albedo(self.texture, self.emission), None, batch)
 
@@ -508,6 +518,10 @@ class Glass(Surface):
     @property
     def roughness_factor(self) -> float:
         return _get_texture_mean_value(self.roughness_texture, self.default_roughness)
+
+    @property
+    def transmission_factor(self) -> float:
+        return 1.0
 
     @property
     def texture(self) -> Texture | None:
@@ -809,6 +823,10 @@ class BSDF(Surface):
     @property
     def metallic_factor(self) -> float:
         return _get_texture_mean_value(self.metallic_texture, 0.0)
+
+    @property
+    def transmission_factor(self) -> float:
+        return self.specular_trans
 
     @property
     def texture(self) -> Texture | None:

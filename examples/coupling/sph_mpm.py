@@ -48,9 +48,6 @@ def main():
             size=(0.7, 0.9, 0.5),
         ),
         material=gs.materials.SPH.Liquid(),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.6, 1.0, 1.0),
-        ),
     )
     duck = scene.add_entity(
         morph=gs.morphs.Mesh(

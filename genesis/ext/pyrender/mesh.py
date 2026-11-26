@@ -175,6 +175,8 @@ class Mesh(object):
         metallic_factor=0.0,
         roughness_factor=1.0,
         base_color_factor=(1.0, 1.0, 1.0),
+        transmission_factor=0.0,
+        ior=1.5,
     ):
         """Create a Mesh from a :class:`~trimesh.base.Trimesh`.
 
@@ -212,6 +214,10 @@ class Mesh(object):
             A PBR material keeps its own. Defaults to 1.0.
         base_color_factor : (3,) float, optional
             Color that the base color of every material made from the mesh is multiplied by. Defaults to white.
+        transmission_factor : float, optional
+            Share of the light that the materials made from the mesh let through. Defaults to 0.0.
+        ior : float | None, optional
+            Index of refraction of the materials made from the mesh, 1.5 if None. Defaults to 1.5.
 
         Returns
         -------
@@ -264,6 +270,9 @@ class Mesh(object):
                 )
             if material is None:
                 primitive_material.baseColorFactor = primitive_material.baseColorFactor * (*base_color_factor, 1.0)
+                # The materials of trimesh hold no transmission, so every material made here takes the given one
+                primitive_material.transmissionFactor = transmission_factor
+                primitive_material.ior = ior
 
             primitive_material.wireframe = wireframe
 

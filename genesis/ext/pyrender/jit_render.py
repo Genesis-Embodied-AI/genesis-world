@@ -46,6 +46,7 @@ GL_BLEND = load_const("GL_BLEND")
 GL_SRC_ALPHA = load_const("GL_SRC_ALPHA")
 GL_ONE_MINUS_SRC_ALPHA = load_const("GL_ONE_MINUS_SRC_ALPHA")
 GL_ONE = load_const("GL_ONE")
+GL_SRC1_COLOR = load_const("GL_SRC1_COLOR")
 GL_ZERO = load_const("GL_ZERO")
 GL_FRONT_AND_BACK = load_const("GL_FRONT_AND_BACK")
 GL_LINE = load_const("GL_LINE")
@@ -325,7 +326,8 @@ class JITRenderer:
             self.set_primitive(scene, node_list, primitive_list)
             scene.reset_meshes_updated()
         elif self._scene_revision != scene.revision:
-            # A node moves through Scene.set_pose, which advances the revision. Its own transform setters leave it alone.
+            # A node moves through Scene.set_pose, which advances the revision. Its own transform setters leave it
+            # alone.
             for i, node in enumerate(self.node_list):
                 self.pose[i] = scene.get_pose(node)
             # Instances move with the simulation, so where they place their primitive has to be refreshed as well
@@ -554,11 +556,12 @@ class JITRenderer:
         self.texture_layers_idx = np.full(n, -1, np.int32)
         self.texture_layers_idx[is_layered] = np.arange(np.count_nonzero(is_layered))
         self.texture_layers = np.zeros((np.count_nonzero(is_layered), len(self.envs_offset), 2), np.float32)
-        self.pbr_mat = np.zeros((n, 9), np.float32)  # base_color <- 4, metallic <- 1, roughness <- 1, emissive <- 3
+        # base_color <- 4, metallic <- 1, roughness <- 1, emissive <- 3, transmission <- 1, ior <- 1
+        self.pbr_mat = np.zeros((n, 11), np.float32)
         self.spec_mat = np.zeros((n, 11), np.float32)  # diffuse <- 4, specular <- 3, glossiness <- 1, emissive <- 3
         # (blend, wireframe, double sided, pbr texture, reflective floor, transparent, marker, env shared, env filtered,
-        # translucent color)
-        self.render_flags = np.zeros((n, 10), np.int8)
+        # translucent color, transmissive)
+        self.render_flags = np.zeros((n, 11), np.int8)
         self.mode = np.zeros(n, np.int32)
         self.n_instances = np.zeros(n, np.int32)
         # Per-(primitive, env) visibility used only when a primitive is "env filtered" (render_flags column 8), i.e. a
@@ -665,6 +668,8 @@ class JITRenderer:
                 self.pbr_mat[i, 4] = material.metallicFactor
                 self.pbr_mat[i, 5] = material.roughnessFactor
                 self.pbr_mat[i, 6:9] = material.emissiveFactor
+                self.pbr_mat[i, 9] = material.transmissionFactor
+                self.pbr_mat[i, 10] = material.ior
             elif isinstance(material, SpecularGlossinessMaterial):
                 self.spec_mat[i, :4] = material.diffuseFactor
                 self.spec_mat[i, 4:7] = material.specularFactor
@@ -681,6 +686,7 @@ class JITRenderer:
             # The shadow maps sample no texture, so a mesh made transparent by the alpha of its texels alone casts the
             # shadow of its whole surface
             self.render_flags[i, 9] = node_list[i].mesh.has_translucent_color
+            self.render_flags[i, 10] = isinstance(material, MetallicRoughnessMaterial) and material.is_transmissive
             self.views[i] = node_list[i].mesh.views
             # A pass drawing one environment draws the instance of that environment of a per-environment instanced
             # primitive, and every instance of any other, which the culling below keeps to its environment
@@ -906,6 +912,7 @@ class JITRenderer:
                 set_uniform_matrix_4fv(pid, "M", pose[id], gl)
                 gl.glBindVertexArray(vao_id[id])
 
+                is_culled = not (render_flags[id, 2] or flags & RenderFlags_SKIP_CULL_FACES)
                 if is_rgba and not flags & RenderFlags_FLAT:
                     tf = textures[id, 0]
                     texture_list = [
@@ -934,13 +941,20 @@ class JITRenderer:
                         set_uniform_1f(pid, "material.metallic_factor", pbr_mat[id, 4], gl)
                         set_uniform_1f(pid, "material.roughness_factor", pbr_mat[id, 5], gl)
                         set_uniform_3fv(pid, "material.emissive_factor", pbr_mat[id, 6:9], gl)
+                        set_uniform_1f(pid, "material.transmission_factor", pbr_mat[id, 9], gl)
+                        set_uniform_1f(pid, "material.ior", pbr_mat[id, 10], gl)
                     else:
                         set_uniform_4fv(pid, "material.diffuse_factor", spec_mat[id, :4], gl)
                         set_uniform_3fv(pid, "material.specular_factor", spec_mat[id, 4:7], gl)
                         set_uniform_1f(pid, "material.roughness_factor", spec_mat[id, 7], gl)
                         set_uniform_3fv(pid, "material.glossiness_factor", spec_mat[id, 8:11], gl)
 
-                    if render_flags[id, 0]:
+                    if render_flags[id, 10]:
+                        # A transmissive material adds the light it reflects to the background, which its second output
+                        # attenuates by the light it lets through (see 'frag_transmittance' in mesh.frag)
+                        gl.glEnable(GL_BLEND)
+                        gl.glBlendFunc(GL_ONE, GL_SRC1_COLOR)
+                    elif render_flags[id, 0]:
                         # FIXME: Note that enabling GL_BLEND yield non-deterministic results on Nvidia GPU.
                         # As a result, it must only be enabled if absolutely necessary rather than systematically.
                         gl.glEnable(GL_BLEND)
@@ -956,11 +970,11 @@ class JITRenderer:
                     else:
                         gl.glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
-                    if render_flags[id, 2] or flags & RenderFlags_SKIP_CULL_FACES:
-                        gl.glDisable(GL_CULL_FACE)
-                    else:
+                    if is_culled:
                         gl.glEnable(GL_CULL_FACE)
                         gl.glCullFace(GL_BACK if det_reflection > 0 else GL_FRONT)
+                    else:
+                        gl.glDisable(GL_CULL_FACE)
                 else:
                     gl.glEnable(GL_CULL_FACE)
                     gl.glCullFace(GL_BACK if det_reflection > 0 else GL_FRONT)
@@ -981,94 +995,103 @@ class JITRenderer:
                 if is_layer_set and env_idx >= 0:
                     set_texture_layers(pid, textures[id, 0], texture_layers[i_layers, env_idx], gl)
 
-                if render_flags[id, 7] or env_idx == -1:
-                    if (render_flags[id, 8] or is_layer_set) and env_idx == -1:
-                        # Combined draw-all of a heterogeneous variant: draw only the environments it is active in,
-                        # otherwise the variant would be drawn in every environment's instance. A primitive sampling a
-                        # texture array is drawn one environment at a time as well, each at its own layer.
-                        for k in range(n_instances[id]):
-                            if not env_active[id, k]:
-                                continue
-                            if is_layer_set:
-                                set_texture_layers(pid, textures[id, 0], texture_layers[i_layers, k], gl)
-                            if IS_OPENGL_42_AVAILABLE:
-                                if n_indices[id] > 0:
-                                    gl.glDrawElementsInstancedBaseInstance(
-                                        mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1, k
-                                    )
+                # A single-sided transmissive surface is drawn twice, back faces first and front faces over them, so
+                # that the far side of a glass or of a body of water shows through its near side
+                n_face_passes = 2 if is_rgba and render_flags[id, 10] and is_culled else 1
+                for i_face_pass in range(n_face_passes):
+                    if n_face_passes == 2:
+                        is_front_culled = (i_face_pass == 0) == (det_reflection > 0)
+                        gl.glCullFace(GL_FRONT if is_front_culled else GL_BACK)
+                    if render_flags[id, 7] or env_idx == -1:
+                        if (render_flags[id, 8] or is_layer_set) and env_idx == -1:
+                            # Combined draw-all of a heterogeneous variant: draw only the environments it is active
+                            # in, otherwise the variant would be drawn in every environment's instance. A primitive
+                            # sampling a texture array is drawn one environment at a time too, each at its own layer.
+                            for k in range(n_instances[id]):
+                                if not env_active[id, k]:
+                                    continue
+                                if is_layer_set:
+                                    set_texture_layers(pid, textures[id, 0], texture_layers[i_layers, k], gl)
+                                if IS_OPENGL_42_AVAILABLE:
+                                    if n_indices[id] > 0:
+                                        gl.glDrawElementsInstancedBaseInstance(
+                                            mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1, k
+                                        )
+                                    else:
+                                        gl.glDrawArraysInstancedBaseInstance(mode[id], 0, -n_indices[id], 1, k)
                                 else:
-                                    gl.glDrawArraysInstancedBaseInstance(mode[id], 0, -n_indices[id], 1, k)
-                            else:
-                                gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
-                                for j in range(4):
-                                    gl.glVertexAttribPointer(
-                                        inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(k * 64 + j * 16)
-                                    )
-                                if is_env_instanced[id]:
-                                    gl.glBindBuffer(GL_ARRAY_BUFFER, env_offset_buffer)
-                                    gl.glVertexAttribPointer(
-                                        inst_attr_start[id] + 4, 3, GL_FLOAT, 0, 12, address_to_ptr(k * 12)
-                                    )
-                                if inst_tint_buffer_id[id]:
-                                    gl.glBindBuffer(GL_ARRAY_BUFFER, inst_tint_buffer_id[id])
-                                    gl.glVertexAttribPointer(
-                                        inst_attr_start[id] + 5, 4, GL_FLOAT, 0, 16, address_to_ptr(k * 16)
-                                    )
-                                if n_indices[id] > 0:
-                                    gl.glDrawElementsInstanced(
-                                        mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1
-                                    )
-                                else:
-                                    gl.glDrawArraysInstanced(mode[id], 0, -n_indices[id], 1)
-                                if inst_tint_buffer_id[id]:
-                                    gl.glVertexAttribPointer(
-                                        inst_attr_start[id] + 5, 4, GL_FLOAT, 0, 16, address_to_ptr(0)
-                                    )
-                                if is_env_instanced[id]:
-                                    gl.glBindBuffer(GL_ARRAY_BUFFER, env_offset_buffer)
-                                    gl.glVertexAttribPointer(
-                                        inst_attr_start[id] + 4, 3, GL_FLOAT, 0, 12, address_to_ptr(0)
-                                    )
-                                gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
-                                for j in range(4):
-                                    gl.glVertexAttribPointer(
-                                        inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(j * 16)
-                                    )
-                    elif n_indices[id] > 0:
-                        gl.glDrawElementsInstanced(
-                            mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), n_instances[id]
-                        )
+                                    gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
+                                    for j in range(4):
+                                        gl.glVertexAttribPointer(
+                                            inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(k * 64 + j * 16)
+                                        )
+                                    if is_env_instanced[id]:
+                                        gl.glBindBuffer(GL_ARRAY_BUFFER, env_offset_buffer)
+                                        gl.glVertexAttribPointer(
+                                            inst_attr_start[id] + 4, 3, GL_FLOAT, 0, 12, address_to_ptr(k * 12)
+                                        )
+                                    if inst_tint_buffer_id[id]:
+                                        gl.glBindBuffer(GL_ARRAY_BUFFER, inst_tint_buffer_id[id])
+                                        gl.glVertexAttribPointer(
+                                            inst_attr_start[id] + 5, 4, GL_FLOAT, 0, 16, address_to_ptr(k * 16)
+                                        )
+                                    if n_indices[id] > 0:
+                                        gl.glDrawElementsInstanced(
+                                            mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1
+                                        )
+                                    else:
+                                        gl.glDrawArraysInstanced(mode[id], 0, -n_indices[id], 1)
+                                    if inst_tint_buffer_id[id]:
+                                        gl.glVertexAttribPointer(
+                                            inst_attr_start[id] + 5, 4, GL_FLOAT, 0, 16, address_to_ptr(0)
+                                        )
+                                    if is_env_instanced[id]:
+                                        gl.glBindBuffer(GL_ARRAY_BUFFER, env_offset_buffer)
+                                        gl.glVertexAttribPointer(
+                                            inst_attr_start[id] + 4, 3, GL_FLOAT, 0, 12, address_to_ptr(0)
+                                        )
+                                    gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
+                                    for j in range(4):
+                                        gl.glVertexAttribPointer(
+                                            inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(j * 16)
+                                        )
+                        elif n_indices[id] > 0:
+                            gl.glDrawElementsInstanced(
+                                mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), n_instances[id]
+                            )
+                        else:
+                            gl.glDrawArraysInstanced(mode[id], 0, -n_indices[id], n_instances[id])
+                    elif IS_OPENGL_42_AVAILABLE:
+                        if n_indices[id] > 0:
+                            gl.glDrawElementsInstancedBaseInstance(
+                                mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1, env_idx
+                            )
+                        else:
+                            gl.glDrawArraysInstancedBaseInstance(mode[id], 0, -n_indices[id], 1, env_idx)
                     else:
-                        gl.glDrawArraysInstanced(mode[id], 0, -n_indices[id], n_instances[id])
-                elif IS_OPENGL_42_AVAILABLE:
-                    if n_indices[id] > 0:
-                        gl.glDrawElementsInstancedBaseInstance(
-                            mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1, env_idx
-                        )
-                    else:
-                        gl.glDrawArraysInstancedBaseInstance(mode[id], 0, -n_indices[id], 1, env_idx)
-                else:
-                    # OpenGL 4.1 fallback: rebind instance attributes with offset
-                    gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
-                    for j in range(4):
-                        gl.glVertexAttribPointer(
-                            inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(env_idx * 64 + j * 16)
-                        )
-                    if inst_tint_buffer_id[id]:
-                        gl.glBindBuffer(GL_ARRAY_BUFFER, inst_tint_buffer_id[id])
-                        gl.glVertexAttribPointer(
-                            inst_attr_start[id] + 5, 4, GL_FLOAT, 0, 16, address_to_ptr(env_idx * 16)
-                        )
-                    if n_indices[id] > 0:
-                        gl.glDrawElementsInstanced(mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1)
-                    else:
-                        gl.glDrawArraysInstanced(mode[id], 0, -n_indices[id], 1)
-                    # Restore default attribute pointer (offset 0) to avoid corrupting VAO state
-                    if inst_tint_buffer_id[id]:
-                        gl.glVertexAttribPointer(inst_attr_start[id] + 5, 4, GL_FLOAT, 0, 16, address_to_ptr(0))
+                        # OpenGL 4.1 fallback: rebind instance attributes with offset
                         gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
-                    for j in range(4):
-                        gl.glVertexAttribPointer(inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(j * 16))
+                        for j in range(4):
+                            gl.glVertexAttribPointer(
+                                inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(env_idx * 64 + j * 16)
+                            )
+                        if inst_tint_buffer_id[id]:
+                            gl.glBindBuffer(GL_ARRAY_BUFFER, inst_tint_buffer_id[id])
+                            gl.glVertexAttribPointer(
+                                inst_attr_start[id] + 5, 4, GL_FLOAT, 0, 16, address_to_ptr(env_idx * 16)
+                            )
+                        if n_indices[id] > 0:
+                            gl.glDrawElementsInstanced(mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1)
+                        else:
+                            gl.glDrawArraysInstanced(mode[id], 0, -n_indices[id], 1)
+                        # Restore default attribute pointer (offset 0) to avoid corrupting VAO state
+                        if inst_tint_buffer_id[id]:
+                            gl.glVertexAttribPointer(inst_attr_start[id] + 5, 4, GL_FLOAT, 0, 16, address_to_ptr(0))
+                            gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
+                        for j in range(4):
+                            gl.glVertexAttribPointer(
+                                inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(j * 16)
+                            )
 
                 gl.glBindVertexArray(0)
             gl.glUseProgram(0)

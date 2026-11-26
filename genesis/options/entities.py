@@ -49,6 +49,25 @@ def get_entity_spec_cls(material: Material) -> type["Spec"]:
     gs.raise_exception(f"No entity spec class admits material {type(material).__name__}.")
 
 
+def get_default_surface(morph: Morph | None, material: Material | None) -> Surface:
+    """Return the surface of an entity given none, based on its morph and its material.
+
+    Parameters
+    ----------
+    morph : Morph | None
+        The morph of the entity, the first one for heterogeneous morphs.
+    material : Material | None
+        The material of the entity.
+    """
+    if isinstance(morph, gs.morphs.Plane):
+        # A slightly metallic, glossy floor keeps the colors and the contrast of the checker texture of the plane
+        # under the default lights, and gives it the sheen of the ground planes of common simulators
+        return gs.surfaces.Default(metallic=0.3, roughness=0.5)
+    if isinstance(material, (materials.SPH.Liquid, materials.MPM.Liquid, materials.PBD.Liquid)):
+        return gs.surfaces.Water()
+    return gs.surfaces.Default()
+
+
 def get_entity_spec(
     morph: Morph | Iterable[Morph] | None = None,
     material: Material | None = None,
@@ -68,7 +87,9 @@ def get_entity_spec(
     if isinstance(morph, Iterable) and not isinstance(morph, Morph):
         morph = tuple(morph)
     if vis_mode is not None:
-        surface = (gs.surfaces.Default() if surface is None else surface).model_copy(update={"vis_mode": vis_mode})
+        if surface is None:
+            surface = get_default_surface(morph[0] if isinstance(morph, tuple) else morph, material)
+        surface = surface.model_copy(update={"vis_mode": vis_mode})
     # Only rigid entities have contacts to draw, and 'False' asks for nothing, so every kind of entity accepts it
     if "visualize_contact" not in spec_cls.model_fields:
         if visualize_contact:
@@ -96,8 +117,9 @@ class Spec(Options, Generic[EntityT]):
         environment simulates one of them (see ``Scene.add_entity``). It must be set once the spec reaches
         ``Scene.add_entity``, while the spec given to ``Scene.add_emitter`` leaves it None, since the emitter sets it.
     surface : Surface | None, optional
-        The appearance of the entity. If None, resolved based on the morph: ``gs.surfaces.Default(metallic=0.3,
-        roughness=0.5)`` for a plane, and ``gs.surfaces.Default()`` otherwise. Defaults to None.
+        The appearance of the entity. If None, resolved based on the morph and the material:
+        ``gs.surfaces.Default(metallic=0.3, roughness=0.5)`` for a plane, ``gs.surfaces.Water()`` for a liquid, and
+        ``gs.surfaces.Default()`` otherwise. Defaults to None.
     vis : EntityVisOptions | None, optional
         How the debug view draws the entity, for the kinds of entity with a debug representation. If None, the debug
         view follows ``VisOptions.debug`` and draws the entity in the first debug representation of its kind.

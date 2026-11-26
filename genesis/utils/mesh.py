@@ -664,6 +664,8 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
                     surface.metallic_factor,
                     surface.roughness_factor,
                     surface.base_color_factor,
+                    surface.transmission_factor,
+                    surface.ior,
                     get_hashkey(emission) if emissive_kwargs else None,
                 ),
                 lambda: (

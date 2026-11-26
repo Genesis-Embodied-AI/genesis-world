@@ -360,6 +360,13 @@ class MetallicRoughnessMaterial(Material):
         the B channel. The roughness values are sampled from the G channel.
         These values are linear. If other channels are present (R or A), they
         are ignored for metallic-roughness calculations.
+    transmissionFactor : float, optional
+        The share of the light that the material lets through, as glTF's transmission extension defines it. The light
+        seen through the material is tinted by its base color, and the share it reflects grows at grazing angles.
+        Defaults to 0.0.
+    ior : float, optional
+        The index of refraction of the material, as glTF's index of refraction extension defines it, which sets the
+        share of the light a transmissive material reflects. Defaults to 1.5.
     """
 
     def __init__(
@@ -379,6 +386,8 @@ class MetallicRoughnessMaterial(Material):
         metallicFactor=1.0,
         roughnessFactor=1.0,
         metallicRoughnessTexture=None,
+        transmissionFactor=0.0,
+        ior=1.5,
     ):
         super().__init__(
             name=name,
@@ -402,6 +411,8 @@ class MetallicRoughnessMaterial(Material):
         self.metallicFactor = metallicFactor
         self.roughnessFactor = roughnessFactor
         self.metallicRoughnessTexture = metallicRoughnessTexture
+        self.transmissionFactor = transmissionFactor
+        self.ior = ior
 
     @property
     def baseColorFactor(self):
@@ -460,6 +471,37 @@ class MetallicRoughnessMaterial(Material):
         self._metallicRoughnessTexture = self._format_texture(value, "GB")
         self._tex_flags = None
 
+    @property
+    def transmissionFactor(self):
+        """float : The share of the light that the material lets through."""
+        return self._transmissionFactor
+
+    @transmissionFactor.setter
+    def transmissionFactor(self, value):
+        if value is None:
+            value = 0.0
+        if value < 0 or value > 1:
+            raise ValueError("Transmission factor must be in range [0,1]")
+        self._transmissionFactor = float(value)
+
+    @property
+    def ior(self):
+        """float : The index of refraction of the material."""
+        return self._ior
+
+    @ior.setter
+    def ior(self, value):
+        if value is None:
+            value = 1.5
+        if value < 1:
+            raise ValueError("Index of refraction must be greater than or equal to 1")
+        self._ior = float(value)
+
+    @property
+    def is_transmissive(self):
+        """bool : If True, the material lets part of the light through."""
+        return self._transmissionFactor > 0.0
+
     def _compute_tex_flags(self):
         tex_flags = super(MetallicRoughnessMaterial, self)._compute_tex_flags()
         if self.baseColorTexture is not None:
@@ -469,6 +511,10 @@ class MetallicRoughnessMaterial(Material):
         return tex_flags
 
     def _compute_transparency(self, include_textures=True):
+        # The background shows through a transmissive material, which is drawn after the opaque geometry and casts no
+        # shadow as a translucent color does
+        if self.is_transmissive:
+            return True
         if self.alphaMode == "OPAQUE":
             return False
         cutoff = self.alphaCutoff

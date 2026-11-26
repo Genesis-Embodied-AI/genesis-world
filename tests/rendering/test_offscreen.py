@@ -2454,3 +2454,121 @@ def test_transparent_surfaces_show_what_lies_behind_them(
     patch_blue_across = centre_patch(PARKED, (-0.6, 0.0, 0.5))
     patch_pair_across = centre_patch((0.6, 0.0, 0.5), (-0.6, 0.0, 0.5))
     assert_allclose(patch_pair_across, patch_blue_across + (1.0 - blues_alpha) * patch_red_across, atol=1.0)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
+def test_glass_tints_what_lies_behind_it(renderer, show_viewer):
+    TINT = (1.0, 0.6, 0.3)
+    IOR = 1.8
+    RES = 64
+    # An alpha that 8-bit texels store exactly
+    VEIL_ALPHA = 128 / 255
+    PARKED = (0.0, 0.0, 1.2)
+    CENTRE = slice(RES // 2 - 3, RES // 2 + 3)
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        sph_options=gs.options.SPHOptions(
+            particle_size=0.02,
+            lower_bound=(0.3, 1.2, 0.2),
+            upper_bound=(0.9, 1.8, 0.8),
+        ),
+        vis_options=gs.options.VisOptions(
+            # The shadow of a transparent surface on the board behind it would darken the board in the composite only
+            shadow=False,
+            split_envs=True,
+            background_color=(0.0, 0.0, 0.0),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.5, 0.0, 0.5),
+            camera_lookat=(0.0, 0.0, 0.5),
+        ),
+        renderer=renderer,
+        show_viewer=show_viewer,
+    )
+    # A glass box, a liquid drawn with the surface of water by default, and a half-covering transmissive box, each with
+    # a camera looking through it
+    glass = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.6, 0.0, 0.5),
+            size=(0.5, 0.5, 0.5),
+        ),
+        surface=gs.surfaces.Glass(
+            color=TINT,
+            ior=IOR,
+        ),
+    )
+    liquid = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.6, 1.5, 0.5),
+            size=(0.4, 0.4, 0.4),
+        ),
+        material=gs.materials.SPH.Liquid(
+            sampler="regular",
+        ),
+    )
+    veil = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.6, -1.5, 0.5),
+            size=(0.5, 0.5, 0.5),
+        ),
+        surface=gs.surfaces.BSDF(
+            color=TINT,
+            opacity=VEIL_ALPHA,
+            ior=IOR,
+            specular_trans=1.0,
+        ),
+    )
+    board = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.6, 0.0, 0.5),
+            size=(0.5, 0.5, 0.5),
+        ),
+        surface=gs.surfaces.Rough(
+            color=(0.5, 0.5, 0.5),
+        ),
+    )
+    cam_glass, cam_liquid, cam_veil = (
+        scene.add_camera(
+            res=(RES, RES),
+            pos=(2.5, cam_y, 0.5),
+            lookat=(0.0, cam_y, 0.5),
+        )
+        for cam_y in (0.0, 1.5, -1.5)
+    )
+    scene.build(n_envs=2)
+
+    def centre_patch(cam, pos_board, show_surfaces):
+        board.set_pos(pos_board)
+        glass.set_pos((0.6, 0.0, 0.5) if show_surfaces else PARKED)
+        veil.set_pos((0.6, -1.5, 0.5) if show_surfaces else (0.0, -1.5, 1.2))
+        if show_surfaces:
+            liquid.activate()
+        else:
+            liquid.deactivate()
+        scene.step()
+        rgb, *_ = cam.render()
+        return tensor_to_array(rgb)[..., CENTRE, CENTRE, :].mean(axis=(-3, -2))
+
+    # Seen head-on, each face of a transparent surface reflects the share of the light that its index of refraction
+    # gives, and lets the rest through tinted by its color. The near and the far faces each scale the sRGB values of the
+    # background by the encoding of that transmittance, over the share of the face that its opacity covers.
+    for cam, cam_y, surface, tint, coverage in (
+        (cam_glass, 0.0, glass.surface, TINT, 1.0),
+        (cam_liquid, 1.5, liquid.surface, liquid.surface.texture.color, 1.0),
+        (cam_veil, -1.5, veil.surface, TINT, VEIL_ALPHA),
+    ):
+        patch_alone = centre_patch(cam, PARKED, show_surfaces=True)
+        patch_board = centre_patch(cam, (-0.6, cam_y, 0.5), show_surfaces=False)
+        patch_pair = centre_patch(cam, (-0.6, cam_y, 0.5), show_surfaces=True)
+        f0 = ((surface.ior - 1.0) / (surface.ior + 1.0)) ** 2
+        tint = np.array(tint)
+        transmittance = (1.0 - f0) * np.where(tint <= 0.04045, tint / 12.92, ((tint + 0.055) / 1.055) ** 2.4)
+        transmittance = np.where(
+            transmittance <= 0.0031308, 12.92 * transmittance, 1.055 * transmittance ** (1.0 / 2.4) - 0.055
+        )
+        transmittance = 1.0 - coverage + coverage * transmittance
+        assert_allclose(patch_pair, patch_alone + transmittance**2 * patch_board, atol=0.5)

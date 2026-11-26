@@ -41,13 +41,21 @@ class _MaterialFactors(NamedTuple):
     metallic_factor: float = 0.0
     roughness_factor: float = 1.0
     base_color_factor: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    transmission_factor: float = 0.0
+    ior: float | None = None
 
 
 def _get_material_factors(surface: "gs.surfaces.Surface | None") -> _MaterialFactors:
     # A mesh drawn without a surface (a marker, a debug geometry) takes the factors of the default surface
     if surface is None:
         return _MaterialFactors()
-    return _MaterialFactors(surface.metallic_factor, surface.roughness_factor, surface.base_color_factor)
+    return _MaterialFactors(
+        surface.metallic_factor,
+        surface.roughness_factor,
+        surface.base_color_factor,
+        surface.transmission_factor,
+        surface.ior,
+    )
 
 
 class SegmentationColorMap:

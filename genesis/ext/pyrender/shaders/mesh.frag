@@ -47,6 +47,8 @@ struct Material {
     vec4 base_color_factor;
     float metallic_factor;
     float roughness_factor;
+    float transmission_factor;
+    float ior;
 #endif
 
 #ifdef USE_GLOSSY_MATERIAL
@@ -157,7 +159,10 @@ uniform bool debug_view;
 // OUTPUTS
 ///////////////////////////////////////////////////////////////////////////////
 
-out vec4 frag_color;
+layout(location = 0, index = 0) out vec4 frag_color;
+// The share of the background that shows through the fragment. Dual-source blending multiplies the background by it
+// for a transmissive material.
+layout(location = 0, index = 1) out vec4 frag_transmittance;
 
 ///////////////////////////////////////////////////////////////////////////////
 // Constants
@@ -417,9 +422,22 @@ void main()
     vec3 c_diff = mix(vec3(0.0), base_color.rgb * (1 - min_roughness), 1.0 - metallic);
     vec3 f0 = mix(dialectric_spec, base_color.rgb, metallic);
 
-    // Compute normal
+    // A transmissive dielectric diffuses no light. It reflects the share of the light that its index of refraction
+    // gives, and lets the rest through tinted by its base color.
+    float transmission = material.transmission_factor;
+    if (transmission > 0.0) {
+        float ior_ratio = (material.ior - 1.0) / (material.ior + 1.0);
+        f0 = mix(vec3(ior_ratio * ior_ratio), base_color.rgb, metallic);
+        c_diff *= 1.0 - transmission;
+    }
+
+    // Compute normal. The far side of a transmissive surface shows through its near side, and is shaded as seen from
+    // the viewer.
     vec3 n = normalize(get_normal());
     vec3 v = normalize(cam_pos - frag_position); // Vector towards camera
+    if (transmission > 0.0 && dot(n, v) < 0.0) {
+        n = -n;
+    }
 
     // Loop over lights
     for (int i = 0; i < n_directional_lights; i++) {
@@ -497,7 +515,7 @@ void main()
 #endif
         color.xyz += res;
     }
-    color.xyz += base_color.xyz * ambient_light;
+    color.xyz += (1.0 - transmission) * base_color.xyz * ambient_light;
 
     // The environment that a surface mirrors is a sky above the horizon, as bright as a surface of albedo 0.5 facing up
     // under the directional lights, and the ambient light below it
@@ -518,6 +536,15 @@ void main()
     vec2 env_ab = vec2(-1.04, 1.04) * env_a + env_r.zw;
     float smoothness = 1.0 - roughness;
     color.xyz += metallic * smoothness * smoothness * (f0 * env_ab.x + env_ab.y) * env;
+
+    // A transmissive surface reflects more of the environment at grazing angles. The reflected share caps at the
+    // smoothness of the surface, a rough surface scattering its reflection away.
+    vec3 transmittance = vec3(0.0);
+    if (transmission > 0.0) {
+        vec3 fresnel = f0 + (max(vec3(smoothness), f0) - f0) * pow(1.0 - nv_env, 5.0);
+        color.xyz += transmission * fresnel * env;
+        transmittance = transmission * (1.0 - fresnel) * base_color.rgb;
+    }
 
     // Calculate lighting from environment
 #ifdef USE_IBL
@@ -560,6 +587,14 @@ void main()
     // if (floor_flag != 0) color.xyz = floor_color.xyz;
 
     frag_color = clamp(vec4(linear_to_srgb(color).rgb, color.a * base_color.a), 0.0, 1.0);
+    // The blending runs on sRGB values, where scaling the background by the encoded transmittance approximates the
+    // encoding of the attenuated background. The background shows unchanged through the share of the fragment that its
+    // alpha leaves uncovered.
+    float coverage = base_color.a;
+    frag_transmittance = vec4(1.0 - coverage + coverage * linear_to_srgb(vec4(transmittance, 1.0)).rgb, 1.0);
+    if (transmission > 0.0) {
+        frag_color.rgb *= coverage;
+    }
 
 
 #else
