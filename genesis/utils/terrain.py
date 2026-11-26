@@ -20,7 +20,7 @@ from .mesh import load_trimesh
 from .misc import tensor_to_array
 
 
-_GENERATE_BY_SUBTERRAIN_CLS: dict[
+_GENERATE_FUNC_BY_SUBTERRAIN_CLS: dict[
     type[Subterrain], Callable[[isaacgym_terrain_utils.SubTerrain, Subterrain], np.ndarray]
 ] = {}
 
@@ -40,7 +40,7 @@ def register_subterrain(subterrain_cls: type[Subterrain]) -> Callable[[Callable]
     """
 
     def _register(generate_subterrain: Callable) -> Callable:
-        _GENERATE_BY_SUBTERRAIN_CLS[subterrain_cls] = generate_subterrain
+        _GENERATE_FUNC_BY_SUBTERRAIN_CLS[subterrain_cls] = generate_subterrain
         return generate_subterrain
 
     return _register
@@ -173,7 +173,7 @@ def generate_height_field(morph: Terrain) -> np.ndarray:
 
         for i, j in zip(*map(np.ravel, np.meshgrid(*map(range, morph.n_subterrains), indexing="ij"))):
             subterrain = morph.subterrains[i][j]
-            generate_subterrain = _GENERATE_BY_SUBTERRAIN_CLS.get(type(subterrain))
+            generate_subterrain = _GENERATE_FUNC_BY_SUBTERRAIN_CLS.get(type(subterrain))
             if generate_subterrain is None:
                 gs.raise_exception(
                     f"No generation is registered for gs.options.terrain.{type(subterrain).__name__}. Register one with "

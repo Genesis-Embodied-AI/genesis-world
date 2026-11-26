@@ -18,7 +18,7 @@ class GeneratorContext(NamedTuple):
     """The entities of the scene added before the generated one, of every kind, which each generator filters."""
 
 
-_GENERATE_BY_MORPH_CLS: dict[type[Generator], Callable[[Generator, GeneratorContext], Morph]] = {}
+_GENERATE_FUNC_BY_MORPH_CLS: dict[type[Generator], Callable[[Generator, GeneratorContext], Morph]] = {}
 
 
 def register_generator(morph_cls: type[Generator]) -> Callable[[Callable], Callable]:
@@ -41,7 +41,7 @@ def register_generator(morph_cls: type[Generator]) -> Callable[[Callable], Calla
     """
 
     def _register(generate_morph: Callable[[Generator, GeneratorContext], Morph]) -> Callable:
-        _GENERATE_BY_MORPH_CLS[morph_cls] = generate_morph
+        _GENERATE_FUNC_BY_MORPH_CLS[morph_cls] = generate_morph
         return generate_morph
 
     return _register
@@ -65,7 +65,7 @@ def generate(morph: Generator, context: GeneratorContext) -> Morph:
     context : GeneratorContext
         The scene the geometry may be generated from.
     """
-    generate_morph = _GENERATE_BY_MORPH_CLS.get(type(morph))
+    generate_morph = _GENERATE_FUNC_BY_MORPH_CLS.get(type(morph))
     if generate_morph is None:
         gs.raise_exception(
             f"No generation is registered for gs.morphs.{type(morph).__name__}. Register one with gs.register_generator."
