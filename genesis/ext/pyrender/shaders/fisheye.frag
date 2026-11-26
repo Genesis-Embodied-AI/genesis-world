@@ -3,8 +3,6 @@
 // The image of a fisheye camera, resampled from the cube map of what the camera sees all around it (see FisheyeCamera
 // in camera.py). The faces of the cube map are rendered in the frame of the camera.
 
-const float PI = 3.14159265358979;
-
 uniform samplerCube color_cube;
 uniform samplerCube depth_cube;
 // The focal lengths and the principal point (fx, fy, cx, cy), in pixels from the top-left corner of the image
@@ -15,6 +13,9 @@ uniform vec4 distortion;
 uniform vec4 depth_range;
 // The width and height of each face of the cube map, in texels
 uniform int face_size;
+// The widest angle to the line of sight that the lens images, and the distance from the principal point at which it
+// does, in units of the focal lengths (see 'fisheye_angle_range' in genesis/utils/geom.py)
+uniform vec4 angle_range;
 
 out vec4 frag_color;
 
@@ -26,15 +27,17 @@ void main()
     float theta_d = length(xy);
 
     // The angle of the ray to the line of sight, the root of theta * (1 + k1 theta^2 + ... + k4 theta^8) = theta_d,
-    // which a few Newton iterations reach from theta_d for the small coefficients of a calibrated lens
-    float theta = theta_d;
+    // which a few Newton iterations reach for the small coefficients of a calibrated lens, within the angles over which
+    // the distance grows
+    float max_angle = angle_range.x;
+    float theta = min(theta_d, max_angle);
     for (int i = 0; i < 10; i++) {
         float theta2 = theta * theta;
         float residual = theta * (1.0 + theta2 * (distortion.x + theta2 * (distortion.y + theta2 * (distortion.z
             + theta2 * distortion.w)))) - theta_d;
         float slope = 1.0 + theta2 * (3.0 * distortion.x + theta2 * (5.0 * distortion.y + theta2 * (7.0 * distortion.z
             + theta2 * 9.0 * distortion.w)));
-        theta -= residual / slope;
+        theta = clamp(theta - residual / max(slope, 1e-6), 0.0, max_angle);
     }
 
     // The ray in the frame of the camera, which looks along -z with y up, while OpenCV looks along z with y down
@@ -45,7 +48,8 @@ void main()
     // color well defined
     vec4 color = texture(color_cube, dir);
     float depth = texture(depth_cube, dir).r;
-    if (theta > PI || depth >= 1.0) {
+    // A pixel beyond the image of the widest angle sees no ray
+    if (theta_d > angle_range.y || depth >= 1.0) {
         discard;
     }
 

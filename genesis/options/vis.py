@@ -249,8 +249,10 @@ class FisheyeLens(Options):
         res : tuple of int, shape (2,)
             The resolution of the camera, as (width, height).
         fov : float
-            The angle that the circle inscribed in the image spans, in degrees.
+            The angle that the circle inscribed in the image spans, in degrees, in (0, 360].
         """
+        if not 0.0 < fov <= 360.0:
+            gs.raise_exception(f"The field of view of an equidistant fisheye must lie in (0, 360] degrees, got {fov}.")
         f = 0.5 * min(res) / np.deg2rad(0.5 * fov)
         return cls(intrinsics=((f, 0.0, 0.5 * res[0]), (0.0, f, 0.5 * res[1]), (0.0, 0.0, 1.0)))
 

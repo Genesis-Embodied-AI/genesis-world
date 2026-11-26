@@ -2899,6 +2899,35 @@ def qd_hash01(k0, k1, k2, k3):
     return qd.cast(h >> qd.u32(8), gs.qd_float) * (1.0 / 16777216.0)
 
 
+def fisheye_angle_range(distortion):
+    """Return the widest angle to the line of sight that a fisheye lens of the Kannala-Brandt model images.
+
+    The image of a ray lies at the distance theta * (1 + k1 theta^2 + k2 theta^4 + k3 theta^6 + k4 theta^8) from the
+    principal point, in units of the focal lengths. The lens images the angles up to pi, or up to the first angle where
+    that distance stops growing, beyond which the polynomial maps two angles onto one distance.
+
+    Parameters
+    ----------
+    distortion : (4,) float
+        The distortion coefficients (k1, k2, k3, k4).
+
+    Returns
+    -------
+    max_angle : float
+        The widest angle imaged, in radians.
+    max_distance : float
+        The distance from the principal point at which it is imaged, in units of the focal lengths.
+    """
+    k1, k2, k3, k4 = distortion
+    # The slope of the distance, as a polynomial of theta^2, the highest degree first
+    slope_roots = np.roots((9.0 * k4, 7.0 * k3, 5.0 * k2, 3.0 * k1, 1.0))
+    slope_roots = slope_roots[(np.abs(slope_roots.imag) < 1e-12) & (slope_roots.real > 0.0)].real
+    max_angle = np.sqrt(slope_roots).min(initial=np.pi)
+    theta2 = max_angle * max_angle
+    max_distance = max_angle * (1.0 + theta2 * (k1 + theta2 * (k2 + theta2 * (k3 + theta2 * k4))))
+    return max_angle, max_distance
+
+
 def fisheye_pixels_to_rays(pixels, intrinsics, distortion):
     """Return the rays that pixels of a fisheye camera see, following the Kannala-Brandt model of OpenCV.
 
@@ -2922,18 +2951,52 @@ def fisheye_pixels_to_rays(pixels, intrinsics, distortion):
         The unit direction of the ray of each pixel, in the frame of the camera of OpenCV: z along the line of sight, x
         to the right and y down the image.
     angles : (...,) float
-        The angle of each ray to the line of sight, beyond pi for a position that no ray reaches.
+        The angle of each ray to the line of sight, infinite for a position that no ray reaches (see
+        'fisheye_angle_range').
     """
     fx, fy, cx, cy = intrinsics
     k1, k2, k3, k4 = distortion
     xy = (pixels - np.array((cx, cy))) / np.array((fx, fy))
     theta_d = np.linalg.norm(xy, axis=-1)
-    theta = theta_d.copy()
+    # The distance grows with the angle up to the widest one imaged, within which the Newton iterations stay
+    max_angle, max_distance = fisheye_angle_range(distortion)
+    theta = np.minimum(theta_d, max_angle)
     for _ in range(10):
         theta2 = theta * theta
         residual = theta * (1.0 + theta2 * (k1 + theta2 * (k2 + theta2 * (k3 + theta2 * k4)))) - theta_d
         slope = 1.0 + theta2 * (3.0 * k1 + theta2 * (5.0 * k2 + theta2 * (7.0 * k3 + theta2 * 9.0 * k4)))
-        theta -= residual / slope
+        theta = np.clip(theta - residual / np.maximum(slope, 1e-6), 0.0, max_angle)
     radial = np.divide(xy, theta_d[..., None], out=np.zeros_like(xy), where=theta_d[..., None] > 0.0)
     rays = np.concatenate((radial * np.sin(theta)[..., None], np.cos(theta)[..., None]), axis=-1)
-    return rays, theta
+    # A position beyond the image of the widest angle sees no ray
+    angles = np.where(theta_d > max_distance, np.inf, theta)
+    return rays, angles
+
+
+def pixels_ray_cosine(res, intrinsics, distortion=None):
+    """Return the cosine of the angle between the ray of each pixel of a camera and its line of sight.
+
+    The cosine converts a distance along the ray of a pixel into a depth along the line of sight. It is negative for a
+    fisheye ray pointing backwards.
+
+    Parameters
+    ----------
+    res : tuple of int, shape (2,)
+        The resolution of the camera, as (width, height).
+    intrinsics : (4,) float
+        The focal lengths and the principal point (fx, fy, cx, cy), in pixels.
+    distortion : (4,) float, optional
+        The distortion coefficients of a fisheye camera (see 'fisheye_pixels_to_rays'), None for a pinhole camera.
+
+    Returns
+    -------
+    cosine : (height, width) float
+        The cosine of each pixel, rows from the top of the image.
+    """
+    width, height = res
+    fx, fy, cx, cy = intrinsics
+    v, u = np.meshgrid(np.arange(height) + 0.5, np.arange(width) + 0.5, indexing="ij")
+    if distortion is not None:
+        rays, _ = fisheye_pixels_to_rays(np.stack((u, v), axis=-1), intrinsics, distortion)
+        return rays[..., 2]
+    return 1.0 / np.sqrt(((u - cx) / fx) ** 2 + ((v - cy) / fy) ** 2 + 1.0)

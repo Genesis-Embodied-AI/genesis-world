@@ -1,7 +1,6 @@
 import argparse
 import os
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 import genesis as gs
@@ -12,9 +11,10 @@ from genesis.utils.misc import tensor_to_array
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--vis", action="store_true", help="Show the images of the wrist camera")
+    parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
     args = parser.parse_args()
 
-    gs.init(backend=gs.cpu)
+    gs.init(backend=gs.gpu if args.gpu else gs.cpu)
 
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
@@ -77,6 +77,9 @@ def main():
     franka.set_dofs_position(qpos_home)
 
     if args.vis:
+        # An optional dependency, which showing the images alone requires
+        import matplotlib.pyplot as plt
+
         plt.ion()
         image = plt.imshow(tensor_to_array(wrist_camera.read().rgb))
         plt.axis("off")

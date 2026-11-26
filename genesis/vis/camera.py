@@ -531,26 +531,22 @@ class Camera(BuildableMixin, RBC):
         return rgb_arr if rgb else None, depth_arr, seg_arr, normal_arr
 
     def distance_center_to_plane(self, center_dis):
-        width, height = self.res
-        fx = fy = self.f
-        cx = self.cx
-        cy = self.cy
+        """Convert the distance of each pixel to the camera along its ray into the depth along the line of sight.
 
-        if isinstance(center_dis, np.ndarray):
-            v, u = np.meshgrid(np.arange(height, dtype=np.int32), np.arange(width, dtype=np.int32), indexing="ij")
-            xd = (u + 0.5 - cx) / fx
-            yd = (v + 0.5 - cy) / fy
-            scale_inv = 1.0 / np.sqrt(xd**2 + yd**2 + 1.0)
-        else:  # torch.Tensor
-            v, u = torch.meshgrid(
-                torch.arange(height, dtype=torch.int32, device=gs.device),
-                torch.arange(width, dtype=torch.int32, device=gs.device),
-                indexing="ij",
-            )
-            xd = (u + 0.5 - cx) / fx
-            yd = (v + 0.5 - cy) / fy
-            scale_inv = torch.rsqrt(xd**2 + yd**2 + 1.0)
-        return center_dis * scale_inv
+        Parameters
+        ----------
+        center_dis : np.ndarray | torch.Tensor, shape (..., height, width)
+            The distance of each pixel to the camera along its ray.
+        """
+        rays_cosine = self._rays_cosine
+        if isinstance(center_dis, torch.Tensor):
+            rays_cosine = torch.as_tensor(rays_cosine, dtype=gs.tc_float, device=gs.device)
+        return center_dis * rays_cosine
+
+    @cached_property
+    def _rays_cosine(self):
+        (fx, _, cx), (_, fy, cy), _ = self.intrinsics
+        return gu.pixels_ray_cosine(self._res, (fx, fy, cx, cy), self.distortion)
 
     @gs.assert_built
     def render_pointcloud(self, world_frame=True):
@@ -956,19 +952,19 @@ class Camera(BuildableMixin, RBC):
     def aperture(self) -> float | None:
         """Deprecated: use 'lens'. The f-number of the lens of a thin-lens camera, None for another camera."""
         gs.logger.warning("'Camera.aperture' is deprecated. Use 'Camera.lens' instead.")
-        return None if self._lens is None else self._lens.aperture
+        return self._lens.aperture if isinstance(self._lens, gs.options.ThinLens) else None
 
     @property
     def focal_len(self) -> float | None:
         """Deprecated: use 'lens'. The focal length of the lens of a thin-lens camera, None for another camera."""
         gs.logger.warning("'Camera.focal_len' is deprecated. Use 'Camera.lens' instead.")
-        return None if self._lens is None else self._lens.focal_len
+        return self._lens.focal_len if isinstance(self._lens, gs.options.ThinLens) else None
 
     @property
     def focus_dist(self) -> float | None:
         """Deprecated: use 'lens'. The focus distance of the lens of a thin-lens camera, None for another camera."""
         gs.logger.warning("'Camera.focus_dist' is deprecated. Use 'Camera.lens' instead.")
-        return None if self._lens is None else self._lens.focus_dist
+        return self._lens.focus_dist if isinstance(self._lens, gs.options.ThinLens) else None
 
     @property
     def GUI(self):

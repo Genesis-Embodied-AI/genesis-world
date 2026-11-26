@@ -2955,6 +2955,11 @@ def test_fisheye_camera(renderer, show_viewer):
             assert_allclose(depth[v, u], DIST - RADIUS, atol=5e-3)
             assert_allclose(np.linalg.norm(points[v, u] - sphere_pos), RADIUS, atol=5e-3)
 
+    # The corners of the image of the equidistant fisheye lie beyond the rays pointing backwards, which no ray reaches
+    _, depth, seg, _ = cam_equidistant.render(rgb=False, depth=True, segmentation=True)
+    assert_equal(seg[[0, 0, -1, -1], [0, -1, 0, -1]], 0)
+    assert_allclose(depth[[0, 0, -1, -1], [0, -1, 0, -1]], cam_equidistant.far, tol=1e-5)
+
     # The sensor renders what the camera does, up to the precision of its pose, and its view reaches the ray of the
     # corner of the image farthest from the principal point, between its clipping distances
     rgb, *_ = cam_calibrated.render(rgb=True)

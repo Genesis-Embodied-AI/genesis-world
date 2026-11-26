@@ -116,11 +116,12 @@ MARKER_XRAY_ALPHA = 0.4
 
 
 class _FisheyeLayout(NamedTuple):
-    """The faces of the cube map that the image of a fisheye camera reaches, and their size, for its parameters."""
+    """The faces of the cube map that the image of a fisheye camera reaches, their size, and the angles it images."""
 
-    camera_params: tuple
+    camera: FisheyeCamera
     is_face_drawn: np.ndarray
     face_size: int
+    angle_range: tuple[float, float]
 
 
 class Renderer:
@@ -172,7 +173,6 @@ class Renderer:
         # the face that a face renderer draws.
         self._face_renderer = None
         self._face_rot = None
-        self._fisheye_layout = None
         self._fisheye_color_cube = None
         self._fisheye_depth_cube = None
         self._fisheye_fb = None
@@ -186,6 +186,7 @@ class Renderer:
     @viewport_width.setter
     def viewport_width(self, value):
         self._viewport_width = self.dpscale * value
+        self._fisheye_layout = None
 
     @property
     def viewport_height(self):
@@ -195,6 +196,7 @@ class Renderer:
     @viewport_height.setter
     def viewport_height(self, value):
         self._viewport_height = self.dpscale * value
+        self._fisheye_layout = None
 
     def render(self, scene, flags, seg_node_map=None, *, is_first_pass=True, env_idx=None):
         """Run the passes of a render, from the main camera of a scene.
@@ -643,8 +645,8 @@ class Renderer:
         camera = scene.main_camera_node.camera
         # The intrinsics count the pixels of the viewport, which the display scale multiplies
         intrinsics = self.dpscale * np.array(camera.intrinsics)
-        camera_params = (*intrinsics, *camera.distortion, self.viewport_width, self.viewport_height)
-        if self._fisheye_layout is None or self._fisheye_layout.camera_params != camera_params:
+        # The layout follows the camera, whose lens is fixed, and the viewport, whose setters reset it
+        if self._fisheye_layout is None or self._fisheye_layout.camera is not camera:
             # The faces that the rays of the pixels reach, along the axes of the frame of the camera. A face gives the
             # centre of the image as many texels per radian as the image has pixels, its texels growing denser away
             # from its centre where the lens spreads the image more.
@@ -652,7 +654,7 @@ class Renderer:
                 np.arange(self.viewport_height) + 0.5, np.arange(self.viewport_width) + 0.5, indexing="ij"
             )
             rays, rays_angle = gu.fisheye_pixels_to_rays(np.stack((u, v), axis=-1), intrinsics, camera.distortion)
-            rays = rays[rays_angle <= np.pi] * np.array((1.0, -1.0, -1.0))
+            rays = rays[np.isfinite(rays_angle)] * np.array((1.0, -1.0, -1.0))
             rays_axis = np.argmax(np.abs(rays), axis=-1)
             rays_face = 2 * rays_axis + (np.take_along_axis(rays, rays_axis[:, None], axis=-1)[:, 0] < 0.0)
             is_face_drawn = np.zeros(6, dtype=np.bool_)
@@ -660,7 +662,7 @@ class Renderer:
             max_face_size = min(glGetIntegerv(GL_MAX_CUBE_MAP_TEXTURE_SIZE), glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE))
             face_size = self.dpscale * int(np.ceil(2.0 * intrinsics[:2].max() / self.dpscale))
             face_size = min(face_size, max_face_size - max_face_size % self.dpscale)
-            if self._fisheye_layout is None or self._fisheye_layout.face_size != face_size:
+            if self._fisheye_color_cube is None or self._fisheye_color_cube.width != face_size:
                 self._delete_fisheye_textures()
                 # The programs of the passes are those of this renderer, which the compiled passes record (see
                 # 'JITRenderer.load_programs') and which outlive the face renderer
@@ -677,7 +679,8 @@ class Renderer:
                 )
                 for cube in (self._fisheye_color_cube, self._fisheye_depth_cube):
                     cube._add_to_context()
-            self._fisheye_layout = _FisheyeLayout(camera_params, is_face_drawn, face_size)
+            angle_range = gu.fisheye_angle_range(camera.distortion)
+            self._fisheye_layout = _FisheyeLayout(camera, is_face_drawn, face_size, angle_range)
         if self._fisheye_fb is None:
             self._fisheye_fb = glGenFramebuffers(1)
             self._fisheye_vao = glGenVertexArrays(1)
@@ -750,6 +753,7 @@ class Renderer:
         depth_range = (camera.znear, camera.zfar, camera.face_zfar, self.viewport_height)
         program.set_uniform("depth_range", depth_range)
         program.set_uniform("face_size", face_size)
+        program.set_uniform("angle_range", (*self._fisheye_layout.angle_range, 0.0, 0.0))
         glBindVertexArray(self._fisheye_vao)
         glDrawArrays(GL_TRIANGLES, 0, 3)
         glBindVertexArray(0)
