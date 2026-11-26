@@ -562,12 +562,15 @@ def test_export_and_load(
     for _ in range(10):
         deformable_scene.step()
         restored_deformable.step()
-    for entity in (mpm_cube, sph_liquid, pbd_liquid, pbd_cloth, pbd_elastic, hybrid_arm.part_soft):
-        restored_particles_pos = restored_deformable.get_entity(entity.name).get_particles_pos()
-        assert_allclose(restored_particles_pos, entity.get_particles_pos(), tol=gs.EPS)
-    assert_allclose(restored_deformable.get_entity(fem_cube.name).get_verts_pos(), fem_cube.get_verts_pos(), tol=gs.EPS)
+    for entity in (mpm_cube, sph_liquid, pbd_liquid, pbd_cloth, hybrid_arm.part_soft):
+        assert_equal(restored_deformable.get_entity(entity.name).get_particles_pos(), entity.get_particles_pos())
+    # The elements of a PBD elastic entity sum their corrections on the shared vertices atomically, in an order that
+    # varies between runs on CPU
+    restored_elastic_pos = restored_deformable.get_entity(pbd_elastic.name).get_particles_pos()
+    assert_allclose(restored_elastic_pos, pbd_elastic.get_particles_pos(), tol=gs.EPS)
+    assert_equal(restored_deformable.get_entity(fem_cube.name).get_verts_pos(), fem_cube.get_verts_pos())
     restored_arm_rigid = restored_deformable.get_entity(hybrid_arm.part_rigid.name)
-    assert_allclose(restored_arm_rigid.get_qpos(), hybrid_arm.part_rigid.get_qpos(), tol=gs.EPS)
+    assert_equal(restored_arm_rigid.get_qpos(), hybrid_arm.part_rigid.get_qpos())
 
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
@@ -1170,7 +1173,7 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         assert_equal(replay_fem_cube.get_verts_pos(), fem_pos)
     # A step from the last frame holds the particles attached as the recorded run did
     deformable_trajectory.scene.step()
-    assert_allclose(replay_mpm_cube.get_particles_pos(), final_mpm_pos, tol=tol)
+    assert_equal(replay_mpm_cube.get_particles_pos(), final_mpm_pos)
 
 
 @pytest.mark.precision("32")
