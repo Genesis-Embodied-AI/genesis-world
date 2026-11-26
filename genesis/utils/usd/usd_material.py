@@ -36,10 +36,17 @@ def parse_component(shader: UsdShade.Shader, component_name: str, component_enco
         component_image = None
         component_uvname = None
     else:  # texture shader
-        component_image, component_overencode, component_uvname = parse_preview_surface(component, component_output)
-        if component_overencode is not None:
-            component_encode = component_overencode
+        component_source = parse_preview_surface(component, component_output)
         component_factor = None
+        if isinstance(component_source, str):
+            # The input reads a primvar of the mesh, the name of which the reader returns. Its values vary along the
+            # mesh, which the surface leaves to the mesh (such as its vertex colors), so it sets no texture.
+            component_image = None
+            component_uvname = None
+        else:
+            component_image, component_overencode, component_uvname = component_source
+            if component_overencode is not None:
+                component_encode = component_overencode
 
     component_texture = mu.create_texture(component_image, component_factor, component_encode)
     return component_texture, component_uvname

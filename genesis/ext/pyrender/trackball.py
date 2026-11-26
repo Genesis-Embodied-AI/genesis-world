@@ -225,6 +225,8 @@ class Trackball:
         if target is None:
             radius = np.linalg.norm(self._n_pose[:3, 3] - self._n_target)
             target = pose[:3, 3] - radius * pose[:3, 2]
+        else:
+            target = target.copy()
         self._pose = pose.copy()
         self._n_pose = pose.copy()
         self._target = target

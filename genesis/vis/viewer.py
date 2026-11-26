@@ -542,11 +542,9 @@ class Viewer(BuildableMixin, RBC):
     @property
     def camera_lookat(self):
         """
-        Get the camera's current lookat point.
+        Get the camera's current lookat point, which it orbits about.
         """
-        pos = np.array(self._pyrender_viewer.trackball.pose[:3, 3])
-        z = self._pyrender_viewer.trackball.pose[:3, 2]
-        return pos - z
+        return self._pyrender_viewer.trackball.target.copy()
 
     @property
     def camera_pose(self):

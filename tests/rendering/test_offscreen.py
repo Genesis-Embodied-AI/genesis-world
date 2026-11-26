@@ -2746,15 +2746,16 @@ def test_plane_reflection(roughness, renderer, show_viewer):
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
 def test_normal_map(renderer, show_viewer):
     TILT = np.deg2rad(40.0)
+    AZIMUTH = np.deg2rad(30.0)
     RES = 64
     CENTRE = slice(RES // 2 - 4, RES // 2 + 4)
 
     scene = gs.Scene(
         vis_options=gs.options.VisOptions(
-            # Lit and seen straight from above, a surface shades by the angle between its normal and the vertical alone
+            # A light coming from aside shades a surface differently for every direction its normal tilts towards
             lights=[
                 gs.options.vis.DirectionalLight(
-                    dir=(0.0, 0.0, -1.0),
+                    dir=(-0.3, 0.5, -1.0),
                     color=(1.0, 1.0, 1.0),
                     intensity=3.0,
                 ),
@@ -2767,16 +2768,17 @@ def test_normal_map(renderer, show_viewer):
         renderer=renderer,
         show_viewer=show_viewer,
     )
-    # A floor whose normal map holds the normal of a floor tilted by TILT, its components from -1 to 1 encoded from 0 to
-    # 255, and a floor tilted by as much
-    normal_rgb = np.round((np.array([np.sin(TILT), 0.0, np.cos(TILT)]) + 1.0) * 127.5).astype(np.uint8)
+    # A floor whose normal map holds a normal tilted by TILT towards its texture axes u and v, which run along x and y,
+    # its components from -1 to 1 encoded from 0 to 255, and a floor tilted by as much
+    tilt_uv = np.sin(TILT) * np.array([np.cos(AZIMUTH), np.sin(AZIMUTH)])
+    normal_rgb = np.round((np.array([*tilt_uv, np.cos(TILT)]) + 1.0) * 127.5).astype(np.uint8)
     for x, normal, normal_texture in (
         (
             -1.0,
             (0.0, 0.0, 1.0),
             gs.textures.ImageTexture(image_array=np.tile(normal_rgb, (4, 4, 1)), encoding="linear"),
         ),
-        (1.0, (0.0, -np.sin(TILT), np.cos(TILT)), None),
+        (1.0, (*tilt_uv, np.cos(TILT)), None),
     ):
         scene.add_entity(
             morph=gs.morphs.Plane(

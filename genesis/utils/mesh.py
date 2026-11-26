@@ -635,7 +635,8 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     # A normal map and an occlusion map sample uvs, so they are drawn only when the mesh has them, and only with a PBR
     # material, since SimpleMaterial has neither channel
     maps_kwargs = {}
-    maps_texture = []
+    # The texture of each map drawn, which keys the material along with the map it fills
+    maps_texture = {}
     if not isinstance(surface, gs.surfaces.Emission) and flipped_uvs is not None:
         for map_name, map_texture in (
             ("normalTexture", surface.normal_texture),
@@ -644,7 +645,7 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
             if isinstance(map_texture, gs.textures.ImageTexture) and map_texture.image_array is not None:
                 assert map_texture.image_array.dtype == np.uint8
                 maps_kwargs[map_name] = Image.fromarray(map_texture.image_array)
-                maps_texture.append(map_texture)
+                maps_texture[map_name] = map_texture
     # The rasterizer reads a factor left unset as 1.0, as glTF specifies, which renders a fully metallic material
     pbr_material_factory = partial(
         trimesh.visual.material.PBRMaterial,
@@ -682,7 +683,7 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
                     surface.transmission_factor,
                     surface.ior,
                     get_hashkey(emission) if emissive_kwargs else None,
-                    tuple(weakref.ref(map_texture) for map_texture in maps_texture),
+                    tuple((map_name, weakref.ref(map_texture)) for map_name, map_texture in maps_texture.items()),
                 ),
                 lambda: (
                     pbr_material_factory(

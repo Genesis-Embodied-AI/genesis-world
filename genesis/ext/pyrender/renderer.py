@@ -311,38 +311,38 @@ class Renderer:
             The color or segmentation image, the depth image and the normal image, those rendered offscreen alone and
             in this order.
         """
+        # The camera of the render stands for the main camera of the scene while the render runs
+        saved_camera_node = scene.main_camera_node
         if camera_node is not None:
-            saved_camera_node = scene.main_camera_node
             scene.main_camera_node = camera_node
+        try:
+            flags |= RenderFlags.MARKER_XRAY if debug_view else RenderFlags.SKIP_MARKERS
+            if shadow:
+                flags |= RenderFlags.SHADOWS_ALL
+            if plane_reflection:
+                flags |= RenderFlags.REFLECTIVE_FLOOR
+            if split_envs:
+                flags |= RenderFlags.ENV_SEPARATE
+            self.jit.view = ViewFlags.DEBUG if debug_view else ViewFlags.NORMAL
+            if seg_node_map is not None:
+                flags |= RenderFlags.SEG
+            if depth:
+                flags |= RenderFlags.RET_DEPTH
+                if not (rgb or seg_node_map is not None):
+                    flags |= RenderFlags.DEPTH_ONLY
 
-        flags |= RenderFlags.MARKER_XRAY if debug_view else RenderFlags.SKIP_MARKERS
-        if shadow:
-            flags |= RenderFlags.SHADOWS_ALL
-        if plane_reflection:
-            flags |= RenderFlags.REFLECTIVE_FLOOR
-        if split_envs:
-            flags |= RenderFlags.ENV_SEPARATE
-        self.jit.view = ViewFlags.DEBUG if debug_view else ViewFlags.NORMAL
-        if seg_node_map is not None:
-            flags |= RenderFlags.SEG
-        if depth:
-            flags |= RenderFlags.RET_DEPTH
-            if not (rgb or seg_node_map is not None):
-                flags |= RenderFlags.DEPTH_ONLY
-
-        images = ()
-        is_first_pass = True
-        if rgb or depth or seg_node_map is not None:
-            images = self.render(scene, flags, seg_node_map, env_idx=env_idx)
-            is_first_pass = False
-        if normal:
-            normal_flags = RenderFlags.NORMAL | RenderFlags.OFFSCREEN
-            normal_flags |= flags & (RenderFlags.ENV_SEPARATE | RenderFlags.SKIP_MARKERS)
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-            normal_image, *_ = self.render(scene, normal_flags, is_first_pass=is_first_pass, env_idx=env_idx)
-            images = (*images, normal_image)
-
-        if camera_node is not None:
+            images = ()
+            is_first_pass = True
+            if rgb or depth or seg_node_map is not None:
+                images = self.render(scene, flags, seg_node_map, env_idx=env_idx)
+                is_first_pass = False
+            if normal:
+                normal_flags = RenderFlags.NORMAL | RenderFlags.OFFSCREEN
+                normal_flags |= flags & (RenderFlags.ENV_SEPARATE | RenderFlags.SKIP_MARKERS)
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+                normal_image, *_ = self.render(scene, normal_flags, is_first_pass=is_first_pass, env_idx=env_idx)
+                images = (*images, normal_image)
+        finally:
             scene.main_camera_node = saved_camera_node
         return images
 

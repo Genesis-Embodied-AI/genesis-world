@@ -176,14 +176,17 @@ vec3 get_normal()
     vec3 pos_dy = dFdy(frag_position);
     vec3 tex_dx = dFdx(vec3(uv_0, 0.0));
     vec3 tex_dy = dFdy(vec3(uv_0, 0.0));
-    vec3 t = (tex_dy.t * pos_dx - tex_dx.t * pos_dy) / (tex_dx.s * tex_dy.t - tex_dy.s * tex_dx.t);
+    float uv_det = tex_dx.s * tex_dy.t - tex_dy.s * tex_dx.t;
+    vec3 t = (tex_dy.t * pos_dx - tex_dx.t * pos_dy) / uv_det;
+    vec3 b = (tex_dx.s * pos_dy - tex_dy.s * pos_dx) / uv_det;
 #ifdef NORMAL_LOC
     vec3 ng = normalize(frag_normal);
 #else
     vec3 ng = cross(pos_dx, pos_dy);
 #endif
+    // The bitangent keeps the side of the tangent that the direction of v gives, which mirrored uvs turn over
     t = normalize(t - ng * dot(ng, t));
-    vec3 b = normalize(cross(ng, t));
+    b = sign(dot(b, cross(ng, t))) * normalize(cross(ng, t));
     // The normal map holds the normal in tangent space, each component from -1 to 1 encoded from 0 to 1
     return normalize(mat3(t, b, ng) * (2.0 * texture(material.normal_texture, uv_0).rgb - 1.0));
 #else
