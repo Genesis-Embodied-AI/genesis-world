@@ -83,7 +83,6 @@ class Renderer(object):
         self._program_cache = ShaderProgramCache()
         self._normal_program_cache = NormalShaderCache()
         self._font_cache = FontCache()
-        self._texture_alloc_idx = 0
 
         self._floor_texture_color = None
         self._floor_texture_depth = None
@@ -168,6 +167,11 @@ class Renderer(object):
         if flags & RenderFlags.SEG or flags & RenderFlags.DEPTH_ONLY or flags & RenderFlags.FLAT:
             flags &= ~RenderFlags.REFLECTIVE_FLOOR
 
+        # The normals are drawn by a pass of their own, which the flags tell apart from the others (see 'forward_pass'
+        # in jit_render.py)
+        normal_flags = flags & (RenderFlags.VERTEX_NORMALS | RenderFlags.FACE_NORMALS)
+        flags &= ~normal_flags
+
         if env_idx is not None:
             envs_idx = (env_idx,)
             use_env_idx = False
@@ -213,10 +217,9 @@ class Renderer(object):
                     for idx, val in enumerate(retval):
                         retval_list[idx].append(val)
 
-            # Render normal visualization on screen only if requested, ie after reading frame buffer and without
-            # cleaning first.
-            if flags & (RenderFlags.VERTEX_NORMALS | RenderFlags.FACE_NORMALS):
-                self._normal_pass(scene, flags, env_idx=env_idx)
+            # The normals are drawn over the image after it is read, so they show on screen alone
+            if normal_flags:
+                self._normal_pass(scene, (flags & ~RenderFlags.REFLECTIVE_FLOOR) | normal_flags, env_idx=env_idx)
 
         # Update camera settings for retrieving depth buffers
         self._latest_znear = scene.main_camera_node.camera.znear
@@ -339,8 +342,6 @@ class Renderer(object):
 
         # Free fonts
         self._font_cache.clear()
-
-        self._texture_alloc_idx = 0
 
         self._delete_main_framebuffer()
         self._delete_shadow_framebuffer()
@@ -560,182 +561,16 @@ class Renderer(object):
         glEnable(GL_DEPTH_TEST)
 
     def _normal_pass(self, scene, flags, env_idx=-1):
-        # Set up viewport for render
         self._configure_forward_pass_viewport(flags)
-        program = None
-
-        # Set up camera matrices
         V, P = self._get_camera_matrices(scene, env_idx)
-
-        # Now, render each object in sorted order
-        for node in scene.sorted_mesh_nodes(env_idx):
-            mesh = node.mesh
-
-            # Skip the mesh if it's not visible
-            if not mesh.is_visible:
-                continue
-
-            for primitive in mesh.primitives:
-                # Skip objects that don't have normals
-                if not primitive.buf_flags & BufFlags.NORMAL:
-                    continue
-
-                # First, get and bind the appropriate program
-                pf = ProgramFlags.NONE
-                if flags & RenderFlags.VERTEX_NORMALS:
-                    pf = pf | ProgramFlags.VERTEX_NORMALS
-                if flags & RenderFlags.FACE_NORMALS:
-                    pf = pf | ProgramFlags.FACE_NORMALS
-                program = self._get_primitive_program(primitive, flags, pf)
-                program._bind()
-
-                # Set the camera uniforms
-                program.set_uniform("V", V)
-                program.set_uniform("P", P)
-                program.set_uniform("env_offset_scale", 0.0 if is_env_pass(flags) else 1.0)
-                program.set_uniform("normal_magnitude", 0.05 * primitive.scale)
-                program.set_uniform("normal_color", np.array((0.1, 0.1, 1.0, 1.0)))
-
-                # Finally, bind and draw the primitive
-                self._bind_and_draw_primitive(
-                    primitive=primitive,
-                    pose=scene.get_pose(node),
-                    program=program,
-                    flags=RenderFlags.DEPTH_ONLY,
-                    env_idx=env_idx,
-                )
-                self._reset_active_textures()
-
-        # Unbind the shader and flush the output
-        if program is not None:
-            program._unbind()
-        glFlush()
-
-    ###########################################################################
-    # Handlers for binding uniforms and drawing primitives
-    ###########################################################################
-
-    def _bind_and_draw_primitive(self, primitive, pose, program, flags, env_idx):
-        # Set model pose matrix
-        program.set_uniform("M", pose)
-
-        # Bind mesh buffers
-        primitive._bind()
-
-        # Bind mesh material
-        if not (flags & RenderFlags.DEPTH_ONLY or flags & RenderFlags.SEG):
-            material = primitive.material
-
-            # Bind textures
-            tf = material.tex_flags
-            if tf & TexFlags.NORMAL:
-                self._bind_texture(material.normalTexture, "material.normal_texture", program)
-            if tf & TexFlags.OCCLUSION:
-                self._bind_texture(material.occlusionTexture, "material.occlusion_texture", program)
-            if tf & TexFlags.EMISSIVE:
-                self._bind_texture(material.emissiveTexture, "material.emissive_texture", program)
-            if tf & TexFlags.BASE_COLOR:
-                self._bind_texture(material.baseColorTexture, "material.base_color_texture", program)
-            if tf & TexFlags.METALLIC_ROUGHNESS:
-                self._bind_texture(material.metallicRoughnessTexture, "material.metallic_roughness_texture", program)
-            if tf & TexFlags.DIFFUSE:
-                self._bind_texture(material.diffuseTexture, "material.diffuse_texture", program)
-            if tf & TexFlags.SPECULAR_GLOSSINESS:
-                self._bind_texture(material.specularGlossinessTexture, "material.specular_glossiness_texture", program)
-
-            # Bind other uniforms
-            b = "material.{}"
-            program.set_uniform(b.format("emissive_factor"), material.emissiveFactor)
-            if isinstance(material, MetallicRoughnessMaterial):
-                program.set_uniform(b.format("base_color_factor"), material.baseColorFactor)
-                program.set_uniform(b.format("metallic_factor"), material.metallicFactor)
-                program.set_uniform(b.format("roughness_factor"), material.roughnessFactor)
-            elif isinstance(material, SpecularGlossinessMaterial):
-                program.set_uniform(b.format("diffuse_factor"), material.diffuseFactor)
-                program.set_uniform(b.format("specular_factor"), material.specularFactor)
-                program.set_uniform(b.format("glossiness_factor"), material.glossinessFactor)
-
-            # Set blending options
-            if material.alphaMode == "BLEND":
-                glEnable(GL_BLEND)
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-            else:
-                glDisable(GL_BLEND)
-
-            # Set wireframe mode
-            wf = material.wireframe
-            if flags & RenderFlags.FLIP_WIREFRAME:
-                wf = not wf
-            if wf or flags & RenderFlags.ALL_WIREFRAME:
-                glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
-            else:
-                glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-
-            # Set culling mode
-            if material.doubleSided or flags & RenderFlags.SKIP_CULL_FACES:
-                glDisable(GL_CULL_FACE)
-            else:
-                glEnable(GL_CULL_FACE)
-                glCullFace(GL_BACK)
-        else:
-            glEnable(GL_CULL_FACE)
-            glCullFace(GL_BACK)
-            glDisable(GL_BLEND)
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-
-        # Set point size if needed
-        glDisable(GL_PROGRAM_POINT_SIZE)
-        if primitive.mode == GLTF.POINTS:
-            glEnable(GL_PROGRAM_POINT_SIZE)
-            glPointSize(self.point_size)
-
-        # Render mesh
-        n_instances = 1
-        if primitive.poses is not None:
-            n_instances = len(primitive.poses)
-
-        if not primitive.is_env_instanced or env_idx == -1:
-            if primitive.indices is not None:
-                glDrawElementsInstanced(
-                    primitive.mode, primitive.indices.size, GL_UNSIGNED_INT, ctypes.c_void_p(0), n_instances
-                )
-            else:
-                glDrawArraysInstanced(primitive.mode, 0, len(primitive.positions), n_instances)
-        else:
-            if primitive.indices is not None:
-                glDrawElementsInstancedBaseInstance(
-                    primitive.mode, primitive.indices.size, GL_UNSIGNED_INT, ctypes.c_void_p(0), 1, env_idx
-                )
-            else:
-                glDrawArraysInstancedBaseInstance(primitive.mode, 0, len(primitive.positions), 1, env_idx)
-
-        # Unbind mesh buffers
-        primitive._unbind()
-
-    ###########################################################################
-    # Context Management
-    ###########################################################################
-
-    ###########################################################################
-    # Texture Management
-    ###########################################################################
-
-    def _bind_texture(self, texture, uniform_name, program):
-        """Bind a texture to an active texture unit and return
-        the texture unit index that was used.
-        """
-        tex_id = self._get_next_active_texture()
-        glActiveTexture(GL_TEXTURE0 + tex_id)
-        texture._bind()
-        program.set_uniform(uniform_name, tex_id)
-
-    def _get_next_active_texture(self):
-        val = self._texture_alloc_idx
-        self._texture_alloc_idx += 1
-        return val
-
-    def _reset_active_textures(self):
-        self._texture_alloc_idx = 0
+        cam_pos = self._get_camera_pose(scene, env_idx)[:3, 3]
+        screen_size = np.array([self.viewport_width, self.viewport_height], np.float32)
+        program_flags = ProgramFlags.NONE
+        if flags & RenderFlags.VERTEX_NORMALS:
+            program_flags |= ProgramFlags.VERTEX_NORMALS
+        if flags & RenderFlags.FACE_NORMALS:
+            program_flags |= ProgramFlags.FACE_NORMALS
+        self.jit.forward_pass(self, V, P, cam_pos, flags, program_flags, screen_size, env_idx=env_idx)
 
     ###########################################################################
     # Camera Matrix Management
@@ -810,7 +645,11 @@ class Renderer(object):
             if primitive.double_sided:
                 geometry_shader = "mesh_double_sided.geom"
                 defines["DOUBLE_SIDED"] = 1
-        elif program_flags & (ProgramFlags.VERTEX_NORMALS | ProgramFlags.FACE_NORMALS):
+        # A primitive without normals is left out of the pass drawing them, and takes the program of a depth pass
+        elif (
+            program_flags & (ProgramFlags.VERTEX_NORMALS | ProgramFlags.FACE_NORMALS)
+            and primitive.buf_flags & BufFlags.NORMAL
+        ):
             vertex_shader = "vertex_normals.vert"
             if primitive.mode == GLTF.POINTS:
                 geometry_shader = "vertex_normals_pc.geom"

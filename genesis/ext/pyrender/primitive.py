@@ -563,11 +563,6 @@ class Primitive(object):
     def _in_context(self):
         return self._vaid is not None
 
-    def _bind(self):
-        if self._vaid is None:
-            raise ValueError("Cannot bind a Mesh that has not been added to a context")
-        glBindVertexArray(self._vaid)
-
     def _unbind(self):
         glBindVertexArray(0)
 

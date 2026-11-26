@@ -8,7 +8,7 @@ import numba as nb
 import OpenGL.GL as GL
 import OpenGL.constant as GL_constant
 
-from .constants import RenderFlags, ViewFlags, MAX_N_LIGHTS
+from .constants import BufFlags, MAX_N_LIGHTS, RenderFlags, ViewFlags
 from .light import DirectionalLight, PointLight, SpotLight
 from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
 from .numba_gl_wrapper import GLWrapper
@@ -77,6 +77,7 @@ RenderFlags_SKIP_FLOOR = RenderFlags.SKIP_FLOOR
 RenderFlags_OFFSCREEN = RenderFlags.OFFSCREEN
 RenderFlags_REFLECTIVE_FLOOR = RenderFlags.REFLECTIVE_FLOOR
 RenderFlags_FLAT = RenderFlags.FLAT
+RenderFlags_NORMALS = RenderFlags.VERTEX_NORMALS | RenderFlags.FACE_NORMALS
 
 
 @nb.jit(nopython=True, cache=True)
@@ -850,6 +851,7 @@ class JITRenderer:
                 nb.int32,
                 nb.float32[:, :, :],
                 nb.int32[:],
+                nb.float32[:],
                 self.gl.wrapper_type,
             ),
             cache=True,
@@ -891,9 +893,12 @@ class JITRenderer:
             env_offset_buffer,
             texture_layers,
             texture_layers_idx,
+            normal_magnitude,
             gl,
         ):
-            is_rgba = not (flags & RenderFlags_DEPTH_ONLY or flags & RenderFlags_SEG)
+            # A pass drawing the normals draws them alone, as lines of a single color (see vertex_normals.geom)
+            is_normal_pass = flags & RenderFlags_NORMALS
+            is_rgba = not (flags & RenderFlags_DEPTH_ONLY or flags & RenderFlags_SEG or is_normal_pass)
 
             # Every sampler left unset reads unit 0, which holds a placeholder until a material binds a texture there
             # (see bind_lighting). This also unbinds the mirror image that a floor pass draws into.
@@ -961,6 +966,8 @@ class JITRenderer:
                     active_texture += 1
 
                 set_uniform_matrix_4fv(pid, "M", pose[id], gl)
+                if is_normal_pass:
+                    set_uniform_1f(pid, "normal_magnitude", normal_magnitude[id], gl)
                 gl.glBindVertexArray(vao_id[id])
 
                 is_culled = not (render_flags[id, 2] or flags & RenderFlags_SKIP_CULL_FACES)
@@ -1451,17 +1458,22 @@ class JITRenderer:
                 )
             GL.glBindTexture(GL.GL_TEXTURE_CUBE_MAP, 0)
             self.placeholder_tex = np.array([texture._texid for texture in self._placeholder_textures], np.int32)
-        # Temporarily hide markers for non-debug offscreen cameras by setting their
-        # index count to 0, so draw calls render nothing for these nodes.
+        # The primitives a pass leaves out have their index count set to 0 for the pass, so that no draw call renders
+        # them: the markers for the cameras that skip them, everything but the markers for the X-ray pass, and the
+        # primitives without normals for the pass drawing the normals.
+        is_marker = self.render_flags[:, 6].astype(bool)
+        is_hidden = np.zeros_like(is_marker)
         if flags & RenderFlags.SKIP_MARKERS:
-            marker_mask = self.render_flags[:, 6].astype(bool)
-            saved_n_indices = self.n_indices[marker_mask].copy()
-            self.n_indices[marker_mask] = 0
-        # Hide everything except markers for the X-ray pass
+            is_hidden |= is_marker
         if markers_only:
-            non_marker_mask = ~self.render_flags[:, 6].astype(bool)
-            saved_non_marker_indices = self.n_indices[non_marker_mask].copy()
-            self.n_indices[non_marker_mask] = 0
+            is_hidden |= ~is_marker
+        # The normals drawn span 5% of the diagonal of the bounding box of their primitive
+        normal_magnitude = np.empty(0, np.float32)
+        if flags & RenderFlags_NORMALS:
+            is_hidden |= [not primitive.buf_flags & BufFlags.NORMAL for primitive in self.primitive_list]
+            normal_magnitude = np.array([0.05 * primitive.scale for primitive in self.primitive_list], np.float32)
+        n_indices_hidden = self.n_indices[is_hidden].copy()
+        self.n_indices[is_hidden] = 0
 
         # Opaque primitives are drawn nearest first, so that the depth test rejects what they hide as early as
         # possible, and transparent ones farthest first, the only order their blending is correct in. Both are keyed on
@@ -1517,12 +1529,10 @@ class JITRenderer:
                 self.env_offset_buffer if self.env_offset_buffer is not None else 0,
                 self.texture_layers,
                 self.texture_layers_idx,
+                normal_magnitude,
                 self.gl.wrapper_instance,
             )
-        if flags & RenderFlags.SKIP_MARKERS:
-            self.n_indices[marker_mask] = saved_n_indices
-        if markers_only:
-            self.n_indices[non_marker_mask] = saved_non_marker_indices
+        self.n_indices[is_hidden] = n_indices_hidden
 
     def shadow_mapping_pass(
         self,
