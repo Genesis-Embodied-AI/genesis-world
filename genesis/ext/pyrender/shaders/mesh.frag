@@ -114,9 +114,11 @@ uniform SpotLight spot_lights[MAX_SPOT_LIGHTS];
 uniform int n_spot_lights;
 uniform vec3 cam_pos;
 uniform vec3 ambient_light;
+#ifdef REFLECTIVE_FLOOR
+// The mirror image of the scene through the floor (see '_floor_pass' in renderer.py)
 uniform sampler2D floor_tex;
-uniform int floor_flag;
 uniform vec2 screen_size;
+#endif
 
 uniform mat4 reflection_mat;
 
@@ -535,7 +537,20 @@ void main()
     float env_a = min(env_r.x * env_r.x, exp2(-9.28 * nv_env)) * env_r.x + env_r.y;
     vec2 env_ab = vec2(-1.04, 1.04) * env_a + env_r.zw;
     float smoothness = 1.0 - roughness;
-    color.xyz += metallic * smoothness * smoothness * (f0 * env_ab.x + env_ab.y) * env;
+    // A reflective floor mirrors the scene, rendered into 'floor_tex' through the floor, with the share of the light
+    // that its surface reflects. A rough floor blurs the mirror image, sampled at a coarser level of detail. Away from
+    // the mirrored geometry, which the alpha of the mirror image covers, the floor shows the environment as any
+    // surface does. The program of the floor alone holds the lookup: a texture fetch in a program changes how some
+    // software renderers compute its depth, which must match that of the other programs.
+    float mirror_coverage = 0.0;
+    vec3 mirror = vec3(0.0);
+#ifdef REFLECTIVE_FLOOR
+    vec4 mirror_texel = textureLod(floor_tex, gl_FragCoord.xy / screen_size, 4.0 * roughness * roughness);
+    mirror_coverage = mirror_texel.a;
+    mirror = srgb_to_linear(vec4(mirror_texel.rgb / max(mirror_coverage, 1e-4), 1.0)).rgb;
+#endif
+    vec3 env_reflected = (1.0 - mirror_coverage) * metallic * smoothness * smoothness * env + mirror_coverage * mirror;
+    color.xyz += (f0 * env_ab.x + env_ab.y) * env_reflected;
 
     // A transmissive surface reflects more of the environment at grazing angles. The reflected share caps at the
     // smoothness of the surface, a rough surface scattering its reflection away.
@@ -569,22 +584,6 @@ void main()
 #endif
 #endif
     color.xyz += emissive;
-
-    vec3 floor_color = floor_flag != 0 ? texture(floor_tex, gl_FragCoord.xy/screen_size).rgb : vec3(0.0);
-
-    if (floor_flag != 0 && length(floor_color) > 1e-4) {
-        //color.xyz *= 0;
-        vec3 floor_radiance = srgb_to_linear(vec4(floor_color, 1.0)).rgb;
-        vec3 l = n * dot(n, v) * 2 - v;
-
-        vec3 h = normalize(l+v);
-        float vh = clamp(dot(v, h), 0.0, 1.0);
-        f0 = vec3(0.03);
-        vec3 reflectance = (f0 + (1.0 - f0) * pow(clamp(1.0 - vh, 0.0, 1.0), 5.0)) * 1.0;
-        color.xyz = color.xyz * (1-reflectance) + reflectance * floor_radiance;
-        // color.xyz += compute_brdf(n, v, l, roughness, metallic, f0, c_diff, vec3(0.0), 1*floor_radiance);
-    }
-    // if (floor_flag != 0) color.xyz = floor_color.xyz;
 
     frag_color = clamp(vec4(linear_to_srgb(color).rgb, color.a * base_color.a), 0.0, 1.0);
     // The blending runs on sRGB values, where scaling the background by the encoded transmittance approximates the

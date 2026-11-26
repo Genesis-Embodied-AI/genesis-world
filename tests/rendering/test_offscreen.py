@@ -2643,3 +2643,77 @@ def test_glass_tints_what_lies_behind_it(renderer, show_viewer):
         )
         transmittance = 1.0 - coverage + coverage * transmittance
         assert_allclose(patch_pair, patch_alone + transmittance**2 * patch_board, atol=0.5)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
+@pytest.mark.parametrize("roughness", [0.04, 1.0])
+def test_plane_reflection(roughness, renderer, show_viewer):
+    RED = 0.8
+    AMBIENT = 0.5
+    RES = 256
+    CENTRE = slice(RES // 2 - 3, RES // 2 + 3)
+
+    scene = gs.Scene(
+        vis_options=gs.options.VisOptions(
+            # The shadow of the box would darken the floor along with its mirror image
+            shadow=False,
+            plane_reflection=True,
+            background_color=(0.0, 0.0, 0.0),
+            # Under a uniform light alone, every face of a dielectric shows its linear color scaled by that light
+            ambient_light=(AMBIENT, AMBIENT, AMBIENT),
+            lights=[],
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -1.0, 1.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        renderer=renderer,
+        show_viewer=show_viewer,
+    )
+    # A floor and a box wholly in view of the camera and of its mirror image, since a software renderer misdraws
+    # geometry that leaves the view
+    scene.add_entity(
+        morph=gs.morphs.Plane(
+            plane_size=(0.4, 0.4),
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.0, 0.0, 0.0),
+            roughness=roughness,
+        ),
+    )
+    # The camera sees the face of the box that looks back along the view direction mirrored by the floor
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 1.6, 1.4),
+            size=(0.6, 0.6, 0.6),
+            fixed=True,
+        ),
+        surface=gs.surfaces.Default(
+            color=(RED, 0.0, 0.0),
+        ),
+    )
+    cam = scene.add_camera(
+        res=(RES, RES),
+        pos=(0.0, -1.0, 1.0),
+        lookat=(0.0, 0.0, 0.0),
+    )
+    scene.build()
+
+    def floor_patch():
+        rgb = tensor_to_array(cam.render()[0])[CENTRE, CENTRE] / 255.0
+        return np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4).mean(axis=(0, 1))
+
+    floor_mirrored = floor_patch()
+    box.set_pos((50.0, 1.6, 1.4))
+    floor_alone = floor_patch()
+
+    # The floor adds the mirror image of the scene in linear light, weighted by the share of the light that a
+    # dielectric surface of that roughness reflects at the view angle (the analytical fit of its environment BRDF)
+    nv = np.cos(np.pi / 4)
+    env_r = roughness * np.array([-1.0, -0.0275, -0.572, 0.022]) + np.array([1.0, 0.0425, 1.04, -0.04])
+    env_a = min(env_r[0] ** 2, 2.0 ** (-9.28 * nv)) * env_r[0] + env_r[1]
+    env_ab = np.array([-1.04, 1.04]) * env_a + env_r[2:]
+    reflectance = 0.04 * env_ab[0] + env_ab[1]
+    radiance = AMBIENT * ((RED + 0.055) / 1.055) ** 2.4
+    assert_allclose(floor_mirrored - floor_alone, (reflectance * radiance, 0.0, 0.0), atol=1e-4)

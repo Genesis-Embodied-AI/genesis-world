@@ -765,6 +765,9 @@ class JITRenderer:
                     prim_flags &= ~(
                         RenderFlags.SHADOWS_DIRECTIONAL | RenderFlags.SHADOWS_SPOT | RenderFlags.SHADOWS_POINT
                     )
+                # A single floor mirrors the scene, the one the reflection is set up for (see 'reflection_mat')
+                if not self.render_flags[i, 4]:
+                    prim_flags &= ~RenderFlags.REFLECTIVE_FLOOR
                 program = renderer._get_primitive_program(primitive, prim_flags, program_flags)
                 program_id[i] = program._program_id
             self.program_id[(flags, program_flags)] = program_id
@@ -897,17 +900,13 @@ class JITRenderer:
 
                 active_texture = lighting_texture
 
-                if flags & RenderFlags_REFLECTIVE_FLOOR:
-                    if render_flags[id, 4]:
-                        gl.glActiveTexture(GL_TEXTURE0 + active_texture)
-                        gl.glBindTexture(GL_TEXTURE_2D, floor_tex)
-                        set_uniform_1i(pid, "floor_tex", active_texture, gl)
-                        set_uniform_1i(pid, "floor_flag", 1, gl)
-                        set_uniform_2f(pid, "screen_size", screen_size[0], screen_size[1], gl)
-                        active_texture += 1
-                    else:
-                        set_uniform_1i(pid, "floor_tex", 0, gl)
-                        set_uniform_1i(pid, "floor_flag", 0, gl)
+                # The program of a reflective floor samples the mirror image (see REFLECTIVE_FLOOR in renderer.py)
+                if flags & RenderFlags_REFLECTIVE_FLOOR and render_flags[id, 4]:
+                    gl.glActiveTexture(GL_TEXTURE0 + active_texture)
+                    gl.glBindTexture(GL_TEXTURE_2D, floor_tex)
+                    set_uniform_1i(pid, "floor_tex", active_texture, gl)
+                    set_uniform_2f(pid, "screen_size", screen_size[0], screen_size[1], gl)
+                    active_texture += 1
 
                 set_uniform_matrix_4fv(pid, "M", pose[id], gl)
                 gl.glBindVertexArray(vao_id[id])
@@ -958,7 +957,9 @@ class JITRenderer:
                         # FIXME: Note that enabling GL_BLEND yield non-deterministic results on Nvidia GPU.
                         # As a result, it must only be enabled if absolutely necessary rather than systematically.
                         gl.glEnable(GL_BLEND)
-                        gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                        # The alpha accumulates the coverage of the fragments, which the mirror image of a floor reads
+                        # (see REFLECTIVE_FLOOR in mesh.frag)
+                        gl.glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
                     else:
                         gl.glDisable(GL_BLEND)
 

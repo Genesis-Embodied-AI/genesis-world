@@ -79,6 +79,7 @@ class GLWrapper:
             ("glEnable", (GLvoid, GLenum)),
             ("glDisable", (GLvoid, GLenum)),
             ("glBlendFunc", (GLvoid, GLenum, GLenum)),
+            ("glBlendFuncSeparate", (GLvoid, GLenum, GLenum, GLenum, GLenum)),
             ("glPolygonMode", (GLvoid, GLenum, GLenum)),
             ("glCullFace", (GLvoid, GLenum)),
             ("glDrawElementsInstanced", (GLvoid, GLenum, GLsizei, GLenum, GLvoidp, GLsizei)),

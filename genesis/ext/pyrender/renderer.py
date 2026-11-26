@@ -27,6 +27,7 @@ from .font import FontCache
 from .jit_render import is_env_pass
 from .light import DirectionalLight, PointLight, SpotLight
 from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
+from .sampler import Sampler
 from .shader_program import NormalShaderCache, ShaderProgramCache
 from .texture import Texture
 from .utils import format_color_vector
@@ -351,7 +352,8 @@ class Renderer(object):
 
     def _floor_pass(self, scene, flags, seg_node_map=None, env_idx=-1):
         self._configure_floor_pass_viewport(flags)
-        glClearColor(0.0, 0.0, 0.0, 1.0)
+        # The alpha of the mirror image marks where it holds mirrored geometry (see floor_tex in mesh.frag)
+        glClearColor(0.0, 0.0, 0.0, 0.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
         V, P = self._get_camera_matrices(scene, env_idx)
@@ -370,6 +372,11 @@ class Renderer(object):
             reflection_mat=self.jit.reflection_mat,
             env_idx=env_idx,
         )
+
+        # A rough floor samples a coarser level of the mirror image, which blurs it
+        glBindTexture(GL_TEXTURE_2D, self._floor_texture_color._texid)
+        glGenerateMipmap(GL_TEXTURE_2D)
+        glBindTexture(GL_TEXTURE_2D, 0)
 
     def _forward_pass(self, scene, flags, seg_node_map=None, env_idx=-1):
         # Set up viewport for render
@@ -769,6 +776,9 @@ class Renderer(object):
         ):
             vertex_shader = "mesh.vert"
             fragment_shader = "mesh.frag"
+            # The floor alone samples the mirror image of the scene (see REFLECTIVE_FLOOR in mesh.frag)
+            if flags & RenderFlags.REFLECTIVE_FLOOR and primitive.is_floor:
+                defines["REFLECTIVE_FLOOR"] = 1
             if primitive.double_sided:
                 geometry_shader = "mesh_double_sided.geom"
                 defines["DOUBLE_SIDED"] = 1
@@ -974,8 +984,19 @@ class Renderer(object):
             )
             self._floor_texture_depth._add_to_context()
         if self._floor_texture_color is None:
+            # The mirror image holds sRGB values within [0, 1], which 8 bits per channel store. A floating-point texture
+            # takes no filtering of its levels on some renderers, which would leave the floor without its reflection.
             self._floor_texture_color = Texture(
-                width=self.viewport_width, height=self.viewport_height, source_channels="RGB", data_format=GL_FLOAT
+                width=self.viewport_width,
+                height=self.viewport_height,
+                source_channels="RGBA",
+                data_format=GL_UNSIGNED_BYTE,
+                sampler=Sampler(
+                    magFilter=GL_LINEAR,
+                    minFilter=GL_LINEAR_MIPMAP_LINEAR,
+                    wrapS=GLTF.CLAMP_TO_EDGE,
+                    wrapT=GLTF.CLAMP_TO_EDGE,
+                ),
             )
             self._floor_texture_color._add_to_context()
         if self._floor_fb is None:
