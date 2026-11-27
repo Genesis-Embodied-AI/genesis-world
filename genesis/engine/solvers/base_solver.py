@@ -602,7 +602,7 @@ class Solver(TrackableMixin, BuildableMixin, BatchedMixin, ErrnoMixin, Checkpoin
         return items
 
     def _add_force_field(self, force_field: ForceField) -> None:
-        self._force_fields.fields.append(force_field)
+        self._force_fields.fields += (force_field,)
 
     def _sanitize_io_variables(
         self,
