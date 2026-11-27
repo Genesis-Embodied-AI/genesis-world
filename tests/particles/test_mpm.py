@@ -196,6 +196,10 @@ def test_perf_dispatch(variant, show_viewer):
             lower_bound=(-0.4, -0.4, -0.05),
             upper_bound=(0.4, 0.4, 0.5),
         ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -1.0, 0.6),
+            camera_lookat=(0.0, 0.0, 0.05),
+        ),
         show_viewer=show_viewer,
     )
     scene.add_entity(
@@ -215,7 +219,7 @@ def test_perf_dispatch(variant, show_viewer):
     )
     elastic_twin = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(-0.1, 0.2, 0.2),
+            pos=(0.025, 0.25, 0.2),
             size=(0.08, 0.08, 0.08),
         ),
         material=gs.materials.MPM.Elastic(
@@ -234,6 +238,61 @@ def test_perf_dispatch(variant, show_viewer):
             viscous=liquid_viscous,
         ),
     )
+    # The sand, the elasto-plastic blocks and the snow read the singular value decomposition
+    if variant == "svd":
+        sand = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(-0.15, -0.25, 0.1),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.MPM.Sand(),
+        )
+        elasto_plastic = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(-0.15, 0.25, 0.2),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.MPM.ElastoPlastic(),
+        )
+        # A low compression bound makes the yield clamp flatten the block for good on impact
+        elasto_plastic_clamp = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.2, 0.25, 0.2),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.MPM.ElastoPlastic(
+                yield_lower=5e-3,
+                use_von_mises=False,
+            ),
+        )
+        snow = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.2, -0.25, 0.2),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.MPM.Snow(),
+        )
+        # A snow block differs from an elasto-plastic block of the same yield bounds by its hardening under compression
+        # alone. Both sample their particles on the same lattice.
+        snow_regular = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(-0.3, 0.1, 0.2),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.MPM.Snow(
+                sampler="regular",
+            ),
+        )
+        elasto_plastic_unhardened = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(-0.3, -0.1, 0.2),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.MPM.ElastoPlastic(
+                use_von_mises=False,
+                sampler="regular",
+            ),
+        )
     scene.build(n_envs=2)
 
     # Aggregate SVD flag must match the variant for the dispatch path under test to actually run.
@@ -244,6 +303,8 @@ def test_perf_dispatch(variant, show_viewer):
 
     init_elastic_pos = elastic.get_particles_pos()
     init_liquid_pos = liquid.get_particles_pos()
+    if variant == "svd":
+        init_snow_pos = snow.get_particles_pos()
 
     for _ in range(100):
         scene.step()
@@ -259,6 +320,88 @@ def test_perf_dispatch(variant, show_viewer):
     # is normal for the MPM coupling, so allow up to 2mm.
     assert final_elastic_pos[..., 2].min() > -1e-3
     assert final_liquid_pos[..., 2].min() > -2e-3
+
+    # Each entity follows the law of its own material once landed: the elastic cube keeps its height, the liquid
+    # spreads, the sand slumps under its own weight while its friction holds a pile, and the elasto-plastic blocks and
+    # the snow keep the flattening of their impact.
+    elastic_height = final_elastic_pos[..., 2].amax(dim=-1) - final_elastic_pos[..., 2].amin(dim=-1)
+    liquid_height = final_liquid_pos[..., 2].amax(dim=-1) - final_liquid_pos[..., 2].amin(dim=-1)
+    assert (liquid_height < 0.9 * elastic_height).all()
+    if variant == "svd":
+        sand_pos = sand.get_particles_pos()
+        elasto_plastic_pos = elasto_plastic.get_particles_pos()
+        elasto_plastic_clamp_pos = elasto_plastic_clamp.get_particles_pos()
+        snow_pos = snow.get_particles_pos()
+        sand_height = sand_pos[..., 2].amax(dim=-1) - sand_pos[..., 2].amin(dim=-1)
+        elasto_plastic_height = elasto_plastic_pos[..., 2].amax(dim=-1) - elasto_plastic_pos[..., 2].amin(dim=-1)
+        clamp_height = elasto_plastic_clamp_pos[..., 2].amax(dim=-1) - elasto_plastic_clamp_pos[..., 2].amin(dim=-1)
+        init_snow_height = init_snow_pos[..., 2].amax(dim=-1) - init_snow_pos[..., 2].amin(dim=-1)
+        snow_height = snow_pos[..., 2].amax(dim=-1) - snow_pos[..., 2].amin(dim=-1)
+        assert ((0.3 * elastic_height < sand_height) & (sand_height < 0.5 * elastic_height)).all()
+        assert (elasto_plastic_height < 0.97 * elastic_height).all()
+        assert (clamp_height < 0.95 * elastic_height).all()
+        assert (snow_height < 0.99 * init_snow_height).all()
+        # The hardened snow compresses less on impact, which keeps its particles higher
+        snow_regular_z = snow_regular.get_particles_pos()[..., 2].mean(dim=-1)
+        elasto_plastic_unhardened_z = elasto_plastic_unhardened.get_particles_pos()[..., 2].mean(dim=-1)
+        assert (snow_regular_z - elasto_plastic_unhardened_z > 5e-3).all()
+
+
+@pytest.mark.required
+def test_material_subclass(precision, show_viewer):
+    class ElasticTwin(gs.materials.MPM.Elastic):
+        pass
+
+    class UnboundMaterial(gs.materials.MPM.Base):
+        pass
+
+    with pytest.raises(gs.GenesisException, match="No MPMMaterialPhysics is registered"):
+        gs.Scene().add_entity(morph=gs.morphs.Box(pos=(0, 0, 0.5), size=(0.08, 0.08, 0.08)), material=UnboundMaterial())
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=2e-3,
+            substeps=10,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            grid_density=64,
+            lower_bound=(-0.4, -0.4, -0.05),
+            upper_bound=(0.4, 0.4, 0.5),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(-0.2, -0.6, 0.3),
+            camera_lookat=(-0.2, 0.0, 0.04),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    elastic = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.1, 0.0, 0.06),
+            size=(0.08, 0.08, 0.08),
+        ),
+        material=gs.materials.MPM.Elastic(),
+    )
+    # The subclass lies a whole number of cells away from its twin, so that both sit alike on the grid
+    elastic_twin = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.2875, 0.0, 0.06),
+            size=(0.08, 0.08, 0.08),
+        ),
+        material=ElasticTwin(),
+    )
+    scene.build(n_envs=2)
+
+    init_elastic_pos = elastic.get_particles_pos()
+    init_elastic_twin_pos = elastic_twin.get_particles_pos()
+    for _ in range(50):
+        scene.step()
+
+    elastic_pos = elastic.get_particles_pos()
+    elastic_twin_disp = elastic_twin.get_particles_pos() - init_elastic_twin_pos
+    assert_allclose(elastic_twin_disp, elastic_pos - init_elastic_pos, tol=1e-13 if precision == "64" else 5e-6)
 
 
 @pytest.mark.required

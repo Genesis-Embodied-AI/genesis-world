@@ -1,11 +1,7 @@
 from typing import TYPE_CHECKING, Annotated, ClassVar
 
-from pydantic import ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 
-import quadrants as qd
-from quadrants.lang._quadrants_callable import QuadrantsCallable
-
-import genesis as gs
 from genesis.constants import STRUCTURE
 from genesis.typing import PositiveFloat, ValidFloat
 
@@ -15,7 +11,6 @@ if TYPE_CHECKING:
     from genesis.engine.entities.mpm_entity import MPMEntity
 
 
-@qd.data_oriented
 class Base(Material["MPMEntity"]):
     """
     The base class of MPM materials.
@@ -42,13 +37,7 @@ class Base(Material["MPMEntity"]):
         the surface stair-stepped. 'random' draws them uniformly, which leaves local density fluctuations.
     """
 
-    # The kernel functions of a material are methods, which pydantic would otherwise take for fields
-    model_config = ConfigDict(ignored_types=(QuadrantsCallable,))
-
     structure: ClassVar[STRUCTURE] = STRUCTURE.TEARABLE
-
-    # The plastic volume ratio of a particle at rest
-    _default_Jp: ClassVar[float] = 1.0
 
     E: PositiveFloat = 1e6
     nu: Annotated[ValidFloat, Field(gt=-1.0, lt=0.5)] = 0.2
@@ -73,28 +62,3 @@ class Base(Material["MPMEntity"]):
             E, nu = info.data["E"], info.data["nu"]
             lam = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
         return lam
-
-    @property
-    def needs_svd(self) -> bool:
-        """Whether the material reads the singular value decomposition of the deformation gradient."""
-        return True
-
-    @qd.func
-    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp, eps):
-        """Return the deformation gradient, its singular values and the plastic volume ratio once plasticity applies.
-
-        `F_tmp` is the deformation gradient of the substep, `U`, `S` and `V` its singular value decomposition, `J` its
-        determinant, `Jp` the plastic volume ratio of the particle and `eps` the tolerance of the norms.
-        """
-        raise NotImplementedError
-
-    @qd.func
-    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-        """Return the Kirchhoff stress of a particle of deformation gradient `F_new` (see 'update_F_S_Jp').
-
-        `actu` is the actuation of the particle and `m_dir` the direction of its muscle fibers.
-        """
-        stress = 2 * self.mu * (F_new - U @ V.transpose()) @ F_new.transpose() + qd.Matrix.identity(
-            gs.qd_float, 3
-        ) * self.lam * J * (J - 1)
-        return stress
