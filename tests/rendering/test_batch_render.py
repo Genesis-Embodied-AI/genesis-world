@@ -7,6 +7,17 @@ from genesis.utils.misc import tensor_to_array
 from ..utils.assertions import rgb_array_to_png_bytes
 from .conftest import RENDERER_TYPE
 
+try:
+    from gs_madrona.renderer_gs import MadronaBatchRendererAdapter
+except ImportError:
+    MadronaBatchRendererAdapter = None
+
+# Dynamic textures and surface alpha need a gs-madrona switching materials and writing textures at runtime
+requires_runtime_textures = pytest.mark.skipif(
+    not hasattr(MadronaBatchRendererAdapter, "set_geom_mat_ids"),
+    reason="gs-madrona does not switch materials and write textures at runtime.",
+)
+
 
 def _batch_render_scene(
     show_viewer,
@@ -102,6 +113,7 @@ def test_fisheye_camera(show_viewer, renderer, png_snapshot):
     _batch_render_scene(show_viewer, renderer, png_snapshot, use_fisheye_camera=True)
 
 
+@requires_runtime_textures
 @pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.BATCHRENDER_RASTERIZER, RENDERER_TYPE.BATCHRENDER_RAYTRACER])
 def test_dynamic_texture(show_viewer, renderer):
@@ -194,6 +206,7 @@ def test_dynamic_texture(show_viewer, renderer):
     assert get_colors() == [(RED, RED)] * 3
 
 
+@requires_runtime_textures
 @pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.BATCHRENDER_RASTERIZER, RENDERER_TYPE.BATCHRENDER_RAYTRACER])
 @pytest.mark.parametrize("alpha", [0.25, 0.75])
