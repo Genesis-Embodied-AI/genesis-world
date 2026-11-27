@@ -233,14 +233,14 @@ def test_alpha_coverage(show_viewer, renderer, alpha):
     )
     scene.build()
 
-    # Both pipelines report the depth and the segmentation of a surface whose opacity reaches the cutoff of 0.5, and
-    # those of what lies behind one below it, here nothing
+    # A surface of opacity a covers a fraction a of the pixels of each 4x4 block by an ordered dither, which both
+    # pipelines share: the covered pixels report its depth and segmentation, the others what lies behind, here nothing
     _, depth_arr, seg_arr, _ = cam.render(rgb=True, depth=True, segmentation=True)
-    depth = tensor_to_array(depth_arr)[CAM_RES[1] // 2, CAM_RES[0] // 2]
-    seg = tensor_to_array(seg_arr)[CAM_RES[1] // 2, CAM_RES[0] // 2]
-    if alpha > 0.5:
-        assert depth == pytest.approx(1.0, abs=1e-2)
-        assert seg != 0
-    else:
-        assert depth > 2.0
-        assert seg == 0
+    depth = tensor_to_array(depth_arr)
+    is_covered = tensor_to_array(seg_arr) != 0
+    bayer = np.array([[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]])
+    rows, cols = np.indices(is_covered.shape)
+    is_covered_expected = (bayer[rows % 4, cols % 4] + 0.5) / 16.0 <= alpha
+    np.testing.assert_array_equal(is_covered, is_covered_expected)
+    np.testing.assert_allclose(depth[is_covered], 1.0, atol=1e-2)
+    assert (depth[~is_covered] > 2.0).all()
