@@ -303,18 +303,9 @@ class Primitive:
                 location += 1
                 offset += size
 
-        # The transforms of the instances, each a column-major matrix over 4 attribute locations
-        pose_data = np.eye(4, dtype=np.float32)[np.newaxis] if self.poses is None else self.poses
-        pose_data = np.ascontiguousarray(np.transpose(pose_data, (0, 2, 1)), dtype=np.float32)
-        model_buffer = glGenBuffers(1)
-        self._buffers["model"] = model_buffer
-        glBindBuffer(GL_ARRAY_BUFFER, model_buffer)
-        glBufferData(GL_ARRAY_BUFFER, pose_data.nbytes, pose_data, GL_STREAM_DRAW)
+        # The transforms of the instances take the next 4 attribute locations, which the renderer drawing the primitive
+        # points at its rows of the instance buffer (see 'JITRenderer.instances_pose')
         self._inst_attr_start = location
-        for i in range(4):
-            glEnableVertexAttribArray(location + i)
-            glVertexAttribPointer(location + i, 4, GL_FLOAT, GL_FALSE, FLOAT_SZ * 16, ctypes.c_void_p(FLOAT_SZ * 4 * i))
-            glVertexAttribDivisor(location + i, 1)
 
         if env_offset_buffer is not None:
             glBindBuffer(GL_ARRAY_BUFFER, env_offset_buffer)

@@ -605,7 +605,6 @@ class RasterizerContext(BuildableMixin):
                 meshes, primitives = shape_nodes.meshes, shape_nodes.primitives
                 if not meshes:
                     return
-                # One transposed copy of the poses, which the buffer flush uploads as is: each node then takes a view
                 poses_T = poses_T.swapaxes(0, 1)
                 if len(meshes) < len(shape):
                     poses_T = poses_T[shape_nodes.meshes_posed]
@@ -620,7 +619,7 @@ class RasterizerContext(BuildableMixin):
                 for mesh, primitive, pose_T in zip(meshes, primitives, poses_T):
                     mesh._bounds = None
                     primitive.poses = pose_T
-                self.jit.update_buffer(primitives, "model", np.ascontiguousarray(poses_T.transpose((0, 1, 3, 2))))
+                self.jit.update_poses(primitives, poses_T)
                 for i in shape_nodes.floors_idx:
                     self.set_reflection_mat(poses_T[i])
                 if tints is not None:
@@ -770,10 +769,9 @@ class RasterizerContext(BuildableMixin):
                     self._update_vertices(node, tets_verts)
             else:
                 for node, pos in zip(nodes, poss):
-                    node.mesh.primitives[0].poses = gu.trans_to_T(pos)
-                    self.jit.update_buffer(
-                        node.mesh.primitives, "model", (node.mesh.primitives[0].poses.transpose((0, 2, 1)),)
-                    )
+                    primitive = node.mesh.primitives[0]
+                    primitive.poses = gu.trans_to_T(pos)
+                    self.jit.update_poses((primitive,), primitive.poses[np.newaxis])
         elif isinstance(shape, (Frames, Arrows, Lines)):
             if isinstance(shape, Frames):
                 # The transforms of the instances of each node drawing the frames: one node per frame holding one
@@ -834,10 +832,9 @@ class RasterizerContext(BuildableMixin):
                     nodes.append(self.add_node(mesh_node))
             else:
                 for node, node_T in zip(nodes, nodes_T):
-                    node.mesh.primitives[0].poses = node_T
-                    self.jit.update_buffer(
-                        node.mesh.primitives, "model", (node.mesh.primitives[0].poses.transpose((0, 2, 1)),)
-                    )
+                    primitive = node.mesh.primitives[0]
+                    primitive.poses = node_T
+                    self.jit.update_poses((primitive,), node_T[np.newaxis])
         if is_new:
             shape_nodes.nodes_views = None
             self._set_nodes_views(shape, shape_nodes)

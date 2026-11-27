@@ -49,6 +49,7 @@ class Scene:
         self._node_ranks = {}
         self._node_rank_next = 0
         self._revision = 0
+        self._nodes_revision = 0
 
         self.mesh_nodes = set()
         self.light_nodes = set()
@@ -70,12 +71,20 @@ class Scene:
     def revision(self):
         """int : Counter of the changes to what the scene draws.
 
-        It advances when a node is added or removed, when a mesh, a light or a node carrying them is moved, and when
-        a GPU buffer update is queued. A consumer keeps the revision it last synced to and repeats its preparation
-        (context bookkeeping, pose upload, shadow maps) only once the scene moved past it, so the renderers sharing
-        a scene do that work once per change.
+        It advances with the nodes revision, and when a GPU buffer update or new instance transforms are queued. A
+        consumer keeps the revision it last synced to and repeats its preparation (bounds, light setup, shadow maps)
+        only once the scene moved past it, so the renderers sharing a scene do that work once per change.
         """
         return self._revision
+
+    @property
+    def nodes_revision(self):
+        """int : Counter of the changes to the nodes of the scene.
+
+        It advances when a node is added or removed, and when a mesh, a light or a node carrying them is moved. The
+        transforms of the instances of a primitive leave it alone (see 'revision').
+        """
+        return self._nodes_revision
 
     def bump_revision(self):
         """Advance the revision for a change made outside the scene API, such as a GPU buffer update."""
@@ -208,6 +217,7 @@ class Scene:
         self._path_cache = {}
         self._bounds = None
         self._revision += 1
+        self._nodes_revision += 1
 
     def has_node(self, node):
         """Tell whether a node is in the scene.
@@ -234,6 +244,7 @@ class Scene:
         self._path_cache = {}
         self._bounds = None
         self._revision += 1
+        self._nodes_revision += 1
 
     def get_pose(self, node):
         """Return the pose of a node in the world frame.
@@ -274,6 +285,7 @@ class Scene:
         # Moving a camera changes the viewpoint only. Moving a mesh or a light changes what every renderer draws.
         if node.mesh is not None or node.light is not None:
             self._revision += 1
+            self._nodes_revision += 1
 
     def _remove_node(self, node):
         self.nodes.remove(node)

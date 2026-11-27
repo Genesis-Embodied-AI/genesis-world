@@ -1131,4 +1131,4 @@ class Renderer:
 
     def reload_program(self):
         self._program_cache.clear()
-        self.jit.program_id.clear()
+        self.jit.programs.clear()
