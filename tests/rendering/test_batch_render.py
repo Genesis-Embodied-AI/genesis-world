@@ -192,3 +192,55 @@ def test_dynamic_texture(show_viewer, renderer):
     # A reset shows the first variant again
     scene.reset()
     assert get_colors() == [(RED, RED)] * 3
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.BATCHRENDER_RASTERIZER, RENDERER_TYPE.BATCHRENDER_RAYTRACER])
+@pytest.mark.parametrize("alpha", [0.25, 0.75])
+def test_alpha_coverage(show_viewer, renderer, alpha):
+    CAM_RES = (32, 32)
+
+    scene = gs.Scene(
+        renderer=renderer,
+        show_viewer=show_viewer,
+        show_FPS=False,
+    )
+    # A board of translucent color filling the view of a camera looking straight down at it, without anything behind
+    scene.add_entity(
+        morph=gs.morphs.Plane(
+            plane_size=(1.0, 1.0),
+            tile_size=(1.0, 1.0),
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.2, 0.4, 0.8, alpha),
+        ),
+    )
+    cam = scene.add_camera(
+        res=CAM_RES,
+        pos=(0.0, 0.0, 1.0),
+        lookat=(0.0, 0.0, 0.0),
+        up=(0.0, 1.0, 0.0),
+        fov=30,
+        GUI=show_viewer,
+    )
+    scene.add_light(
+        pos=(0.0, 0.0, 2.0),
+        dir=(0.0, 0.0, -1.0),
+        directional=True,
+        castshadow=False,
+        cutoff=45.0,
+        intensity=1.0,
+    )
+    scene.build()
+
+    # Both pipelines report the depth and the segmentation of a surface whose opacity reaches the cutoff of 0.5, and
+    # those of what lies behind one below it, here nothing
+    _, depth_arr, seg_arr, _ = cam.render(rgb=True, depth=True, segmentation=True)
+    depth = tensor_to_array(depth_arr)[CAM_RES[1] // 2, CAM_RES[0] // 2]
+    seg = tensor_to_array(seg_arr)[CAM_RES[1] // 2, CAM_RES[0] // 2]
+    if alpha > 0.5:
+        assert depth == pytest.approx(1.0, abs=1e-2)
+        assert seg != 0
+    else:
+        assert depth > 2.0
+        assert seg == 0
