@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pytest
 import torch
+import trimesh
 from PIL import Image
 
 import genesis as gs
@@ -228,6 +229,7 @@ def test_parsing_inertia_defaults(
     degenerate_inertials,
     zero_density_marker_mjcf,
     implicit_inertial_origin_chain,
+    asset_tmp_path,
     show_viewer,
     tol,
     caplog,
@@ -372,6 +374,31 @@ def test_parsing_inertia_defaults(
             align=False,
         ),
     )
+    # A closed mesh encloses its volume even when it splits its vertices, as an STL file does at every face corner
+    torus = trimesh.creation.torus(major_radius=0.2, minor_radius=0.05)
+    torus_path = str(asset_tmp_path / "torus.stl")
+    torus.export(torus_path)
+    entity_torus = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=torus_path,
+            pos=(8.0, 0.0, 1.0),
+            collision=False,
+        ),
+        material=gs.materials.Rigid(
+            rho=1000.0,
+        ),
+    )
+    # A primitive drawn without collision geometry takes the inertia of its exact shape rather than its tessellation
+    entity_ball = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            radius=0.1,
+            pos=(7.2, 0.0, 1.0),
+            collision=False,
+        ),
+        material=gs.materials.Rigid(
+            rho=1000.0,
+        ),
+    )
     # An entity attached beneath another shares its root, so attaching that one onto a moving link makes both bases
     # movable at once. Each is estimated at the density of its own entity. The three stand consecutively, since an
     # entity created between attached ones is rejected.
@@ -412,6 +439,12 @@ def test_parsing_inertia_defaults(
     # A 0.1 m cube of each entity's own density, rather than both taking the density of the one they hang from.
     assert_allclose(stacked_middle.base_link.get_mass(), 2000.0 * 0.1**3, tol=gs.EPS)
     assert_allclose(stacked_tip.base_link.get_mass(), 8000.0 * 0.1**3, tol=gs.EPS)
+
+    assert_allclose(entity_torus.base_link.desc.mass, 1000.0 * torus.volume, rtol=1e-6)
+
+    ball_mass = 1000.0 * 4.0 / 3.0 * np.pi * 0.1**3
+    assert_allclose(entity_ball.base_link.desc.mass, ball_mass, rtol=1e-6)
+    assert_allclose(np.linalg.eigvalsh(entity_ball.base_link.desc.inertia) / ball_mass, 2.0 / 5.0 * 0.1**2, rtol=1e-6)
 
     # The link 'no_inertial' has no inertial element, so its whole inertial is the geometry estimate. Every link carries
     # the same sphere, so this mass is the reference for the recovered masses below.
@@ -544,6 +577,9 @@ def test_parsing_inertia_defaults(
     # collision and visual geometry feed the computation.
     assert_allclose(mounted_arm.base_link.get_mass(), free_arm.base_link.get_mass(), tol=gs.EPS)
     assert_allclose(mounted_drawn.get_mass(), free_drawn.get_mass(), tol=gs.EPS)
+    # A sphere the asset states for drawing alone takes the mass of its exact shape rather than its tessellation, at
+    # object density since the asset has a single link.
+    assert_allclose(free_drawn.get_mass(), 600.0 * 4.0 / 3.0 * np.pi * 0.06**3, rtol=1e-6)
     # Genesis applies the robot density because the asset is articulated. The convex hull of the authored sphere
     # loses a little volume, so the measured mass lands slightly below the closed form.
     assert_allclose(mounted_arm.base_link.get_mass(), 1500.0 * 4.0 / 3.0 * np.pi * 0.06**3, rtol=0.1)

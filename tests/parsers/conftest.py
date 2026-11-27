@@ -1543,6 +1543,43 @@ def negative_scale_rigid_usd(asset_tmp_path):
 
 
 @pytest.fixture(scope="session")
+def scaled_primitives_usd(asset_tmp_path):
+    """Rigid bodies each holding one collision primitive under a scale its shape can or cannot carry."""
+    usd_file = str(asset_tmp_path / "scaled_primitives.usda")
+    stage = Usd.Stage.CreateNew(usd_file)
+    UsdGeom.SetStageUpAxis(stage, "Z")
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+
+    root_prim = stage.DefinePrim("/root", "Xform")
+    stage.SetDefaultPrim(root_prim)
+
+    for i, (name, prim_type, scale, rotation_z) in enumerate(
+        (
+            ("uniform_sphere", UsdGeom.Sphere, (2.0, 2.0, 2.0), 0.0),
+            ("stretched_sphere", UsdGeom.Sphere, (1.0, 3.0, 3.0), 0.0),
+            ("stretched_box", UsdGeom.Cube, (1.0, 2.0, 3.0), 0.0),
+            ("sheared_box", UsdGeom.Cube, (1.0, 3.0, 1.0), 45.0),
+        )
+    ):
+        body = UsdGeom.Xform.Define(stage, f"/root/{name}")
+        body.AddTranslateOp().Set(Gf.Vec3d(2.0 * i, 0.0, 1.0))
+        UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
+        # The scale applies before the rotation of the shape, which leaves it off the shape axes when rotated
+        frame = UsdGeom.Xform.Define(stage, f"/root/{name}/frame")
+        frame.AddScaleOp().Set(Gf.Vec3f(*scale))
+        shape = prim_type.Define(stage, f"/root/{name}/frame/shape")
+        if prim_type is UsdGeom.Sphere:
+            shape.GetRadiusAttr().Set(0.1)
+        else:
+            shape.GetSizeAttr().Set(0.2)
+        shape.AddRotateZOp().Set(rotation_z)
+        UsdPhysics.CollisionAPI.Apply(shape.GetPrim())
+
+    stage.Save()
+    return usd_file
+
+
+@pytest.fixture(scope="session")
 def nested_collision_joint_usd(asset_tmp_path):
     """Articulation where joints reference child collision prims under RigidBodyAPI parents."""
     usd_file = str(asset_tmp_path / "nested_collision_joint.usda")
