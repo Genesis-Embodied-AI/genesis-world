@@ -18,7 +18,7 @@ from genesis.recorders.plotters import IS_MATPLOTLIB_AVAILABLE
 from genesis.vis.keybindings import Key, KeyAction, Keybind
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.rigid_entity import RigidEntity
+    from genesis.engine.entities.rigid_entity import RigidLink
     from genesis.engine.sensors.base_sensor import Sensor
 
 OBJ_DENSITY = 300
@@ -33,16 +33,14 @@ DROT = 0.02
 
 def _add_tactile_sensor(
     scene: gs.Scene,
-    entity: "RigidEntity",
-    link_idx_local: int,
+    link: "RigidLink",
     sensor_type: str,
     probe_local_pos: np.ndarray,
     probe_normal: tuple[float, float, float],
-    track_link_idx: tuple[int, ...],
+    tracked_links: tuple["RigidLink", ...],
 ) -> "Sensor":
     common = dict(
-        entity_idx=entity.idx,
-        link_idx_local=link_idx_local,
+        link=link,
         draw_debug=True,
     )
     if sensor_type == "elastomer":
@@ -51,7 +49,7 @@ def _add_tactile_sensor(
                 probe_local_pos=probe_local_pos,
                 probe_local_normal=probe_normal,
                 probe_radius=0.002,
-                track_link_idx=track_link_idx,
+                tracked_links=tracked_links,
                 lambda_d=5000.0,
                 lambda_s=4000.0,
                 dilate_scale=1.0,
@@ -89,7 +87,7 @@ def _add_tactile_sensor(
         return scene.add_sensor(
             gs.sensors.ProximityTaxel(
                 probe_local_pos=probe_local_pos,
-                track_link_idx=track_link_idx,
+                tracked_links=tracked_links,
                 probe_radius=0.01,
                 n_sample_points=1000,
                 stiffness=150.0,
@@ -253,13 +251,13 @@ def main() -> None:
         nx=8,
         ny=8,
     )
-    track_idx = (int(cube.base_link_idx), int(sphere.base_link_idx))
+    tracked_links = (cube.base_link, sphere.base_link)
 
     left = _add_tactile_sensor(
-        scene, franka, franka.get_link("left_finger").idx_local, args.sensor, probe_local_pos, probe_normal, track_idx
+        scene, franka.get_link("left_finger"), args.sensor, probe_local_pos, probe_normal, tracked_links
     )
     right = _add_tactile_sensor(
-        scene, franka, franka.get_link("right_finger").idx_local, args.sensor, probe_local_pos, probe_normal, track_idx
+        scene, franka.get_link("right_finger"), args.sensor, probe_local_pos, probe_normal, tracked_links
     )
     if args.vis and "PYTEST_VERSION" not in os.environ:
         _plot_tactile_sensor(scene, args.sensor, ("left", "right"), (left, right), plot_normal=probe_normal)

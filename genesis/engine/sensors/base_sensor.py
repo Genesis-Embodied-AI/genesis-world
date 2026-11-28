@@ -614,7 +614,7 @@ class KinematicSensorMetadataMixin:
     Shared metadata for sensors attached to a KinematicEntity (or any subclass, including RigidEntity).
 
     Sensors are bucketed at build time into per-solver ``_SolverLinkGroup`` entries so the per-step gather is one bulk
-    read per solver. Static sensors (``entity_idx<0``) are not bucketed and keep an identity link pose, leaving the
+    read per solver. Static sensors (no entity) are not bucketed and keep an identity link pose, leaving the
     kernel to apply ``pos_offset`` / ``euler_offset`` in world frame.
     """
 

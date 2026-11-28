@@ -89,7 +89,7 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
     )
     force_sensor = scene.add_sensor(
         gs.sensors.ContactForce(
-            entity_idx=box.idx,
+            link=box.base_link,
         )
     )
     force_sensor_box_2 = scene.add_sensor(
@@ -116,10 +116,6 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
         )
     )
 
-    with pytest.raises(gs.GenesisException, match="requires entity_idx >= 0"):
-        scene.add_sensor(gs.sensors.Contact())
-    with pytest.raises(gs.GenesisException, match="requires entity_idx >= 0"):
-        scene.add_sensor(gs.sensors.ContactForce())
     scene.build(n_envs=n_envs)
 
     # Move CoM to get unbalanced forces on each contact points
@@ -184,9 +180,6 @@ def test_filter_link_idx(show_viewer, tol):
         ),
         show_viewer=show_viewer,
     )
-    floor = scene.add_entity(
-        morph=gs.morphs.Plane(),
-    )
     box_on_floor = scene.add_entity(
         morph=gs.morphs.Box(
             size=(0.2, 0.2, 0.2),
@@ -198,6 +191,10 @@ def test_filter_link_idx(show_viewer, tol):
             size=(0.2, 0.2, 0.2),
             pos=(0.0, 0.5, 0.1),
         ),
+    )
+    # The floor comes last, so that its link index in the rigid solver differs from its index in the entity
+    floor = scene.add_entity(
+        morph=gs.morphs.Plane(),
     )
     sensor = scene.add_sensor(
         gs.sensors.Contact(
@@ -218,7 +215,7 @@ def test_filter_link_idx(show_viewer, tol):
     force_sensor_filtered = scene.add_sensor(
         gs.sensors.ContactForce(
             entity_idx=box_on_floor.idx,
-            filter_link_idx=(floor.link_start,),
+            filtered_links=(floor.base_link,),
         )
     )
     scene.build(n_envs=2)

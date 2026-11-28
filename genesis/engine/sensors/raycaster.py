@@ -211,7 +211,7 @@ class RaycasterSensor(
         targets = shared_context.targets
 
         # Allocate the link-pose scratch buffers on first cast (B and n_sensors are known here). Identity quat is baked
-        # into the initial allocation so static sensors (entity_idx<0) leave their rows at identity, letting the cast
+        # into the initial allocation so static sensors (no entity) leave their rows at identity, letting the cast
         # kernel apply pos_offset / euler_offset in world frame.
         if shared_metadata.links_pos is None:
             B = raw_data_T.shape[-1]
