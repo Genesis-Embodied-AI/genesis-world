@@ -71,7 +71,7 @@ def test_surface_distance_sensor_box_sphere(show_viewer, tol, n_envs):
         gs.sensors.SurfaceDistanceProbe(
             probe_local_pos=((0.0, 0.0, DISTANCE * 2.0 + SPHERE_RADIUS + WORLD_GAP),),
             probe_radius=MAX_RANGE,
-            links=(sphere2.base_link,),
+            tracked_links=(sphere2.base_link,),
         )
     )
     box_to_spheres_dist_sensor = scene.add_sensor(

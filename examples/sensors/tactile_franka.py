@@ -37,7 +37,7 @@ def _add_tactile_sensor(
     sensor_type: str,
     probe_local_pos: np.ndarray,
     probe_normal: tuple[float, float, float],
-    links: tuple["RigidLink", ...],
+    tracked_links: tuple["RigidLink", ...],
 ) -> "Sensor":
     common = dict(
         link=link,
@@ -49,7 +49,7 @@ def _add_tactile_sensor(
                 probe_local_pos=probe_local_pos,
                 probe_local_normal=probe_normal,
                 probe_radius=0.002,
-                links=links,
+                tracked_links=tracked_links,
                 lambda_d=5000.0,
                 lambda_s=4000.0,
                 dilate_scale=1.0,
@@ -87,7 +87,7 @@ def _add_tactile_sensor(
         return scene.add_sensor(
             gs.sensors.ProximityTaxel(
                 probe_local_pos=probe_local_pos,
-                links=links,
+                tracked_links=tracked_links,
                 probe_radius=0.01,
                 n_sample_points=1000,
                 stiffness=150.0,
@@ -251,11 +251,13 @@ def main() -> None:
         nx=8,
         ny=8,
     )
-    links = (cube.base_link, sphere.base_link)
+    tracked_links = (cube.base_link, sphere.base_link)
 
-    left = _add_tactile_sensor(scene, franka.get_link("left_finger"), args.sensor, probe_local_pos, probe_normal, links)
+    left = _add_tactile_sensor(
+        scene, franka.get_link("left_finger"), args.sensor, probe_local_pos, probe_normal, tracked_links
+    )
     right = _add_tactile_sensor(
-        scene, franka.get_link("right_finger"), args.sensor, probe_local_pos, probe_normal, links
+        scene, franka.get_link("right_finger"), args.sensor, probe_local_pos, probe_normal, tracked_links
     )
     if args.vis and "PYTEST_VERSION" not in os.environ:
         _plot_tactile_sensor(scene, args.sensor, ("left", "right"), (left, right), plot_normal=probe_normal)

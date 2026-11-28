@@ -46,7 +46,7 @@ def _add_tactile_sensor(
     sensor_type: str,
     probe_local_pos: np.ndarray,
     probe_normal: tuple[float, float, float] | np.ndarray,
-    links: tuple["RigidLink", ...],
+    tracked_links: tuple["RigidLink", ...],
     contact_depth_query: str | None,
     noise: bool,
 ) -> "Sensor":
@@ -68,7 +68,7 @@ def _add_tactile_sensor(
             gs.sensors.ElastomerTaxel(
                 probe_local_pos=probe_local_pos,
                 probe_local_normal=probe_normal,
-                links=links,
+                tracked_links=tracked_links,
                 n_sample_points=1000,
                 lambda_d=5000.0,
                 lambda_s=4000.0,
@@ -129,7 +129,7 @@ def _add_tactile_sensor(
     if sensor_type == "proximity":
         return scene.add_sensor(
             gs.sensors.ProximityTaxel(
-                links=links,
+                tracked_links=tracked_links,
                 n_sample_points=4000,
                 stiffness=40.0,
                 shear_coupling=10.0,
@@ -364,7 +364,7 @@ def main() -> None:
         args.sensor,
         probe_local_pos,
         probe_normal,
-        links=(obj.base_link,),
+        tracked_links=(obj.base_link,),
         contact_depth_query=args.contact_depth_query,
         noise=args.noise,
     )

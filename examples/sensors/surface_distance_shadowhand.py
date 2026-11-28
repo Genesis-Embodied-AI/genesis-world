@@ -99,7 +99,7 @@ def main():
                 link=robot.get_link(link_name),
                 probe_local_pos=((0.0, 0.0, 0.0),),
                 probe_radius=MAX_RANGE,
-                links=(duck.base_link, box.base_link),
+                tracked_links=(duck.base_link, box.base_link),
                 draw_debug=args.vis,
             )
         )

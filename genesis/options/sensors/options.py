@@ -174,7 +174,8 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
         if "link" in data:
             if any(name in data for name in ("entity", "entity_idx", "link_idx_local")):
                 gs.raise_exception(
-                    f"{cls.__name__}: `link` sets the entity and the link. Give it without `entity_idx` or `link_idx_local`."
+                    f"{cls.__name__}: `link` sets the entity and the link. "
+                    "Give it without `entity_idx` or `link_idx_local`."
                 )
             data = dict(data)
             link = data.pop("link")
@@ -641,10 +642,9 @@ class SurfaceDistanceProbe(
 
     The read() output will provide the distances, and the nearest points can be accessed with `sensor.nearest_points`.
 
-    Attached to a rigid entity link. Takes a list of local probe positions and a list of global link indices
-    to track; for each probe, outputs the distance and nearest point (world frame) to the closest mesh
-    surface among the tracked links. If no mesh is within max_range, reports max_range and the probe
-    position as nearest point.
+    Attached to a link of a rigid entity, it takes the local positions of the probes and the links to track. For each
+    probe, it outputs the distance and the nearest point (world frame) on the closest mesh surface among the tracked
+    links. If no mesh is within the probe radius, it reports the probe radius and the probe position as nearest point.
 
     Parameters
     ----------
@@ -653,12 +653,12 @@ class SurfaceDistanceProbe(
     probe_radius : float | array-like[float]
         Maximum sensing range in meters. When no mesh is within this distance, distance is clamped to the probe
         radius and nearest points is the probe position. Default: 0.5. Also controls the outer debug sphere.
-    links : Sequence[RigidLink]
+    tracked_links : Sequence[RigidLink]
         The links of rigid entities whose mesh geoms are used for distance queries.
     """
 
     probe_radius: PositiveFArrayType | PositiveFloat = 0.5
-    track_link_idx: RigidLinksIdx = Field(validation_alias=AliasChoices("links", "track_link_idx"))
+    track_link_idx: RigidLinksIdx = Field(validation_alias=AliasChoices("tracked_links", "track_link_idx"))
 
     def _validate(self, sim: "Simulator"):
         super()._validate(sim)
