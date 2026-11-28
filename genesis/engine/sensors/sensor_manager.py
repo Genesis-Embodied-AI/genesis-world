@@ -56,7 +56,7 @@ class SensorManager(BuildableMixin, BatchedMixin):
         # history reads.
         self._hist_idx_by_class: dict[type["Sensor"], torch.Tensor] = {}
         self._cache_slices_by_type: dict[type["Sensor"], slice] = {}
-        # (sensor class, entity_idx) -> slice within the class cache. entity_idx == -1 means static sensors.
+        # (sensor class, entity_idx) -> slice within the class cache. Static sensors (no entity) share the key -1.
         self._entity_slice_in_class: dict[type["Sensor"], dict[int, slice]] = {}
         self._max_history_by_class: dict[type["Sensor"], int] = {}
 
@@ -149,8 +149,8 @@ class SensorManager(BuildableMixin, BatchedMixin):
         self._sim.step_timer.add_phases(*(f"sensors/{sensor_cls.__name__}" for sensor_cls in self._sensors_by_type))
 
         # Sort each class by entity_idx so sensors attached to the same entity occupy a contiguous slice of the class
-        # cache. Static sensors have entity_idx=-1 and group together. Python's sort is stable, so registration order is
-        # preserved within each entity bucket.
+        # cache. Static sensors (no entity) group together. Python's sort is stable, so registration order is preserved
+        # within each entity bucket.
         for sensors in self._sensors_by_type.values():
             sensors.sort(key=lambda s: s._options.entity_idx)
             for new_idx, sensor in enumerate(sensors):

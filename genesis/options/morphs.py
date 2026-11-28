@@ -7,12 +7,13 @@ rigid object / MPM object / FEM object.
 
 import os
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal, Self
 
 import numpy as np
 
-from pydantic import Field, StrictBool, StrictInt, model_validator
+from pydantic import Field, InstanceOf, StrictBool, StrictInt, model_validator
 
 import genesis as gs
 import genesis.ext.urdfpy as urdfpy
@@ -40,9 +41,11 @@ from genesis.typing import (
     UnitVec4FType,
     Vec2IType,
     Vec3FType,
+    objects_idx_type,
 )
 from genesis.utils import serialization
 
+from . import terrain
 from .misc import CoacdOptions
 from .options import Options
 
@@ -1306,29 +1309,79 @@ class Drone(FileMorph):
             gs.raise_exception(f"Drone only supports `{URDF_FORMAT}` extension: {self.file}")
 
 
-class Terrain(Morph):
+class Generator(Morph):
+    """Base class of the morphs whose geometry is generated from their options, and possibly from the scene.
+
+    A generator morph holds the options of the geometry, never the geometry itself. The scene generates the geometry as
+    the entity is added, into a morph that takes the place of the generator in the spec the entity holds, so that an
+    exported scene stores what was generated and loading it generates nothing again. The spec given to the scene stays
+    as it was. A user defines a generator by subclassing this class and registering the function generating its
+    geometry with ``gs.register_generator`` (see ``gs.morphs.Terrain`` for a built-in one).
+
+    The kinds of entity a generator is generated for are declared as a class keyword, ``class Chain(Generator,
+    specs=(gs.entities.Rigid,)):``, and a spec of another kind refuses it. A generator declaring none is accepted by every
+    spec. A generator defined before the entity specs, as the built-in ones are, gives a function returning them.
     """
 
+    # The entity specs the generator is generated for, or a function returning them, every spec if empty
+    _SPECS: ClassVar["tuple[type, ...] | Callable[[], tuple[type, ...]]"] = ()
+
+    def __init_subclass__(cls, *, specs: "tuple[type, ...] | Callable[[], tuple[type, ...]] | None" = None, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if specs is not None:
+            cls._SPECS = specs
+
+    @classmethod
+    def specs(cls) -> tuple[type, ...]:
+        """The entity specs the generator is generated for, every spec if empty."""
+        return cls._SPECS() if callable(cls._SPECS) else cls._SPECS
+
+
+class LinkShellGenerator(Generator, specs=lambda: (gs.entities.MPM,)):
+    """A soft volume grown around the collision geoms of rigid links, one member of a mesh set per geom.
+
+    Each member is the collision mesh of a geom with every vertex pushed outward along its vertex normal by
+    'thickness', so a flat face meeting other faces at sharp edges moves out by less than 'thickness'. The members
+    stand where the links stand at the neutral configuration of their entities, so the generator takes no pose of its
+    own. The members of geoms that meet, such as the links on both sides of a joint, overlap.
+
+    Parameters
+    ----------
+    links : Sequence[RigidLink]
+        The links of rigid entities to grow the volume around, each holding at least one collision geom. The links of
+        a heterogeneous entity are refused.
+    thickness : float
+        The distance (m) each vertex of the collision meshes moves out along its vertex normal.
+    """
+
+    # The class is looked up lazily, since the engine imports these options before defining it
+    links: objects_idx_type(get_cls=lambda: gs.engine.entities.rigid_entity.RigidLink, many=True, allow_int=True)
+    thickness: PositiveFloat
+
+    def __init__(self, **data: Any) -> None:
+        fields_name = [name for name in Morph.model_fields if name in data]
+        if fields_name:
+            gs.raise_exception(
+                f"gs.morphs.{type(self).__name__} stands where its links stand and takes no {fields_name}."
+            )
+        super().__init__(**data)
+
+
+class Terrain(Generator, specs=lambda: (gs.entities.Rigid,)):
+    """
     Morph for creating a rigid terrain. This can be instantiated from two choices:
-    1) a grid of subterrains generated using the given configurations
+    1) a grid of subterrains generated from their options (see ``gs.options.terrain``)
     2) a terrain generated using the given height field.
 
     If randomize is True, subterrain type that involves randomness will have random parameters.
     Otherwise, they will use fixed random seed 0.
 
-    Users can easily configure the subterrain types by specifying the `subterrain_types` parameter.
-    If using a single string, it will be repeated for all subterrains. If it's a 2D list, it should have the same shape
-    as `n_subterrains`. The supported subterrain types are:
-
-    - 'flat_terrain': flat terrain
-    - 'random_uniform_terrain': random uniform terrain
-    - 'sloped_terrain': sloped terrain
-    - 'pyramid_sloped_terrain': pyramid sloped terrain
-    - 'discrete_obstacles_terrain': discrete obstacles terrain
-    - 'wave_terrain': wave terrain
-    - 'stairs_terrain': stairs terrain
-    - 'pyramid_stairs_terrain': pyramid stairs terrain
-    - 'stepping_stones_terrain': stepping stones terrain
+    Each subterrain is one of the options classes of ``gs.options.terrain`` (``Flat``, ``Fractal``,
+    ``RandomUniform``, ``Sloped``, ``PyramidSloped``, ``DiscreteObstacles``, ``Wave``, ``Stairs``, ``PyramidStairs``,
+    ``SteppingStones``), or a kind a user registers with ``gs.register_subterrain``. A single subterrain is repeated
+    over the grid. The keywords 'subterrain_types', the names of the kinds such as 'wave_terrain' (see
+    ``gs.options.terrain.Subterrain``), and 'subterrain_parameters', their options by name, are also accepted. Prefer
+    'subterrains' instead. Given with 'subterrains', they are ignored.
 
     Note
     ----
@@ -1363,9 +1416,9 @@ class Terrain(Morph):
         The height of each step in the subterrain in meters. Defaults to 0.005.
     uv_scale : float, optional
         The scale of the UV mapping for the terrain. Defaults to 1.0.
-    subterrain_types : str or 2D list of str, optional
-        The types of subterrains to generate. If a string, it will be repeated for all subterrains.
-        If a 2D list, it should have the same shape as `n_subterrains`.
+    subterrains : gs.options.terrain.Subterrain or 2D tuple of them, optional
+        The subterrains to generate, a single one repeated over the grid, or one per subterrain in a grid of the shape
+        of `n_subterrains`. Defaults to a 3x3 grid of the built-in kinds at their default options.
     height_field : array-like or torch.Tensor, optional
         The height field to generate the terrain. If specified, all other configurations will be ignored.
         Defaults to None.
@@ -1375,8 +1428,6 @@ class Terrain(Morph):
         no matter if `randomize` is True.
     from_stored : str, optional
         This parameter is deprecated.
-    subterrain_parameters : dictionary, optional
-        Lets users pick their own subterrain parameters.
     batch_fixed_verts : bool, optional
         Whether to batch fixed vertices. This will allow setting env-specific poses to fixed geometries, at the cost of
         significantly increasing memory usage. Default to false. **This is only used for RigidEntity.**
@@ -1389,29 +1440,24 @@ class Terrain(Morph):
     horizontal_scale: PositiveFloat = 0.25
     vertical_scale: PositiveFloat = 0.005
     uv_scale: PositiveFloat = 1.0
-    subterrain_types: Any = [
-        ["flat_terrain", "random_uniform_terrain", "stepping_stones_terrain"],
-        ["pyramid_sloped_terrain", "discrete_obstacles_terrain", "wave_terrain"],
-        ["random_uniform_terrain", "pyramid_stairs_terrain", "sloped_terrain"],
-    ]
+    subterrains: Annotated[
+        tuple[Annotated[tuple[InstanceOf[terrain.Subterrain], ...], Field(strict=False)], ...], Field(strict=False)
+    ] = (
+        (terrain.Flat(), terrain.RandomUniform(), terrain.SteppingStones()),
+        (terrain.PyramidSloped(), terrain.DiscreteObstacles(), terrain.Wave()),
+        (terrain.RandomUniform(), terrain.PyramidStairs(), terrain.Sloped()),
+    )
     height_field: FGridArrayType | None = None
     name: str | None = None
-    subterrain_parameters: dict[str, dict] | None = None
 
-    _SUPPORTED_SUBTERRAIN_TYPES: ClassVar[tuple[str, ...]] = (
-        "flat_terrain",
-        "fractal_terrain",
-        "random_uniform_terrain",
-        "sloped_terrain",
-        "pyramid_sloped_terrain",
-        "discrete_obstacles_terrain",
-        "wave_terrain",
-        "stairs_terrain",
-        "pyramid_stairs_terrain",
-        "stepping_stones_terrain",
-    )
-
-    def __init__(self, *, from_stored: str | None = None, **data):
+    def __init__(
+        self,
+        *,
+        from_stored: str | None = None,
+        subterrain_types: str | list[list[str]] | None = None,
+        subterrain_parameters: dict[str, dict] | None = None,
+        **data,
+    ):
         if from_stored is not None:
             gs.logger.warning("'from_stored' is deprecated. Use 'name' instead.")
             if data.get("name") is None:
@@ -1419,21 +1465,43 @@ class Terrain(Morph):
             elif from_stored != data.get("name"):
                 gs.raise_exception("'from_stored' and 'name' cannot both be set to different values.")
 
-        # Merge subterrain_parameters with defaults
-        custom_params = data.get("subterrain_parameters") or {}
-        terrain_types = set(self.default_params) | set(custom_params)
-        overwritten_params = {}
-        for terrain_type in terrain_types:
-            default_value = self.default_params.get(terrain_type, {})
-            custom_value = custom_params.get(terrain_type, {})
-            overwritten_params[terrain_type] = default_value | custom_value
-        data["subterrain_parameters"] = overwritten_params
+        if subterrain_types is not None or subterrain_parameters is not None:
+            if data.get("subterrains") is not None:
+                gs.logger.warning(
+                    "Both `subterrains` and `subterrain_types` or `subterrain_parameters` were provided, using "
+                    "`subterrains`."
+                )
+            else:
+                names_unknown = set(subterrain_parameters or {}) - set(terrain.Subterrain.CLS_BY_NAME)
+                if names_unknown:
+                    gs.raise_exception(
+                        f"Unsupported subterrain types in 'subterrain_parameters': {sorted(names_unknown)}, should be "
+                        f"among {list(terrain.Subterrain.CLS_BY_NAME)}."
+                    )
+                if subterrain_types is None:
+                    names_by_cls = {cls: name for name, cls in terrain.Subterrain.CLS_BY_NAME.items()}
+                    subterrain_types = [
+                        [names_by_cls[type(subterrain)] for subterrain in row]
+                        for row in type(self).model_fields["subterrains"].default
+                    ]
+                rows_name = [[subterrain_types]] if isinstance(subterrain_types, str) else subterrain_types
+                subterrains = []
+                for row_name in rows_name:
+                    subterrains.append([])
+                    for name in row_name:
+                        subterrain_cls = terrain.Subterrain.CLS_BY_NAME.get(name)
+                        if subterrain_cls is None:
+                            gs.raise_exception(
+                                f"Unsupported subterrain type: {name}, should be one of "
+                                f"{list(terrain.Subterrain.CLS_BY_NAME)}."
+                            )
+                        subterrains[-1].append(subterrain_cls(**(subterrain_parameters or {}).get(name, {})))
+                data["subterrains"] = subterrains[0][0] if isinstance(subterrain_types, str) else subterrains
 
-        # Expand subterrain_types string to 2D list
-        subterrain_types = data.get("subterrain_types")
-        if isinstance(subterrain_types, str):
-            n_subterrains = data.get("n_subterrains", self.model_fields["n_subterrains"].default)
-            data["subterrain_types"] = [[subterrain_types] * n_subterrains[1] for _ in range(n_subterrains[0])]
+        # A single subterrain repeats over the grid
+        if isinstance(data.get("subterrains"), terrain.Subterrain):
+            n_subterrains = data.get("n_subterrains", type(self).model_fields["n_subterrains"].default)
+            data["subterrains"] = [[data["subterrains"]] * n_subterrains[1] for _ in range(n_subterrains[0])]
 
         super().__init__(**data)
 
@@ -1441,18 +1509,12 @@ class Terrain(Morph):
         if self.height_field is not None:
             return
 
-        if not isinstance(self.subterrain_types, str):
-            if np.array(self.subterrain_types).shape != (self.n_subterrains[0], self.n_subterrains[1]):
-                gs.raise_exception(
-                    "`subterrain_types` should be either a string or a 2D list of strings with the same shape as `n_subterrains`."
-                )
-
-        for row in self.subterrain_types:
-            for subterrain_type in row:
-                if subterrain_type not in self._SUPPORTED_SUBTERRAIN_TYPES:
-                    gs.raise_exception(
-                        f"Unsupported subterrain type: {subterrain_type}, should be one of {list(self._SUPPORTED_SUBTERRAIN_TYPES)}"
-                    )
+        if len(self.subterrains) != self.n_subterrains[0] or any(
+            len(row) != self.n_subterrains[1] for row in self.subterrains
+        ):
+            gs.raise_exception(
+                "`subterrains` should be either a subterrain or a 2D grid of them with the same shape as `n_subterrains`."
+            )
 
         if not mu.is_approx_multiple(self.subterrain_size[0], self.horizontal_scale) or not mu.is_approx_multiple(
             self.subterrain_size[1], self.horizontal_scale
@@ -1461,56 +1523,6 @@ class Terrain(Morph):
 
     def _identifier(self) -> str:
         return self.name if self.name else super()._identifier()
-
-    @property
-    def default_params(self):
-        return {
-            "flat_terrain": {},
-            "fractal_terrain": {
-                "levels": 8,
-                "scale": 5.0,
-            },
-            "random_uniform_terrain": {
-                "min_height": -0.1,
-                "max_height": 0.1,
-                "step": 0.1,
-                "downsampled_scale": 0.5,
-            },
-            "sloped_terrain": {
-                "slope": -0.5,
-            },
-            "pyramid_sloped_terrain": {
-                "slope": -0.1,
-            },
-            "discrete_obstacles_terrain": {
-                "max_height": 0.05,
-                "min_size": 1.0,
-                "max_size": 5.0,
-                "num_rects": 20,
-            },
-            "wave_terrain": {
-                "num_waves": 2.0,
-                "amplitude": 0.1,
-            },
-            "stairs_terrain": {
-                "step_width": 0.75,
-                "step_height": -0.1,
-            },
-            "pyramid_stairs_terrain": {
-                "step_width": 0.75,
-                "step_height": -0.1,
-            },
-            "stepping_stones_terrain": {
-                "stone_size": 1.0,
-                "stone_distance": 0.25,
-                "max_height": 0.2,
-                "platform_size": 0.0,
-            },
-        }
-
-    @property
-    def subterrain_params(self):
-        return self.subterrain_parameters
 
 
 class USD(FileMorph):

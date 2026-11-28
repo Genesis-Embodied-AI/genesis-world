@@ -21,7 +21,7 @@ from genesis.utils.misc import tensor_to_array
 from genesis.vis.keybindings import Key, KeyAction, Keybind
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.rigid_entity import RigidEntity
+    from genesis.engine.entities.rigid_entity import RigidLink
     from genesis.engine.sensors.base_sensor import Sensor
 
 KEY_DPOS = 0.001
@@ -42,18 +42,16 @@ OBJ_PER_ENV_LABELS = ("torus", "sphere", "duck", "dragon")
 
 def _add_tactile_sensor(
     scene: gs.Scene,
-    entity: "RigidEntity",
-    link_idx_local: int,
+    link: "RigidLink",
     sensor_type: str,
     probe_local_pos: np.ndarray,
     probe_normal: tuple[float, float, float] | np.ndarray,
-    track_link_idx: tuple[int, ...],
+    tracked_links: tuple["RigidLink", ...],
     contact_depth_query: str | None,
     noise: bool,
 ) -> "Sensor":
     common = dict(
-        entity_idx=entity.idx,
-        link_idx_local=link_idx_local,
+        link=link,
         draw_debug=True,
         probe_radius=PROBE_RADIUS,
         contact_depth_query=contact_depth_query,
@@ -70,7 +68,7 @@ def _add_tactile_sensor(
             gs.sensors.ElastomerTaxel(
                 probe_local_pos=probe_local_pos,
                 probe_local_normal=probe_normal,
-                track_link_idx=track_link_idx,
+                tracked_links=tracked_links,
                 n_sample_points=1000,
                 lambda_d=5000.0,
                 lambda_s=4000.0,
@@ -131,7 +129,7 @@ def _add_tactile_sensor(
     if sensor_type == "proximity":
         return scene.add_sensor(
             gs.sensors.ProximityTaxel(
-                track_link_idx=track_link_idx,
+                tracked_links=tracked_links,
                 n_sample_points=4000,
                 stiffness=40.0,
                 shear_coupling=10.0,
@@ -362,12 +360,11 @@ def main() -> None:
 
     sensor = _add_tactile_sensor(
         scene,
-        sensor_obj,
-        0,
+        sensor_obj.base_link,
         args.sensor,
         probe_local_pos,
         probe_normal,
-        track_link_idx=(obj.base_link_idx,),
+        tracked_links=(obj.base_link,),
         contact_depth_query=args.contact_depth_query,
         noise=args.noise,
     )

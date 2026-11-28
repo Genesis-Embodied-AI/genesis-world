@@ -1,3 +1,4 @@
+from . import terrain
 from .misc import CoacdOptions, FoamOptions
 from .patches import Geom, Vertex, VGeom
 from .profiling import ProfilingOptions

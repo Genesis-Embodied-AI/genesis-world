@@ -45,8 +45,7 @@ def main():
 
     imu = scene.add_sensor(
         gs.sensors.IMU(
-            entity_idx=franka.idx,
-            link_idx_local=end_effector.idx_local,
+            link=end_effector,
             pos_offset=(0.0, 0.0, 0.15),
             # noise parameters
             acc_cross_axis_coupling=(0.0, 0.01, 0.02),

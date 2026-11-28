@@ -30,6 +30,7 @@ from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .couplers.rigid_mpm_hybrid import RigidMPMHybrid
 from .entities import HybridEntity
 from .entities.hybrid_entity import HybridEntityDescription
+from .generators import GeneratorContext, generate
 from .render_context import RenderContext
 from .sensors import SensorManager
 from .solvers import FEMSolver, KinematicSolver, MPMSolver, PBDSolver, RigidSolver, SPHSolver
@@ -178,6 +179,10 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
     ) -> "Entity":
         if desc is not None:
             spec = desc.spec
+        elif isinstance(spec.morph, gs.morphs.Generator):
+            # The entity is built from the generated morph, which its description and an exported scene hold, so that
+            # loading the scene generates nothing. The spec of the caller stays as it was given.
+            spec = spec.model_copy(update={"morph": generate(spec.morph, GeneratorContext(self._entities))})
         # FIXME: Kill this please >:( need to rework how we define HybridEntity.
         if isinstance(spec, gs.entities.Hybrid):
             # A hybrid entity adds its parts to the scene as entities of their own, before itself

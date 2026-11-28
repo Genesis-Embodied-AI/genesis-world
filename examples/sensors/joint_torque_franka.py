@@ -73,7 +73,7 @@ def main():
 
     joint_torque = scene.add_sensor(
         gs.sensors.JointTorque(
-            entity_idx=franka.idx,
+            entity=franka,
             dofs_idx_local=motors_dof,
         )
     )

@@ -30,6 +30,14 @@ def test_sensor(free_box, show_viewer, tol, n_envs):
     )
 
     scene.add_entity(gs.morphs.Plane())
+    # An articulated entity added first, so that the entity index of the box differs from the index of its link
+    scene.add_entity(
+        morph=gs.morphs.URDF(
+            file="urdf/simple/two_link_arm.urdf",
+            pos=(2.0, 0.0, 1.0),
+            fixed=True,
+        ),
+    )
 
     box = scene.add_entity(
         morph=gs.morphs.MJCF(
@@ -42,7 +50,7 @@ def test_sensor(free_box, show_viewer, tol, n_envs):
 
     imu = scene.add_sensor(
         gs.sensors.IMU(
-            entity_idx=box.idx,
+            link=box.base_link,
             magnetic_field=MAG_FIELD,
         )
     )

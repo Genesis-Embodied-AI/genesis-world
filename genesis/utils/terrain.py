@@ -1,5 +1,6 @@
 import math
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +10,9 @@ import trimesh
 
 import genesis as gs
 from genesis.ext.isaacgym import terrain_utils as isaacgym_terrain_utils
+from genesis.options import terrain
 from genesis.options.morphs import Terrain
+from genesis.options.terrain import Subterrain
 
 from . import serialization
 from .cache import get_gnd_path
@@ -17,44 +20,137 @@ from .mesh import load_trimesh
 from .misc import tensor_to_array
 
 
-def parse_terrain(morph: Terrain, surface):
-    """
-    Generate mesh (and height field) according to configurations passed by morph.
+_GENERATE_FUNC_BY_SUBTERRAIN_CLS: dict[
+    type[Subterrain], Callable[[isaacgym_terrain_utils.SubTerrain, Subterrain], np.ndarray]
+] = {}
 
-    ------------------------------------------------------------------------------------------------------
-    If morph.height_field is not passed, generate the height field by
-        n_subterrains    : Tuple[int, int]     = (3, 3)     # number of subterrains in x and y directions
-        subterrain_types : Any                 = [
-                ['flat_terrain', 'random_uniform_terrain', 'pyramid_sloped_terrain'],
-                ['pyramid_sloped_terrain', 'discrete_obstacles_terrain', 'wave_terrain'],
-                ['random_uniform_terrain', 'pyramid_stairs_terrain', 'pyramid_sloped_terrain'],
-        ]                                                   # types of subterrains in x and y directions
-    If morph.height_field is passed, (n_subterrains, subterrain_size, subterrain_types) will be ignored.
-    ------------------------------------------------------------------------------------------------------
 
-    Returns
-    --------------------------
-    vmesh        : Mesh | None, None when the morph disables visualization
-    mesh         : Mesh
-    height_field : np.ndarray
+def register_subterrain(subterrain_cls: type[Subterrain]) -> Callable[[Callable], Callable]:
+    """Register the function generating the height field of a kind of subterrain, as a decorator.
+
+    The function takes the tile to fill, whose size and scales it reads, and the options of the subterrain, and returns
+    the height field of the tile in units of the vertical scale. A user defines a kind of subterrain by subclassing
+    ``gs.options.terrain.Subterrain`` and registering its function. The global numpy generator is seeded with 0 around
+    the call, unless the terrain is randomized (see ``gs.morphs.Terrain.randomize``).
+
+    Parameters
+    ----------
+    subterrain_cls : type[gs.options.terrain.Subterrain]
+        The kind of subterrain whose height field the decorated function generates.
     """
 
+    def _register(generate_subterrain: Callable) -> Callable:
+        _GENERATE_FUNC_BY_SUBTERRAIN_CLS[subterrain_cls] = generate_subterrain
+        return generate_subterrain
+
+    return _register
+
+
+@register_subterrain(terrain.Flat)
+def _generate_flat(tile: isaacgym_terrain_utils.SubTerrain, subterrain: terrain.Flat) -> np.ndarray:
+    return np.zeros((tile.width, tile.length), dtype=gs.np_float)
+
+
+@register_subterrain(terrain.Fractal)
+def _generate_fractal(tile: isaacgym_terrain_utils.SubTerrain, subterrain: terrain.Fractal) -> np.ndarray:
+    return fractal_terrain(tile, levels=subterrain.levels, scale=subterrain.scale).height_field_raw
+
+
+@register_subterrain(terrain.RandomUniform)
+def _generate_random_uniform(tile: isaacgym_terrain_utils.SubTerrain, subterrain: terrain.RandomUniform) -> np.ndarray:
+    return isaacgym_terrain_utils.random_uniform_terrain(
+        tile,
+        min_height=subterrain.min_height,
+        max_height=subterrain.max_height,
+        step=subterrain.step,
+        downsampled_scale=subterrain.downsampled_scale,
+    ).height_field_raw
+
+
+@register_subterrain(terrain.Sloped)
+def _generate_sloped(tile: isaacgym_terrain_utils.SubTerrain, subterrain: terrain.Sloped) -> np.ndarray:
+    return isaacgym_terrain_utils.sloped_terrain(tile, slope=subterrain.slope).height_field_raw
+
+
+@register_subterrain(terrain.PyramidSloped)
+def _generate_pyramid_sloped(tile: isaacgym_terrain_utils.SubTerrain, subterrain: terrain.PyramidSloped) -> np.ndarray:
+    return isaacgym_terrain_utils.pyramid_sloped_terrain(
+        tile, slope=subterrain.slope, platform_size=subterrain.platform_size
+    ).height_field_raw
+
+
+@register_subterrain(terrain.DiscreteObstacles)
+def _generate_discrete_obstacles(
+    tile: isaacgym_terrain_utils.SubTerrain, subterrain: terrain.DiscreteObstacles
+) -> np.ndarray:
+    return isaacgym_terrain_utils.discrete_obstacles_terrain(
+        tile,
+        max_height=subterrain.max_height,
+        min_size=subterrain.min_size,
+        max_size=subterrain.max_size,
+        num_rects=subterrain.num_rects,
+        platform_size=subterrain.platform_size,
+    ).height_field_raw
+
+
+@register_subterrain(terrain.Wave)
+def _generate_wave(tile: isaacgym_terrain_utils.SubTerrain, subterrain: terrain.Wave) -> np.ndarray:
+    return isaacgym_terrain_utils.wave_terrain(
+        tile, num_waves=subterrain.num_waves, amplitude=subterrain.amplitude
+    ).height_field_raw
+
+
+@register_subterrain(terrain.Stairs)
+def _generate_stairs(tile: isaacgym_terrain_utils.SubTerrain, subterrain: terrain.Stairs) -> np.ndarray:
+    return isaacgym_terrain_utils.stairs_terrain(
+        tile, step_width=subterrain.step_width, step_height=subterrain.step_height
+    ).height_field_raw
+
+
+@register_subterrain(terrain.PyramidStairs)
+def _generate_pyramid_stairs(tile: isaacgym_terrain_utils.SubTerrain, subterrain: terrain.PyramidStairs) -> np.ndarray:
+    return isaacgym_terrain_utils.pyramid_stairs_terrain(
+        tile,
+        step_width=subterrain.step_width,
+        step_height=subterrain.step_height,
+        platform_size=subterrain.platform_size,
+    ).height_field_raw
+
+
+@register_subterrain(terrain.SteppingStones)
+def _generate_stepping_stones(
+    tile: isaacgym_terrain_utils.SubTerrain, subterrain: terrain.SteppingStones
+) -> np.ndarray:
+    return isaacgym_terrain_utils.stepping_stones_terrain(
+        tile,
+        stone_size=subterrain.stone_size,
+        stone_distance=subterrain.stone_distance,
+        max_height=subterrain.max_height,
+        platform_size=subterrain.platform_size,
+    ).height_field_raw
+
+
+def generate_height_field(morph: Terrain) -> np.ndarray:
+    """Generate the height field of the grid of subterrains of a terrain morph, in units of its vertical scale.
+
+    The height field of a named terrain is read from the cache when it holds one for the same options, and written to
+    it otherwise (see 'gs.morphs.Terrain.name').
+    """
     gnd_file_path = None
     if morph.name is not None:
         gnd_file_path = Path(
             get_gnd_path(
                 morph.name,
-                morph.subterrain_types,
+                morph.subterrains,
                 morph.subterrain_size,
                 morph.horizontal_scale,
                 morph.vertical_scale,
                 morph.n_subterrains,
-                morph.subterrain_parameters,
             )
         )
 
-    heightfield = morph.height_field
-    if heightfield is None and (gnd_file_path is not None and gnd_file_path.exists()):
+    heightfield = None
+    if gnd_file_path is not None and gnd_file_path.exists():
         gs.logger.debug(f"Pre-genenerated terrain heightmap '{morph.name}' found in cache.")
         try:
             with open(gnd_file_path, "rb") as file:
@@ -76,8 +172,21 @@ def parse_terrain(morph: Terrain, surface):
         )
 
         for i, j in zip(*map(np.ravel, np.meshgrid(*map(range, morph.n_subterrains), indexing="ij"))):
-            subterrain_type = morph.subterrain_types[i][j]
-            params = morph.subterrain_params[subterrain_type]
+            subterrain = morph.subterrains[i][j]
+            # A subclass of a registered kind of subterrain is generated as its closest registered ancestor
+            generate_subterrain = next(
+                (
+                    _GENERATE_FUNC_BY_SUBTERRAIN_CLS[subterrain_cls]
+                    for subterrain_cls in type(subterrain).__mro__
+                    if subterrain_cls in _GENERATE_FUNC_BY_SUBTERRAIN_CLS
+                ),
+                None,
+            )
+            if generate_subterrain is None:
+                gs.raise_exception(
+                    f"No generation is registered for gs.options.terrain.{type(subterrain).__name__}. Register one with "
+                    "gs.register_subterrain."
+                )
 
             new_subterrain = isaacgym_terrain_utils.SubTerrain(
                 width=subterrain_rows,
@@ -88,76 +197,11 @@ def parse_terrain(morph: Terrain, surface):
             if not morph.randomize:
                 saved_state = np.random.get_state()
                 np.random.seed(0)
-            if subterrain_type == "flat_terrain":
-                subterrain = None
-            elif subterrain_type == "fractal_terrain":
-                subterrain = fractal_terrain(
-                    new_subterrain,
-                    levels=params.get("levels", 8),
-                    scale=params.get("scale", 5.0),
-                )
-            elif subterrain_type == "random_uniform_terrain":
-                subterrain = isaacgym_terrain_utils.random_uniform_terrain(
-                    new_subterrain,
-                    min_height=params.get("min_height", -0.1),
-                    max_height=params.get("max_height", 0.1),
-                    step=params.get("step", 0.1),
-                    downsampled_scale=params.get("downsampled_scale", 0.5),
-                )
-            elif subterrain_type == "sloped_terrain":
-                subterrain = isaacgym_terrain_utils.sloped_terrain(
-                    new_subterrain,
-                    slope=params.get("slope", -0.5),
-                )
-            elif subterrain_type == "pyramid_sloped_terrain":
-                subterrain = isaacgym_terrain_utils.pyramid_sloped_terrain(
-                    new_subterrain,
-                    slope=params.get("slope", -0.1),
-                )
-            elif subterrain_type == "discrete_obstacles_terrain":
-                subterrain = isaacgym_terrain_utils.discrete_obstacles_terrain(
-                    new_subterrain,
-                    max_height=params.get("max_height", 0.05),
-                    min_size=params.get("min_size", 1.0),
-                    max_size=params.get("max_size", 5.0),
-                    num_rects=params.get("num_rects", 20),
-                )
-            elif subterrain_type == "wave_terrain":
-                subterrain = isaacgym_terrain_utils.wave_terrain(
-                    new_subterrain,
-                    num_waves=params.get("num_waves", 2.0),
-                    amplitude=params.get("amplitude", 0.1),
-                )
-            elif subterrain_type == "stairs_terrain":
-                subterrain = isaacgym_terrain_utils.stairs_terrain(
-                    new_subterrain,
-                    step_width=params.get("step_width", 0.75),
-                    step_height=params.get("step_height", -0.1),
-                )
-            elif subterrain_type == "pyramid_stairs_terrain":
-                subterrain = isaacgym_terrain_utils.pyramid_stairs_terrain(
-                    new_subterrain,
-                    step_width=params.get("step_width", 0.75),
-                    step_height=params.get("step_height", -0.1),
-                )
-            elif subterrain_type == "stepping_stones_terrain":
-                subterrain = isaacgym_terrain_utils.stepping_stones_terrain(
-                    new_subterrain,
-                    stone_size=params.get("stone_size", 1.0),
-                    stone_distance=params.get("stone_distance", 0.25),
-                    max_height=params.get("max_height", 0.2),
-                    platform_size=params.get("platform_size", 0.0),
-                )
-            else:
-                gs.raise_exception(f"Unsupported subterrain type: {subterrain_type}")
-
-            if not morph.randomize:
-                np.random.set_state(saved_state)
-
-            if subterrain is None:
-                data = np.zeros((subterrain_rows, subterrain_cols), dtype=gs.np_float)
-            else:
-                data = subterrain.height_field_raw
+            try:
+                data = generate_subterrain(new_subterrain, subterrain)
+            finally:
+                if not morph.randomize:
+                    np.random.set_state(saved_state)
 
             subterrain_heightfield = heightfield[
                 i * (subterrain_rows - 1) : (i + 1) * (subterrain_rows - 1) + 1,
@@ -170,8 +214,21 @@ def parse_terrain(morph: Terrain, surface):
             with open(gnd_file_path, "wb") as file:
                 serialization.export_record(file, heightfield, np.ndarray)
 
+    return heightfield
+
+
+def parse_terrain(morph: Terrain, surface):
+    """Build the meshes of the height field of a terrain morph, which its generation set (see 'generate_height_field').
+
+    Returns
+    -------
+    vmesh : Mesh | None
+        The visual mesh, or None when the morph disables visualization.
+    mesh : Mesh
+        The collision mesh.
+    """
     need_uvs = getattr(surface, "diffuse_texture", None) is not None
-    heightfield = heightfield.astype(gs.np_float)
+    heightfield = morph.height_field.astype(gs.np_float)
     tmesh, sdf_tmesh = convert_heightfield_to_watertight_trimesh(
         heightfield,
         horizontal_scale=morph.horizontal_scale,
@@ -191,7 +248,7 @@ def parse_terrain(morph: Terrain, surface):
             "height_field": heightfield,
         },
     )
-    return vmesh, mesh, heightfield
+    return vmesh, mesh
 
 
 def fractal_terrain(terrain, levels=8, scale=1.0):

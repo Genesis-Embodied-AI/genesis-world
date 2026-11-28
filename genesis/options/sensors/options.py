@@ -3,13 +3,20 @@ from typing import TYPE_CHECKING, Annotated, Any, NamedTuple
 
 import numpy as np
 
-from pydantic import BeforeValidator, Field, StrictBool, StrictInt, field_validator
+from pydantic import (
+    AliasChoices,
+    BeforeValidator,
+    Field,
+    StrictBool,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+    model_validator,
+)
 
 import genesis as gs
 from genesis.typing import (
     FArrayType,
     Grid3DFloatType,
-    IArrayType,
     LaxVec3FType,
     NonNegativeFloat,
     NonNegativeInt,
@@ -31,12 +38,15 @@ from genesis.typing import (
     Vec3FType,
     Vec4FType,
     is_sequence,
+    objects_idx_type,
 )
 
 from ..options import Options
 from .raycaster import DepthCameraPattern, RaycastPattern
 
 if TYPE_CHECKING:
+    from genesis.engine.entities import Entity
+    from genesis.engine.entities.rigid_entity import RigidLink
     from genesis.engine.simulator import Simulator
     from genesis.engine.sensors.base_sensor import Sensor
     from genesis.engine.sensors.contact_force import ContactForceSensor, ContactSensor
@@ -47,6 +57,10 @@ if TYPE_CHECKING:
 
     NonNegativeUnboundedFloat = float
     LaxNonNegativeUnboundedVec3FType = Vec3FType | float
+    EntityIdx = Entity | int
+    RigidLinkIdx = RigidLink | int
+    RigidLinksIdx = Sequence[RigidLinkIdx]
+    OptionalRigidLinksIdx = RigidLinksIdx
 else:
     NonNegativeUnboundedFloat = Annotated[float, Field(ge=0, strict=False)]
     LaxNonNegativeUnboundedVec3FType = Annotated[
@@ -54,6 +68,17 @@ else:
         BeforeValidator(lambda v: v if is_sequence(v) else (v,) * 3),
         Field(strict=False),
     ]
+    # The classes are looked up lazily, since the engine imports these options before defining them
+    EntityIdx = objects_idx_type(get_cls=lambda: gs.engine.entities.Entity, many=False, allow_int=True)
+    RigidLinkIdx = objects_idx_type(
+        get_cls=lambda: gs.engine.entities.rigid_entity.RigidLink, many=False, allow_int=True
+    )
+    RigidLinksIdx = objects_idx_type(
+        get_cls=lambda: gs.engine.entities.rigid_entity.RigidLink, many=True, allow_int=True
+    )
+    OptionalRigidLinksIdx = objects_idx_type(
+        get_cls=lambda: gs.engine.entities.rigid_entity.RigidLink, many=True, allow_empty=True, allow_int=True
+    )
 CrossCouplingAxisType = RotationMatrixType | UnitIntervalVec3Type | float
 
 
@@ -91,13 +116,16 @@ class SensorOptions[SensorT: "Sensor"](Options):
     delay: NonNegativeFloat = 0.0
     jitter: NonNegativeFloat = 0.0
     draw_debug: StrictBool = False
-    # -1 means not link-attached. None is accepted from users and normalized to -1 so SensorManager can sort uniformly.
-    entity_idx: StrictInt = Field(default=-1, ge=-1)
+    # -1 means not link-attached, so that SensorManager can sort uniformly
+    entity_idx: EntityIdx | None = None
 
-    @field_validator("entity_idx", mode="before")
+    @field_validator("entity_idx", mode="wrap")
     @classmethod
-    def _normalize_entity_idx(cls, value):
-        return -1 if value is None else value
+    def _normalize_entity_idx(cls, value: Any, handler: ValidatorFunctionWrapHandler) -> int:
+        entity_idx = -1 if value is None else handler(value)
+        if entity_idx < -1:
+            gs.raise_exception(f"{cls.__name__}: entity must be an entity, an index >= 0 or None, got {value}.")
+        return entity_idx
 
     def model_post_init(self, context: Any) -> None:
         if self.jitter > self.delay:
@@ -124,10 +152,9 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
 
     Parameters
     ----------
-    entity_idx : int
-        The global entity index of the entity to which this sensor is attached. -1 or None for static sensors.
-    link_idx_local : int, optional
-        The local index of the link of the entity to which this sensor is attached.
+    link : KinematicLink | KinematicEntity | None, optional
+        The link to which this sensor is attached, or an entity for its base link, or None for a static sensor.
+        Defaults to None.
     pos_offset : array-like[float, float, float], optional
         The positional offset of the sensor from the link.
     euler_offset : array-like[float, float, float], optional
@@ -137,6 +164,32 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
     link_idx_local: NonNegativeInt = 0
     pos_offset: Vec3FType = (0.0, 0.0, 0.0)
     euler_offset: Vec3FType = (0.0, 0.0, 0.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_link(cls, data: Any) -> Any:
+        # 'link' is resolved into the index fields, so that the options hold indices alone
+        if not isinstance(data, dict):
+            return data
+        if "link" in data:
+            if any(name in data for name in ("entity", "entity_idx", "link_idx_local")):
+                gs.raise_exception(
+                    f"{cls.__name__}: `link` sets the entity and the link. "
+                    "Give it without `entity_idx` or `link_idx_local`."
+                )
+            data = dict(data)
+            link = data.pop("link")
+            for name in ("entity", "entity_idx", "link_idx_local"):
+                data.pop(name, None)
+            if link is None:
+                data["entity_idx"] = None
+            else:
+                if isinstance(link, gs.engine.entities.rigid_entity.KinematicEntity):
+                    link = link.base_link
+                if not isinstance(link, gs.engine.entities.rigid_entity.KinematicLink):
+                    gs.raise_exception(f"{cls.__name__}: link must be a link or an entity, got {type(link).__name__}.")
+                data.update(entity_idx=link.entity.idx, link_idx_local=link.idx_local)
+        return data
 
     def _validate(self, sim: "Simulator"):
         from genesis.engine.entities import KinematicEntity
@@ -174,7 +227,7 @@ class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[S
     """
     Options for a sensor that measures nothing without a RigidEntity.
 
-    The attachment is mandatory: entity_idx must refer to an existing RigidEntity, static sensors are not allowed. Such
+    The attachment is mandatory: the sensor must refer to an existing RigidEntity, static sensors are not allowed. Such
     are the joint-space sensors, bound to a whole entity, and the sensors measuring a quantity of their link (contacts,
     contact force, temperature).
 
@@ -184,7 +237,7 @@ class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[S
     def _validate(self, sim: "Simulator"):
         super()._validate(sim)
         if self.entity_idx < 0:
-            gs.raise_exception(f"{type(self).__name__} requires entity_idx >= 0, got {self.entity_idx}.")
+            gs.raise_exception(f"{type(self).__name__} requires an entity.")
 
 
 class ContactFilterOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[SensorT]):
@@ -195,14 +248,16 @@ class ContactFilterOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[Senso
 
     Parameters
     ----------
-    filter_link_idx : array-like[int], optional
-        Global rigid link indices (solver link space). Contacts with the sensor link whose other participant is one
-        of these links are ignored: the sensor behaves as if those counterparts were not touching. Use it to scope a
-        reading to a chosen set of contacts (e.g. force on a foot from the ground, excluding self-contact). Default
-        is empty, so every contact with the sensor link counts.
+    filtered_links : Sequence[RigidLink], optional
+        Links of rigid entities. Contacts with the sensor link whose other participant is one of these links are
+        ignored: the sensor behaves as if those counterparts were not touching. Use it to scope a reading to a chosen
+        set of contacts (e.g. force on a foot from the ground, excluding self-contact). Default is empty, so every
+        contact with the sensor link counts.
     """
 
-    filter_link_idx: OptionalIArrayType = Field(default_factory=tuple)
+    filter_link_idx: OptionalRigidLinksIdx = Field(
+        default=(), validation_alias=AliasChoices("filtered_links", "filter_link_idx")
+    )
 
     def _validate(self, sim: "Simulator"):
         super()._validate(sim)
@@ -327,12 +382,13 @@ class JointTorque(RigidEntitySensorOptionsMixin["JointTorqueSensor"], SimpleSens
 
     Parameters
     ----------
-    entity_idx : int
-        Scene-level index of the RigidEntity to sense. Must be >= 0.
+    entity : RigidEntity
+        The rigid entity to sense.
     dofs_idx_local : array-like[int] | None, optional
         Local DOF indices within the entity. ``None`` (default) selects all DOFs.
     """
 
+    entity_idx: EntityIdx | None = Field(default=None, validation_alias=AliasChoices("entity", "entity_idx"))
     dofs_idx_local: OptionalIArrayType | None = None
 
     def _validate(self, sim: "Simulator"):
@@ -440,8 +496,8 @@ class TemperatureGrid(
 
     Parameters
     ----------
-    properties_dict: dict[int, TemperatureProperties]
-        A dictionary which maps link indices to their temperature-related material properties. Key `-1` is
+    properties_dict: dict[RigidLink, TemperatureProperties]
+        A dictionary which maps links to their temperature-related material properties. Key `-1` is
         used as the default for links not present in the dict; if omitted, unlisted links are ignored in contacts.
         This parameter is shared across all Temperature sensors (dicts will be merged).
     ambient_temperature: float
@@ -467,7 +523,7 @@ class TemperatureGrid(
         The range of temperatures to visualize in the debug mode. Defaults to (0.0, 100.0).
     """
 
-    properties_dict: dict[int, TemperatureProperties] = Field(default_factory=dict)
+    properties_dict: dict[RigidLinkIdx, TemperatureProperties] = Field(default_factory=dict)
     ambient_temperature: float | None = None
     convection_coefficient: float | None = None
     simulate_all_link_temperatures: bool = False
@@ -586,10 +642,9 @@ class SurfaceDistanceProbe(
 
     The read() output will provide the distances, and the nearest points can be accessed with `sensor.nearest_points`.
 
-    Attached to a rigid entity link. Takes a list of local probe positions and a list of global link indices
-    to track; for each probe, outputs the distance and nearest point (world frame) to the closest mesh
-    surface among the tracked links. If no mesh is within max_range, reports max_range and the probe
-    position as nearest point.
+    Attached to a link of a rigid entity, it takes the local positions of the probes and the links to track. For each
+    probe, it outputs the distance and the nearest point (world frame) on the closest mesh surface among the tracked
+    links. If no mesh is within the probe radius, it reports the probe radius and the probe position as nearest point.
 
     Parameters
     ----------
@@ -598,12 +653,12 @@ class SurfaceDistanceProbe(
     probe_radius : float | array-like[float]
         Maximum sensing range in meters. When no mesh is within this distance, distance is clamped to the probe
         radius and nearest points is the probe position. Default: 0.5. Also controls the outer debug sphere.
-    track_link_idx : array-like[int]
-        Global link indices (solver link space) whose mesh geoms are used for distance queries.
+    tracked_links : Sequence[RigidLink]
+        The links of rigid entities whose mesh geoms are used for distance queries.
     """
 
     probe_radius: PositiveFArrayType | PositiveFloat = 0.5
-    track_link_idx: IArrayType = Field(default_factory=tuple)
+    track_link_idx: RigidLinksIdx = Field(validation_alias=AliasChoices("tracked_links", "track_link_idx"))
 
     def _validate(self, sim: "Simulator"):
         super()._validate(sim)

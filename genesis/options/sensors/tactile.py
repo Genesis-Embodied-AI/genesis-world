@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
-from pydantic import Field, StrictBool
+from pydantic import AliasChoices, Field, StrictBool
 
 import genesis as gs
 from genesis.typing import (
@@ -24,6 +24,7 @@ from .options import (
     ContactFilterOptionsMixin,
     ProbeSensorOptionsMixin,
     ProbesWithNormalSensorOptionsMixin,
+    RigidLinksIdx,
     RigidSensorOptionsMixin,
     SensorOptions,
     SimpleSensorOptions,
@@ -218,10 +219,10 @@ class PointCloudTactileSensorMixin[SensorT: "Sensor"](TactileProbeSensorOptionsM
 
     Parameters
     ----------
-    track_link_idx : array-like[int]
-        Global link indices whose mesh geometry is used to sample a point cloud from.
+    tracked_links : Sequence[RigidLink]
+        The links of rigid entities whose mesh geometry is used to sample a point cloud from.
     n_sample_points: int | array-like[int]
-        Total FPS samples split across ``track_link_idx``, or one count per tracked link. Per-variant
+        Total FPS samples split across ``tracked_links``, or one count per tracked link. Per-variant
         counts are not supported: when a tracked link belongs to a heterogeneous entity, the per-link
         count is allocated to every variant on that link (so each parallel environment sees the full
         count regardless of which variant is active).
@@ -233,7 +234,7 @@ class PointCloudTactileSensorMixin[SensorT: "Sensor"](TactileProbeSensorOptionsM
         The radius of the debug tracked object point cloud spheres.
     """
 
-    track_link_idx: IArrayType = Field(default_factory=tuple)
+    track_link_idx: RigidLinksIdx = Field(validation_alias=AliasChoices("tracked_links", "track_link_idx"))
     n_sample_points: IArrayType | NonNegativeInt = 500
     use_visual_mesh: StrictBool = True
 
@@ -434,10 +435,10 @@ class ElastomerTaxel(
     probe_radius : float | array-like[float]
         Probe sensing radius in meters. A scalar is shared by every probe; an array must match the probe count.
         Array entries of 0 mark inactive filler probes (see the grid note above); at least one must be positive.
-    track_link_idx : array-like[int]
-        Global rigid link indices whose collision geometry is queried by SDF and whose mesh is sampled for shear.
+    tracked_links : Sequence[RigidLink]
+        The links of rigid entities whose collision geometry is queried by SDF and whose mesh is sampled for shear.
     n_sample_points: int | array-like[int]
-        Total surface samples split across ``track_link_idx``, or one count per tracked link.
+        Total surface samples split across ``tracked_links``, or one count per tracked link.
     compressibility : float
         In-plane dilation kernel as a mix of a local and a global response, in ``[0, 1]``. ``1`` (default) is fully
         compressible: a concentrated *local* bulge from the ``exp(-lambda_d * r^2)`` Gaussian, with no far-field
@@ -506,8 +507,6 @@ class ElastomerTaxel(
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         _validate_filler_probe_radius(self.probe_radius, "ElastomerTaxel")
-        if len(self.track_link_idx) == 0:
-            gs.raise_exception("ElastomerTaxel requires at least one tracked link in track_link_idx.")
         if self.normal_exponent < 1.0:
             gs.raise_exception(f"normal_exponent must be greater than or equal to 1.0. Got {self.normal_exponent}.")
         if self.compressibility > 1.0:
