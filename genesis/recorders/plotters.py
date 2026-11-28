@@ -82,7 +82,9 @@ class BasePlotter[T](Recorder[T]):
     def process(self, data, cur_time):
         # Update plot
         self._update_plot()
+        self._record_frame()
 
+    def _record_frame(self):
         # Render frame if necessary
         if self._options.save_to_filename:
             self._frames_buffer.append(self.get_image_array())
@@ -697,6 +699,7 @@ class MPLImagePlotter(BaseMPLPlotter):
         self.fig.canvas.blit(self.ax.bbox)
 
         self.flush_events()
+        self._record_frame()
 
     def cleanup(self):
         super().cleanup()
@@ -842,46 +845,50 @@ class MPLVectorFieldPlotter(BaseMPLPlotter):
                 twist_all = twist_all[None]
 
         n = len(self._positions)
-        if vectors_all.ndim != 3 or vectors_all.shape[1:] != (n, 3):
-            return
-        if vectors_all.shape[0] != len(self.axes) or self._background is None:
-            return
-        if is_twist and twist_all.shape != vectors_all.shape:
-            return
-
-        # Blit the whole figure, not per-axes: a stroke clipped at an axes box can bleed a pixel past it, and a
-        # per-axes blit never restores that sliver, so it would accumulate as residue.
-        self.fig.canvas.restore_region(self._background)
-        for i_ax, (ax, scatter, quiver, vectors) in enumerate(
-            zip(self.axes, self._scatters, self._quivers, vectors_all)
-        ):
-            magnitudes = np.linalg.norm(vectors, axis=-1)
-            xy, uv = _project_to_plane(self._normal, self._positions, vectors)
-            scatter.set_offsets(xy)
-            scatter.set_array(magnitudes)
-            quiver.set_offsets(xy)
-            quiver.set_UVC(*(uv * self._scale_factor).T)
-            quiver.set_array(magnitudes)
-            ax.draw_artist(scatter)
-            ax.draw_artist(quiver)
-            if is_twist:
-                arcs, heads = self._twist_arcs[i_ax], self._twist_heads[i_ax]
-                twist = twist_all[i_ax] @ self._normal
-                radius = self._twist_scale_factor * np.abs(twist)
-                direction = self._twist_sign * np.sign(twist)
-                # 270-degree arc per taxel; the open quarter marks the rotation and leaves room for the head.
-                ang = direction[:, None] * np.linspace(0.0, 1.5 * np.pi, 16)[None, :]
-                xs = xy[:, 0][:, None] + radius[:, None] * np.cos(ang)
-                ys = xy[:, 1][:, None] + radius[:, None] * np.sin(ang)
-                segments = np.stack((xs, ys), axis=-1)
-                arcs.set_segments(list(segments))
-                arcs.set_array(twist)
-                heads.set_offsets(segments[:, -2])
-                heads.set_UVC(segments[:, -1, 0] - segments[:, -2, 0], segments[:, -1, 1] - segments[:, -2, 1], twist)
-                ax.draw_artist(arcs)
-                ax.draw_artist(heads)
-        self.fig.canvas.blit(self.fig.bbox)
-        self.flush_events()
+        valid = (
+            vectors_all.ndim == 3
+            and vectors_all.shape[1:] == (n, 3)
+            and vectors_all.shape[0] == len(self.axes)
+            and self._background is not None
+            and (not is_twist or twist_all.shape == vectors_all.shape)
+        )
+        if valid:
+            # Blit the whole figure, not per-axes: a stroke clipped at an axes box can bleed a pixel past it, and a
+            # per-axes blit never restores that sliver, so it would accumulate as residue.
+            self.fig.canvas.restore_region(self._background)
+            for i_ax, (ax, scatter, quiver, vectors) in enumerate(
+                zip(self.axes, self._scatters, self._quivers, vectors_all)
+            ):
+                magnitudes = np.linalg.norm(vectors, axis=-1)
+                xy, uv = _project_to_plane(self._normal, self._positions, vectors)
+                scatter.set_offsets(xy)
+                scatter.set_array(magnitudes)
+                quiver.set_offsets(xy)
+                quiver.set_UVC(*(uv * self._scale_factor).T)
+                quiver.set_array(magnitudes)
+                ax.draw_artist(scatter)
+                ax.draw_artist(quiver)
+                if is_twist:
+                    arcs, heads = self._twist_arcs[i_ax], self._twist_heads[i_ax]
+                    twist = twist_all[i_ax] @ self._normal
+                    radius = self._twist_scale_factor * np.abs(twist)
+                    direction = self._twist_sign * np.sign(twist)
+                    # 270-degree arc per taxel; the open quarter marks the rotation and leaves room for the head.
+                    ang = direction[:, None] * np.linspace(0.0, 1.5 * np.pi, 16)[None, :]
+                    xs = xy[:, 0][:, None] + radius[:, None] * np.cos(ang)
+                    ys = xy[:, 1][:, None] + radius[:, None] * np.sin(ang)
+                    segments = np.stack((xs, ys), axis=-1)
+                    arcs.set_segments(list(segments))
+                    arcs.set_array(twist)
+                    heads.set_offsets(segments[:, -2])
+                    heads.set_UVC(
+                        segments[:, -1, 0] - segments[:, -2, 0], segments[:, -1, 1] - segments[:, -2, 1], twist
+                    )
+                    ax.draw_artist(arcs)
+                    ax.draw_artist(heads)
+            self.fig.canvas.blit(self.fig.bbox)
+            self.flush_events()
+        self._record_frame()
 
     def cleanup(self):
         super().cleanup()

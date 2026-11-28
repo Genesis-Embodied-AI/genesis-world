@@ -205,6 +205,58 @@ def test_plotter(tmp_path, monkeypatch, mpl_agg_backend, png_snapshot):
 
 
 @pytest.mark.required
+def test_image_and_vector_field_plotter_video(tmp_path, monkeypatch, mpl_agg_backend):
+    DT = 0.01
+    STEPS = 6
+
+    # Capture the frames the video writer pops from the plotters' buffers
+    buffers = []
+
+    def process(self, data, cur_time):
+        nonlocal buffers
+        buffers.append((data, cur_time))
+
+    monkeypatch.setattr("genesis.recorders.file_writers.VideoFileWriter.process", process)
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(dt=DT),
+        show_viewer=False,
+        show_FPS=False,
+    )
+    box = scene.add_entity(
+        morph=gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5)),
+    )
+
+    positions = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    image_plotter = scene.add_recorder(
+        data_func=lambda: np.full((4, 4), float(box.get_pos()[2])),
+        rec_options=gs.recorders.MPLImagePlot(
+            save_to_filename=tmp_path / "image.mp4",
+            show_window=False,
+        ),
+    )
+    vf_plotter = scene.add_recorder(
+        data_func=lambda: np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        rec_options=gs.recorders.MPLVectorFieldPlot(
+            positions=positions,
+            normal=(0.0, 0.0, 1.0),
+            save_to_filename=tmp_path / "field.mp4",
+            show_window=False,
+        ),
+    )
+
+    scene.build()
+    for _ in range(STEPS):
+        scene.step()
+    for plotter in (image_plotter, vf_plotter):
+        if plotter.run_in_thread:
+            plotter.sync()
+
+    # Every process call must have left one frame for the writer to pop
+    assert len(buffers) == 2 * STEPS
+
+
+@pytest.mark.required
 def test_file_writers(tmp_path):
     STEPS = 10
 
